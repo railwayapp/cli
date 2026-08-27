@@ -1,5 +1,14 @@
-//! `railway postgres pitr` -- point-in-time recovery / continuous backups.
-
+//! The `pitr` verb -- point-in-time recovery / continuous backups, for every
+//! engine whose registry entry declares a PITR contract.
+//!
+//! The engine declaration decides which composable template the enable
+//! overlay deploys and which variables carry the archive
+//! (`PitrSpec::template_code`, `archive_var_prefix`). Which images may adopt
+//! the overlay is not decided here at all: that rule ships with the enable
+//! template (`adoptionImageEligibility`) and is read off the fetched record,
+//! so widening it is a template update rather than a CLI release. Backups,
+//! schedules and restore ride the volume-instance mutations, which are
+//! engine-agnostic server-side.
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -13,15 +22,15 @@ use crate::{
     client::post_graphql,
     commands::ssh::get_service_instance_id,
     controllers::{
+        adoption_eligibility::AdoptionTarget,
         config::{EnvironmentConfig, fetch_environment_config},
         database::DatabaseType,
+        database_engines::{DatabaseEngine, PitrSpec},
+        database_plugins,
         db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
         exec::exec_probe_in_container,
-        postgres_plugins::{self, PitrState},
         project::{ServiceContext, resolve_service_context},
-        template_apply::{
-            self, ApplyKind, ApplyTemplateParams, PITR_TEMPLATE_CODE, RevertTemplateParams,
-        },
+        template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
     },
     errors::RailwayError,
     gql::{mutations, queries},
@@ -32,10 +41,10 @@ use super::{
     ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label, yes_no,
 };
 
-/// Manage point-in-time recovery (continuous backups) for Postgres
+/// Manage point-in-time recovery (continuous backups)
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone Postgres or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
+    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone database or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -218,31 +227,40 @@ struct ScheduleSetArgs {
 }
 
 pub async fn command(
+    engine: &'static DatabaseEngine,
     args: Args,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     json: bool,
 ) -> Result<()> {
+    // The per-engine command trees only route here for engines that declare a
+    // PITR contract; a miss is a wiring bug, not a user error.
+    let pitr = engine.pitr.with_context(|| {
+        format!(
+            "{} does not support point-in-time recovery",
+            engine.display_name
+        )
+    })?;
     match args.command {
-        Commands::Status => status(project, service, environment, json).await,
-        Commands::Enable(a) => enable(project, service, environment, json, a).await,
-        Commands::Disable(a) => disable(project, service, environment, json, a).await,
-        Commands::Progress(a) => progress(project, service, environment, json, a).await,
-        Commands::Cancel => cancel(project, service, environment, json).await,
-        Commands::Clear => clear(project, service, environment, json).await,
+        Commands::Status => status(engine, pitr, project, service, environment, json).await,
+        Commands::Enable(a) => enable(engine, pitr, project, service, environment, json, a).await,
+        Commands::Disable(a) => disable(engine, pitr, project, service, environment, json, a).await,
+        Commands::Progress(a) => progress(engine, project, service, environment, json, a).await,
+        Commands::Cancel => cancel(engine, project, service, environment, json).await,
+        Commands::Clear => clear(engine, project, service, environment, json).await,
         Commands::Restore(a) => restore(project, service, environment, json, a).await,
         Commands::Backup(a) => match a.command {
             BackupCommands::List => backup_list(project, service, environment, json).await,
             BackupCommands::Create(a) => {
-                backup_create(project, service, environment, json, a).await
+                backup_create(engine, project, service, environment, json, a).await
             }
             BackupCommands::Delete(a) => {
                 backup_delete(project, service, environment, json, a).await
             }
             BackupCommands::Lock(a) => backup_lock(project, service, environment, json, a).await,
             BackupCommands::Restore(a) => {
-                backup_restore(project, service, environment, json, a).await
+                backup_restore(engine, project, service, environment, json, a).await
             }
         },
         Commands::Schedule(a) => match a.command {
@@ -253,6 +271,8 @@ pub async fn command(
 }
 
 async fn status(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -262,7 +282,7 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status(&ctx, &config, json, true).await
+    print_status(engine, pitr, &ctx, &config, json, true).await
 }
 
 /// `include_live == false` skips the SSH coverage/archiver probe -- used
@@ -270,6 +290,8 @@ async fn status(
 /// change hasn't rolled out yet, so a live probe would only report stale or
 /// "unavailable" noise (mirrors `pgbouncer`'s post-mutation status print).
 async fn print_status(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     json: bool,
@@ -277,12 +299,12 @@ async fn print_status(
 ) -> Result<()> {
     let root = resolve_root(ctx, config);
     let names = service_name_map(ctx);
-    let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(config, &root.root_id, &names, engine);
 
     let root_pitr = config
         .services
         .get(&root.root_id)
-        .map(postgres_plugins::compute_pitr_state)
+        .map(|s| database_plugins::compute_pitr_state(s, &pitr))
         .unwrap_or_default();
 
     let members: Vec<PitrMemberStatus> = if ha_state.is_cluster {
@@ -294,7 +316,7 @@ async fn print_status(
                 let state = config
                     .services
                     .get(&m.service_id)
-                    .map(postgres_plugins::compute_pitr_state)
+                    .map(|s| database_plugins::compute_pitr_state(s, &pitr))
                     .unwrap_or_default();
                 PitrMemberStatus {
                     service: ResourceRef {
@@ -311,10 +333,24 @@ async fn print_status(
         Vec::new()
     };
 
+    // The blockers preview reads the enable template's own declared rules, so
+    // it needs the record. Best-effort on purpose: status must keep working
+    // when that fetch fails (the blockers are advisory here; `enable` does the
+    // hard check itself), so a fetch error just renders no blockers.
+    let blockers = match template_apply::fetch_adoption_rules(ctx, pitr.template_code).await {
+        Ok(rules) => rules.blockers(&AdoptionTarget {
+            image: root_pitr.image.as_deref(),
+            has_start_command: root_pitr.has_start_command,
+        }),
+        Err(_) => Vec::new(),
+    };
+
     // Live coverage/archiver probe is best-effort and only meaningful once the
     // overlay is actually applied -- skip it entirely for a service that never
     // had PITR enabled rather than spending a ~5s SSH round trip to learn
-    // nothing.
+    // nothing. An engine that declares no probe implementation renders no
+    // coverage section at all: there is nothing to run, which is not the same
+    // as "unavailable".
     let live = if include_live && root_pitr.enabled {
         Some(probe_pitr_live(ctx, &root.root_id).await)
     } else {
@@ -337,7 +373,7 @@ async fn print_status(
         is_ha_cluster: ha_state.is_cluster,
         enabled: root_pitr.enabled,
         bucket_wired: root_pitr.bucket_wired,
-        blockers: guardrail_blockers(&root_pitr),
+        blockers,
         members,
         live,
     };
@@ -443,29 +479,10 @@ fn print_pitr_status(output: &PitrStatusOutput) {
     }
 }
 
-fn guardrail_blockers(state: &PitrState) -> Vec<String> {
-    let mut blockers = Vec::new();
-    if state.unsupported_image {
-        blockers.push(
-            "Image is not an official Railway Postgres image -- PITR is not supported.".to_string(),
-        );
-    }
-    if state.minor_pinned {
-        blockers.push(
-            "Image is pinned to a minor version -- unpin to the major tag (e.g. `:16`) before enabling PITR."
-                .to_string(),
-        );
-    }
-    if state.has_start_command {
-        blockers.push(
-            "A custom start command overrides the entrypoint that turns on WAL archiving -- clear it before enabling PITR."
-                .to_string(),
-        );
-    }
-    blockers
-}
-
+#[allow(clippy::too_many_arguments)]
 async fn enable(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -478,7 +495,7 @@ async fn enable(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     let target_service = config.services.get(&root.root_id).with_context(|| {
         format!(
@@ -486,7 +503,7 @@ async fn enable(
             root.root_name
         )
     })?;
-    let pitr_state = postgres_plugins::compute_pitr_state(target_service);
+    let pitr_state = database_plugins::compute_pitr_state(target_service, &pitr);
 
     if pitr_state.enabled {
         // Stdout must stay pure JSON under --json; the human note goes to
@@ -496,10 +513,19 @@ async fn enable(
         } else {
             println!("PITR is already enabled for {}.", root.root_name.bold());
         }
-        return print_status(&ctx, &config, json, true).await;
+        return print_status(engine, pitr, &ctx, &config, json, true).await;
     }
 
-    let blockers = guardrail_blockers(&pitr_state);
+    // Pre-flight only, for a fast error with the remedy attached before the
+    // confirmation/deploy machinery runs -- templateDeployV2 enforces the
+    // same template-declared rules server-side before creating anything.
+    let rules = template_apply::fetch_adoption_rules(&ctx, pitr.template_code)
+        .await
+        .context("Failed to check PITR eligibility")?;
+    let blockers = rules.blockers(&AdoptionTarget {
+        image: pitr_state.image.as_deref(),
+        has_start_command: pitr_state.has_start_command,
+    });
     if !blockers.is_empty() {
         bail!(
             "Cannot enable PITR for {}:\n  - {}",
@@ -529,6 +555,7 @@ async fn enable(
         .context("Failed to enable PITR on the HA cluster")?;
 
         follow_started_ha_workflow(
+            engine,
             &ctx,
             &root,
             json,
@@ -547,7 +574,7 @@ async fn enable(
         let result = template_apply::apply_composable_template(
             &ctx,
             ApplyTemplateParams {
-                template_code: PITR_TEMPLATE_CODE.to_string(),
+                template_code: pitr.template_code.to_string(),
                 service_id: root.root_id.clone(),
                 // Overlay applies never take the pre-conversion safety
                 // backup, so no volume-instance resolution is needed.
@@ -581,10 +608,13 @@ async fn enable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status(&ctx, &config, json, false).await
+    print_status(engine, pitr, &ctx, &config, json, false).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn disable(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -597,7 +627,7 @@ async fn disable(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     // Mirror enable's idempotence: a second disable must not revert a
     // non-applied overlay (confusing server error at best, a pointless
@@ -605,7 +635,7 @@ async fn disable(
     let root_pitr = config
         .services
         .get(&root.root_id)
-        .map(postgres_plugins::compute_pitr_state)
+        .map(|s| database_plugins::compute_pitr_state(s, &pitr))
         .unwrap_or_default();
     if !root_pitr.enabled {
         if json {
@@ -613,12 +643,12 @@ async fn disable(
         } else {
             println!("PITR is already disabled for {}.", root.root_name.bold());
         }
-        return print_status(&ctx, &config, json, true).await;
+        return print_status(engine, pitr, &ctx, &config, json, true).await;
     }
 
     if !confirm_or_bail(
         &format!(
-            "Disable PITR for {}? This stops WAL archiving; existing backups are kept.",
+            "Disable PITR for {}? This stops continuous archiving; existing backups are kept.",
             root.root_name.red()
         ),
         args.yes,
@@ -682,6 +712,7 @@ async fn disable(
         .context("Failed to disable PITR on the HA cluster")?;
 
         follow_started_ha_workflow(
+            engine,
             &ctx,
             &root,
             json,
@@ -700,7 +731,7 @@ async fn disable(
         let result = template_apply::revert_template(
             &ctx,
             RevertTemplateParams {
-                template_code: PITR_TEMPLATE_CODE.to_string(),
+                template_code: pitr.template_code.to_string(),
                 root_service_id: root.root_id.clone(),
                 auto_deploy: !args.no_deploy,
             },
@@ -726,10 +757,11 @@ async fn disable(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status(&ctx, &config, json, false).await
+    print_status(engine, pitr, &ctx, &config, json, false).await
 }
 
 async fn cancel(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -741,7 +773,7 @@ async fn cancel(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
             "{} is not an HA cluster; there is no PITR workflow to cancel.",
@@ -772,6 +804,7 @@ async fn cancel(
 }
 
 async fn clear(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -783,7 +816,7 @@ async fn clear(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
             "{} is not an HA cluster; there is no PITR workflow progress to clear.",
@@ -824,6 +857,9 @@ const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
 /// Debug-build-only env override so the e2e harness can exercise the watch
 /// loop's timeout branch in seconds instead of minutes (same pattern as the
 /// `RAILWAY_BACKBOARD_URL` testkit escape hatch -- compiled out of releases).
+/// The `RAILWAY_POSTGRES_*` names are a shipped knob and apply to every
+/// engine's watch loop -- renaming them per engine would silently break
+/// existing harnesses.
 fn progress_watch_timeout_secs() -> u64 {
     #[cfg(debug_assertions)]
     if let Ok(value) = std::env::var("RAILWAY_POSTGRES_WATCH_TIMEOUT_SECS")
@@ -855,7 +891,9 @@ const HA_WORKFLOW_FOLLOW_TIMEOUT_SECS: u64 = 1800;
 /// visible before the follower falls back to the generic workflow wait.
 const PROGRESS_VISIBILITY_GRACE_SECS: u64 = 60;
 
+#[allow(clippy::too_many_arguments)]
 async fn progress(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -868,7 +906,7 @@ async fn progress(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
             "{} is not an HA cluster; there is no PITR workflow progress to show.",
@@ -877,6 +915,7 @@ async fn progress(
     }
 
     let observed = follow_progress(
+        engine,
         &ctx,
         &root,
         &ProgressFollow {
@@ -927,6 +966,7 @@ struct ProgressFollow {
 /// Returns `Ok(Some(<final phase>))` once a (matching) progress record was
 /// observed, or `Ok(None)` if none became visible in time.
 async fn follow_progress(
+    engine: &'static DatabaseEngine,
     ctx: &ServiceContext,
     root: &super::RootContext,
     opts: &ProgressFollow,
@@ -1018,8 +1058,9 @@ async fn follow_progress(
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Timed out after {}s waiting for the workflow to reach a terminal phase. It keeps running server-side -- follow it with `railway postgres pitr progress --watch`.",
-                opts.deadline.as_secs()
+                "Timed out after {}s waiting for the workflow to reach a terminal phase. It keeps running server-side -- follow it with `railway {} pitr progress --watch`.",
+                opts.deadline.as_secs(),
+                engine.key
             );
         }
 
@@ -1037,6 +1078,7 @@ fn is_transient_progress_transport_error(err: &RailwayError) -> bool {
 /// the generic workflow-status wait if the progress record never becomes
 /// visible, rather than reporting success blind.
 async fn follow_started_ha_workflow(
+    engine: &'static DatabaseEngine,
     ctx: &ServiceContext,
     root: &super::RootContext,
     json: bool,
@@ -1054,6 +1096,7 @@ async fn follow_started_ha_workflow(
     }
 
     let observed = follow_progress(
+        engine,
         ctx,
         root,
         &ProgressFollow {
@@ -1073,7 +1116,8 @@ async fn follow_started_ha_workflow(
             .await
             .map_err(|err| match err {
                 WorkflowError::Timeout => anyhow::anyhow!(
-                    "The PITR workflow is still running (the CLI stopped waiting). Follow it with `railway postgres pitr progress --watch`."
+                    "The PITR workflow is still running (the CLI stopped waiting). Follow it with `railway {} pitr progress --watch`.",
+                    engine.key
                 ),
                 other => other.into(),
             })?;
@@ -1346,6 +1390,7 @@ async fn backup_list(
 }
 
 async fn backup_create(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -1383,7 +1428,10 @@ async fn backup_create(
         if let Some(id) = &workflow_id {
             print_field("Workflow:", id);
         }
-        println!("Check `railway postgres pitr backup list` once it completes.");
+        println!(
+            "Check `railway {} pitr backup list` once it completes.",
+            engine.key
+        );
     }
     Ok(())
 }
@@ -1506,6 +1554,7 @@ async fn backup_lock(
 }
 
 async fn backup_restore(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -1519,11 +1568,11 @@ async fn backup_restore(
     let root = resolve_root(&ctx, &config);
 
     // An in-place backup restore replaces only the root's volume. On an HA
-    // cluster the replicas would keep their newer timelines and diverge from
-    // the restored leader, so refuse outright -- the dashboard restore knows
-    // how to reseed replicas as part of the same operation.
+    // cluster the replicas would keep their newer data and diverge from the
+    // restored leader, so refuse outright -- the dashboard restore knows how
+    // to reseed replicas as part of the same operation.
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if ha_state.is_cluster {
         bail!(
             "{} is an HA cluster: restoring a backup in place would leave its replicas diverged from the restored leader. Use the dashboard, which reseeds replicas as part of the restore.",
@@ -1566,7 +1615,7 @@ async fn backup_restore(
     // The server-side workflow copies the backup into a fresh volume and then
     // only STAGES the volume swap (the dashboard has the user apply staged
     // changes as a second step). Wait for the copy, then commit + deploy so
-    // the CLI restore is end-to-end like every other postgres verb.
+    // the CLI restore is end-to-end like every other subcommand here.
     let mut deployed = false;
     if let Some(workflow_id) = &workflow_id {
         if !json {
@@ -1948,10 +1997,11 @@ fn apply_archiver_output(probe: &mut PitrLiveProbe, output: &str) {
         None => Some(true), // no failure recorded at all
         Some(failed_raw) => match (parse_pg_timestamp(failed_raw), &last_archived_time) {
             (Some(_), None) => Some(false), // failed, and never successfully archived
-            (Some(failed), Some(archived_raw)) => match parse_pg_timestamp(archived_raw) {
-                Some(archived) => Some(failed <= archived),
-                None => None, // archive timestamp unparseable -- unknown
-            },
+            // An unparseable archive timestamp leaves the gate unevaluable,
+            // which is unknown rather than a verdict either way.
+            (Some(failed), Some(archived_raw)) => {
+                parse_pg_timestamp(archived_raw).map(|archived| failed <= archived)
+            }
             (None, _) => None, // failure timestamp unparseable -- unknown
         },
     };
@@ -2460,16 +2510,16 @@ mod tests {
         assert_eq!(probe.backup_set_count, None);
     }
 
+    // The archive variable contract the enabled-state detection and the
+    // enable overlay ride on: the gate suffix over the engine's declared
+    // prefix. A drift here would make `status` read the wrong variable and
+    // report a configured database as having no archive at all.
     #[test]
-    fn guardrail_blockers_lists_every_failing_check() {
-        let state = PitrState {
-            enabled: false,
-            bucket_wired: false,
-            minor_pinned: true,
-            unsupported_image: false,
-            has_start_command: true,
-        };
-        let blockers = guardrail_blockers(&state);
-        assert_eq!(blockers.len(), 2);
+    fn archive_variable_names_resolve_from_the_declared_prefix() {
+        use crate::controllers::database_engines::POSTGRES;
+
+        let postgres = POSTGRES.pitr.unwrap();
+        assert_eq!(postgres.archive_gate_variable(), "WAL_ARCHIVE_BUCKET");
+        assert_eq!(postgres.template_code, "postgres-pitr");
     }
 }

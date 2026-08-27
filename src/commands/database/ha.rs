@@ -1,4 +1,16 @@
-//! `railway postgres ha` -- high-availability Postgres clustering.
+//! The `ha` verb -- high-availability clustering, for every engine that
+//! ships an HA companion template.
+//!
+//! What a cluster IS, and how it is driven, is read from the template's own
+//! declarations rather than compiled in: `haTemplateCode` names the companion
+//! to deploy, `haConversionConfig` bounds the topology the user may ask for,
+//! and `clusterWiring` says how each node reports its role and how a
+//! switchover is requested. The two switchover mechanisms the platform
+//! defines -- a coordinator API the CLI speaks (Patroni), and the generic
+//! per-node HTTP contract -- are selected from that same declaration, so a
+//! topology that swaps coordinators is a template change.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -6,24 +18,25 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::controllers::{
+    adoption_eligibility::{AdoptionRules, AdoptionTarget},
+    cluster_probe,
     cluster_scale::{self, EdgeScaleSummary, ScaleClusterParams, ScaleDimensionSummary},
-    config::{EnvironmentConfig, fetch_environment_config},
+    config::{ClusterWiring, EnvironmentConfig, fetch_environment_config},
+    database_engines::{DatabaseEngine, SwitchoverMechanism},
+    database_plugins::{self, HaState},
     patroni,
-    postgres_plugins::{self, HaState, PitrState},
     project::{ServiceContext, resolve_service_context},
-    template_apply::{
-        self, ApplyKind, ApplyTemplateParams, HA_TEMPLATE_CODE, RevertTemplateParams,
-    },
+    template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
 };
 
 use super::{
     ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label,
 };
 
-/// Manage high-availability clustering for Postgres
+/// Manage high-availability clustering
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n  railway postgres ha convert --service postgres --replicas 2 --coordinators 3 --edge 1\n  railway postgres ha revert --service postgres --yes\n  railway postgres ha scale --service postgres --replicas 3\n  railway postgres ha switchover --service postgres --to postgres-replica-1\n\nAutomation notes:\n  Omitted --replicas/--coordinators/--edge on `convert` leave the template's authored count untouched.\n  --coordinators must be an odd number (consensus quorum)."
+    after_help = "Examples:\n\n  ha status --service my-database\n  ha convert --service my-database --replicas 2\n  ha convert --service my-database --replicas 2 --coordinators 3 --edge 1\n  ha revert --service my-database --yes\n  ha scale --service my-database --replicas 3\n  ha switchover --service my-database --to my-database-replica-1\n\nAutomation notes:\n  Omitted --replicas/--coordinators/--edge on `convert` leave the template's authored count untouched.\n  Which roles a cluster has, and the counts each accepts, are declared by the engine's HA template -- `convert` reports the allowed values when a count is refused.\n  --coordinators applies only to clusters with a separate coordinator tier, and must be odd (consensus quorum).\n  Where the data nodes themselves carry the failover vote, their total must be odd and at least three, so --replicas must be even."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -35,16 +48,16 @@ enum Commands {
     /// Show HA cluster status
     Status,
 
-    /// Convert a standalone Postgres service into an HA cluster
+    /// Convert a standalone service into an HA cluster
     Convert(ConvertArgs),
 
-    /// Revert an HA cluster back to standalone Postgres
+    /// Revert an HA cluster back to a standalone service
     Revert(RevertArgs),
 
     /// Scale cluster replicas, coordinators, or edge nodes
     Scale(ScaleArgs),
 
-    /// Promote a replica to leader (brief downtime)
+    /// Promote a replica to primary (brief downtime)
     #[clap(visible_alias = "promote")]
     Switchover(SwitchoverArgs),
 }
@@ -55,7 +68,7 @@ struct ConvertArgs {
     #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: Option<i64>,
 
-    /// Number of coordinator/consensus nodes (e.g. etcd); must be odd; omit to keep the template default
+    /// Number of coordinator/consensus nodes (e.g. etcd), for clusters that have a coordinator tier; must be odd
     #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
     coordinators: Option<i64>,
 
@@ -114,7 +127,7 @@ struct ScaleArgs {
 
 #[derive(Parser)]
 struct SwitchoverArgs {
-    /// Service name or ID of the replica to promote
+    /// Service name or ID of the node to promote
     #[clap(long)]
     to: String,
 
@@ -124,6 +137,7 @@ struct SwitchoverArgs {
 }
 
 pub async fn command(
+    engine: &'static DatabaseEngine,
     args: Args,
     project: Option<String>,
     service: Option<String>,
@@ -131,11 +145,11 @@ pub async fn command(
     json: bool,
 ) -> Result<()> {
     match args.command {
-        Commands::Status => status(project, service, environment, json).await,
-        Commands::Convert(a) => convert(project, service, environment, json, a).await,
-        Commands::Revert(a) => revert(project, service, environment, json, a).await,
-        Commands::Scale(a) => scale(project, service, environment, json, a).await,
-        Commands::Switchover(a) => switchover(project, service, environment, json, a).await,
+        Commands::Status => status(engine, project, service, environment, json).await,
+        Commands::Convert(a) => convert(engine, project, service, environment, json, a).await,
+        Commands::Revert(a) => revert(engine, project, service, environment, json, a).await,
+        Commands::Scale(a) => scale(engine, project, service, environment, json, a).await,
+        Commands::Switchover(a) => switchover(engine, project, service, environment, json, a).await,
     }
 }
 
@@ -156,25 +170,28 @@ pub async fn command(
 /// role-stamped service with NO parent is not a legitimate end state of any
 /// flow, so those are swept as cluster debris as well.
 ///
-/// The exception on BOTH paths is the PgBouncer pooler. It hangs off the
-/// root exactly like a member (parent = root, role "edge"), so the
-/// membership walk picks it up and the parent-dropping patch path strands it
-/// looking like debris -- but it belongs to the postgres-with-pgbouncer
-/// feature, not to the HA conversion: it may well predate the convert, and
-/// reverting the cluster to standalone is not an instruction to remove
-/// pooling. `pgbouncer remove` is. Deleting it here silently destroyed a
-/// customer-configured pooler on every revert of a pooled cluster.
+/// The exception on BOTH paths is the engine's pooler, where it declares one.
+/// It hangs off the root exactly like a member (parent = root, role "edge"),
+/// so the membership walk picks it up and the parent-dropping patch path
+/// strands it looking like debris -- but it belongs to the pooling feature,
+/// not to the HA conversion: it may well predate the convert, and reverting
+/// the cluster to standalone is not an instruction to remove pooling. `pool
+/// remove` is. Deleting it here silently destroyed a customer-configured
+/// pooler on every revert of a pooled cluster.
 fn revert_sweep_targets(
+    engine: &DatabaseEngine,
     pre_revert_members: &[(String, String)],
     config: &EnvironmentConfig,
     root_id: &str,
-    names: &std::collections::BTreeMap<String, String>,
+    names: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
     let is_pooler = |id: &str| {
-        config
-            .services
-            .get(id)
-            .is_some_and(postgres_plugins::is_pgbouncer_service)
+        engine.pooling.is_some_and(|pooling| {
+            config
+                .services
+                .get(id)
+                .is_some_and(|service| database_plugins::is_pooler_service(service, &pooling))
+        })
     };
     let mut leftovers: Vec<(String, String)> = pre_revert_members
         .iter()
@@ -206,12 +223,21 @@ fn revert_sweep_targets(
     leftovers
 }
 
-/// Members whose live Patroni role/state actually matters for `status` and
-/// `switchover`/`revert`'s precheck -- the data nodes (root + replicas).
-/// Coordinator/edge members don't run Patroni themselves. Each entry is
-/// `(service_id, patroni_member_name)` -- the name the probe join uses,
-/// derived from the node's identity variable (see
-/// `postgres_plugins::patroni_member_name`).
+/// The root's declared `clusterWiring` -- how this cluster reports node health
+/// and role, and how a switchover is asked for. Absent on legacy clusters
+/// converted before templates carried it; callers degrade to "no live signal"
+/// rather than guessing.
+fn cluster_wiring(config: &EnvironmentConfig, root_id: &str) -> Option<ClusterWiring> {
+    config
+        .services
+        .get(root_id)
+        .and_then(|root| root.cluster_wiring.clone())
+}
+
+/// Members whose live role/state actually matters for `status`, `switchover`
+/// and `revert`'s precheck -- the data nodes (root + replicas). Coordinator
+/// and edge members answer to none of the probes below. Each entry is
+/// `(service_id, node_name)`, the name the probe join uses.
 fn data_node_members(ha_state: &HaState, config: &EnvironmentConfig) -> Vec<(String, String)> {
     let root_id = ha_state.root_service_id.clone().unwrap_or_default();
     ha_state
@@ -221,7 +247,7 @@ fn data_node_members(ha_state: &HaState, config: &EnvironmentConfig) -> Vec<(Str
         .map(|m| {
             (
                 m.service_id.clone(),
-                postgres_plugins::patroni_member_name(
+                database_plugins::member_identity_name(
                     config,
                     &root_id,
                     &m.service_id,
@@ -232,7 +258,114 @@ fn data_node_members(ha_state: &HaState, config: &EnvironmentConfig) -> Vec<(Str
         .collect()
 }
 
+/// One data node's live view, however its topology reports it.
+///
+/// The two mechanisms answer different amounts: a coordinator API returns a
+/// cluster-wide member list (role, state, replication lag), while the generic
+/// per-node contract answers only "am I the primary" and "am I healthy". The
+/// shape is the union, and every field an engine's mechanism cannot supply
+/// stays `None` -- never a fabricated default, which would read as fact.
+#[derive(Debug, Clone, Default)]
+struct LiveMember {
+    reachable: bool,
+    is_primary: Option<bool>,
+    role: Option<String>,
+    state: Option<String>,
+    lag: Option<String>,
+}
+
+/// Probes every data node through whichever mechanism this cluster declares.
+///
+/// Best-effort by contract: a cluster nobody can reach yields an empty map and
+/// the caller reports "unknown", rather than failing a read-only command.
+async fn probe_data_nodes(
+    engine: &DatabaseEngine,
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    ha_state: &HaState,
+) -> BTreeMap<String, LiveMember> {
+    let members = data_node_members(ha_state, config);
+    if members.is_empty() {
+        return BTreeMap::new();
+    }
+    let root_id = ha_state.root_service_id.clone().unwrap_or_default();
+    let wiring = cluster_wiring(config, &root_id);
+
+    match engine.ha.map(|ha| ha.switchover) {
+        Some(SwitchoverMechanism::Patroni) => match patroni::probe_members(ctx, &members).await {
+            Ok(probes) => probes
+                .into_iter()
+                .map(|(service_id, probe)| {
+                    let view = probe.self_view;
+                    (
+                        service_id,
+                        LiveMember {
+                            reachable: probe.reachable,
+                            is_primary: view.as_ref().map(|v| v.role == "leader"),
+                            role: view
+                                .as_ref()
+                                .map(|v| v.role.clone())
+                                .filter(|s| !s.is_empty()),
+                            state: view
+                                .as_ref()
+                                .map(|v| v.state.clone())
+                                .filter(|s| !s.is_empty()),
+                            lag: view.as_ref().and_then(|v| v.lag.as_ref()).map(format_lag),
+                        },
+                    )
+                })
+                .collect(),
+            Err(err) => {
+                eprintln!("Warning: could not probe live cluster status: {err:#}");
+                BTreeMap::new()
+            }
+        },
+        Some(SwitchoverMechanism::DeclaredHttp) => {
+            let Some(wiring) = wiring else {
+                return BTreeMap::new();
+            };
+            let service_ids: Vec<String> = members.iter().map(|(id, _)| id.clone()).collect();
+            let instance_ids = match patroni::resolve_instance_ids(ctx, &service_ids).await {
+                Ok(ids) => ids,
+                Err(err) => {
+                    eprintln!("Warning: could not resolve live cluster instances: {err:#}");
+                    return BTreeMap::new();
+                }
+            };
+            cluster_probe::probe_nodes(
+                &instance_ids,
+                wiring.data_node_health_check.as_ref(),
+                wiring.data_node_role_check.as_ref(),
+            )
+            .await
+            .into_iter()
+            .map(|(service_id, status)| {
+                (
+                    service_id,
+                    LiveMember {
+                        reachable: status.reachable,
+                        is_primary: status.is_primary,
+                        // This contract reports a verdict, not a role name:
+                        // deriving the label here keeps the display uniform
+                        // without inventing detail the node never sent.
+                        role: status
+                            .is_primary
+                            .map(|primary| if primary { "primary" } else { "replica" }.to_string()),
+                        state: status.healthy.map(|healthy| {
+                            if healthy { "healthy" } else { "unhealthy" }.to_string()
+                        }),
+                        lag: None,
+                    },
+                )
+            })
+            .collect()
+        }
+        None => BTreeMap::new(),
+    }
+}
+
 async fn status(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -242,14 +375,15 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status(&ctx, &config, json, true).await
+    print_status(engine, &ctx, &config, json, true).await
 }
 
-/// `include_live == false` skips the per-member Patroni probe -- used right
-/// after `convert`/`revert`/`scale`, where brand-new (or just-deleted)
-/// members haven't rolled out yet, so probing them would only add ~5s of
-/// "unreachable" noise (mirrors `pgbouncer`'s post-mutation status print).
+/// `include_live == false` skips the per-member probe -- used right after
+/// `convert`/`revert`/`scale`, where brand-new (or just-deleted) members
+/// haven't rolled out yet, so probing them would only add seconds of
+/// "unreachable" noise.
 async fn print_status(
+    engine: &'static DatabaseEngine,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     json: bool,
@@ -257,18 +391,12 @@ async fn print_status(
 ) -> Result<()> {
     let root = resolve_root(ctx, config);
     let names = service_name_map(ctx);
-    let ha_state = postgres_plugins::compute_ha_state(config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(config, &root.root_id, &names, engine);
 
     let live = if include_live && ha_state.is_cluster {
-        match patroni::probe_members(ctx, &data_node_members(&ha_state, config)).await {
-            Ok(live) => live,
-            Err(err) => {
-                eprintln!("Warning: could not probe live cluster status: {err:#}");
-                Default::default()
-            }
-        }
+        probe_data_nodes(engine, ctx, config, &ha_state).await
     } else {
-        Default::default()
+        BTreeMap::new()
     };
 
     let members: Vec<HaMemberOutput> = ha_state
@@ -276,16 +404,15 @@ async fn print_status(
         .iter()
         .map(|m| {
             let probe = live.get(&m.service_id);
-            let self_view = probe.and_then(|p| p.self_view.as_ref());
             HaMemberOutput {
                 service: ResourceRef {
                     id: m.service_id.clone(),
                     name: m.service_name.clone(),
                 },
                 cluster_role: m.cluster_role.clone(),
-                live_role: self_view.map(|v| v.role.clone()).filter(|s| !s.is_empty()),
-                live_state: self_view.map(|v| v.state.clone()).filter(|s| !s.is_empty()),
-                live_lag: self_view.and_then(|v| v.lag.as_ref()).map(format_lag),
+                live_role: probe.and_then(|p| p.role.clone()),
+                live_state: probe.and_then(|p| p.state.clone()),
+                live_lag: probe.and_then(|p| p.lag.clone()),
                 reachable: probe.map(|p| p.reachable),
             }
         })
@@ -311,7 +438,7 @@ async fn print_status(
     if json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_ha_status(&output);
+        print_ha_status(engine, &output);
     }
     Ok(())
 }
@@ -323,9 +450,10 @@ fn format_lag(value: &serde_json::Value) -> String {
     }
 }
 
-fn print_ha_status(output: &HaStatusOutput) {
+fn print_ha_status(engine: &DatabaseEngine, output: &HaStatusOutput) {
     println!("{}", "High availability".bold());
     println!();
+    print_field("Engine:", &engine.display_name);
     print_field("Service:", &output.service.name.green().bold());
     print_field("Environment:", &output.environment.name.blue().bold());
     if output.root.id != output.service.id {
@@ -360,30 +488,50 @@ fn print_ha_status(output: &HaStatusOutput) {
     }
 }
 
-fn guardrail_blockers(state: &PitrState) -> Vec<String> {
-    let mut blockers = Vec::new();
-    if state.unsupported_image {
-        blockers.push(
-            "Image is not an official Railway Postgres image -- HA conversion is not supported."
-                .to_string(),
+/// Validates one requested count against the companion's declared selector
+/// for that role.
+///
+/// A role the companion does not declare at all does not exist in this
+/// topology -- Sentinel and Group Replication colocate their coordinator on
+/// the data nodes, so asking for coordinators there is not a count to clamp
+/// but a request the cluster has no shape for. Refuse, naming what the
+/// template does offer, rather than silently ignoring the flag.
+fn validate_role_count(
+    rules: &AdoptionRules,
+    role: &str,
+    flag: &str,
+    requested: i64,
+    engine: &DatabaseEngine,
+) -> Result<()> {
+    // A companion that declares no conversion config at all gives no local
+    // bounds to check against; the server-side gate still applies.
+    if rules.role_options.is_empty() {
+        return Ok(());
+    }
+
+    let Some(options) = rules.role_options.get(role) else {
+        bail!(
+            "{} high-availability clusters have no {role} nodes, so {flag} does not apply here.",
+            engine.display_name
+        );
+    };
+
+    if !options.is_empty() && !options.contains(&requested) {
+        bail!(
+            "{flag} must be one of {} for a {} cluster (got {requested}).",
+            options
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            engine.display_name
         );
     }
-    if state.minor_pinned {
-        blockers.push(
-            "Image is pinned to a minor version -- unpin to the major tag (e.g. `:16`) before converting to HA."
-                .to_string(),
-        );
-    }
-    if state.has_start_command {
-        blockers.push(
-            "A custom start command overrides the Postgres entrypoint -- clear it before converting to HA."
-                .to_string(),
-        );
-    }
-    blockers
+    Ok(())
 }
 
 async fn convert(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -402,7 +550,7 @@ async fn convert(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     if ha_state.is_cluster {
         bail!("{} is already an HA cluster.", root.root_name);
@@ -414,7 +562,48 @@ async fn convert(
             root.root_name
         )
     })?;
-    let blockers = guardrail_blockers(&postgres_plugins::compute_pitr_state(target_service));
+
+    // The companion the service's own origin template names, so a service
+    // provisioned from a first-party template converts into the companion that
+    // template was authored against rather than a code-side assumption.
+    let template_code = engine
+        .ha_template_code_for(target_service.ha_template_code.as_deref())
+        .with_context(|| {
+            format!(
+                "{} has no high-availability companion template.",
+                engine.display_name
+            )
+        })?;
+
+    // Everything the conversion is bounded by -- eligible images, supported
+    // majors, and the counts each role accepts -- is declared by the COMPANION
+    // being applied, which is the same record the server-side gate reads.
+    // Pre-flighting it here means an ineligible image or an impossible
+    // topology is refused with its remedy before the prompt, rather than after
+    // the user has already confirmed.
+    let rules = template_apply::fetch_adoption_rules(&ctx, &template_code).await?;
+
+    if let Some(replicas) = args.replicas {
+        validate_role_count(&rules, "replica", "--replicas", replicas, engine)?;
+    }
+    if let Some(coordinators) = args.coordinators {
+        validate_role_count(&rules, "internal", "--coordinators", coordinators, engine)?;
+    }
+    if let Some(edge) = args.edge {
+        validate_role_count(&rules, "edge", "--edge", edge, engine)?;
+    }
+
+    let blockers = rules.blockers(&AdoptionTarget {
+        image: target_service
+            .source
+            .as_ref()
+            .and_then(|s| s.image.as_deref()),
+        has_start_command: target_service
+            .deploy
+            .as_ref()
+            .and_then(|d| d.start_command.as_deref())
+            .is_some_and(|c| !c.trim().is_empty()),
+    });
     if !blockers.is_empty() {
         bail!(
             "Cannot convert {} to HA:\n  - {}",
@@ -435,8 +624,8 @@ async fn convert(
     }
 
     // Live volume-instance id (NOT the config volumeMounts key, which is the
-    // volume id) for the pre-conversion safety backup. Best-effort: the
-    // backup itself is best-effort, so failing to resolve just skips it.
+    // volume id) for the pre-conversion safety backup. Best-effort: the backup
+    // itself is best-effort, so failing to resolve just skips it.
     let volume_instance_id = crate::controllers::project::get_environment_instances(
         &ctx.client,
         &ctx.configs,
@@ -455,7 +644,7 @@ async fn convert(
     let result = template_apply::apply_composable_template(
         &ctx,
         ApplyTemplateParams {
-            template_code: HA_TEMPLATE_CODE.to_string(),
+            template_code,
             service_id: root.root_id.clone(),
             volume_instance_id,
             replica_count: args.replicas,
@@ -485,10 +674,11 @@ async fn convert(
             result.project_id
         );
     }
-    print_status(&ctx, &config, json, false).await
+    print_status(engine, &ctx, &config, json, false).await
 }
 
 async fn revert(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -501,7 +691,7 @@ async fn revert(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     if !ha_state.is_cluster {
         // A revert that died mid-sweep leaves no cluster to detect --
@@ -511,7 +701,7 @@ async fn revert(
         // no parent. Bailing here would strand them with no command able to
         // remove them (this is exactly what re-running `ha revert` after a
         // transient delete failure used to do), so finish the sweep instead.
-        let leftovers = revert_sweep_targets(&[], &config, &root.root_id, &names);
+        let leftovers = revert_sweep_targets(engine, &[], &config, &root.root_id, &names);
         if leftovers.is_empty() {
             bail!("{} is not an HA cluster.", root.root_name);
         }
@@ -547,59 +737,64 @@ async fn revert(
                 root.root_name.bold()
             );
         }
-        return print_status(&ctx, &config, json, false).await;
+        return print_status(engine, &ctx, &config, json, false).await;
     }
 
+    let template_code = engine
+        .ha
+        .map(|ha| ha.template_code.to_string())
+        .with_context(|| {
+            format!(
+                "{} has no high-availability companion template.",
+                engine.display_name
+            )
+        })?;
+
     // Live precheck: revert is only safe while the root is the current
-    // Patroni leader (matches the frontend's own gate before allowing
-    // revert). A stale/uncaught-up former leader still running as a
-    // replica would silently lose whatever writes landed on the real
-    // leader once the cluster is torn down. Degrades to a warning (rather
-    // than blocking) if no cluster member is reachable at all -- mirrors
-    // `pitr disable`'s replication-health precheck, which does the same.
-    let data_nodes = data_node_members(&ha_state, &config);
-    match patroni::probe_members(&ctx, &data_nodes).await {
-        Ok(live) => {
-            let root_probe = live.get(&root.root_id);
-            let root_is_leader = root_probe
-                .and_then(|p| p.self_view.as_ref())
-                .is_some_and(|v| v.role == "leader");
-
-            if !root_is_leader {
-                let current_leader = live
-                    .values()
-                    .filter_map(|p| p.self_view.as_ref())
-                    .find(|v| v.role == "leader")
-                    .map(|v| v.name.clone());
-                let any_reachable = live.values().any(|p| p.reachable);
-
-                if any_reachable {
-                    bail!(
-                        "{} is not currently the Patroni leader{}. Run `railway postgres ha switchover --to {}` first, then revert.",
-                        root.root_name,
-                        current_leader
-                            .map(|l| format!(" (current leader: {l})"))
-                            .unwrap_or_default(),
-                        root.root_name,
-                    );
-                }
-                eprintln!(
-                    "Warning: could not reach any cluster member to verify {} is the current Patroni leader before reverting. Proceeding anyway.",
-                    root.root_name
-                );
-            }
-        }
-        Err(err) => {
-            eprintln!(
-                "Warning: could not check the current Patroni leader before reverting: {err:#}"
+    // primary. A stale former primary still running as a replica would
+    // silently lose whatever writes landed on the real one once the cluster is
+    // torn down. Degrades to a warning (rather than blocking) when no member
+    // is reachable at all -- refusing to tear down a cluster nobody can reach
+    // would leave the customer with no way out.
+    let live = probe_data_nodes(engine, &ctx, &config, &ha_state).await;
+    let root_is_primary = live
+        .get(&root.root_id)
+        .and_then(|m| m.is_primary)
+        .unwrap_or(false);
+    if !root_is_primary {
+        let any_reachable = live.values().any(|m| m.reachable);
+        if any_reachable {
+            let current_primary = live
+                .iter()
+                .find(|(_, m)| m.is_primary == Some(true))
+                .and_then(|(id, _)| {
+                    ha_state
+                        .members
+                        .iter()
+                        .find(|m| &m.service_id == id)
+                        .map(|m| m.service_name.clone())
+                });
+            bail!(
+                "{} is not currently the primary{}. Run `railway {} ha switchover --to {}` first, then revert.",
+                root.root_name,
+                current_primary
+                    .map(|p| format!(" (current primary: {p})"))
+                    .unwrap_or_default(),
+                engine.key,
+                root.root_name,
             );
         }
+        eprintln!(
+            "Warning: could not reach any cluster member to verify {} is the current primary before reverting. Proceeding anyway.",
+            root.root_name
+        );
     }
 
     if !confirm_or_bail(
         &format!(
-            "Revert {} to standalone Postgres? Connection endpoints will change and active connections will drop.",
-            root.root_name.red()
+            "Revert {} to a standalone {}? Connection endpoints will change and active connections will drop.",
+            root.root_name.red(),
+            engine.display_name
         ),
         args.yes,
     )? {
@@ -620,7 +815,7 @@ async fn revert(
     let result = template_apply::revert_template(
         &ctx,
         RevertTemplateParams {
-            template_code: HA_TEMPLATE_CODE.to_string(),
+            template_code,
             root_service_id: root.root_id.clone(),
             auto_deploy: !args.no_deploy,
         },
@@ -645,9 +840,13 @@ async fn revert(
         config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
             .await?
             .config;
-        let still_ha =
-            postgres_plugins::compute_ha_state(&config, &root.root_id, &service_name_map(&ctx))
-                .is_cluster;
+        let still_ha = database_plugins::compute_ha_state(
+            &config,
+            &root.root_id,
+            &service_name_map(&ctx),
+            engine,
+        )
+        .is_cluster;
         if !still_ha {
             break;
         }
@@ -661,7 +860,8 @@ async fn revert(
     }
 
     let names = service_name_map(&ctx);
-    let leftovers = revert_sweep_targets(&pre_revert_members, &config, &root.root_id, &names);
+    let leftovers =
+        revert_sweep_targets(engine, &pre_revert_members, &config, &root.root_id, &names);
     for (member_id, member_name) in &leftovers {
         if !json {
             println!(
@@ -688,16 +888,18 @@ async fn revert(
             "Reverted (deploys skipped -- applies on the next deploy)"
         };
         println!(
-            "{verb} {} to standalone Postgres in environment {} (project {}).",
+            "{verb} {} to a standalone {} in environment {} (project {}).",
             root.root_name.bold(),
+            engine.display_name,
             ctx.environment_name.bold(),
             result.project_id
         );
     }
-    print_status(&ctx, &config, json, false).await
+    print_status(engine, &ctx, &config, json, false).await
 }
 
 async fn scale(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -714,12 +916,28 @@ async fn scale(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     if !ha_state.is_cluster {
         bail!(
-            "{} is not an HA cluster. Use `railway postgres ha convert` first.",
+            "{} is not an HA cluster. Run `ha convert` first.",
             root.root_name
+        );
+    }
+
+    // A cluster with no coordinator tier has no coordinators to scale. The
+    // members are the truth here rather than the conversion config, which
+    // describes the shape the service was converted INTO and may be absent on
+    // a legacy cluster.
+    if args.coordinators.is_some()
+        && !ha_state
+            .members
+            .iter()
+            .any(|m| m.cluster_role.as_deref() == Some("internal"))
+    {
+        bail!(
+            "This {} cluster has no coordinator nodes, so --coordinators does not apply.",
+            engine.display_name
         );
     }
 
@@ -767,7 +985,7 @@ async fn scale(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status(&ctx, &config, json, false).await
+    print_status(engine, &ctx, &config, json, false).await
 }
 
 fn print_scale_result(root_name: &str, result: &cluster_scale::ScaleClusterResult) {
@@ -807,7 +1025,26 @@ fn print_scale_result(root_name: &str, result: &cluster_scale::ScaleClusterResul
     }
 }
 
+/// Resolves the SSH key the live probes need, failing with the setup recipe
+/// rather than a misleading "could not reach the cluster". Interactive runs may
+/// register a key on the spot; `--yes` runs must never block on a prompt.
+async fn preflight_ssh(ctx: &ServiceContext, yes: bool) -> Result<()> {
+    let preflight = if yes {
+        crate::commands::ssh::native::ensure_ssh_key_noninteractive(&ctx.client, &ctx.configs).await
+    } else {
+        crate::commands::ssh::native::ensure_ssh_key_quiet(&ctx.client, &ctx.configs).await
+    };
+    if let Err(e) = preflight {
+        bail!(
+            "Switchover is driven over SSH (ssh <instance>@ssh.railway.com), and no usable \
+             SSH key is available: {e:#}"
+        );
+    }
+    Ok(())
+}
+
 async fn switchover(
+    engine: &'static DatabaseEngine,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -820,7 +1057,7 @@ async fn switchover(
         .config;
     let root = resolve_root(&ctx, &config);
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
     if !ha_state.is_cluster {
         bail!("{} is not an HA cluster.", root.root_name);
@@ -837,14 +1074,15 @@ async fn switchover(
         Some("root") | Some("replica")
     ) {
         bail!(
-            "Switchover target must be a Postgres data node (root or replica), not \"{}\".",
+            "Switchover target must be a {} data node (root or replica), not \"{}\".",
+            engine.display_name,
             candidate.cluster_role.as_deref().unwrap_or("unknown")
         );
     }
 
     if !confirm_or_bail(
         &format!(
-            "Promote {} to leader? This causes a brief write downtime while Postgres fails over.",
+            "Promote {} to primary? This causes a brief write downtime while the cluster fails over.",
             candidate.service_name.yellow()
         ),
         args.yes,
@@ -853,9 +1091,35 @@ async fn switchover(
         return Ok(());
     }
 
-    let data_nodes = data_node_members(&ha_state, &config);
+    preflight_ssh(&ctx, args.yes).await?;
+
+    match engine.ha.map(|ha| ha.switchover) {
+        Some(SwitchoverMechanism::Patroni) => {
+            switchover_via_patroni(&ctx, &config, &root, &ha_state, candidate, json).await
+        }
+        Some(SwitchoverMechanism::DeclaredHttp) => {
+            switchover_via_declared_endpoint(&ctx, &config, &root, candidate, json).await
+        }
+        None => bail!(
+            "{} has no high-availability companion template.",
+            engine.display_name
+        ),
+    }
+}
+
+/// Switchover through a coordinator API: one member's view names the whole
+/// cluster, so the request is addressed from whichever member answers.
+async fn switchover_via_patroni(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    root: &super::RootContext,
+    ha_state: &HaState,
+    candidate: &database_plugins::HaMember,
+    json: bool,
+) -> Result<()> {
+    let data_nodes = data_node_members(ha_state, config);
     let instance_ids = patroni::resolve_instance_ids(
-        &ctx,
+        ctx,
         &data_nodes
             .iter()
             .map(|(id, _)| id.clone())
@@ -863,23 +1127,6 @@ async fn switchover(
     )
     .await
     .context("Failed to resolve live cluster member instances")?;
-
-    // The probes below run over native `ssh <instance>@ssh.railway.com` —
-    // an API token alone reaches nothing. Preflight the key so the failure
-    // is "your SSH setup" (with the recipe) instead of a misleading
-    // "could not reach the cluster". Interactive runs may register a key on
-    // the spot; --yes runs must never block on a prompt.
-    let preflight = if args.yes {
-        crate::commands::ssh::native::ensure_ssh_key_noninteractive(&ctx.client, &ctx.configs).await
-    } else {
-        crate::commands::ssh::native::ensure_ssh_key_quiet(&ctx.client, &ctx.configs).await
-    };
-    if let Err(e) = preflight {
-        bail!(
-            "Switchover drives Patroni over SSH (ssh <instance>@ssh.railway.com), and no usable \
-             SSH key is available: {e:#}"
-        );
-    }
 
     let probe_targets: Vec<String> = instance_ids.values().cloned().collect();
     let (probe_instance_id, cluster_members) = match patroni::probe_any(&probe_targets).await {
@@ -891,8 +1138,8 @@ async fn switchover(
                 .collect::<Vec<_>>()
                 .join("\n");
             bail!(
-                "Could not reach any cluster member's Patroni API to determine the current \
-                 leader. Per-member errors:\n{detail}"
+                "Could not reach any cluster member's coordinator API to determine the current \
+                 primary. Per-member errors:\n{detail}"
             );
         }
     };
@@ -900,37 +1147,29 @@ async fn switchover(
     let leader = cluster_members
         .iter()
         .find(|m| m.role == "leader")
-        .context("Patroni did not report a current leader")?;
+        .context("The cluster's coordinator did not report a current primary")?;
 
-    let candidate_patroni_name = postgres_plugins::patroni_member_name(
-        &config,
+    let candidate_node_name = database_plugins::member_identity_name(
+        config,
         &root.root_id,
         &candidate.service_id,
         &candidate.service_name,
     );
     if !cluster_members
         .iter()
-        .any(|m| m.name.to_ascii_lowercase() == candidate_patroni_name)
+        .any(|m| m.name.to_ascii_lowercase() == candidate_node_name)
     {
         bail!(
-            "\"{}\" is not currently a recognized Patroni cluster member.",
+            "\"{}\" is not currently a recognized cluster member.",
             candidate.service_name
         );
     }
 
-    if leader.name.to_ascii_lowercase() == candidate_patroni_name {
-        if !json {
-            println!("{} is already the leader.", candidate.service_name.bold());
-        } else {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({"alreadyLeader": true}))?
-            );
-        }
-        return Ok(());
+    if leader.name.to_ascii_lowercase() == candidate_node_name {
+        return report_already_primary(&candidate.service_name, json);
     }
 
-    patroni::switchover(&probe_instance_id, &leader.name, &candidate_patroni_name)
+    patroni::switchover(&probe_instance_id, &leader.name, &candidate_node_name)
         .await
         .context("Switchover request failed")?;
 
@@ -938,7 +1177,7 @@ async fn switchover(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "requestedLeader": candidate_patroni_name,
+                "requestedLeader": candidate_node_name,
                 "previousLeader": leader.name,
             }))?
         );
@@ -949,8 +1188,93 @@ async fn switchover(
             candidate.service_name.bold()
         );
         println!(
-            "Patroni is performing the failover -- run `railway postgres ha status` shortly to confirm the new leader."
+            "The cluster is performing the failover -- run `ha status` shortly to confirm the new primary."
         );
+    }
+    Ok(())
+}
+
+/// Switchover through the generic per-node contract: the request goes to the
+/// CANDIDATE's own container, asking its colocated coordinator to make that
+/// node the primary. There is no cluster-wide endpoint to address, and the
+/// response only says the handoff was accepted -- the role probe flipping is
+/// what confirms it.
+async fn switchover_via_declared_endpoint(
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    root: &super::RootContext,
+    candidate: &database_plugins::HaMember,
+    json: bool,
+) -> Result<()> {
+    let wiring = cluster_wiring(config, &root.root_id).with_context(|| {
+        format!(
+            "This cluster declares no wiring, so there is no way to ask {} to become the primary.",
+            candidate.service_name
+        )
+    })?;
+    let endpoint = cluster_probe::resolve(wiring.data_node_switchover.as_ref()).with_context(
+        || "This cluster does not offer a switchover endpoint. Fail over through the dashboard.",
+    )?;
+
+    let instance_ids =
+        patroni::resolve_instance_ids(ctx, std::slice::from_ref(&candidate.service_id))
+            .await
+            .context("Failed to resolve the target's live instance")?;
+    let instance_id = instance_ids.get(&candidate.service_id).with_context(|| {
+        format!(
+            "{} has no running deployment to promote.",
+            candidate.service_name
+        )
+    })?;
+
+    // Asking a node that already holds the primary role to take it again is a
+    // no-op at best and an unnecessary election at worst.
+    if let Some(role_endpoint) = cluster_probe::resolve(wiring.data_node_role_check.as_ref()) {
+        let mut one = BTreeMap::new();
+        one.insert(candidate.service_id.clone(), instance_id.clone());
+        let statuses =
+            cluster_probe::probe_nodes(&one, None, wiring.data_node_role_check.as_ref()).await;
+        let _ = role_endpoint;
+        if statuses
+            .get(&candidate.service_id)
+            .and_then(|s| s.is_primary)
+            == Some(true)
+        {
+            return report_already_primary(&candidate.service_name, json);
+        }
+    }
+
+    cluster_probe::request_switchover(instance_id, &endpoint)
+        .await
+        .context("Switchover request failed")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "requestedPrimary": candidate.service_name,
+            }))?
+        );
+    } else {
+        println!(
+            "Requested that {} become the primary.",
+            candidate.service_name.bold()
+        );
+        println!(
+            "The cluster is performing the failover -- run `ha status` shortly to confirm the new primary."
+        );
+    }
+    Ok(())
+}
+
+fn report_already_primary(candidate_name: &str, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"alreadyPrimary": true}))?
+        );
+    } else {
+        println!("{} is already the primary.", candidate_name.bold());
     }
     Ok(())
 }
@@ -984,6 +1308,8 @@ struct HaStatusOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controllers::config::{ServiceInstance, Variable};
+    use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
     use clap::Parser;
 
     #[test]
@@ -1124,22 +1450,105 @@ mod tests {
         assert!(cluster_scale::validate_odd_coordinator_count(5).is_ok());
     }
 
-    #[test]
-    fn guardrail_blockers_lists_every_failing_check() {
-        let state = PitrState {
-            enabled: false,
-            bucket_wired: false,
-            minor_pinned: false,
-            unsupported_image: true,
-            has_start_command: true,
-        };
-        let blockers = guardrail_blockers(&state);
-        assert_eq!(blockers.len(), 2);
+    /// The rules a companion template yields, built from the shape its record
+    /// really has -- these mirror redis-ha/mysql-ha and postgres-ha.
+    fn rules_from(conversion: serde_json::Value) -> AdoptionRules {
+        crate::controllers::adoption_eligibility::rules_from_template(&serde_json::json!({
+            "services": { "root": { "clusterRole": "root", "haConversionConfig": conversion } }
+        }))
+    }
+
+    /// redis-ha's and mysql-ha's real shape: replicas and edge, and no
+    /// coordinator tier at all.
+    fn colocated_rules() -> AdoptionRules {
+        rules_from(serde_json::json!({
+            "replica": { "label": "Replicas", "options": [2, 4, 6, 8] },
+            "internal": null,
+            "edge": { "label": "Reverse Proxies", "options": [1, 2] }
+        }))
+    }
+
+    /// postgres-ha's real shape: all three roles.
+    fn coordinated_rules() -> AdoptionRules {
+        rules_from(serde_json::json!({
+            "replica": { "label": "Replicas", "options": [2, 3, 4, 5, 6, 7] },
+            "internal": { "label": "Coordinator Nodes", "options": [3, 5, 7, 9] },
+            "edge": { "label": "Reverse Proxy", "options": [2, 3, 4, 5] }
+        }))
     }
 
     #[test]
-    fn data_node_members_excludes_internal_and_edge_roles() {
-        use crate::controllers::postgres_plugins::HaMember;
+    fn coordinators_are_refused_for_a_topology_that_has_no_coordinator_tier() {
+        let err = validate_role_count(&colocated_rules(), "internal", "--coordinators", 3, &REDIS)
+            .unwrap_err()
+            .to_string();
+        // Naming the role the cluster lacks beats silently ignoring the flag
+        // and converting into a shape the user did not ask for.
+        assert!(err.contains("no internal nodes"));
+        assert!(err.contains("--coordinators"));
+
+        // The same flag is fine where the tier exists.
+        assert!(
+            validate_role_count(
+                &coordinated_rules(),
+                "internal",
+                "--coordinators",
+                3,
+                &POSTGRES
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn role_counts_are_bounded_by_the_companions_own_options() {
+        let colocated = colocated_rules();
+        for allowed in [2, 4, 6, 8] {
+            assert!(
+                validate_role_count(&colocated, "replica", "--replicas", allowed, &MYSQL).is_ok()
+            );
+        }
+
+        // An odd replica count would leave an even number of data nodes,
+        // which cannot hold a quorum -- the template declares only even
+        // options for exactly that reason.
+        let err = validate_role_count(&colocated, "replica", "--replicas", 3, &MYSQL)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2, 4, 6, 8"));
+        assert!(err.contains("MySQL"));
+
+        // Postgres declares a different set and is bounded by its own.
+        let coordinated = coordinated_rules();
+        assert!(validate_role_count(&coordinated, "replica", "--replicas", 3, &POSTGRES).is_ok());
+        assert!(
+            validate_role_count(&coordinated, "internal", "--coordinators", 4, &POSTGRES).is_err()
+        );
+    }
+
+    #[test]
+    fn a_companion_declaring_no_conversion_config_is_left_to_the_server_gate() {
+        // Inventing bounds for a companion that declares none would refuse
+        // conversions the backend would have accepted.
+        let rules = AdoptionRules::default();
+        for role in ["replica", "internal", "edge"] {
+            assert!(validate_role_count(&rules, role, "--flag", 99, &POSTGRES).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_role_declared_without_options_accepts_any_count() {
+        let rules = rules_from(serde_json::json!({
+            "replica": { "label": "Replicas" },
+            "edge": { "label": "Proxies", "options": [1, 2] }
+        }));
+        assert!(validate_role_count(&rules, "replica", "--replicas", 42, &POSTGRES).is_ok());
+        assert!(validate_role_count(&rules, "edge", "--edge", 42, &POSTGRES).is_err());
+    }
+
+    #[test]
+    fn data_node_members_excludes_coordinator_and_edge_roles() {
+        use crate::controllers::database_plugins::HaMember;
 
         let ha_state = HaState {
             is_cluster: true,
@@ -1168,9 +1577,8 @@ mod tests {
             ],
         };
 
-        // With no identity variables in the config, names fall back to the
-        // lowercased service names; with one, it wins (the root's Patroni
-        // name is template-authored, e.g. `postgres-1`).
+        // With no identity variable declared, names fall back to the
+        // lowercased service names.
         let config = EnvironmentConfig::default();
         let data_nodes = data_node_members(&ha_state, &config);
         assert_eq!(
@@ -1181,13 +1589,21 @@ mod tests {
             ]
         );
 
+        // Where one IS declared it wins: the HA template authors the root's
+        // node name, which never matches the adopted service's own.
         let mut config = EnvironmentConfig::default();
-        let mut root = crate::controllers::config::ServiceInstance::default();
+        let mut root = ServiceInstance {
+            cluster_wiring: Some(ClusterWiring {
+                replica_node_name_variable: Some("PATRONI_NAME".to_string()),
+                ..ClusterWiring::default()
+            }),
+            ..ServiceInstance::default()
+        };
         root.variables.insert(
             "PATRONI_NAME".to_string(),
-            Some(crate::controllers::config::Variable {
+            Some(Variable {
                 value: Some("postgres-1".to_string()),
-                ..Default::default()
+                ..Variable::default()
             }),
         );
         config.services.insert("root".to_string(), root);
@@ -1205,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn revert_sweep_never_deletes_the_pgbouncer_pooler() {
+    fn revert_sweep_never_deletes_the_engines_pooler() {
         use crate::controllers::config::{ServiceInstance, ServiceSource};
 
         let service =
@@ -1258,13 +1674,13 @@ mod tests {
             ("replica-1".to_string(), "postgres-replica-1".to_string()),
             ("pooler".to_string(), "PgBouncer".to_string()),
         ];
-        let names: std::collections::BTreeMap<String, String> =
-            [("haproxy", "Postgres HA"), ("pooler", "PgBouncer")]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
+        let names: BTreeMap<String, String> = [("haproxy", "Postgres HA"), ("pooler", "PgBouncer")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
 
-        let mut targets = revert_sweep_targets(&pre_revert_members, &config, "root", &names);
+        let mut targets =
+            revert_sweep_targets(&POSTGRES, &pre_revert_members, &config, "root", &names);
         targets.sort();
 
         // The replica (snapshot path) and the orphaned haproxy (debris path)
@@ -1283,7 +1699,7 @@ mod tests {
         // scan alone must still find what the dead sweep left behind (and
         // still never the pooler). This is the path a re-run takes after a
         // member delete failed transiently.
-        let mut resumed = revert_sweep_targets(&[], &config, "root", &names);
+        let mut resumed = revert_sweep_targets(&POSTGRES, &[], &config, "root", &names);
         resumed.sort();
         assert_eq!(
             resumed,
@@ -1291,6 +1707,39 @@ mod tests {
                 ("haproxy".to_string(), "Postgres HA".to_string()),
                 ("replica-1".to_string(), "replica-1".to_string()),
             ]
+        );
+
+        // An engine that declares no pooler has no such exception to make:
+        // the same edge child is ordinary cluster debris to Redis, whose
+        // clusters never carry one.
+        let mut without_pooler = revert_sweep_targets(&REDIS, &[], &config, "root", &names);
+        without_pooler.sort();
+        assert_eq!(
+            without_pooler,
+            vec![
+                ("haproxy".to_string(), "Postgres HA".to_string()),
+                ("pooler".to_string(), "PgBouncer".to_string()),
+                ("replica-1".to_string(), "replica-1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_engine_declares_the_switchover_mechanism_its_cluster_actually_speaks() {
+        // Postgres nodes run a coordinator with a cluster-wide member API;
+        // Redis and MySQL colocate theirs and expose only the per-node
+        // contract. Driving one through the other's path reaches nothing.
+        assert_eq!(
+            POSTGRES.ha.unwrap().switchover,
+            SwitchoverMechanism::Patroni
+        );
+        assert_eq!(
+            REDIS.ha.unwrap().switchover,
+            SwitchoverMechanism::DeclaredHttp
+        );
+        assert_eq!(
+            MYSQL.ha.unwrap().switchover,
+            SwitchoverMechanism::DeclaredHttp
         );
     }
 }

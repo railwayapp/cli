@@ -1,13 +1,17 @@
-//! Persistent local audit trail for `railway postgres` operations.
+//! Persistent local audit trail for the managed-database commands.
 //!
-//! Every invocation appends one JSONL entry to
-//! `~/.railway/postgres-ops.jsonl` (override with
-//! `RAILWAY_POSTGRES_OPS_LOG`, e.g. in tests): timestamp, CLI version, the
-//! full argument vector, the project/environment/service selectors in
-//! play, outcome and duration. PITR, HA and PgBouncer compose -- and when a
-//! Postgres ends up misconfigured after some sequence of feature
+//! Every invocation appends one JSONL entry to `~/.railway/<engine>-ops.jsonl`
+//! (override with `RAILWAY_<ENGINE>_OPS_LOG`, e.g. in tests): timestamp, CLI
+//! version, the full argument vector, the project/environment/service
+//! selectors in play, outcome and duration. PITR, HA and pooling compose --
+//! and when a database ends up misconfigured after some sequence of feature
 //! enables/converts/reverts, this trail is how that sequence gets
-//! reconstructed (`railway postgres history`, or just reading the file).
+//! reconstructed (`railway <engine> history`, or just reading the file).
+//!
+//! The trail is per engine rather than one shared file, which keeps each
+//! engine's history readable on its own and leaves the Postgres trail
+//! (`postgres-ops.jsonl`, written since this command shipped) exactly where
+//! it already is.
 //!
 //! Server-side command telemetry already exists but carries no resource
 //! identifiers; this log is the local, resource-aware complement. Entries
@@ -21,6 +25,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::controllers::database_engines::DatabaseEngine;
+
 pub const RETENTION_DAYS: i64 = 90;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +34,7 @@ pub const RETENTION_DAYS: i64 = 90;
 pub struct OpsLogEntry {
     pub timestamp: DateTime<Utc>,
     pub cli_version: String,
-    /// Full argv (minus the binary path). Postgres subcommands carry no
+    /// Full argv (minus the binary path). These subcommands carry no
     /// secrets -- ids, counts, names and timestamps only.
     pub args: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,19 +49,23 @@ pub struct OpsLogEntry {
     pub duration_ms: u64,
 }
 
-pub fn log_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("RAILWAY_POSTGRES_OPS_LOG")
+pub fn log_path(engine: &DatabaseEngine) -> Option<PathBuf> {
+    let override_var = format!("RAILWAY_{}_OPS_LOG", engine.key.to_ascii_uppercase());
+    if let Ok(path) = std::env::var(&override_var)
         && !path.is_empty()
     {
         return Some(PathBuf::from(path));
     }
-    dirs::home_dir().map(|home| home.join(".railway").join("postgres-ops.jsonl"))
+    dirs::home_dir().map(|home| {
+        home.join(".railway")
+            .join(format!("{}-ops.jsonl", engine.key))
+    })
 }
 
 /// Appends `entry`, pruning anything older than the retention window.
 /// Best-effort by contract: all errors are swallowed.
-pub fn record(entry: &OpsLogEntry) {
-    let Some(path) = log_path() else { return };
+pub fn record(engine: &DatabaseEngine, entry: &OpsLogEntry) {
+    let Some(path) = log_path(engine) else { return };
     let _ = record_at(&path, entry);
 }
 
@@ -89,8 +99,8 @@ fn record_at(path: &PathBuf, entry: &OpsLogEntry) -> std::io::Result<()> {
 }
 
 /// All retained entries, oldest first. Unparseable lines are skipped.
-pub fn read_entries() -> Vec<OpsLogEntry> {
-    let Some(path) = log_path() else {
+pub fn read_entries(engine: &DatabaseEngine) -> Vec<OpsLogEntry> {
+    let Some(path) = log_path(engine) else {
         return Vec::new();
     };
     match std::fs::read_to_string(path) {
@@ -118,6 +128,25 @@ mod tests {
             error: None,
             duration_ms: 42,
         }
+    }
+
+    #[test]
+    fn each_engine_writes_its_own_trail() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
+
+        let filename_for = |engine: &DatabaseEngine| {
+            log_path(engine)
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        };
+        // Postgres keeps the filename it has written since the command
+        // shipped, so an existing trail stays where its owner left it.
+        assert_eq!(filename_for(&POSTGRES), "postgres-ops.jsonl");
+        assert_eq!(filename_for(&MYSQL), "mysql-ops.jsonl");
+        assert_eq!(filename_for(&REDIS), "redis-ops.jsonl");
     }
 
     #[test]
