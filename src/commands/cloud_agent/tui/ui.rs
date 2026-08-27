@@ -753,27 +753,31 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
 }
 
 /// How many rows `text` occupies once wrapped at `width`, breaking on spaces
-/// the way ratatui does and hard-wrapping a word that cannot fit.
+/// the way ratatui does, hard-wrapping a word that cannot fit, and starting a
+/// fresh row at every `\n` — the character ⇧enter puts in a draft.
 fn wrapped_lines(text: &str, width: usize) -> usize {
     if width == 0 {
         return 1;
     }
-    let mut rows = 1usize;
-    let mut column = 0usize;
-    for word in text.split_inclusive(' ') {
-        let len = word.chars().count();
-        if column + len > width && column > 0 {
-            rows += 1;
-            column = 0;
-        }
-        if len > width {
-            rows += (len - 1) / width;
-            column = len % width;
-        } else {
-            column += len;
+    let mut rows = 0usize;
+    for line in text.split('\n') {
+        rows += 1;
+        let mut column = 0usize;
+        for word in line.split_inclusive(' ') {
+            let len = word.chars().count();
+            if column + len > width && column > 0 {
+                rows += 1;
+                column = 0;
+            }
+            if len > width {
+                rows += (len - 1) / width;
+                column = len % width;
+            } else {
+                column += len;
+            }
         }
     }
-    rows
+    rows.max(1)
 }
 
 /// The size the session pane will have, given the whole terminal — the same
@@ -1504,7 +1508,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
                 if app.shell_selected() {
                     " enter launch · esc close "
                 } else {
-                    " enter send · esc close "
+                    " enter send · ⇧enter newline · esc close "
                 },
                 Style::default().fg(theme.dim),
             ))

@@ -2183,14 +2183,15 @@ impl App {
             }
             return None;
         }
-        // The prompt boxes are single-line: newlines become spaces rather
-        // than being taken as Enter, and other control characters have no
-        // business in a draft at all.
+        // A pasted newline stays a newline — the prompt boxes hold
+        // paragraphs, and ⇧enter types the same character — but it is never
+        // taken as Enter: pasting must not launch. Other control characters
+        // have no business in a draft at all.
         let text: String = text
-            .replace("\r\n", " ")
+            .replace("\r\n", "\n")
             .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .filter(|c| !c.is_control())
+            .map(|c| if c == '\r' { '\n' } else { c })
+            .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         match self.screen {
             Screen::Manage if self.new_session_selected() && !self.shell_selected() => {
@@ -4077,6 +4078,23 @@ impl App {
                 self.harness = (self.harness + 1) % HARNESSES.len();
                 Ok(None)
             }
+            // ⇧enter is the newline every text field owes a paragraph-sized
+            // prompt; plain enter still launches. ALT is accepted alongside
+            // SHIFT because most terminals cannot say "shifted Enter" at all
+            // (the kitty disambiguate mode exempts Enter by design) — the
+            // ones configured to send it, Claude Code's own /terminal-setup
+            // included, bind it to `ESC CR`, which parses as alt+enter. A
+            // terminal that reports neither sends a plain Enter, so the chord
+            // degrades to launching — never to a lost draft.
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    && !self.shell_selected() =>
+            {
+                self.prompt_insert('\n');
+                Ok(None)
+            }
             KeyCode::Enter => Ok(self.launch_from_prompt()),
             // Esc walks up, one step per press: a draft is cleared first, so
             // a stray Esc mid-typing doesn't throw the session away…
@@ -4482,6 +4500,19 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.harness = (self.harness + 1) % HARNESSES.len();
+                self.manage_prompt = Some(draft);
+                None
+            }
+            // Same newline chord as the launcher's box — the two are the
+            // same control. ALT rides along for the same reason it does
+            // there: most terminals deliver ⇧enter as `ESC CR`, alt+enter.
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                    && !self.shell_selected() =>
+            {
+                draft.push('\n');
                 self.manage_prompt = Some(draft);
                 None
             }
@@ -5864,15 +5895,50 @@ mod tests {
     }
 
     /// A paste lands in the prompt as text — dictation tools insert whole
-    /// utterances this way — with newlines flattened to spaces: the box is
-    /// one line, and a line break taken as Enter would launch mid-thought.
+    /// utterances this way. Newlines stay newlines (the box holds paragraphs,
+    /// same as ⇧enter types), but a line break is never taken as Enter: a
+    /// paste must not launch mid-thought.
     #[test]
-    fn a_paste_lands_in_the_prompt_as_one_line() {
+    fn a_paste_lands_in_the_prompt_with_its_newlines() {
         let mut a = app();
         a.on_key(key(KeyCode::Char('f')));
-        assert_eq!(a.on_paste("ix the login bug\nthen deploy".into()), None);
-        assert_eq!(a.prompt, "fix the login bug then deploy");
+        assert_eq!(a.on_paste("ix the login bug\r\nthen deploy".into()), None);
+        assert_eq!(a.prompt, "fix the login bug\nthen deploy");
         assert_eq!(a.screen, Screen::Manage, "a pasted newline is not Enter");
+    }
+
+    /// ⇧enter puts a newline in the draft; plain enter still launches. The
+    /// same chord works in the ⌥p composer — the two boxes are one control.
+    #[test]
+    fn shift_enter_breaks_the_line_in_the_prompt_boxes() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+
+        let mut a = app();
+        a.on_key(key(KeyCode::Char('f')));
+        a.on_key(key(KeyCode::Char('i')));
+        a.on_key(key(KeyCode::Char('x')));
+        assert_eq!(a.on_key(shift_enter), None);
+        a.on_key(key(KeyCode::Char('g')));
+        a.on_key(key(KeyCode::Char('o')));
+        assert_eq!(a.prompt, "fix\ngo");
+        assert_eq!(a.screen, Screen::Manage, "⇧enter is not a launch");
+
+        let mut b = loaded_app();
+        b.screen = Screen::ManagePrompt;
+        b.manage_prompt = Some("fix".into());
+        assert_eq!(b.on_key(shift_enter), None);
+        assert_eq!(b.manage_prompt.as_deref(), Some("fix\n"));
+        assert_eq!(b.screen, Screen::ManagePrompt, "the composer stays up");
+
+        // Most terminals can't say "shifted Enter" — the configured ones
+        // (Claude Code's /terminal-setup included) send `ESC CR`, which
+        // parses as alt+enter. Same newline.
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        let mut c = app();
+        c.on_key(key(KeyCode::Char('f')));
+        assert_eq!(c.on_key(alt_enter), None);
+        assert_eq!(c.prompt, "f\n");
+        assert_eq!(c.screen, Screen::Manage, "⌥enter in the box is a newline");
     }
 
     /// Where typing is refused, pasting is too; and off the prompt a paste
