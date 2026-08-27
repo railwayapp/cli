@@ -63,6 +63,18 @@ pub struct Args {
     /// Print variable values in the plan instead of redacting them.
     #[clap(long)]
     pub(super) show_values: bool,
+
+    /// Write a pinned plan artifact (plan only).
+    #[clap(long)]
+    pub(super) out: Option<PathBuf>,
+
+    /// Apply a pinned plan artifact without re-evaluating the authoring file.
+    #[clap(long)]
+    pub(super) plan: Option<PathBuf>,
+
+    /// Tree hash written into `--out`. Defaults to `git rev-parse HEAD:.railway`.
+    #[clap(long)]
+    pub(super) source_tree: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -90,6 +102,7 @@ struct CurrentEnvironment {
     project_name: Option<String>,
     environment_id: String,
     environment_name: Option<String>,
+    config_etag: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -171,10 +184,16 @@ struct StagedPatch {
 
 pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
-    invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await
+    let (response, _) =
+        invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await?;
+    Ok(response)
 }
 
 pub(super) async fn run_command(args: Args) -> Result<()> {
+    if let Some(path) = &args.plan {
+        return apply_pinned_plan(&args, path).await;
+    }
+
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     let command = if args.stage {
         "stage"
@@ -189,7 +208,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
             !args.json && std::io::stdout().is_terminal(),
             "Checking proposed changes".into(),
         );
-        let preview =
+        let (preview, _) =
             invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
         if let Some(spinner) = &mut spinner {
             if preview.ok {
@@ -243,8 +262,13 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         !args.json && std::io::stdout().is_terminal(),
         runner_message(command).into(),
     );
-    let output =
+    let (output, raw) =
         invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
+    if output.ok {
+        if let Some(path) = &args.out {
+            write_pinned_plan(&args, &raw, path)?;
+        }
+    }
     if let Some(spinner) = &mut spinner {
         if output.ok {
             success_spinner(spinner, runner_done_message(command).into());
@@ -305,7 +329,8 @@ async fn preview_before_apply(
         !args.json && std::io::stdout().is_terminal(),
         "Checking Railway configuration".into(),
     );
-    let preview = invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
+    let (preview, _) =
+        invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
     if let Some(spinner) = &mut spinner {
         if preview.ok {
             success_spinner(spinner, "Checked Railway configuration".into());
@@ -377,6 +402,62 @@ fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
         )
 }
 
+fn write_pinned_plan(args: &Args, raw: &serde_json::Value, path: &PathBuf) -> Result<()> {
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let tree = crate::iac::saved_plan::source_tree(&cwd, args.source_tree.as_deref())?;
+    let plan = crate::iac::saved_plan::from_runner_json(raw, tree)?;
+    crate::iac::saved_plan::write_plan(path, &plan)?;
+    if !args.json {
+        eprintln!("{} {}", "Wrote".dimmed(), path.display());
+    }
+    Ok(())
+}
+
+async fn apply_pinned_plan(args: &Args, path: &PathBuf) -> Result<()> {
+    if !args.yes && !args.json && !std::io::stdout().is_terminal() {
+        bail!(
+            "Run `railway config apply --plan {} --yes` to apply a pinned plan non-interactively.",
+            path.display()
+        );
+    }
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let plan = crate::iac::saved_plan::read_plan(path)?;
+    crate::iac::saved_plan::assert_source_tree(&plan, &cwd)?;
+    guard_destructive_apply(args, plan.destructive)?;
+
+    if !args.yes && !args.json {
+        if let Some(diff) = &plan.diff {
+            println!("{diff}");
+        }
+        println!();
+        let prompt = if plan.destructive {
+            "Apply this pinned plan? This will remove Railway resources or variables."
+        } else {
+            "Apply this pinned plan to Railway?"
+        };
+        if !prompt_confirm_with_default(prompt, false)? {
+            bail!("No changes applied.");
+        }
+        println!();
+    }
+
+    let (configs, _, _, _) = ensure_config_context().await?;
+    let result = crate::iac::saved_plan::apply_saved_plan(&configs, &plan).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if result.get("status").and_then(Value::as_str) == Some("noop") {
+        println!(
+            "{}",
+            "✓ Your Railway configuration is already up to date.".green()
+        );
+        return Ok(());
+    }
+    println!("{}", "Applied pinned Railway configuration.".green());
+    Ok(())
+}
+
 async fn invoke_runner(
     args: &Args,
     configs: &Configs,
@@ -384,7 +465,7 @@ async fn invoke_runner(
     token: &str,
     auth_type: &str,
     command: &str,
-) -> Result<RunnerResponse> {
+) -> Result<(RunnerResponse, Value)> {
     let cwd_path = env::current_dir().context("Unable to get current working directory")?;
     if !crate::iac::use_legacy_ts_runner(args.runner.as_deref()) {
         let value = crate::iac::run_native(
@@ -398,8 +479,9 @@ async fn invoke_runner(
             command,
         )
         .await?;
-        return serde_json::from_value(value)
-            .context("Native IaC engine returned a response the CLI could not parse");
+        let response = serde_json::from_value(value.clone())
+            .context("Native IaC engine returned a response the CLI could not parse")?;
+        return Ok((response, value));
     }
     let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
 
@@ -453,11 +535,13 @@ async fn invoke_runner(
     let stdout = String::from_utf8(output.stdout).context("Runner stdout was not valid UTF-8")?;
     let stderr = String::from_utf8(output.stderr).context("Runner stderr was not valid UTF-8")?;
 
-    let response: RunnerResponse = serde_json::from_str(&stdout).with_context(|| {
+    let value: Value = serde_json::from_str(&stdout).with_context(|| {
         format!("IaC runner returned non-JSON output.\nstdout:\n{stdout}\nstderr:\n{stderr}")
     })?;
+    let response: RunnerResponse = serde_json::from_value(value.clone())
+        .context("IaC runner returned a response the CLI could not parse")?;
 
-    Ok(response)
+    Ok((response, value))
 }
 
 struct ResolvedRunner {

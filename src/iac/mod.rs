@@ -11,6 +11,7 @@ mod eval;
 mod graph;
 mod json;
 mod partial;
+pub mod saved_plan;
 
 #[allow(dead_code)]
 pub use change_set::{ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
