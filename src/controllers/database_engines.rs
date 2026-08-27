@@ -51,6 +51,18 @@ pub struct HaCompanion {
     pub switchover: SwitchoverMechanism,
 }
 
+/// Which live-archive probe implementation backs an engine's PITR status.
+///
+/// Declared kind -> code registry, so the probe is selected by declaration
+/// rather than by branching on the engine's name. An engine that declares
+/// none simply reports no coverage detail: the archive's own restore is the
+/// hard guard, and inventing a probe it has no tool for would be worse than
+/// saying nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PitrProbeKind {
+    PgBackRest,
+}
+
 /// The engine's PITR contract -- the mirror of one `pitrEngineSpecs` entry.
 #[derive(Debug, Clone, Copy)]
 pub struct PitrSpec {
@@ -59,6 +71,14 @@ pub struct PitrSpec {
     /// Prefix of the archive variable contract the template stamps. Every
     /// engine's contract is the same six variables, differing only in prefix.
     pub archive_var_prefix: &'static str,
+    /// Live coverage probe backing `pitr status`, when one exists for this
+    /// engine's archiver.
+    pub probe_kind: Option<PitrProbeKind>,
+    /// Whether PITR is supported on an HA cluster of this engine. MySQL's
+    /// archiver refuses to run whenever the Group Replication seed list is
+    /// set, so its PITR is standalone-only and the HA progress/cancel
+    /// subcommands have nothing to drive.
+    pub supports_ha: bool,
 }
 
 impl PitrSpec {
@@ -103,6 +123,8 @@ pub const POSTGRES: DatabaseEngine = DatabaseEngine {
     pitr: Some(PitrSpec {
         template_code: "postgres-pitr",
         archive_var_prefix: "WAL_ARCHIVE_",
+        probe_kind: Some(PitrProbeKind::PgBackRest),
+        supports_ha: true,
     }),
     pooling: Some(PoolingSpec {
         template_code: "postgres-with-pgbouncer",
@@ -119,7 +141,14 @@ pub const MYSQL: DatabaseEngine = DatabaseEngine {
         legacy_active_variable: None,
         switchover: SwitchoverMechanism::DeclaredHttp,
     }),
-    pitr: None,
+    pitr: Some(PitrSpec {
+        template_code: "mysql-pitr",
+        archive_var_prefix: "BINLOG_ARCHIVE_",
+        probe_kind: None,
+        // The image's restore-on-boot runs in standalone mode only -- it is
+        // refused outright whenever the cluster's seed list is set.
+        supports_ha: false,
+    }),
     pooling: None,
 };
 
@@ -357,6 +386,10 @@ mod tests {
             POSTGRES.pitr.unwrap().archive_gate_variable(),
             "WAL_ARCHIVE_BUCKET"
         );
+        assert_eq!(
+            MYSQL.pitr.unwrap().archive_gate_variable(),
+            "BINLOG_ARCHIVE_BUCKET"
+        );
     }
 
     #[test]
@@ -365,8 +398,9 @@ mod tests {
         // which subcommands exist at all, so they are worth pinning.
         assert!(POSTGRES.pitr.is_some());
         assert!(POSTGRES.pooling.is_some());
-        assert!(MYSQL.pitr.is_none());
+        assert!(MYSQL.pitr.is_some());
         assert!(MYSQL.pooling.is_none());
+        // No Redis image ships a continuous archiver.
         assert!(REDIS.pitr.is_none());
         assert!(REDIS.pooling.is_none());
         // Every engine here ships an HA companion; that is the feature this
@@ -374,5 +408,9 @@ mod tests {
         assert!(POSTGRES.ha.is_some());
         assert!(MYSQL.ha.is_some());
         assert!(REDIS.ha.is_some());
+        // MySQL's archiver only runs standalone, which is what removes the
+        // rolling HA workflow verbs for it.
+        assert!(POSTGRES.pitr.unwrap().supports_ha);
+        assert!(!MYSQL.pitr.unwrap().supports_ha);
     }
 }

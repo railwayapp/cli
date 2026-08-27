@@ -1,14 +1,18 @@
-//! The `pitr` verb -- point-in-time recovery / continuous backups, for every
-//! engine whose registry entry declares a PITR contract.
+//! `railway {postgres,mysql} pitr` -- point-in-time recovery / continuous
+//! backups, for every engine whose registry entry declares a PITR contract.
 //!
-//! The engine declaration decides which composable template the enable
-//! overlay deploys and which variables carry the archive
-//! (`PitrSpec::template_code`, `archive_var_prefix`). Which images may adopt
-//! the overlay is not decided here at all: that rule ships with the enable
-//! template (`adoptionImageEligibility`) and is read off the fetched record,
-//! so widening it is a template update rather than a CLI release. Backups,
+//! The engine declaration decides three things here: which composable
+//! template the enable overlay deploys (`PitrSpec::template_code`), whether
+//! the rolling HA enable/disable workflow exists at all (`supports_ha` --
+//! MySQL's archiver only runs standalone, so its HA path is a refusal, not a
+//! workflow), and which live coverage probe backs `status` (`probe_kind` --
+//! only pgBackRest ships one). Which images may adopt the overlay is not
+//! decided here at all: that rule ships with the enable template
+//! (`adoptionImageEligibility`) and is read off the fetched record, so
+//! widening it is a template update rather than a CLI release. Backups,
 //! schedules and restore ride the volume-instance mutations, which are
 //! engine-agnostic server-side.
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -25,7 +29,7 @@ use crate::{
         adoption_eligibility::AdoptionTarget,
         config::{EnvironmentConfig, fetch_environment_config},
         database::DatabaseType,
-        database_engines::{DatabaseEngine, PitrSpec},
+        database_engines::{DatabaseEngine, PitrProbeKind, PitrSpec},
         database_plugins,
         db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
         exec::exec_probe_in_container,
@@ -44,7 +48,7 @@ use super::{
 /// Manage point-in-time recovery (continuous backups)
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway postgres pitr backup create --service postgres --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone database or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow).\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
+    after_help = "Examples (any database command with PITR works the same way):\n\n  railway postgres pitr status --service postgres\n  railway mysql pitr enable --service mysql\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway mysql pitr backup create --service mysql --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone database or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow), on engines whose PITR supports HA.\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container, on engines that ship one; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -246,9 +250,11 @@ pub async fn command(
         Commands::Status => status(engine, pitr, project, service, environment, json).await,
         Commands::Enable(a) => enable(engine, pitr, project, service, environment, json, a).await,
         Commands::Disable(a) => disable(engine, pitr, project, service, environment, json, a).await,
-        Commands::Progress(a) => progress(engine, project, service, environment, json, a).await,
-        Commands::Cancel => cancel(engine, project, service, environment, json).await,
-        Commands::Clear => clear(engine, project, service, environment, json).await,
+        Commands::Progress(a) => {
+            progress(engine, pitr, project, service, environment, json, a).await
+        }
+        Commands::Cancel => cancel(engine, pitr, project, service, environment, json).await,
+        Commands::Clear => clear(engine, pitr, project, service, environment, json).await,
         Commands::Restore(a) => restore(project, service, environment, json, a).await,
         Commands::Backup(a) => match a.command {
             BackupCommands::List => backup_list(project, service, environment, json).await,
@@ -351,7 +357,7 @@ async fn print_status(
     // nothing. An engine that declares no probe implementation renders no
     // coverage section at all: there is nothing to run, which is not the same
     // as "unavailable".
-    let live = if include_live && root_pitr.enabled {
+    let live = if include_live && root_pitr.enabled && live_probe_applies(&pitr) {
         Some(probe_pitr_live(ctx, &root.root_id).await)
     } else {
         None
@@ -479,6 +485,28 @@ fn print_pitr_status(output: &PitrStatusOutput) {
     }
 }
 
+/// Why the rolling HA enable/disable workflow does not exist for this engine,
+/// or `None` for engines whose archiver runs inside a cluster. Everything that
+/// would take (or follow) the HA path checks this first, so the refusal is one
+/// clear sentence instead of a server error from a workflow that was never
+/// going to start.
+fn ha_pitr_unsupported_reason(engine: &DatabaseEngine, pitr: &PitrSpec) -> Option<String> {
+    if pitr.supports_ha {
+        return None;
+    }
+    Some(format!(
+        "{} PITR is standalone-only: its archiver does not run on HA cluster members",
+        engine.display_name
+    ))
+}
+
+/// Whether `status` has a live coverage probe implementation for this engine.
+/// Selected by the declared probe kind, never by engine name -- an engine
+/// declaring none gets no coverage section rather than a fake "unavailable".
+fn live_probe_applies(pitr: &PitrSpec) -> bool {
+    matches!(pitr.probe_kind, Some(PitrProbeKind::PgBackRest))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn enable(
     engine: &'static DatabaseEngine,
@@ -535,6 +563,12 @@ async fn enable(
     }
 
     if ha_state.is_cluster {
+        if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+            bail!(
+                "Cannot enable PITR for {}: it is the root of an HA cluster, and {reason}.",
+                root.root_name
+            );
+        }
         if args.no_deploy {
             eprintln!(
                 "Note: --no-deploy has no effect here -- enabling PITR on an HA cluster runs a live rolling restart with no staging step."
@@ -644,6 +678,18 @@ async fn disable(
             println!("PITR is already disabled for {}.", root.root_name.bold());
         }
         return print_status(engine, pitr, &ctx, &config, json, true).await;
+    }
+
+    // The rolling HA disable drives engine-specific server-side machinery
+    // that only exists where the archiver runs inside a cluster -- refuse
+    // with the reason instead of surfacing that workflow's own error.
+    if ha_state.is_cluster
+        && let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr)
+    {
+        bail!(
+            "Cannot disable PITR for {} via the rolling HA workflow: {reason}.",
+            root.root_name
+        );
     }
 
     if !confirm_or_bail(
@@ -762,11 +808,15 @@ async fn disable(
 
 async fn cancel(
     engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     json: bool,
 ) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow to cancel.");
+    }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
@@ -805,11 +855,15 @@ async fn cancel(
 
 async fn clear(
     engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     json: bool,
 ) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow progress to clear.");
+    }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
@@ -894,12 +948,16 @@ const PROGRESS_VISIBILITY_GRACE_SECS: u64 = 60;
 #[allow(clippy::too_many_arguments)]
 async fn progress(
     engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     json: bool,
     args: ProgressArgs,
 ) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow progress to show.");
+    }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
@@ -2510,16 +2568,46 @@ mod tests {
         assert_eq!(probe.backup_set_count, None);
     }
 
-    // The archive variable contract the enabled-state detection and the
-    // enable overlay ride on: the gate suffix over the engine's declared
-    // prefix. A drift here would make `status` read the wrong variable and
+    // The archive variable contract each engine's enabled-state detection and
+    // overlay ride on: the same gate suffix over an engine-specific prefix. A
+    // drift here would make `status` read the wrong engine's variables and
     // report a configured database as having no archive at all.
     #[test]
-    fn archive_variable_names_resolve_from_the_declared_prefix() {
-        use crate::controllers::database_engines::POSTGRES;
+    fn archive_variable_names_resolve_per_engine() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES};
 
         let postgres = POSTGRES.pitr.unwrap();
         assert_eq!(postgres.archive_gate_variable(), "WAL_ARCHIVE_BUCKET");
         assert_eq!(postgres.template_code, "postgres-pitr");
+
+        let mysql = MYSQL.pitr.unwrap();
+        assert_eq!(mysql.archive_gate_variable(), "BINLOG_ARCHIVE_BUCKET");
+        assert_eq!(mysql.template_code, "mysql-pitr");
+    }
+
+    // The gate in front of every HA-workflow path (enable/disable's cluster
+    // branches, progress/cancel/clear): an engine whose archiver is
+    // standalone-only must be refused with the reason, never routed into the
+    // rolling workflow's GraphQL operations.
+    #[test]
+    fn ha_workflow_gate_refuses_standalone_only_engines() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES};
+
+        assert!(ha_pitr_unsupported_reason(&POSTGRES, &POSTGRES.pitr.unwrap()).is_none());
+
+        let reason = ha_pitr_unsupported_reason(&MYSQL, &MYSQL.pitr.unwrap()).unwrap();
+        assert!(reason.contains("MySQL"));
+        assert!(reason.contains("standalone-only"));
+    }
+
+    // The coverage probe is selected by the declared probe kind: an engine
+    // that ships none renders no coverage section instead of a fake
+    // "unavailable" (or a probe run with another engine's tooling).
+    #[test]
+    fn live_probe_runs_only_for_engines_declaring_one() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES};
+
+        assert!(live_probe_applies(&POSTGRES.pitr.unwrap()));
+        assert!(!live_probe_applies(&MYSQL.pitr.unwrap()));
     }
 }
