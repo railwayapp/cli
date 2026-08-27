@@ -2732,10 +2732,15 @@ async fn prepare_inner(
     }
     // The launch directory's project MCP servers travel too — the `.mcp.json`
     // the repo committed is what "the servers this project's people get"
-    // means. Packed up front for the same reason as skills: a malformed file
-    // should fail here, not after a VM.
-    let packed_mcp = match std::env::current_dir() {
-        Ok(cwd) => mcp_sync::pack(&prefs, &cwd)?,
+    // means. A broken file is said out loud but never blocks the launch: the
+    // file is usually a teammate's commit, and one bad merge upstream must
+    // not take everyone's `railway ca` down with it.
+    let packed_mcp = match std::env::current_dir().map(|cwd| mcp_sync::pack(&prefs, &cwd)) {
+        Ok(Ok(packed)) => packed,
+        Ok(Err(err)) => {
+            progress.note(&format!("Skipping MCP import: {err:#}"));
+            None
+        }
         Err(_) => None,
     };
     if let Some(packed) = &packed_mcp {
@@ -3721,6 +3726,68 @@ mod tests {
         // An agent that has never synced prints an empty value rather than
         // failing the script — the marker parser treats that as "no hash".
         assert!(script.contains("2>/dev/null || true"));
+    }
+
+    /// Every generated provision script is valid POSIX shell. `sh -n` parses
+    /// without executing, so this catches a broken heredoc, an unbalanced
+    /// quote, or a mangled format! escape in ANY variant before a VM does —
+    /// including the skills and MCP follow-up scripts.
+    #[cfg(unix)]
+    #[test]
+    fn every_generated_provision_script_parses_as_shell() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut scripts: Vec<(String, String)> = Vec::new();
+        for agent in [
+            Agent::Codex,
+            Agent::Claude,
+            Agent::Grok,
+            Agent::Railway,
+            Agent::Shell,
+        ] {
+            for write_credential in [true, false] {
+                for app_mode in [true, false] {
+                    scripts.push((
+                        format!("provision {agent:?} cred={write_credential} app={app_mode}"),
+                        provision_script(agent, write_credential, app_mode),
+                    ));
+                }
+            }
+            scripts.push((
+                format!("provision+skills {agent:?}"),
+                provision_script_with_skills(agent, Some(42), false, "deadbeef"),
+            ));
+        }
+        scripts.push((
+            "skills follow-up".into(),
+            skills_sync::provision_script("deadbeef"),
+        ));
+        scripts.push((
+            "mcp follow-up".into(),
+            mcp_sync::provision_script("deadbeef"),
+        ));
+
+        for (label, script) in scripts {
+            let mut child = Command::new("sh")
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "`{label}` is not valid shell:\n{}\n--- script ---\n{script}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     /// The TUI's prompt box and `-- exec …` must not collapse into the same

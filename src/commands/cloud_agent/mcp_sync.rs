@@ -505,4 +505,169 @@ mod tests {
         assert_eq!(recorded.trim(), packed.hash);
         assert!(!vm.path().join(".railway-mcp-payload.json").exists());
     }
+
+    /// Run the provision script against a stand-in `$HOME`, returning stdout.
+    #[cfg(unix)]
+    fn run_script(vm: &Path, payload: &[u8], hash: &str) -> String {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(provision_script(hash))
+            .env("HOME", vm)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(payload).unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A config the merge cannot parse or cannot type-match must degrade —
+    /// MCP-MERGE-FAILED, no hash recorded (so the next launch retries), the
+    /// broken file left byte-for-byte as it was — never a clobber, and never
+    /// a failed launch.
+    #[cfg(unix)]
+    #[test]
+    fn provision_script_leaves_corrupt_configs_untouched() {
+        use std::process::Command;
+        if Command::new("jq").arg("--version").output().is_err() {
+            eprintln!("skipping: jq not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), MONO_LIKE);
+        let packed = pack(&prefs_on(), dir.path()).unwrap().unwrap();
+
+        // Invalid JSON in ~/.claude.json, and a shape clash in settings.json
+        // (mcpServers as an array would break `object + object` the same way).
+        let vm = tempfile::tempdir().unwrap();
+        std::fs::write(vm.path().join(".claude.json"), "{ definitely not json").unwrap();
+        std::fs::create_dir_all(vm.path().join(".claude")).unwrap();
+        std::fs::write(
+            vm.path().join(".claude").join("settings.json"),
+            r#"{"mcp_servers": {"wrong": "shape"}}"#,
+        )
+        .unwrap();
+
+        let stdout = run_script(vm.path(), &packed.payload, &packed.hash);
+        assert!(stdout.contains("MCP-MERGE-FAILED"), "{stdout}");
+        assert!(!stdout.contains("MCP-OK"), "{stdout}");
+
+        // Both files exactly as they were: degrade means hands off.
+        assert_eq!(
+            std::fs::read_to_string(vm.path().join(".claude.json")).unwrap(),
+            "{ definitely not json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vm.path().join(".claude").join("settings.json")).unwrap(),
+            r#"{"mcp_servers": {"wrong": "shape"}}"#
+        );
+        // No hash: the next launch retries instead of believing itself
+        // current. No temp or scratch litter. The canonical file still lands
+        // — it validated, and express-agent reads it independently.
+        assert!(!vm.path().join(".railway-mcp-hash").exists());
+        assert!(!vm.path().join(".railway-mcp-payload.json").exists());
+        assert!(!vm.path().join(".claude.json.railway-mcp-tmp").exists());
+        assert!(
+            !vm.path()
+                .join(".claude")
+                .join("settings.json.railway-mcp-tmp")
+                .exists()
+        );
+        assert!(vm.path().join(".railway-mcp.json").exists());
+    }
+
+    /// A shape clash in only ONE file must not take the other down with it:
+    /// the good file still gets its merge, and the run still reports failure
+    /// so nothing records the hash.
+    #[cfg(unix)]
+    #[test]
+    fn provision_script_merges_the_good_file_despite_the_bad_one() {
+        use std::process::Command;
+        if Command::new("jq").arg("--version").output().is_err() {
+            eprintln!("skipping: jq not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), MONO_LIKE);
+        let packed = pack(&prefs_on(), dir.path()).unwrap().unwrap();
+
+        let vm = tempfile::tempdir().unwrap();
+        // mcpServers as an ARRAY: `$new + array` is a jq type error.
+        std::fs::write(
+            vm.path().join(".claude.json"),
+            r#"{"mcpServers": ["not", "an", "object"]}"#,
+        )
+        .unwrap();
+
+        let stdout = run_script(vm.path(), &packed.payload, &packed.hash);
+        assert!(stdout.contains("MCP-MERGE-FAILED"), "{stdout}");
+        // The clashing file was left alone…
+        assert_eq!(
+            std::fs::read_to_string(vm.path().join(".claude.json")).unwrap(),
+            r#"{"mcpServers": ["not", "an", "object"]}"#
+        );
+        // …while settings.json (absent → seeded) still got the servers.
+        let set: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vm.path().join(".claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            set["mcp_servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "user-buildkite"),
+            "{set}"
+        );
+        assert!(!vm.path().join(".railway-mcp-hash").exists());
+    }
+
+    /// Running the sync twice must converge, not accumulate: the object merge
+    /// is keyed and the array merge is name-deduped, so the second pass finds
+    /// every name present and changes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn provision_script_is_idempotent() {
+        use std::process::Command;
+        if Command::new("jq").arg("--version").output().is_err() {
+            eprintln!("skipping: jq not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        plant(dir.path(), MONO_LIKE);
+        let packed = pack(&prefs_on(), dir.path()).unwrap().unwrap();
+        let vm = tempfile::tempdir().unwrap();
+
+        assert!(run_script(vm.path(), &packed.payload, &packed.hash).contains("MCP-OK"));
+        let first_cfg = std::fs::read_to_string(vm.path().join(".claude.json")).unwrap();
+        let first_set =
+            std::fs::read_to_string(vm.path().join(".claude").join("settings.json")).unwrap();
+
+        assert!(run_script(vm.path(), &packed.payload, &packed.hash).contains("MCP-OK"));
+        assert_eq!(
+            std::fs::read_to_string(vm.path().join(".claude.json")).unwrap(),
+            first_cfg,
+            "second run left .claude.json byte-identical"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vm.path().join(".claude").join("settings.json")).unwrap(),
+            first_set,
+            "second run left settings.json byte-identical"
+        );
+        let set: serde_json::Value = serde_json::from_str(&first_set).unwrap();
+        assert_eq!(
+            set["mcp_servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|s| s["name"] == "user-buildkite")
+                .count(),
+            1,
+            "no duplicate array entries across runs"
+        );
+    }
 }
