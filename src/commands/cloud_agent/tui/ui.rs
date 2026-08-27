@@ -718,12 +718,29 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
             Line::from(Span::styled(count, Style::default().fg(theme.dim))).right_aligned(),
         );
 
-    // Keep the cursor line in view once the wrapped text outgrows the box.
-    // Without this the box simply stops showing what is being typed, which is
-    // the one thing it exists to do.
+    // Keep the CARET's line in view once the wrapped text outgrows the box —
+    // not just the tail. ←/Home move the caret anywhere in the draft, and a
+    // box that keeps showing the end while characters splice invisibly at
+    // the front fails at the one thing it exists to do.
     let inner_w = area.width.saturating_sub(DIALOG_CHROME_X).max(1) as usize;
     let inner_h = area.height.saturating_sub(DIALOG_CHROME_Y).max(1) as usize;
-    let scroll_y = wrapped_lines(&text, inner_w).saturating_sub(inner_h) as u16;
+    let total = wrapped_lines(&text, inner_w);
+    let tail_pin = total.saturating_sub(inner_h);
+    let scroll_y = if focused && !empty && !app.shell_selected() {
+        // The wrapped row the caret sits on, measured over the text up to
+        // and including the caret glyph. (Greedy wrapping means a caret
+        // mid-word can measure one row shy of where the full text wraps it
+        // — one row of slack, not a lost caret.)
+        let caret_end = text
+            .char_indices()
+            .nth(app.prompt_cursor + 1)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        let caret_row = wrapped_lines(&text[..caret_end], inner_w);
+        caret_row.saturating_sub(inner_h).min(tail_pin)
+    } else {
+        tail_pin
+    } as u16;
 
     f.render_widget(
         Paragraph::new(text)
@@ -1951,9 +1968,6 @@ fn tree_line(theme: &Theme, row: &Row, tick: usize) -> Line<'static> {
                 RowKind::Workspace(_) => Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
-                // A group heads its agents the way a workspace used to head
-                // everything: bold, so the sections read at a glance.
-                RowKind::Group(..) => Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
                 _ => Style::default().fg(theme.fg),
             };
             spans.push(Span::styled(row.label.clone(), style));
@@ -2087,7 +2101,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 if status == "running" {
-                    " enter / double-click connects · n starts a session"
+                    " enter / double-click connects · n new agent here"
                 } else {
                     " w wakes it · enter / double-click connects"
                 },
@@ -2095,7 +2109,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
             )));
             lines
         }
-        RowKind::Environment(w, p, e) | RowKind::Group(w, p, e) => {
+        RowKind::Environment(w, p, e) => {
             let proj = &app.tree[w].projects[p];
             let env = &proj.envs[e];
             let count = match &env.agents {
@@ -2483,6 +2497,29 @@ mod tests {
             title + 3,
             "two rows between title and prompt:\n{out}"
         );
+    }
+
+    /// The prompt box follows the CARET, not the tail: with a draft taller
+    /// than the box and the cursor moved to the front, the caret (and the
+    /// text being typed) must be on screen.
+    #[test]
+    fn the_prompt_scrolls_to_the_caret_not_the_tail() {
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.prompt_focused = true;
+        app.cursor = 0;
+        app.prompt = "word ".repeat(200);
+        app.prompt_cursor = 0;
+        let out = draw(&app, 100, 30);
+        assert!(
+            out.contains('▏'),
+            "the caret stays in view at the front:\n{out}"
+        );
+
+        // And typing at the end still pins to the tail, as before.
+        app.prompt_cursor = app.prompt.chars().count();
+        let out = draw(&app, 100, 30);
+        assert!(out.contains('▏'), "…and at the tail:\n{out}");
     }
 
     /// Submitting from the main screen carries the prompt box along: the

@@ -1633,6 +1633,11 @@ mod tests {
     /// far side backs up until ssh's keepalive replies stop arriving and ssh
     /// kills the connection. So: everything must land, promptly, with the
     /// session alive and history still bounded by the emulator's retention.
+    /// Unix only: the fixture's pty is ConPTY on Windows, which cooks and
+    /// throttles the byte stream instead of pumping it raw — the megabytes
+    /// never make it through inside any reasonable deadline, and the drain
+    /// path under test is the raw one a real ssh session rides.
+    #[cfg(unix)]
     #[test]
     fn a_flood_drains_under_render_contention() {
         let mut session = Session::for_test("ca", "test").unwrap();

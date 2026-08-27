@@ -54,7 +54,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
             ("c", "copy an ssh command for it"),
-            ("⌥/⇧esc / ^]", "stop typing in it"),
+            ("⌥/⇧esc / ^] / esc esc", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -83,7 +83,8 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         "elsewhere",
         &[
             ("t", "set the prompt's target"),
-            ("esc", "quit (clears the prompt first)"),
+            ("esc", "step back — clear the draft, then home"),
+            ("q", "quit, from home"),
             ("^c", "quit"),
         ],
     ),
@@ -325,6 +326,11 @@ pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(150
 /// two of its menus, say) rarely fall inside it.
 const DOUBLE_ESC: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How many background attaches may be in flight at once. Startup wants the
+/// whole tree green, but each attach is a relay ssh, a reader thread, and a
+/// scrollback replay — a fleet's worth at once is a thundering herd.
+const AUTO_CONNECT_INFLIGHT: usize = 3;
+
 /// How often the tree asks the platform for everything again on its own.
 ///
 /// One `myCloudAgents` request covers the whole account — every workspace,
@@ -547,10 +553,6 @@ pub enum RowKind {
     Workspace(usize),
     Project(usize, usize),
     Environment(usize, usize, usize),
-    /// An environment that has agents, promoted to a top-level heading. The
-    /// tree leads with these — the screen is about agents, so the containers
-    /// read as context on the way to them, not as levels to open.
-    Group(usize, usize, usize),
     Agent(usize, usize, usize, usize),
     /// A reattachable session on an agent's VM.
     Session(usize, usize, usize, usize, usize),
@@ -1384,6 +1386,30 @@ impl App {
                     dimmed: false,
                 });
             }
+            // A list still on its way — or one that failed to come — says so
+            // where the rows would be: silence here is indistinguishable
+            // from "no sessions", which reads as work lost.
+            match &agent.sessions {
+                LoadSessions::Loading => rows.push(Row {
+                    depth: 1,
+                    kind: RowKind::Note(w, p, e),
+                    label: "loading sessions…".into(),
+                    note: String::new(),
+                    status: None,
+                    expanded: None,
+                    dimmed: true,
+                }),
+                LoadSessions::Failed(err) => rows.push(Row {
+                    depth: 1,
+                    kind: RowKind::Note(w, p, e),
+                    label: format!("couldn't load sessions — retrying ({err})"),
+                    note: String::new(),
+                    status: None,
+                    expanded: None,
+                    dimmed: true,
+                }),
+                _ => {}
+            }
         }
     }
 
@@ -1581,8 +1607,8 @@ impl App {
     fn env_of(&self, kind: RowKind) -> Option<(usize, usize, usize)> {
         match kind {
             RowKind::Environment(w, p, e)
-            | RowKind::Group(w, p, e)
             | RowKind::Agent(w, p, e, _)
+            | RowKind::Session(w, p, e, _, _)
             | RowKind::Note(w, p, e) => Some((w, p, e)),
             _ => None,
         }
@@ -1818,21 +1844,13 @@ impl App {
 
     /// Put the cursor back on the row it was on, wherever that row now sits.
     ///
-    /// A load can promote the environment under the cursor into a group — or
-    /// demote it back into the tail — and it is the same place under either
-    /// name, so the cursor follows it. A row can also be gone entirely — a
-    /// load can fold the projects tail the cursor was in — and then the
-    /// nearest selectable row is the best that can be done.
+    /// A row can be gone entirely — a load can fold the projects tail the
+    /// cursor was in — and then the nearest selectable row is the best that
+    /// can be done.
     fn restore_cursor(&mut self, anchor: Option<RowKind>) {
         if let Some(kind) = anchor {
             let rows = self.rows();
-            let position = |kind: RowKind| rows.iter().position(|row| row.kind == kind);
-            let index = position(kind).or_else(|| match kind {
-                RowKind::Environment(w, p, e) => position(RowKind::Group(w, p, e)),
-                RowKind::Group(w, p, e) => position(RowKind::Environment(w, p, e)),
-                _ => None,
-            });
-            if let Some(index) = index {
+            if let Some(index) = rows.iter().position(|row| row.kind == kind) {
                 self.cursor = index;
             }
         }
@@ -2784,6 +2802,14 @@ impl App {
             }
         }
         self.auto_attempted.extend(already_open);
+        // Bounded fan-out: an account with a dozen running agents must not
+        // open every session's ssh at once — each attach is a relay
+        // connection, a reader thread, and a full replay competing for the
+        // render lock. Only what fits under the cap starts now; the rest are
+        // left unmarked, and every completion wakes the loop, which calls
+        // here again and takes the next batch.
+        let budget = AUTO_CONNECT_INFLIGHT.saturating_sub(self.connecting.len());
+        out.truncate(budget);
         for connect in &out {
             self.auto_attempted.insert(connect.session_name.clone());
             self.connecting.insert(connect.session_name.clone());
@@ -2914,7 +2940,15 @@ impl App {
             let real = listed
                 .into_iter()
                 .filter(|(name, attached, running, _)| {
-                    *attached && *running && !claimed.contains(name)
+                    // Never adopt a name whose attach is in flight: the
+                    // auto-connect that dialed it is about to land a pane
+                    // under that exact name, and two panes sharing a durable
+                    // name would misroute reattach/copy-ssh/kill by
+                    // first-match.
+                    *attached
+                        && *running
+                        && !claimed.contains(name)
+                        && !self.connecting.contains(name.as_str())
                 })
                 .max_by_key(|(_, _, _, created)| *created)
                 .map(|(name, ..)| name);
@@ -3192,6 +3226,13 @@ impl App {
     /// mean that immediately — not the tree's refresh — without needing a
     /// click first. Once per drop: Esc-ing back to the tree sticks, and a
     /// reconnected pane that drops again gets to announce itself again.
+    ///
+    /// Only the pane on screen: a background pane (an auto-connect the user
+    /// never opened) dropping must not yank the keyboard out from under
+    /// whatever they are doing — its banner waits on its row. And never over
+    /// a dialog or the launcher prompt: a y/n mid-answer or a sentence
+    /// mid-typing would route keystrokes into the corpse, where a stray `x`
+    /// closes it.
     fn notice_dropped_panes(&mut self) {
         for i in 0..self.sessions.len() {
             if !self.sessions[i].dropped() {
@@ -3201,10 +3242,12 @@ impl App {
             if !self.drop_seen.insert(name) {
                 continue;
             }
-            // Never over a dialog: a y/n confirm or the ssh-key question owns
-            // the keyboard, and stealing it mid-answer would misroute keys.
-            if self.screen == Screen::Manage && self.confirm.is_none() && self.ssh_gate.is_none() {
-                self.active = Some(i);
+            if self.screen == Screen::Manage
+                && self.active == Some(i)
+                && !self.launcher_selected()
+                && self.confirm.is_none()
+                && self.ssh_gate.is_none()
+            {
                 self.focus = ManageFocus::Session;
             }
         }
@@ -3484,9 +3527,15 @@ impl App {
                         if agent.sessions == LoadSessions::Loading {
                             continue;
                         }
+                        // A failed fetch retries on the refresh cadence,
+                        // watched or not: a transient 502 during the startup
+                        // prefetch would otherwise leave the agent showing
+                        // zero threads forever — nothing else re-asks for an
+                        // unexpanded row.
+                        let failed = matches!(agent.sessions, LoadSessions::Failed(_));
                         let watched =
                             agent.expanded || self.sessions.iter().any(|s| s.agent_id == agent.id);
-                        if !watched {
+                        if !watched && !failed {
                             continue;
                         }
                         out.push(Effect::LoadSessions {
@@ -4088,8 +4137,15 @@ impl App {
                 }
             }
             // `n` is the dashboard's New Agent button: pick the harness,
-            // then a fresh agent in the target project.
+            // then a fresh agent — in the row's own project when the cursor
+            // names one (the footer advertises row-local behavior), falling
+            // back to the prompt's target from the launcher and the tail.
             KeyCode::Char('n') => {
+                if let Some(path) = row.map(|r| r.kind).and_then(|k| self.env_of(k))
+                    && let Some(target) = self.target_at(path)
+                {
+                    self.target = Some(target);
+                }
                 self.harness_pick = Some(self.harness);
                 self.screen = Screen::HarnessPick;
                 None
@@ -4209,7 +4265,7 @@ impl App {
                     base: Default::default(),
                 }))
             }
-            Some(RowKind::Environment(w, p, e)) | Some(RowKind::Group(w, p, e)) => {
+            Some(RowKind::Environment(w, p, e)) => {
                 self.target = self.target_at((w, p, e));
                 match prompt {
                     Some(p) => self.launch_prompted(None, true, Some(p)),
@@ -4700,7 +4756,6 @@ impl App {
             // A group is always open; there is nothing to do in either
             // direction, and quietly folding agents away would be the old
             // tree's problem reintroduced on purpose.
-            RowKind::Group(..) => {}
             RowKind::OtherProjects => {
                 self.others_expanded = Some(open);
             }
@@ -4758,18 +4813,8 @@ impl App {
                 self.clamp_cursor();
                 return None;
             }
-            // Collapsing a closed agent walks the cursor up to its group
-            // header. The group itself never folds, so this is as far out as
-            // `h` can go.
-            RowKind::Agent(w, p, e, _) if !open => {
-                if let Some(i) = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.kind == RowKind::Group(w, p, e))
-                {
-                    self.cursor = i;
-                }
-            }
+            // A closed agent is as far out as `h` goes: the threads list is
+            // flat, so there is no parent row above it to walk to.
             _ => {}
         }
         self.clamp_cursor();
@@ -5550,6 +5595,92 @@ mod tests {
         );
     }
 
+    /// Startup fan-out is bounded: only [`AUTO_CONNECT_INFLIGHT`] attaches
+    /// run at once, and the rest start as those land — never a thundering
+    /// herd of ssh connections on a fleet-sized account.
+    #[test]
+    fn auto_connect_fan_out_is_capped() {
+        let mut a = loaded_app();
+        let sessions: Vec<ConsoleSession> = (0..5)
+            .map(|i| ConsoleSession {
+                name: format!("merry-daisy-{i}"),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000 + i, 0),
+            })
+            .collect();
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions));
+
+        assert_eq!(a.take_auto_connects().len(), 3, "first batch fills the cap");
+        assert!(
+            a.take_auto_connects().is_empty(),
+            "nothing more while the cap is full"
+        );
+        // One lands (or fails): exactly one slot's worth starts next.
+        a.auto_connect_failed("merry-daisy-0", "relay said no");
+        assert_eq!(a.take_auto_connects().len(), 1);
+    }
+
+    /// A listed session whose attach is in flight is not adoption material:
+    /// renaming a freshly minted pane onto it would leave two panes sharing
+    /// one durable name the moment the auto-connect lands.
+    #[test]
+    fn adoption_skips_sessions_with_an_attach_in_flight() {
+        let mut a = loaded_app();
+        // Listed as attached-and-running — normally prime adoption material —
+        // but its background attach is still in flight.
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "merry-daisy-ld9".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: true,
+                created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            }]),
+        );
+        assert_eq!(a.take_auto_connects().len(), 1, "the attach is in flight");
+
+        // A fresh launch opens its own pane under a minted name.
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "railway-fresh1".into();
+        a.attach_session(pane, "ca_1".into());
+        assert_eq!(
+            a.sessions[0].durable_name, "railway-fresh1",
+            "the minted pane must not steal the in-flight name"
+        );
+
+        // Once nothing is in flight for it, adoption works as before.
+        a.connecting.clear();
+        a.adopt_pane_sessions();
+        assert_eq!(a.sessions[0].durable_name, "merry-daisy-ld9");
+    }
+
+    /// `n` targets the row under the cursor, as the footer advertises: a new
+    /// agent lands in that row's project, not wherever the prompt happened
+    /// to be aimed.
+    #[test]
+    fn n_retargets_to_the_cursor_row() {
+        let mut a = loaded_app();
+        a.target = None;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(
+            a.target.as_ref().map(|t| t.label()),
+            Some("devtools/production".to_string()),
+            "the new agent goes where the cursor points"
+        );
+    }
+
     /// The cursor opens on New Session, so `t` there is a letter, not a
     /// command. Retargeting is Ctrl-T everywhere.
     #[test]
@@ -5983,22 +6114,27 @@ mod tests {
         assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
     }
 
-    /// A drop pulls the keyboard to its pane — the banner says "r
-    /// reconnects", and r has to mean that without a click first — but only
-    /// once: stepping back out with Esc sticks, however many times the reap
-    /// runs over the same corpse.
+    /// A drop of the pane ON SCREEN pulls the keyboard to it — the banner
+    /// says "r reconnects", and r has to mean that without a click first —
+    /// but only once: stepping back out with Esc sticks, however many times
+    /// the reap runs over the same corpse.
     #[test]
     fn a_dropped_connection_takes_focus_once() {
         let mut a = loaded_app();
         a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
-        // The user has moved on to the tree when the connection dies.
+        // The user is browsing the tree, cursor off the launcher, with the
+        // pane still showing, when its connection dies.
         a.focus = ManageFocus::Tree;
-        a.active = None;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.active, Some(0), "the attached pane is on screen");
         a.sessions[0].end_dropped_for_test();
 
         assert_eq!(a.reap_ended_sessions(), None);
         assert_eq!(a.focus, ManageFocus::Session, "the drop took the keyboard");
-        assert_eq!(a.active, Some(0), "and showed the pane that dropped");
 
         // r now means reconnect, immediately.
         let effect = a.on_key(key(KeyCode::Char('r')));
@@ -6016,6 +6152,48 @@ mod tests {
         assert_eq!(b.focus, ManageFocus::Tree, "esc stepped out");
         assert_eq!(b.reap_ended_sessions(), None);
         assert_eq!(b.focus, ManageFocus::Tree, "and it stays stepped out");
+    }
+
+    /// A drop never takes the keyboard from someone who wasn't looking at
+    /// the pane: not from the launcher prompt mid-sentence, and not for a
+    /// background pane (an auto-connect they never opened). The banner
+    /// waits on the pane instead.
+    #[test]
+    fn a_background_drop_does_not_steal_the_keyboard() {
+        // Mid-typing at the launcher: cursor 0, prompt focused, pane showing
+        // the welcome screen — keystrokes must keep landing in the draft.
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.focus = ManageFocus::Tree;
+        a.cursor = 0;
+        a.prompt_focused = true;
+        a.prompt = "half a thought".into();
+        a.sessions[0].end_dropped_for_test();
+        assert_eq!(a.reap_ended_sessions(), None);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Tree,
+            "typing at the launcher is never interrupted"
+        );
+
+        // A pane that is not the one on screen: no steal either.
+        let mut b = loaded_app();
+        b.attach_session(session("ca_1", "one"), "ca_1".into());
+        b.attach_session(session("ca_1", "two"), "ca_1".into());
+        b.focus = ManageFocus::Tree;
+        b.active = Some(1);
+        b.cursor = b
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        b.sessions[0].end_dropped_for_test();
+        assert_eq!(b.reap_ended_sessions(), None);
+        assert_eq!(
+            b.focus,
+            ManageFocus::Tree,
+            "a background pane's drop waits on its row"
+        );
     }
 
     /// Esc-Esc inside a live session steps back out to the tree. A single

@@ -13,19 +13,20 @@
 //! lands as `user-buildkite`), so an import can never collide with a server
 //! already on the agent — the platform's, or one the user added by hand —
 //! and everything ours is recognizable at a glance. The rest lands on the VM
-//! merged ADD-ONLY into the two JSON dialects the harnesses there read:
+//! merged into the two JSON dialects the harnesses there read:
 //!
 //! - `~/.claude.json` `mcpServers` (object form) — claude's user scope, which
 //!   asks no per-project approval question the way a repo `.mcp.json` would.
 //! - `~/.claude/settings.json` `mcp_servers` (array form) — what the railway
 //!   harness reads; entries carry `{name, transport, url|command}`.
 //!
-//! Add-only means an existing name always wins, whether the user put it there
-//! by hand or express-agent's boot reconcile did — the same rule skills sync
-//! follows, for the same reason: this path must never overwrite anything on
-//! the agent. Codex and grok keep their MCP config in TOML, which a shell
-//! merge cannot edit safely; they are deliberately out of scope here and get
-//! their servers when the platform's workspace-MCP feature lands.
+//! The prefix is the ownership contract, on both sides of the merge: names
+//! under it are ours to keep current (an edited url in the project's
+//! `.mcp.json` propagates on the next launch, since the recorded hash claims
+//! it did), and every other name is preserved untouched, whether the user put
+//! it there by hand or express-agent's boot reconcile did. Nothing is ever
+//! removed. Codex and grok keep their MCP config in TOML, which a shell merge
+//! cannot edit safely; express-agent renders those from the canonical file.
 //!
 //! The merge runs under jq, which cloud-agent-base bakes. Every failure path
 //! degrades instead of aborting the launch — a missing jq or an unparseable
@@ -66,15 +67,20 @@ pub struct PackedMcp {
 }
 
 /// The `.mcp.json` a launch from `dir` should read: the nearest one walking
-/// up from `dir`, stopping at the git root — the same containment rule the
-/// harnesses use for project scope, so launching from a subdirectory of a
-/// repo still finds the repo's file.
+/// up from `dir`, and only within the repo — the walk requires a git root
+/// and never passes it. Outside any repo, only `dir` itself is checked:
+/// walking an unbounded ancestor chain from some scratch directory would
+/// eventually find a personal `~/.mcp.json` (headers and env values — API
+/// tokens — included) and ship it to a VM nobody meant to give it to.
 pub fn find_config(dir: &Path) -> Option<PathBuf> {
+    let in_repo = |d: &Path| d.ancestors().any(|a| a.join(".git").exists());
     let mut cur = Some(dir);
     while let Some(d) = cur {
         let candidate = d.join(".mcp.json");
         if candidate.is_file() {
-            return Some(candidate);
+            // The launch directory's own file always counts; anything above
+            // it only inside the repo that contains the launch directory.
+            return (d == dir || in_repo(dir)).then_some(candidate);
         }
         // The git root is the last directory searched: a `.mcp.json` above
         // the repo belongs to some other context.
@@ -190,27 +196,31 @@ jq -e 'type == "object"' "$payload" >/dev/null 2>&1 || {{ rm -f "$payload"; echo
 # express-agent predates the file.
 cp "$payload" "$HOME/.railway-mcp.json"
 ok=1
-# claude's user scope: mcpServers object. Add-only — existing names (the
-# user's own, or express-agent's) always win; ours fill the gaps.
+# claude's user scope: mcpServers object. The payload's keys all wear the
+# import prefix, and prefixed names are OURS to keep current — an edited url
+# in the project's .mcp.json must land, or the hash below would record a
+# sync that never happened. Every other name (the user's own, or
+# express-agent's) is preserved untouched.
 cfg="$HOME/.claude.json"
 [ -s "$cfg" ] || echo '{{}}' > "$cfg"
-if jq --slurpfile new "$payload" '.mcpServers = ($new[0] + (.mcpServers // {{}}))' "$cfg" > "$cfg.railway-mcp-tmp" 2>/dev/null; then
+if jq --slurpfile new "$payload" '.mcpServers = ((.mcpServers // {{}}) + $new[0])' "$cfg" > "$cfg.railway-mcp-tmp" 2>/dev/null; then
   mv "$cfg.railway-mcp-tmp" "$cfg"
 else
   rm -f "$cfg.railway-mcp-tmp"; ok=0
 fi
-# The railway harness reads settings.json's mcp_servers array. Same rule:
-# only names not already present are appended, translated into the array
-# dialect ({{name, transport, url|command}}).
+# The railway harness reads settings.json's mcp_servers array. Same
+# ownership rule in array form: entries under the payload's names are
+# replaced with the payload's current content (appended at the tail), and
+# every other entry keeps its place.
 mkdir -p "$HOME/.claude"
 set="$HOME/.claude/settings.json"
 [ -s "$set" ] || echo '{{}}' > "$set"
 if jq --slurpfile new "$payload" '
-  (.mcp_servers // []) as $have
-  | ($have | map(.name)) as $names
-  | .mcp_servers = $have + ($new[0]
+  ($new[0] | keys) as $ours
+  | .mcp_servers = ((.mcp_servers // [])
+      | map(select(.name as $n | $ours | index($n) | not)))
+      + ($new[0]
       | to_entries
-      | map(select(.key as $k | $names | index($k) | not))
       | map({{name: .key}}
           + (if .value.url then {{transport: (.value.type // "http"), url: .value.url}}
              else {{transport: "stdio", command: (.value.command // ""), args: (.value.args // [])}} end)
@@ -310,6 +320,27 @@ mod tests {
         assert!(find_config(&bare).is_none());
     }
 
+    /// Outside any repo the walk goes nowhere: only the launch directory's
+    /// own file counts. An unbounded ancestor walk from a scratch directory
+    /// would eventually reach a personal `~/.mcp.json` — headers and env
+    /// values included — and ship it to a VM nobody meant to give it to.
+    #[test]
+    fn outside_a_repo_only_the_launch_directory_is_read() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("scratch").join("notes");
+        std::fs::create_dir_all(&scratch).unwrap();
+        // The ancestor holds a config full of secrets; no .git anywhere.
+        plant(root.path(), MONO_LIKE);
+        assert!(
+            find_config(&scratch).is_none(),
+            "an out-of-repo ancestor's file must stay home"
+        );
+
+        // The launch directory's own file still counts, repo or not.
+        plant(&scratch, MONO_LIKE);
+        assert_eq!(find_config(&scratch).unwrap(), scratch.join(".mcp.json"));
+    }
+
     #[test]
     fn disabled_pref_missing_file_or_empty_set_pack_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -395,15 +426,15 @@ mod tests {
     }
 
     /// The script actually runs: executed against a stand-in `$HOME` with the
-    /// real payload on stdin. Asserts the add-only rule — a name express-agent
-    /// (or the user) already put on the agent is never replaced — and both
-    /// dialects. Skipped where jq isn't installed locally; the agent image
-    /// bakes it.
+    /// real payload on stdin. Asserts the ownership rule — prefixed names are
+    /// refreshed to the payload's current content (an edited url propagates;
+    /// the hash below records that it did), every other name is preserved —
+    /// in both dialects. Skipped where jq isn't installed locally; the agent
+    /// image bakes it.
     #[cfg(unix)]
     #[test]
-    fn provision_script_merges_add_only_into_both_dialects() {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+    fn provision_script_upserts_owned_names_and_preserves_the_rest() {
+        use std::process::Command;
 
         if Command::new("jq").arg("--version").output().is_err() {
             eprintln!("skipping: jq not installed");
@@ -414,62 +445,48 @@ mod tests {
         plant(dir.path(), MONO_LIKE);
         let packed = pack(&prefs_on(), dir.path()).unwrap().unwrap();
 
-        // Stand-in agent: express-agent has already written its own entries,
-        // and one prefixed name is already taken (an earlier import, or a
-        // user's own) — the add-only rule must leave it alone.
+        // Stand-in agent: express-agent has written its own entries, the
+        // user has one of their own, and a PREVIOUS import left a stale copy
+        // of a prefixed name — the shape of "I edited the url and
+        // relaunched".
         let vm = tempfile::tempdir().unwrap();
         std::fs::write(
             vm.path().join(".claude.json"),
-            r#"{"hasCompletedOnboarding": true, "mcpServers": {"user-buildkite": {"type": "http", "url": "https://theirs.example"}}}"#,
+            r#"{"hasCompletedOnboarding": true, "mcpServers": {"user-buildkite": {"type": "http", "url": "https://stale.example"}, "mine": {"command": "hands-off"}}}"#,
         )
         .unwrap();
         std::fs::create_dir_all(vm.path().join(".claude")).unwrap();
         std::fs::write(
             vm.path().join(".claude").join("settings.json"),
-            r#"{"mcp_servers": [{"name": "railway", "transport": "stdio", "command": "express-agent"}, {"name": "user-buildkite", "transport": "http", "url": "https://theirs.example"}]}"#,
+            r#"{"mcp_servers": [{"name": "railway", "transport": "stdio", "command": "express-agent"}, {"name": "user-buildkite", "transport": "http", "url": "https://stale.example"}]}"#,
         )
         .unwrap();
 
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(provision_script(&packed.hash))
-            .env("HOME", vm.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&packed.payload)
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains("MCP-OK"),
-            "stdout: {stdout}\nstderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let stdout = run_script(vm.path(), &packed.payload, &packed.hash);
+        assert!(stdout.contains("MCP-OK"), "{stdout}");
 
-        // ~/.claude.json: ours added under their prefixed names, the taken
-        // name untouched, the unrelated fields intact.
+        // ~/.claude.json: the stale import refreshed, the user's own name and
+        // unrelated fields untouched, the rest of the payload added.
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(vm.path().join(".claude.json")).unwrap())
                 .unwrap();
         assert_eq!(cfg["hasCompletedOnboarding"], true);
         assert_eq!(
-            cfg["mcpServers"]["user-buildkite"]["url"], "https://theirs.example",
-            "an existing name is never replaced"
+            cfg["mcpServers"]["user-buildkite"]["url"], "https://mcp.buildkite.com/mcp",
+            "an edited server propagates on the next sync"
+        );
+        assert_eq!(
+            cfg["mcpServers"]["mine"]["command"], "hands-off",
+            "names outside the prefix are never touched"
         );
         assert_eq!(
             cfg["mcpServers"]["user-railway-internal"]["url"],
             "https://mcp.internal.example.com/"
         );
 
-        // ~/.claude/settings.json: array dialect, existing entries first,
-        // the taken name not appended a second time.
+        // ~/.claude/settings.json: array dialect — express-agent's entry
+        // keeps its place, the stale prefixed entry is replaced (exactly one
+        // survives), the rest appended.
         let set: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(vm.path().join(".claude").join("settings.json")).unwrap(),
         )
@@ -480,8 +497,12 @@ mod tests {
             .iter()
             .filter(|s| s["name"] == "user-buildkite")
             .collect();
-        assert_eq!(buildkites.len(), 1, "a taken name is not duplicated");
-        assert_eq!(buildkites[0]["url"], "https://theirs.example");
+        assert_eq!(
+            buildkites.len(),
+            1,
+            "an owned name is replaced, not duplicated"
+        );
+        assert_eq!(buildkites[0]["url"], "https://mcp.buildkite.com/mcp");
         let internal = servers
             .iter()
             .find(|s| s["name"] == "user-railway-internal")

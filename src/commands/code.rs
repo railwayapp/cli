@@ -744,10 +744,16 @@ fn remote_command(
     // that exact id instead, so keying it to the durable session's own name —
     // which vm-init stamps into every durable session's environment — makes
     // each window its own conversation while keeping the daemon's
-    // persistence. The `-- args` exec form below is left alone: its arguments
-    // are the caller's, flags included.
+    // persistence. The fallback mints an id remotely for connections that
+    // named no durable session (`railway ca start`, older vm-init): an unset
+    // var would otherwise expand to `--session ''`, and every such launch
+    // would collide on the one empty-string id — the exact shared-
+    // conversation bug the flag exists to fix. The `-- args` exec form below
+    // is left alone: its arguments are the caller's, flags included.
     let name = match agent {
-        Agent::Railway => "railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\"",
+        Agent::Railway => {
+            "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\""
+        }
         _ => agent.name(),
     };
     let after = match style {
@@ -3845,13 +3851,15 @@ mod tests {
         );
         assert!(
             railway.contains(
-                "railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\" 'fix the tests';"
+                "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\" 'fix the tests';"
             ),
             "{railway}"
         );
         let railway_bare = remote_command(Agent::Railway, "P; ", None, &[], FullTerminal);
         assert!(
-            railway_bare.contains("railway-agent-tui --session \"$RAILWAY_DURABLE_SESSION_NAME\";"),
+            railway_bare.contains(
+                "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\";"
+            ),
             "{railway_bare}"
         );
         // The exec form's args are the caller's, flags included.
