@@ -824,10 +824,13 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
             .bg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
-    if full && !app.sessions.is_empty() {
+    if full && !app.sessions.is_empty() && !app.hide_tabs {
         // Maximized, the tree is folded away, so the open sessions become
         // tabs on the header: click one (or ⌥⇧[ ⌥⇧]) to switch panes. The
-        // clickable boxes are recorded as they are laid out.
+        // clickable boxes are recorded as they are laid out. Hidden entirely
+        // by the ⌥s "Full-screen tabs" setting — the rects stay zeroed (a
+        // fresh PaneRects every draw), so there is nothing stale to click —
+        // and the header falls through to the status line instead.
         let mut x = chunks[0].x + " RAILWAY CLOUD-AGENTS ".chars().count() as u16;
         for i in 0..app.sessions.len() {
             // The tab names the session (its task, or its harness-led name),
@@ -2851,6 +2854,48 @@ mod tests {
             (rects.session.w, rects.session.h),
             "the PTY must be exactly the pane the emulator is drawn into"
         );
+    }
+
+    /// The ⌥s "Full-screen tabs" setting takes the header tabs out of the
+    /// maximized layout: ⌥⇧[ ⌥⇧] stay the way between sessions, and the
+    /// zeroed tab rects mean there is nothing stale to click.
+    #[test]
+    fn hidden_tabs_leave_the_maximized_header_bare() {
+        use crate::commands::cloud_agent::tui::session::Session;
+
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        app.maximized = true;
+
+        let header = |out: &str| {
+            out.lines()
+                .find(|l| l.contains("RAILWAY CLOUD-AGENTS"))
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        let out = draw(&app, 100, 30);
+        assert!(header(&out).contains(" 1 "), "tabs show by default:\n{out}");
+
+        app.hide_tabs = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut rects = crate::commands::cloud_agent::tui::app::PaneRects::default();
+        terminal
+            .draw(|f| {
+                let (r, _) = render_with_layout(&app, f);
+                rects = r;
+            })
+            .unwrap();
+        let out = draw(&app, 100, 30);
+        assert!(
+            !header(&out).contains(" 1 "),
+            "no tab row when hidden:\n{out}"
+        );
+        assert_eq!(rects.tabs[0].w, 0, "nothing stale to click");
     }
 
     /// An error toast sits front and center at the bottom of the session

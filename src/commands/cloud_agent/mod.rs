@@ -404,6 +404,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
         .map(|(source, _)| source.slug.to_string());
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
+    app.hide_tabs = saved.hide_tabs;
     // What the key check learned. Connects gate on this in-frame: an
     // unregistered key raises a register question instead of a hung prompt.
     app.ssh_key = ssh_key;

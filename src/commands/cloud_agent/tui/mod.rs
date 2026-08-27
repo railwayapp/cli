@@ -114,6 +114,7 @@ fn save_setup(
             environment_name: p.environment_name.clone(),
         }),
         theme: Some(outcome.theme.clone()),
+        hide_tabs: outcome.hide_tabs,
     };
     let _ = app;
     prefs.save_in(&home)?;
@@ -143,6 +144,7 @@ fn save_settings(
         environment_name: p.environment_name.clone(),
     });
     prefs.theme = Some(outcome.theme.clone());
+    prefs.hide_tabs = outcome.hide_tabs;
     prefs.save_in(&home)?;
     Ok(prefs)
 }
@@ -161,6 +163,7 @@ fn apply_settings(app: &mut App, outcome: &wizard::Outcome) {
     app.set_harness(Some(&outcome.agent));
     app.set_theme(Some(&outcome.theme));
     app.skills_enabled = outcome.skills;
+    app.hide_tabs = outcome.hide_tabs;
     match &outcome.project {
         Some(project) => {
             app.default_project = Some(project.project_id.clone());
