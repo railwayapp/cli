@@ -12,7 +12,7 @@ use crate::{
 
 use super::change_set::{ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set};
 use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
-use super::eval::evaluate_file;
+use super::eval::{EvalContext, evaluate_file_with_context};
 use super::graph::validate_graph;
 use super::partial::needs_partial_claim_apply;
 
@@ -157,7 +157,10 @@ pub async fn run(
         .clone()
         .or_else(|| find_authoring_file(&cwd))
         .context("Could not find .railway/railway.ts, railway.py, or railway.go")?;
-    let evaluated = evaluate_file(&file)?;
+    let evaluated = evaluate_file_with_context(
+        &file,
+        &EvalContext::from_linked_project(linked_project, command),
+    )?;
     let diagnostics: Vec<Value> = validate_graph(&evaluated.graph)
         .into_iter()
         .map(|message| json!({ "severity": "error", "path": "graph", "message": message }))

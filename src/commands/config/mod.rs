@@ -832,7 +832,7 @@ fn render_preamble(lang: AuthoringLang, imports: &[&str]) -> String {
                 .join(", ")
         ),
         AuthoringLang::Go => {
-            "package main\n\nimport \"github.com/railwayapp/railway-go-sdk\"\n\nfunc Railway() railway.Project {\n"
+            "package main\n\nimport \"github.com/railwayapp/railway-go-sdk\"\n\nfunc Railway(ctx railway.Context) railway.Project {\n  ctx = railway.NewContext(ctx)\n"
                 .to_string()
         }
     }
@@ -2223,7 +2223,7 @@ mod tests {
         };
         let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go);
         assert!(rendered.contains("github.com/railwayapp/railway-go-sdk"));
-        assert!(rendered.contains("func Railway()"));
+        assert!(rendered.contains("func Railway(ctx railway.Context)"));
         assert!(rendered.contains("railway.Github(\"org/app\")"));
         assert!(rendered.contains("\"start\": \"./app\""));
         assert!(rendered.contains("railway.ServiceNamed"));
