@@ -90,6 +90,18 @@ struct SharedArgs {
     /// Print variable values in the plan instead of redacting them.
     #[clap(long)]
     show_values: bool,
+
+    /// Write a pinned plan artifact. Plan only.
+    #[clap(long)]
+    out: Option<PathBuf>,
+
+    /// Apply this pinned plan without re-evaluating the authoring file. Apply only.
+    #[clap(long)]
+    plan: Option<PathBuf>,
+
+    /// Tree written into `--out`. Defaults to `git rev-parse HEAD:.railway`.
+    #[clap(long)]
+    source_tree: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -165,6 +177,9 @@ pub async fn command(args: Args) -> Result<()> {
             if args.confirm_destructive {
                 bail!("--confirm-destructive is only valid with `railway config apply`.");
             }
+            if args.plan.is_some() {
+                bail!("--plan is only valid with `railway config apply`.");
+            }
             run_sync(args, false, false).await
         }
         Command::Stage(_args) => bail!(
@@ -173,6 +188,12 @@ pub async fn command(args: Args) -> Result<()> {
         Command::Apply(args) => {
             if args.detailed_exit_code {
                 bail!("--detailed-exit-code is only valid with `railway config plan`.");
+            }
+            if args.out.is_some() {
+                bail!("--out is only valid with `railway config plan`.");
+            }
+            if args.source_tree.is_some() {
+                bail!("--source-tree is only valid with `railway config plan`.");
             }
             run_sync(args, false, true).await
         }
@@ -508,6 +529,9 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         verbose: false,
         detailed_exit_code: false,
         show_values: false,
+        out: None,
+        plan: None,
+        source_tree: None,
     };
     let response = runner::run(&args, "current").await?;
     // `temp_dir` cleans itself up on drop, including on the error paths below.
@@ -1734,7 +1758,9 @@ fn detect_package_manager(cwd: &Path) -> String {
 }
 
 async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
-    ensure_config_initialized(&args).await?;
+    if args.plan.is_none() {
+        ensure_config_initialized(&args).await?;
+    }
 
     runner::run_command(runner::Args {
         file: args.file,
@@ -1749,6 +1775,9 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         verbose: args.verbose,
         detailed_exit_code: args.detailed_exit_code,
         show_values: args.show_values,
+        out: args.out,
+        plan: args.plan,
+        source_tree: args.source_tree,
     })
     .await
 }

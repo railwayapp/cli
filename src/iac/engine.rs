@@ -475,11 +475,21 @@ async fn preview_change_set(
     Ok(data.result)
 }
 
-async fn apply_change_set(
+pub(crate) async fn fetch_config_etag(
+    configs: &Configs,
+    environment_id: &str,
+) -> Result<Option<String>> {
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let current = fetch_current_environment(&client, &endpoint, environment_id, false).await?;
+    Ok(current.config_etag)
+}
+
+pub(crate) async fn apply_change_set(
     client: &reqwest::Client,
     endpoint: &str,
     environment_id: &str,
-    change_set: &super::change_set::ChangeSet,
+    change_set: &impl serde::Serialize,
     base_etag: Option<&str>,
 ) -> Result<Value> {
     let mut variables = json!({

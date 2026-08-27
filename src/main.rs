@@ -1053,5 +1053,26 @@ mod cli_tests {
             assert_parses(&["mcp", "install", "--oauth"]);
             assert_parses(&["mcp", "install", "--oauth", "--agent", "cursor"]);
         }
+
+        #[test]
+        fn config_pinned_plan_flags() {
+            assert_parses(&["config", "plan", "--out", "railway-plan.json"]);
+            assert_parses(&[
+                "config",
+                "plan",
+                "--out",
+                "railway-plan.json",
+                "--source-tree",
+                "abc123",
+            ]);
+            assert_parses(&[
+                "config",
+                "apply",
+                "--plan",
+                "railway-plan.json",
+                "--yes",
+                "--confirm-destructive",
+            ]);
+        }
     }
 }
