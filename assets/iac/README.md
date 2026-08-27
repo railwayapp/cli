@@ -39,7 +39,7 @@ railway config apply
 - `railway config plan` is safe and does not change Railway.
 - `railway config apply` previews changes and asks before applying unless you pass `--yes`.
 - Destructive changes in non-interactive or agent sessions require `railway config apply --confirm-destructive` after reviewing the plan.
-- CI should pin a plan (`railway config plan --out railway-plan.json`) and apply that file on merge (`railway config apply --plan railway-plan.json --yes --confirm-destructive`) so the reviewed change set is what lands.
+- CI should pin a plan (`railway config plan --out railway-plan.json`) and apply that file on merge (`railway config apply --plan railway-plan.json --yes --confirm-destructive`) so the reviewed change set is what lands. On GitHub Actions, use https://github.com/railwayapp/config.
 - Services already managed by `railway.json` must be migrated before `.railway/railway.ts` can manage them.
 - Keep one `.railway` file for the whole project. A named `export const partial` (or `PARTIAL` / `const Partial`) is a last resort for separate repos that cannot share that file. Do not add it unless omit=delete across repos is a blocker.
 - Use `replicas` for scaling; advanced placement can still specify region names.
