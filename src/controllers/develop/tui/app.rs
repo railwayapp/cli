@@ -311,7 +311,7 @@ impl TuiApp {
         }
 
         let now = std::time::Instant::now();
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+        match crate::util::clipboard::copy(&text) {
             Ok(()) => self.copied_feedback = Some(now),
             Err(_) => self.copy_failed = Some(now),
         }

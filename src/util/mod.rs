@@ -1,6 +1,7 @@
 pub mod agent_advisory;
 pub mod cac_deprecation;
 pub mod check_update;
+pub mod clipboard;
 pub mod compare_semver;
 pub mod detect;
 pub mod editor;
