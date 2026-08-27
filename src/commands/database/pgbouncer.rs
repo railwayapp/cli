@@ -1,4 +1,9 @@
-//! `railway postgres pgbouncer` -- PgBouncer connection pooling.
+//! The `pgbouncer` verb -- connection pooling, for engines that ship a pooler
+//! companion.
+//!
+//! Postgres is the only one today: which template the pooler comes from, and
+//! which image identifies it among a root's edge children, are read from the
+//! engine's declared pooling spec rather than compiled in here.
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -11,9 +16,10 @@ use serde_json::{Map, Value, json};
 
 use crate::controllers::{
     config::{EnvironmentConfig, ServiceInstance, Variable, fetch_environment_config},
+    database_engines::{DatabaseEngine, PoolingSpec},
+    database_plugins::{self, PoolingState},
     db_stats::{parse_i64, split_sections},
     exec::exec_probe_in_container,
-    postgres_plugins::{self, PgBouncerState},
     project::{
         ServiceContext, find_service_instance, get_environment_instances, resolve_service_context,
     },
@@ -22,8 +28,7 @@ use crate::controllers::{
         validate_total_replicas,
     },
     template_apply::{
-        self, ApplyKind, ApplyTemplateParams, PGBOUNCER_TEMPLATE_CODE, RevertTemplateParams,
-        stage_and_commit_patch,
+        self, ApplyKind, ApplyTemplateParams, RevertTemplateParams, stage_and_commit_patch,
     },
 };
 
@@ -54,10 +59,10 @@ const MAX_CLIENT_CONN_FALLBACK: i64 = 1000;
 const DEFAULT_POOL_SIZE_FALLBACK: i64 = 20;
 const MAX_PREPARED_STATEMENTS_FALLBACK: i64 = 100;
 
-/// Manage PgBouncer connection pooling for Postgres
+/// Manage PgBouncer connection pooling
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pgbouncer status --service postgres\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n  railway postgres pgbouncer remove --service postgres --yes\n  railway postgres pgbouncer configure --service postgres --max-client-conn 200\n  railway postgres pgbouncer scale --service postgres --replicas 2\n\nAutomation notes:\n  Works against a standalone Postgres or an HA cluster root -- if --service points at a PgBouncer/HAProxy edge node, the actual database root is resolved automatically."
+    after_help = "Examples:\n\n  railway postgres pgbouncer status --service postgres\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n  railway postgres pgbouncer remove --service postgres --yes\n  railway postgres pgbouncer configure --service postgres --max-client-conn 200\n  railway postgres pgbouncer scale --service postgres --replicas 2\n\nAutomation notes:\n  Works against a standalone database or an HA cluster root -- if --service points at a pooler/proxy edge node, the actual database root is resolved automatically."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -167,22 +172,34 @@ struct ScaleArgs {
 }
 
 pub async fn command(
+    engine: &'static DatabaseEngine,
     args: Args,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
     json: bool,
 ) -> Result<()> {
+    // Per-engine command trees only route here for engines that ship a
+    // pooler, so reaching this without one is a wiring bug, not user error.
+    let pooling = engine.pooling.with_context(|| {
+        format!(
+            "{} has no connection pooling companion.",
+            engine.display_name
+        )
+    })?;
+    let pooling = &pooling;
+
     match args.command {
-        Commands::Status => status(project, service, environment, json).await,
-        Commands::Add(a) => add(project, service, environment, json, a).await,
-        Commands::Remove(a) => remove(project, service, environment, json, a).await,
-        Commands::Configure(a) => configure(project, service, environment, json, a).await,
-        Commands::Scale(a) => scale(project, service, environment, json, a).await,
+        Commands::Status => status(pooling, project, service, environment, json).await,
+        Commands::Add(a) => add(engine, pooling, project, service, environment, json, a).await,
+        Commands::Remove(a) => remove(pooling, project, service, environment, json, a).await,
+        Commands::Configure(a) => configure(pooling, project, service, environment, json, a).await,
+        Commands::Scale(a) => scale(pooling, project, service, environment, json, a).await,
     }
 }
 
 async fn status(
+    pooling: &PoolingSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -192,14 +209,19 @@ async fn status(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
-    print_status_with_live(&ctx, &config, json).await
+    print_status_with_live(pooling, &ctx, &config, json).await
 }
 
 /// Config-only status print (no live probe) -- used right after `add`/`remove`
 /// stage a change, where the deployment triggered by that change may not have
 /// rolled out yet, so a live probe would just report "unavailable" noise.
-fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) -> Result<()> {
-    let output = build_status_output(ctx, config, None);
+fn print_status(
+    pooling: &PoolingSpec,
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    json: bool,
+) -> Result<()> {
+    let output = build_status_output(pooling, ctx, config, None);
     render_status(&output, json)
 }
 
@@ -207,12 +229,13 @@ fn print_status(ctx: &ServiceContext, config: &EnvironmentConfig, json: bool) ->
 /// SERVERS` probe when PgBouncer is attached. Used by the standalone `status`
 /// subcommand.
 async fn print_status_with_live(
+    pooling: &PoolingSpec,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     json: bool,
 ) -> Result<()> {
     let root = resolve_root(ctx, config);
-    let state = postgres_plugins::compute_pgbouncer_state(config, &root.root_id);
+    let state = database_plugins::compute_pooling_state(config, &root.root_id, pooling);
 
     let live = if let Some(edge_id) = state.edge_service_id.as_ref() {
         Some(probe_pgbouncer_live(ctx, edge_id).await)
@@ -220,17 +243,18 @@ async fn print_status_with_live(
         None
     };
 
-    let output = build_status_output(ctx, config, live);
+    let output = build_status_output(pooling, ctx, config, live);
     render_status(&output, json)
 }
 
 fn build_status_output(
+    pooling: &PoolingSpec,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     live: Option<PgBouncerLiveOutput>,
 ) -> PgBouncerStatusOutput {
     let root = resolve_root(ctx, config);
-    let state = postgres_plugins::compute_pgbouncer_state(config, &root.root_id);
+    let state = database_plugins::compute_pooling_state(config, &root.root_id, pooling);
     let names = service_name_map(ctx);
     // Replica count comes from deploy.multiRegionConfig (what the platform
     // actually writes; `pgbouncer scale` patches it too), summed across
@@ -410,6 +434,8 @@ fn print_util_line(label: &str, used: i64, capacity: i64, warn_threshold: f64) {
 }
 
 async fn add(
+    engine: &'static DatabaseEngine,
+    pooling: &PoolingSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -422,17 +448,17 @@ async fn add(
         .config;
     let root = resolve_root(&ctx, &config);
 
-    let state = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+    let state = database_plugins::compute_pooling_state(&config, &root.root_id, pooling);
     if state.attached {
         println!(
             "PgBouncer is already attached to {}.",
             root.root_name.bold()
         );
-        return print_status(&ctx, &config, json);
+        return print_status(pooling, &ctx, &config, json);
     }
 
     let names = service_name_map(&ctx);
-    let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     let upstream = if ha_state.is_cluster {
         "HA cluster"
     } else {
@@ -453,14 +479,14 @@ async fn add(
 
     let mut edge_variables = BTreeMap::new();
     edge_variables.insert(
-        postgres_plugins::POOL_MODE_VAR.to_string(),
+        database_plugins::POOL_MODE_VAR.to_string(),
         args.pool_mode.as_var_value().to_string(),
     );
 
     let result = template_apply::apply_composable_template(
         &ctx,
         ApplyTemplateParams {
-            template_code: PGBOUNCER_TEMPLATE_CODE.to_string(),
+            template_code: pooling.template_code.to_string(),
             service_id: root.root_id.clone(),
             volume_instance_id: None,
             replica_count: None,
@@ -490,10 +516,11 @@ async fn add(
             result.project_id
         );
     }
-    print_status(&ctx, &config, json)
+    print_status(pooling, &ctx, &config, json)
 }
 
 async fn remove(
+    pooling: &PoolingSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -506,7 +533,8 @@ async fn remove(
         .config;
     let root = resolve_root(&ctx, &config);
 
-    let state: PgBouncerState = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+    let state: PoolingState =
+        database_plugins::compute_pooling_state(&config, &root.root_id, pooling);
     if !state.attached {
         bail!("PgBouncer is not attached to {}.", root.root_name);
     }
@@ -525,7 +553,7 @@ async fn remove(
     let result = template_apply::revert_template(
         &ctx,
         RevertTemplateParams {
-            template_code: PGBOUNCER_TEMPLATE_CODE.to_string(),
+            template_code: pooling.template_code.to_string(),
             root_service_id: root.root_id.clone(),
             auto_deploy: !args.no_deploy,
         },
@@ -549,10 +577,11 @@ async fn remove(
             result.project_id
         );
     }
-    print_status(&ctx, &config, json)
+    print_status(pooling, &ctx, &config, json)
 }
 
 async fn configure(
+    pooling: &PoolingSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -564,7 +593,7 @@ async fn configure(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let state = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+    let state = database_plugins::compute_pooling_state(&config, &root.root_id, pooling);
 
     if !state.attached {
         bail!(
@@ -615,7 +644,7 @@ async fn configure(
     let mut variables: BTreeMap<String, Option<Variable>> = BTreeMap::new();
     if let Some(pool_mode) = args.pool_mode {
         variables.insert(
-            postgres_plugins::POOL_MODE_VAR.to_string(),
+            database_plugins::POOL_MODE_VAR.to_string(),
             Some(Variable {
                 value: Some(pool_mode.as_var_value().to_string()),
                 ..Variable::default()
@@ -624,7 +653,7 @@ async fn configure(
     }
     if let Some(v) = args.max_client_conn {
         variables.insert(
-            postgres_plugins::MAX_CLIENT_CONN_VAR.to_string(),
+            database_plugins::MAX_CLIENT_CONN_VAR.to_string(),
             Some(Variable {
                 value: Some(v.to_string()),
                 ..Variable::default()
@@ -633,7 +662,7 @@ async fn configure(
     }
     if let Some(v) = args.default_pool_size {
         variables.insert(
-            postgres_plugins::DEFAULT_POOL_SIZE_VAR.to_string(),
+            database_plugins::DEFAULT_POOL_SIZE_VAR.to_string(),
             Some(Variable {
                 value: Some(v.to_string()),
                 ..Variable::default()
@@ -642,7 +671,7 @@ async fn configure(
     }
     if let Some(v) = args.max_prepared_statements {
         variables.insert(
-            postgres_plugins::MAX_PREPARED_STATEMENTS_VAR.to_string(),
+            database_plugins::MAX_PREPARED_STATEMENTS_VAR.to_string(),
             Some(Variable {
                 value: Some(v.to_string()),
                 ..Variable::default()
@@ -681,7 +710,7 @@ async fn configure(
             ctx.project_id
         );
     }
-    print_status(&ctx, &config, json)
+    print_status(pooling, &ctx, &config, json)
 }
 
 /// Inputs for [`configure_advisory_warnings`], the exact set of values that
@@ -727,6 +756,7 @@ fn configure_advisory_warnings(inputs: AdvisoryInputs) -> Vec<String> {
 }
 
 async fn scale(
+    pooling: &PoolingSpec,
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
@@ -738,7 +768,7 @@ async fn scale(
         .await?
         .config;
     let root = resolve_root(&ctx, &config);
-    let state = postgres_plugins::compute_pgbouncer_state(&config, &root.root_id);
+    let state = database_plugins::compute_pooling_state(&config, &root.root_id, pooling);
 
     if !state.attached {
         bail!(
@@ -811,7 +841,7 @@ async fn scale(
             ctx.project_id
         );
     }
-    print_status(&ctx, &config, json)
+    print_status(pooling, &ctx, &config, json)
 }
 
 /// Resolves the single region `railway postgres pgbouncer scale --replicas N`
