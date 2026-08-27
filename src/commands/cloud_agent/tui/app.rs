@@ -3210,14 +3210,37 @@ impl App {
     /// only account of what happened, and the recovery keys can reconnect it.
     /// When the last pane closes under `railway code`, the TUI leaves with it
     /// — see [`Self::quit_when_done`].
+    /// A finish this soon after connecting is a harness that cannot start;
+    /// replacing it would just watch it die again, forever.
+    const RESPAWN_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Keystrokes this close to the end mean the user ended it themselves —
+    /// ctrl-c, ctrl-d, and `/exit` all arrive as input moments before ssh
+    /// does. A respawn then would undo the gesture.
+    const DELIBERATE_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
     pub fn reap_ended_sessions(&mut self) -> Option<Effect> {
         let mut closed = None;
+        let mut respawn = None;
         let mut i = 0;
         while i < self.sessions.len() {
             if self.sessions[i].finished() {
+                // Judged before the take, while the pane still knows: only
+                // the session the user was typing into earns a replacement,
+                // and only when nothing says they ended it on purpose. A
+                // background pane ending must never conjure sessions the
+                // user is not looking at.
+                let watched = self.screen == Screen::Manage
+                    && self.focus == ManageFocus::Session
+                    && self.active == Some(i);
+                let unasked = !self.sessions[i].input_within(Self::DELIBERATE_EXIT_WINDOW);
+                let settled = self.sessions[i].age() >= Self::RESPAWN_MIN_AGE;
                 // Dropping the session detaches its local half; the agent
                 // stays running (sleeping is deliberate, never a side effect).
                 if let Some(session) = self.take_session(i) {
+                    if watched && unasked && settled {
+                        respawn = Some((session.agent_id.clone(), session.harness.clone()));
+                    }
                     closed = Some(session.agent_name.clone());
                 }
             } else {
@@ -3232,7 +3255,67 @@ impl App {
             ));
             return Some(Effect::Quit);
         }
+        // The session died out from under the user: start a fresh one on the
+        // same agent so the pane they were working in comes back, rather than
+        // leaving them at a toast. Skipped when another pane on the agent is
+        // still up (that one is the work now), and while a dialog owns the
+        // keyboard — a launch underneath a y/n would race its answer.
+        if let Some((agent_id, harness)) = respawn
+            && !self.sessions.iter().any(|s| s.agent_id == agent_id)
+            && self.confirm.is_none()
+            && self.ssh_gate.is_none()
+            && let Some(effect) = self.respawn_on(&agent_id, &harness)
+        {
+            self.toast(format!(
+                "Session on {agent_name} ended — starting a new one"
+            ));
+            return Some(effect);
+        }
         self.toast(format!("Session on {agent_name} ended"));
+        None
+    }
+
+    /// A replacement session for one that died unasked (see the respawn arm
+    /// of [`Self::reap_ended_sessions`]).
+    ///
+    /// Deliberately not [`Self::launch`]: that reads the launcher's draft, and
+    /// a respawn must not submit whatever half-sentence is sitting in the
+    /// prompt box. Same harness as the session that died, a fresh durable
+    /// session (`force_new` — the old one exited with its harness), and only
+    /// onto a machine the platform still says is running: waking an agent is
+    /// a gesture, never a reap side effect.
+    fn respawn_on(&mut self, agent_id: &str, harness: &str) -> Option<Effect> {
+        for w in 0..self.tree.len() {
+            for p in 0..self.tree[w].projects.len() {
+                for e in 0..self.tree[w].projects[p].envs.len() {
+                    let agents = self.tree[w].projects[p].envs[e].agents_vec();
+                    let Some(agent) = agents.iter().find(|agent| agent.id == agent_id) else {
+                        continue;
+                    };
+                    if agent.status != "running" {
+                        return None;
+                    }
+                    let target = self.target_at((w, p, e))?;
+                    let harness = if harness.is_empty() {
+                        self.harness_name().to_string()
+                    } else {
+                        harness.to_string()
+                    };
+                    return Some(Effect::Launch(LaunchRequest {
+                        project_id: target.project_id.clone(),
+                        environment_id: target.environment_id.clone(),
+                        agent_id: Some(agent_id.to_string()),
+                        session_name: None,
+                        force_new: true,
+                        new_session: false,
+                        harness,
+                        prompt: None,
+                        label: target.label(),
+                        base: Default::default(),
+                    }));
+                }
+            }
+        }
         None
     }
 
@@ -6147,6 +6230,62 @@ mod tests {
 
         assert_eq!(a.reap_ended_sessions(), None);
         assert_eq!(a.sessions.len(), 1, "the pane stays for recovery");
+    }
+
+    /// The session the user was typing into finishing WITHOUT them asking —
+    /// no recent input, not a boot crash — starts a replacement on the same
+    /// agent, with the same harness and no prompt draft riding along.
+    #[test]
+    fn an_unasked_finish_of_the_focused_pane_respawns() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        assert_eq!(a.focus, ManageFocus::Session, "attach focused the pane");
+        a.prompt = "half a sentence".into();
+        a.sessions[0].backdate_spawn_for_test(std::time::Duration::from_secs(60));
+        a.sessions[0].end_for_test();
+
+        let Some(Effect::Launch(req)) = a.reap_ended_sessions() else {
+            panic!("expected a replacement launch");
+        };
+        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert!(
+            req.force_new,
+            "the old durable session exited with its harness"
+        );
+        assert_eq!(req.prompt, None, "a respawn must not submit the draft");
+        let toast = a.toast.as_ref().expect("announced").text.clone();
+        assert!(toast.contains("starting a new one"), "{toast}");
+    }
+
+    /// Input just before the end is the user ending it — ctrl-c, `/exit` —
+    /// and a finish that soon after connecting is a harness that cannot
+    /// start. Neither earns a replacement, and nor does a pane the user
+    /// was not focused on.
+    #[test]
+    fn deliberate_fast_or_background_finishes_do_not_respawn() {
+        // Typed moments before the exit: the user asked for this.
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.sessions[0].backdate_spawn_for_test(std::time::Duration::from_secs(60));
+        a.sessions[0].touch_input_for_test();
+        a.sessions[0].end_for_test();
+        assert_eq!(a.reap_ended_sessions(), None, "ctrl-c must stay ended");
+
+        // Died within the settle window: respawning would loop on a harness
+        // that cannot boot.
+        let mut b = loaded_app();
+        b.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        b.sessions[0].end_for_test();
+        assert_eq!(b.reap_ended_sessions(), None, "a boot crash must not loop");
+
+        // The keyboard was in the tree: an unwatched pane ending must not
+        // conjure a session under the user's hands.
+        let mut c = loaded_app();
+        c.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        c.focus = ManageFocus::Tree;
+        c.sessions[0].backdate_spawn_for_test(std::time::Duration::from_secs(60));
+        c.sessions[0].end_for_test();
+        assert_eq!(c.reap_ended_sessions(), None, "background panes just close");
     }
 
     /// A drop of the pane ON SCREEN pulls the keyboard to it — the banner

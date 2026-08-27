@@ -162,8 +162,8 @@ fn kitty_scan(chunk: &[u8], kitty: &AtomicBool) -> Option<Vec<u8>> {
 pub struct Session {
     pub agent_id: String,
     pub agent_name: String,
-    /// The harness this session was started with, when we started it.
-    #[allow(dead_code)]
+    /// The harness this session was started with, when we started it — what a
+    /// respawn after an unasked-for exit launches again.
     pub harness: String,
     /// The durable session this pane is attached to.
     pub durable_name: String,
@@ -199,6 +199,10 @@ pub struct Session {
     /// The remote program pushed the kitty keyboard protocol (see
     /// [`kitty_scan`]), so modified Enter goes out CSI-u encoded.
     kitty_keys: Arc<AtomicBool>,
+    /// When local input last reached the pane. A deliberate exit — ctrl-c,
+    /// ctrl-d, `/exit` — arrives as keystrokes moments before ssh ends, and
+    /// this is what lets the reap tell "the user ended it" from "it died".
+    last_input: Option<std::time::Instant>,
     /// Last size pushed to the pty, so a redraw at the same size is free.
     size: (u16, u16),
     /// Rows scrolled back from the live view. Typing snaps back to 0 — nobody
@@ -376,6 +380,7 @@ impl Session {
             spawned_at: std::time::Instant::now(),
             got_output,
             kitty_keys,
+            last_input: None,
             size: (rows, cols),
             scroll: 0,
         })
@@ -702,7 +707,21 @@ impl Session {
     pub fn send(&mut self, bytes: &[u8]) {
         // Typing is a statement of intent to be at the bottom.
         self.scroll_to_live();
+        self.last_input = Some(std::time::Instant::now());
         self.write_raw(bytes);
+    }
+
+    /// Local input reached the pane within `window`. Every deliberate way out
+    /// of a harness — ctrl-c, ctrl-d, typing `/exit` — is keystrokes moments
+    /// before ssh ends, so a finish with no recent input is one the user did
+    /// not ask for.
+    pub fn input_within(&self, window: std::time::Duration) -> bool {
+        self.last_input.is_some_and(|at| at.elapsed() < window)
+    }
+
+    /// How long this pane has been connected.
+    pub fn age(&self) -> std::time::Duration {
+        self.spawned_at.elapsed()
     }
 
     pub fn send_key(&mut self, key: KeyEvent) {
@@ -791,6 +810,16 @@ impl Session {
         self.ended.store(true, Ordering::Relaxed);
     }
 
+    /// Pretend the user just typed into the pane.
+    pub fn touch_input_for_test(&mut self) {
+        self.last_input = Some(std::time::Instant::now());
+    }
+
+    /// Pretend the pane connected `by` ago, for the fast-crash guard.
+    pub fn backdate_spawn_for_test(&mut self, by: std::time::Duration) {
+        self.spawned_at = std::time::Instant::now() - by;
+    }
+
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {
@@ -842,6 +871,7 @@ impl Session {
             spawned_at: std::time::Instant::now(),
             got_output: Arc::new(AtomicBool::new(true)),
             kitty_keys: Arc::new(AtomicBool::new(false)),
+            last_input: None,
             size: (24, 80),
             scroll: 0,
         })
