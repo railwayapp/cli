@@ -35,6 +35,9 @@ pub struct AgentPrefs {
     #[serde(default)]
     pub skills: SkillsPrefs,
 
+    #[serde(default)]
+    pub mcp: McpPrefs,
+
     /// Where cloud agents go unless told otherwise. Chosen in setup, and the
     /// target a new agent is created in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,10 +55,40 @@ impl Default for AgentPrefs {
             version: CURRENT_VERSION,
             agent: None,
             skills: SkillsPrefs::default(),
+            mcp: McpPrefs::default(),
             default_project: None,
             theme: None,
         }
     }
+}
+
+/// Project MCP import — the launch directory's `.mcp.json`, carried onto the
+/// agent. See [`super::mcp_sync`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPrefs {
+    /// On by default, unlike skills: the source is a file the project chose
+    /// to commit, so bringing it is what launching from that directory means.
+    /// `"mcp": {"enabled": false}` opts out.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Server names never shipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+impl Default for McpPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The project and environment new agents are created in by default.
@@ -145,6 +178,10 @@ mod tests {
                 source: Some("claude".into()),
                 exclude: vec!["use-railway".into()],
             },
+            mcp: McpPrefs {
+                enabled: false,
+                exclude: vec!["notion".into()],
+            },
             default_project: None,
             theme: Some("ember".into()),
         };
@@ -182,6 +219,29 @@ mod tests {
         let prefs = AgentPrefs::load_in(home.path()).unwrap();
         assert_eq!(prefs.agent.as_deref(), Some("codex"));
         assert!(!prefs.skills.enabled);
+    }
+
+    /// A prefs file written before the MCP field existed imports by default —
+    /// the source is the project's own committed config, and requiring
+    /// everyone to re-run setup to get it would make the feature invisible.
+    #[test]
+    fn mcp_import_defaults_on_for_older_prefs_files() {
+        let home = tempfile::tempdir().unwrap();
+        let path = AgentPrefs::path_in(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version": 1, "agent": "claude"}"#).unwrap();
+        let prefs = AgentPrefs::load_in(home.path()).unwrap();
+        assert!(prefs.mcp.enabled);
+
+        // And the opt-out parses.
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "mcp": {"enabled": false, "exclude": ["notion"]}}"#,
+        )
+        .unwrap();
+        let prefs = AgentPrefs::load_in(home.path()).unwrap();
+        assert!(!prefs.mcp.enabled);
+        assert_eq!(prefs.mcp.exclude, vec!["notion".to_string()]);
     }
 
     /// The launcher reads `agent` as a harness slug; setup must never write a

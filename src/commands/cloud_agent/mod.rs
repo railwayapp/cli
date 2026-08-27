@@ -1,15 +1,17 @@
 //! `railway ca` — the cloud agent front door.
 //!
-//! Bare `railway ca` on a terminal opens the TUI; everything else is a
+//! Bare `railway ca` on a terminal opens the TUI, straight onto the manage
+//! screen with the New Session prompt selected; everything else is a
 //! subcommand. `railway code` is the same launcher pointed straight at a
 //! session: it opens the same manage screen with the tree collapsed and the
-//! session already starting, rather than the menu. Both read the same
+//! session already starting. Both read the same
 //! preferences file, so the choice between them is only whether you want to
 //! browse first. `railway ca start` is the one that skips the TUI entirely.
 
 pub mod access;
 pub mod desktop;
 pub mod lifecycle;
+pub mod mcp_sync;
 pub mod prefs;
 pub mod setup;
 pub mod skills_sync;
@@ -35,7 +37,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher pointed straight at a session — same flags,\nsame preferences, no menu: it opens the manage screen with the tree collapsed\nand your default harness already starting (⌥f brings the tree back). `railway\nca start` skips the TUI altogether.\n\nPreferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher pointed straight at a session — same flags,\nsame preferences, no browsing: it opens the manage screen with the tree collapsed\nand your default harness already starting (⌥f brings the tree back). `railway\nca start` skips the TUI altogether.\n\nPreferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -55,7 +57,7 @@ enum Command {
     /// Set up a desktop coding app to work on a cloud agent over SSH
     Desktop(desktop::Args),
 
-    /// Open the TUI directly on the manage screen, skipping the menu
+    /// Open the TUI directly on the manage screen, skipping the first-run nudge
     Manage,
 
     /// Launch a coding agent on a cloud agent VM, without the TUI
@@ -174,13 +176,13 @@ async fn browse() -> Result<()> {
     browse_with(BrowseOpts::default()).await
 }
 
-/// How the TUI opens, for the callers that want something other than the menu.
+/// How the TUI opens, for the callers that want something other than the
+/// default landing.
 #[derive(Default)]
 struct BrowseOpts {
-    /// Open straight on this screen instead of the menu. An explicit ask, so
-    /// it also skips the first-run "set up cloud agents?" nudge that a bare
-    /// `railway ca` would show. `railway ca manage` passes
-    /// [`tui::Screen::Manage`].
+    /// Open straight on this screen. An explicit ask, so it also skips the
+    /// first-run "set up cloud agents?" nudge that a bare `railway ca` would
+    /// show. `railway ca manage` passes [`tui::Screen::Manage`].
     initial_screen: Option<tui::Screen>,
     /// Collapse the tree and give the pane the window from the first frame.
     /// `railway code` does: it already knows where it is going, so the tree is
@@ -407,9 +409,8 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     app.ssh_key = ssh_key;
     // No preferences yet: ask whether to set them up, rather than dropping
     // someone in front of a prompt whose target, agent and skills are all
-    // unanswered. Choosing Setup from the menu skips that question — they have
-    // already answered it by choosing it. An explicit initial screen is its
-    // own answer to "what should I see first" and skips the nudge too.
+    // unanswered. An explicit initial screen is its own answer to "what
+    // should I see first" and skips the nudge.
     if let Some(screen) = initial_screen {
         app.screen = screen;
     } else if first_run {
