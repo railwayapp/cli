@@ -22,7 +22,7 @@ pub use compiler::{
 };
 pub use engine::{NativeRun, run as run_native};
 #[allow(dead_code)]
-pub use eval::{EvaluatedFile, evaluate_file};
+pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
 #[allow(dead_code)]
 pub use graph::{RAILWAY_GRAPH_VERSION, RailwayGraph, resource_address, validate_graph};
 #[allow(dead_code)]

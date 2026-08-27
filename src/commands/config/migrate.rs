@@ -280,7 +280,8 @@ import "github.com/railwayapp/railway-go-sdk"
 // project and drop this if you later combine services into that file.
 const Partial = {name}
 
-func Railway() railway.Project {{
+func Railway(ctx railway.Context) railway.Project {{
+	ctx = railway.NewContext(ctx)
 	web := railway.ServiceNamed({name}, {config})
 	return railway.ProjectNamed({name}, []any{{web}})
 }}
