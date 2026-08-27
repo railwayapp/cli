@@ -305,6 +305,15 @@ enum Message {
         session_name: String,
         error: String,
     },
+    /// A reconnect found its target session no longer exists on the agent —
+    /// it closed, or the machine went away and came back without it.
+    /// Connecting was the ask, so the answer is a fresh session, not an
+    /// error.
+    ReattachTargetGone {
+        agent_id: String,
+        agent_name: String,
+        session_name: String,
+    },
     /// A background auto-connect resolved its ssh info; the pane opens
     /// quietly — no focus steal, no screen change.
     AutoReattachReady {
@@ -883,8 +892,36 @@ pub async fn run(
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
                 let tx = tx.clone();
+                let client = client.clone();
+                let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let message = match code::connect_info(&environment_id, &agent_id).await {
+                    // The row the reconnect came from can be stale: the
+                    // session may have closed, or the machine died and came
+                    // back without it. Asking the platform rides alongside
+                    // connect_info, so a live session pays no extra latency —
+                    // and a dead one gets a replacement instead of a blank
+                    // pane. Only a definitive answer diverts; a listing error
+                    // attaches anyway, the benefit of the doubt.
+                    let (info, listed) = tokio::join!(
+                        code::connect_info(&environment_id, &agent_id),
+                        fetch_sessions(&client, &backboard, &agent_id),
+                    );
+                    let gone = matches!(
+                        &listed,
+                        Ok(sessions) if !sessions
+                            .iter()
+                            .any(|s| s.name == session_name && s.running)
+                    );
+                    let message = match info {
+                        Ok(_) if gone => {
+                            super::telemetry::track_session_event("reattach_target_gone", None)
+                                .await;
+                            Message::ReattachTargetGone {
+                                agent_id,
+                                agent_name,
+                                session_name,
+                            }
+                        }
                         Ok(info) => Message::ReattachReady {
                             agent_id,
                             agent_name,
@@ -1347,6 +1384,11 @@ fn handle_message(
             app.launch_failed(error);
             None
         }
+        Message::ReattachTargetGone {
+            agent_id,
+            agent_name,
+            session_name,
+        } => app.reattach_target_gone(&agent_id, &agent_name, &session_name),
         Message::AutoReattachReady {
             agent_id,
             agent_name,

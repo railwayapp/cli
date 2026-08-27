@@ -3319,6 +3319,65 @@ impl App {
         None
     }
 
+    /// A reconnect aimed at a session the agent no longer has — it closed, or
+    /// the machine died and came back without it. Connecting was the ask, so
+    /// the answer is a fresh session on that agent, not an error: the stale
+    /// row goes now (the platform just said it does not exist), and the
+    /// replacement runs the harness the row named where it still names one.
+    pub fn reattach_target_gone(
+        &mut self,
+        agent_id: &str,
+        agent_name: &str,
+        session_name: &str,
+    ) -> Option<Effect> {
+        self.connecting.remove(session_name);
+        let harness = self
+            .remove_session_row(agent_id, session_name)
+            .unwrap_or_default();
+        if let Some(effect) = self.respawn_on(agent_id, &harness) {
+            self.toast(format!(
+                "Session {session_name} is gone — starting a new one"
+            ));
+            return Some(effect);
+        }
+        // No replacement to offer — the agent stopped running underneath the
+        // reconnect. Say what happened and re-ask for the list, so the tree
+        // settles on the truth rather than the row that just misled us.
+        self.toast_error(format!(
+            "Session {session_name} is gone, and {agent_name} isn't running"
+        ));
+        self.refresh_agent_sessions(agent_id)
+    }
+
+    /// Drop one session row from the tree — the platform just said the
+    /// session does not exist — returning the harness it claimed to run, for
+    /// a replacement to launch.
+    fn remove_session_row(&mut self, agent_id: &str, session_name: &str) -> Option<String> {
+        let mut harness = None;
+        'search: for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    let Load::Loaded(agents) = &mut env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter_mut().find(|agent| agent.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(sessions) = &mut agent.sessions else {
+                        break 'search;
+                    };
+                    let Some(i) = sessions.iter().position(|s| s.name == session_name) else {
+                        break 'search;
+                    };
+                    harness = sessions.remove(i).harness_slug().map(str::to_string);
+                    break 'search;
+                }
+            }
+        }
+        self.clamp_cursor();
+        harness
+    }
+
     /// A pane whose connection just DIED (rather than finished) pulls the
     /// keyboard to itself, once: its banner says "r reconnects", and r has to
     /// mean that immediately — not the tree's refresh — without needing a
@@ -8536,6 +8595,62 @@ mod tests {
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
         assert_eq!(a.focus, ManageFocus::Session, "a second click keeps it");
+    }
+
+    /// A reconnect whose target session turns out not to exist launches a
+    /// replacement on the same agent — same harness, stale row dropped —
+    /// instead of failing. Connecting was the ask; a dead name must not
+    /// answer it with an error.
+    #[test]
+    fn a_reconnect_to_a_gone_session_starts_a_new_one() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: Some("claude --resume".into()),
+                running: true,
+                attached: false,
+                created_at: None,
+            }]);
+        }
+
+        let Some(Effect::Launch(req)) =
+            a.reattach_target_gone("ca_1", "nimble-otter", "claude-one")
+        else {
+            panic!("expected a replacement launch");
+        };
+        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert!(req.force_new, "the dead name must not be redialed");
+        assert_eq!(req.harness, "claude", "same harness the dead session ran");
+        assert_eq!(req.prompt, None);
+        assert!(
+            !a.rows().iter().any(|r| r.label.contains("claude-one")),
+            "the stale row is gone"
+        );
+
+        // The agent stopped running underneath the reconnect: nothing to
+        // launch onto — the truth gets refetched instead.
+        let mut b = loaded_app();
+        if let Load::Loaded(agents) = &mut b.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].status = "sleeping".into();
+            agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: None,
+            }]);
+        }
+        let effect = b.reattach_target_gone("ca_1", "nimble-otter", "claude-one");
+        assert!(
+            matches!(effect, Some(Effect::LoadSessions { .. })),
+            "{effect:?}"
+        );
+        assert!(!b.toast.as_ref().unwrap().ok, "announced as a failure");
     }
 
     /// A refresh that finds an agent no longer running drops its session
