@@ -47,6 +47,11 @@ pub struct AgentPrefs {
     /// ignored rather than treated as an error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+
+    /// Hide the maximized layout's header tabs — ⌥⇧[ / ⌥⇧] stay the way
+    /// between sessions. A settings-card choice; the wizard never asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_tabs: bool,
 }
 
 impl Default for AgentPrefs {
@@ -58,6 +63,7 @@ impl Default for AgentPrefs {
             mcp: McpPrefs::default(),
             default_project: None,
             theme: None,
+            hide_tabs: false,
         }
     }
 }
@@ -184,6 +190,7 @@ mod tests {
             },
             default_project: None,
             theme: Some("ember".into()),
+            hide_tabs: true,
         };
         prefs.save_in(home.path()).unwrap();
         assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), prefs);

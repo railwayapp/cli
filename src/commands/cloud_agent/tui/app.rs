@@ -939,6 +939,9 @@ pub struct App {
     /// Whether the skills preference is on, mirrored from the file so the
     /// settings card opens showing the truth.
     pub skills_enabled: bool,
+    /// Hide the maximized layout's header tabs (⌥s settings): ⌥⇧[ ⌥⇧] stay
+    /// the way between sessions, and the header keeps its status line.
+    pub hide_tabs: bool,
     /// The key overlay is open.
     pub keys_open: bool,
     /// A drag in progress or a completed selection.
@@ -1048,6 +1051,7 @@ impl App {
             settings: None,
             skills_source: None,
             skills_enabled: false,
+            hide_tabs: false,
             keys_open: false,
             selection: None,
             last_click: None,
@@ -1171,6 +1175,7 @@ impl App {
             Some(self.harness_name()),
             self.theme,
             self.skills_source.clone(),
+            self.hide_tabs,
         );
         if !ask_first {
             wizard.skip_intro();
@@ -1215,6 +1220,7 @@ impl App {
             self.skills_enabled,
             self.skills_source.clone(),
             self.theme,
+            self.hide_tabs,
         ));
         self.screen = Screen::Settings;
     }
@@ -7226,7 +7232,7 @@ mod tests {
     fn settings_can_replay_first_run_setup() {
         let mut a = app();
         a.on_key(alt('s'));
-        for _ in 0..4 {
+        for _ in 0..5 {
             a.on_key(key(KeyCode::Down)); // down to the last row
         }
         assert_eq!(a.on_key(key(KeyCode::Enter)), None);

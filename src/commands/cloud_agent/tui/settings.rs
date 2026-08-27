@@ -23,6 +23,9 @@ pub enum Row {
     Project,
     Skills,
     Theme,
+    /// Whether the maximized layout draws its header tabs. Settings-only —
+    /// the wizard never asks.
+    Tabs,
     /// Replay first-run setup, for anyone who wants the guided walk.
     Setup,
 }
@@ -32,6 +35,7 @@ const ROWS: &[Row] = &[
     Row::Project,
     Row::Skills,
     Row::Theme,
+    Row::Tabs,
     Row::Setup,
 ];
 
@@ -69,6 +73,7 @@ pub struct Settings {
     pub skills: bool,
     pub skills_source: Option<String>,
     pub theme: usize,
+    pub hide_tabs: bool,
 }
 
 impl Settings {
@@ -79,6 +84,7 @@ impl Settings {
         skills: bool,
         skills_source: Option<String>,
         theme: &Theme,
+        hide_tabs: bool,
     ) -> Self {
         Self {
             cursor: 0,
@@ -96,6 +102,7 @@ impl Settings {
             skills: skills && skills_source.is_some(),
             skills_source,
             theme: theme.index(),
+            hide_tabs,
         }
     }
 
@@ -108,7 +115,7 @@ impl Settings {
     /// draw the value in cycle arrows.
     pub fn cycles(&self) -> bool {
         match self.row() {
-            Row::Agent | Row::Theme => true,
+            Row::Agent | Row::Theme | Row::Tabs => true,
             Row::Skills => self.skills_source.is_some(),
             Row::Project | Row::Setup => false,
         }
@@ -146,6 +153,15 @@ impl Settings {
                     "Theme".into(),
                     THEMES[self.theme].label.to_string(),
                     "Previews as you cycle".into(),
+                ),
+                Row::Tabs => (
+                    "Full-screen tabs".into(),
+                    if self.hide_tabs { "hidden" } else { "shown" }.into(),
+                    if self.hide_tabs {
+                        "⌥⇧[ ⌥⇧] move between sessions".into()
+                    } else {
+                        "Open sessions as header tabs when maximized".into()
+                    },
                 ),
                 Row::Setup => (
                     "Run first-time setup again".into(),
@@ -297,6 +313,10 @@ impl Settings {
                 self.theme = wrap(self.theme, THEMES.len(), forward);
                 self.save()
             }
+            Row::Tabs => {
+                self.hide_tabs = !self.hide_tabs;
+                self.save()
+            }
             // → reads as "into"; ← on a row that opens a card does nothing.
             Row::Project if forward => self.open_picker(),
             _ => Action::None,
@@ -342,6 +362,7 @@ impl Settings {
             skills: self.skills,
             skills_source: self.skills_source.clone(),
             theme: THEMES[self.theme].slug.to_string(),
+            hide_tabs: self.hide_tabs,
         }))
     }
 }
@@ -404,6 +425,7 @@ mod tests {
             true,
             Some("claude".into()),
             Theme::default_theme(),
+            false,
         )
     }
 
@@ -460,7 +482,7 @@ mod tests {
         assert!(!saved(s.right()).skills, "on toggles off");
         assert!(saved(s.right()).skills, "and back on");
 
-        let mut bare = Settings::new(&tree(), None, 0, true, None, Theme::default_theme());
+        let mut bare = Settings::new(&tree(), None, 0, true, None, Theme::default_theme(), false);
         assert!(!bare.skills, "enabled with no source is not a state");
         bare.cursor = 2;
         assert_eq!(bare.right(), Action::None);
@@ -541,11 +563,22 @@ mod tests {
         assert_eq!(s.back(), Action::Close);
     }
 
+    /// The tabs row toggles in place and rides the save like every other
+    /// value.
+    #[test]
+    fn the_tabs_row_toggles_and_saves() {
+        let mut s = settings();
+        s.cursor = 4;
+        assert!(s.cycles());
+        assert!(saved(s.right()).hide_tabs, "shown toggles to hidden");
+        assert!(!saved(s.right()).hide_tabs, "and back");
+    }
+
     /// The last row hands over to the wizard.
     #[test]
     fn the_setup_row_replays_the_flow() {
         let mut s = settings();
-        s.cursor = 4;
+        s.cursor = 5;
         assert_eq!(s.select(), Action::RunSetup);
     }
 
@@ -559,7 +592,7 @@ mod tests {
         assert_eq!(s.left(), Action::None);
         assert_eq!(s.right(), Action::Redraw, "→ opens the picker");
         s.back();
-        s.cursor = 4;
+        s.cursor = 5;
         assert_eq!(s.left(), Action::None);
         assert_eq!(s.right(), Action::None);
     }

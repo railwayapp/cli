@@ -239,11 +239,12 @@ async fn prompt(home: &Path, existing: Option<AgentPrefs>) -> Result<AgentPrefs>
         version: super::prefs::CURRENT_VERSION,
         agent: Some(agent),
         skills,
-        // Setup doesn't ask about MCP import; whatever was configured (or the
-        // on-by-default) carries through.
+        // Setup doesn't ask about MCP import or the tabs toggle; whatever was
+        // configured (or the defaults) carries through.
         mcp: previous.mcp.clone(),
         default_project,
         theme: Some(theme),
+        hide_tabs: previous.hide_tabs,
     })
 }
 

@@ -43,6 +43,9 @@ pub struct Outcome {
     pub skills: bool,
     pub skills_source: Option<String>,
     pub theme: String,
+    /// Carried through untouched — the wizard never asks; only the ⌥s
+    /// settings card changes it.
+    pub hide_tabs: bool,
 }
 
 /// An environment leaf under a [`TargetProject`]. Selecting one finishes the
@@ -100,6 +103,8 @@ pub struct Wizard {
     pub skills: bool,
     pub skills_source: Option<String>,
     pub theme: usize,
+    /// Not a step — carried so finishing the flow doesn't reset it.
+    pub hide_tabs: bool,
 }
 
 /// What a keypress asked the loop to do.
@@ -160,6 +165,7 @@ impl Wizard {
         harness: Option<&str>,
         theme: &Theme,
         skills_source: Option<String>,
+        hide_tabs: bool,
     ) -> Self {
         let mut workspaces: Vec<TargetWorkspace> = tree
             .iter()
@@ -202,6 +208,7 @@ impl Wizard {
             skills: skills_source.is_some(),
             skills_source,
             theme: theme.index(),
+            hide_tabs,
         }
     }
 
@@ -456,6 +463,7 @@ impl Wizard {
                     skills: self.skills,
                     skills_source: self.skills_source.clone(),
                     theme: THEMES[self.theme].slug.to_string(),
+                    hide_tabs: self.hide_tabs,
                 }))
             }
         }
@@ -544,7 +552,7 @@ mod tests {
     }
 
     fn wizard() -> Wizard {
-        Wizard::new(&tree(), Some("codex"), Theme::default_theme(), None)
+        Wizard::new(&tree(), Some("codex"), Theme::default_theme(), None, false)
     }
 
     /// More than one environment still expands: the parentheses shortcut is
@@ -558,7 +566,7 @@ mod tests {
             expanded: false,
             agents: Load::NotLoaded,
         });
-        let mut w = Wizard::new(&base, None, Theme::default_theme(), None);
+        let mut w = Wizard::new(&base, None, Theme::default_theme(), None, false);
         w.skip_intro();
         let devtools = w
             .options()
@@ -721,7 +729,7 @@ mod tests {
     /// way through is the escape hatch.
     #[test]
     fn with_no_workspaces_only_decide_later_is_offered() {
-        let mut w = Wizard::new(&[], None, Theme::default_theme(), None);
+        let mut w = Wizard::new(&[], None, Theme::default_theme(), None, false);
         w.select(); // set up now
         let labels: Vec<String> = w.options().into_iter().map(|(label, _)| label).collect();
         assert_eq!(labels, vec!["Decide later"]);
@@ -752,7 +760,7 @@ mod tests {
                 }],
             }],
         });
-        let mut w = Wizard::new(&tree, Some("codex"), Theme::default_theme(), None);
+        let mut w = Wizard::new(&tree, Some("codex"), Theme::default_theme(), None, false);
         w.skip_intro();
 
         let before = w.options();
