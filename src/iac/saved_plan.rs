@@ -39,6 +39,10 @@ pub struct SavedPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
     pub destructive: bool,
+    /// A named partial claiming ownership must apply even with zero changes,
+    /// mirroring the live apply path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claim: bool,
 }
 
 pub fn change_set_hash(change_set: &Value) -> String {
@@ -76,6 +80,16 @@ pub fn detect_source_tree(cwd: &Path) -> Result<String> {
 }
 
 fn git_railway_tree(cwd: &Path) -> Option<String> {
+    // A dirty .railway/ means HEAD's tree is not what the plan evaluated;
+    // fall back to hashing the working tree instead of pinning a lie.
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--", ".railway"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return None;
+    }
     let output = Command::new("git")
         .args(["rev-parse", "HEAD:.railway"])
         .current_dir(cwd)
@@ -164,6 +178,7 @@ pub fn from_runner_json(raw: &Value, source_tree: String) -> Result<SavedPlan> {
         change_set,
         diff: raw.get("diff").and_then(Value::as_str).map(str::to_string),
         destructive: is_destructive_change_set(raw.get("changeSet").unwrap_or(&Value::Null)),
+        claim: raw.get("claim").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -182,7 +197,7 @@ pub fn write_plan(path: &Path, plan: &SavedPlan) -> Result<()> {
 pub fn read_plan(path: &Path) -> Result<SavedPlan> {
     let body = fs::read_to_string(path)
         .with_context(|| format!("Failed to read saved plan {}", path.display()))?;
-    let plan: SavedPlan = serde_json::from_str(&body).with_context(|| {
+    let mut plan: SavedPlan = serde_json::from_str(&body).with_context(|| {
         format!(
             "Saved plan {} is not a railway.config.plan file",
             path.display()
@@ -210,6 +225,9 @@ pub fn read_plan(path: &Path) -> Result<SavedPlan> {
             plan.change_set_hash
         );
     }
+    // The destructive guard must derive from the hash-verified change set, not
+    // a stored flag an edited artifact could clear.
+    plan.destructive = is_destructive_change_set(&plan.change_set);
     Ok(plan)
 }
 
@@ -243,7 +261,7 @@ pub async fn apply_saved_plan(configs: &Configs, plan: &SavedPlan) -> Result<Val
         .and_then(Value::as_array)
         .map(Vec::is_empty)
         .unwrap_or(true);
-    if empty {
+    if empty && !plan.claim {
         return Ok(serde_json::json!({
             "id": null,
             "status": "noop",
@@ -340,6 +358,51 @@ mod tests {
                 .contains("corrupt")
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_plan_recomputes_destructive_from_hashed_change_set() {
+        let dir = tempfile_dir("saved-plan-destructive");
+        let path = dir.join("plan.json");
+        let mut plan = from_runner_json(
+            &json!({
+                "currentEnvironment": {
+                    "environmentId": "env_1",
+                    "configEtag": "etag_1"
+                },
+                "changeSet": {
+                    "version": 1,
+                    "changes": [{"summary": "delete service", "severity": "destructive"}]
+                }
+            }),
+            "tree".into(),
+        )
+        .unwrap();
+        assert!(plan.destructive);
+        // An edited artifact clearing the flag must not bypass the guard.
+        plan.destructive = false;
+        write_plan(&path, &plan).unwrap();
+        assert!(read_plan(&path).unwrap().destructive);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn claim_defaults_to_false_and_round_trips() {
+        let raw = json!({
+            "currentEnvironment": { "environmentId": "env_1", "configEtag": "etag_1" },
+            "changeSet": { "version": 1, "changes": [] },
+            "claim": true
+        });
+        let plan = from_runner_json(&raw, "tree".into()).unwrap();
+        assert!(plan.claim);
+        let encoded = serde_json::to_string(&plan).unwrap();
+        let parsed: SavedPlan = serde_json::from_str(&encoded).unwrap();
+        assert!(parsed.claim);
+        // Old artifacts without the field still parse.
+        let mut trimmed: Value = serde_json::from_str(&encoded).unwrap();
+        trimmed.as_object_mut().unwrap().remove("claim");
+        let old: SavedPlan = serde_json::from_value(trimmed).unwrap();
+        assert!(!old.claim);
     }
 
     #[test]
