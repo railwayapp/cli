@@ -927,6 +927,9 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
+    /// The agent `n` was pressed on, when it was: the picked harness launches
+    /// a new session on that box rather than minting a fresh agent.
+    pub harness_pick_agent: Option<String>,
     /// ⌥n's picker cursor while [`Screen::HarnessPick`] is up.
     pub harness_pick: Option<usize>,
     /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
@@ -1098,6 +1101,7 @@ impl App {
             known_environments: Vec::new(),
             target_pick: None,
             harness_pick: None,
+            harness_pick_agent: None,
             manage_prompt: None,
             maximized: false,
             autostart: None,
@@ -1415,44 +1419,38 @@ impl App {
                     .collect(),
                 _ => Vec::new(),
             };
+            // The agent heads its threads: always on the list, so a sleeping
+            // or freshly created agent is reachable too — and an emptied one
+            // still says what it is once its last session closes.
+            let empty = matches!(&agent.sessions, LoadSessions::Loaded(_)) && live.is_empty();
+            rows.push(Row {
+                depth: 0,
+                kind: RowKind::Agent(w, p, e, a),
+                label: agent.name.clone(),
+                // No status tag: the orb's colour is the status, pending
+                // states included.
+                note: String::new(),
+                status: Some(pending.unwrap_or(status).to_string()),
+                expanded: Some(agent.expanded),
+                dimmed: false,
+            });
             // The agent's orb is green only when its effective status says
             // running — and its sessions never look better than it does: a
             // pane held open onto a sleeping agent is not "connected" in any
             // way that matters.
             let agent_live = pending.unwrap_or(status) == "running";
-            // The sidebar lists threads, not machines: an agent with running
-            // sessions is represented by them alone. Only an agent with no
-            // thread rows to stand in for it keeps a row of its own — a
-            // sleeping box, a fresh create, a list still loading — so it
-            // stays reachable (to wake, connect to, or start a thread on).
-            if live.is_empty() {
-                rows.push(Row {
-                    depth: 0,
-                    kind: RowKind::Agent(w, p, e, a),
-                    label: agent.name.clone(),
-                    // No status tag: the orb's colour is the status, pending
-                    // states included.
-                    note: String::new(),
-                    status: Some(pending.unwrap_or(status).to_string()),
-                    expanded: Some(agent.expanded),
-                    dimmed: false,
-                });
-            }
             for (i, session) in live {
-                // Each thread leads with what the harness says it is doing
-                // (its latest prompt), falling back to `[S] name` for a
-                // session nothing has reported from. `connected` is whether
-                // THIS UI is attached; the platform's own `attached` flag
-                // counts other clients too, which is why it flickered.
+                // Each thread leads with what is happening in it — the latest
+                // prompt while the harness works, its last reply once done —
+                // falling back to `[S] name` for a session nothing has
+                // reported from. `connected` is whether THIS UI is attached;
+                // the platform's own `attached` flag counts other clients
+                // too, which is why it flickered.
                 let connected = self.pane_for(&session.name).is_some();
                 let connecting = self.connecting.contains(&session.name);
                 let reported = session.snapshot.as_ref().map(|s| s.state.as_str());
-                // The label is the hook-reported latest prompt, attached or
-                // not. A pane's own last screen line was tried here and reads
-                // as chrome, not content — a harness's bottom bar ("Help
-                // +Tab:mode") sits below whatever it last said.
                 rows.push(Row {
-                    depth: 0,
+                    depth: 1,
                     kind: RowKind::Session(w, p, e, a, i),
                     label: session.thread_label(),
                     note: String::new(),
@@ -1472,6 +1470,20 @@ impl App {
                     },
                     expanded: None,
                     dimmed: false,
+                });
+            }
+            // An agent whose listing came back empty says so where its
+            // threads would be — otherwise closing the last session leaves a
+            // bare name with nothing marking it as an agent.
+            if empty {
+                rows.push(Row {
+                    depth: 1,
+                    kind: RowKind::Note(w, p, e),
+                    label: "no sessions — n starts one".into(),
+                    note: String::new(),
+                    status: None,
+                    expanded: None,
+                    dimmed: true,
                 });
             }
             // A list still on its way — or one that failed to come — says so
@@ -4413,12 +4425,20 @@ impl App {
             // then a fresh agent — in the row's own project when the cursor
             // names one (the footer advertises row-local behavior), falling
             // back to the prompt's target from the launcher and the tail.
+            // On an agent (or one of its threads) the box already exists, so
+            // the pick starts a new session ON it instead.
             KeyCode::Char('n') => {
-                if let Some(path) = row.map(|r| r.kind).and_then(|k| self.env_of(k))
+                if let Some(path) = row.as_ref().map(|r| r.kind).and_then(|k| self.env_of(k))
                     && let Some(target) = self.target_at(path)
                 {
                     self.target = Some(target);
                 }
+                self.harness_pick_agent = match row.as_ref().map(|r| r.kind) {
+                    Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => {
+                        self.agent_at(w, p, e, a).map(|(id, _)| id)
+                    }
+                    _ => None,
+                };
                 self.harness_pick = Some(self.harness);
                 self.screen = Screen::HarnessPick;
                 None
@@ -4587,10 +4607,16 @@ impl App {
                 self.harness = cursor.min(HARNESSES.len() - 1);
                 self.harness_pick = None;
                 self.screen = Screen::Manage;
-                self.launch_new_agent()
+                // Picked from an agent's row: a new session on that box, not
+                // a new box.
+                match self.harness_pick_agent.take() {
+                    Some(agent_id) => self.launch(Some(agent_id), true),
+                    None => self.launch_new_agent(),
+                }
             }
             KeyCode::Esc => {
                 self.harness_pick = None;
+                self.harness_pick_agent = None;
                 self.screen = Screen::Manage;
                 None
             }
@@ -5586,11 +5612,10 @@ mod tests {
                     snapshot: None,
             }]);
         }
-        // The running session's own thread row is the way in now.
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, _)))
+            .position(|r| r.label == "nimble-otter")
             .unwrap();
         let effect = a.on_key(key(KeyCode::Enter));
         assert!(
@@ -5601,11 +5626,7 @@ mod tests {
             "a plain connect must not mint a session: {effect:?}"
         );
 
-        // A drafted prompt is new work, and does get a session of its own —
-        // entered from the agent's row, which exists while it has no threads.
-        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
-            agents[0].sessions = LoadSessions::Loaded(vec![]);
-        }
+        // A drafted prompt is new work, and does get a session of its own.
         a.prompt = "fix the tests".into();
         a.cursor = a
             .rows()
@@ -7881,13 +7902,15 @@ mod tests {
             Ok(vec![agent("ca_new", "just-created", "starting")]),
         );
 
-        assert_eq!(
+        let status_for = |a: &App| {
             a.rows()
                 .into_iter()
                 .find(|r| r.label == "just-created")
                 .unwrap()
                 .status
-                .as_deref(),
+        };
+        assert_eq!(
+            status_for(&a).as_deref(),
             Some("starting"),
             "no pane yet: report what we know"
         );
@@ -7897,17 +7920,9 @@ mod tests {
             "ca_new".to_string(),
         );
 
-        // The pane's adopted session is the agent's row now; its `connected`
-        // marker only exists because the live pane overrides "starting" to
-        // running — a session on a non-running agent never shows connected.
         assert_eq!(
-            a.rows()
-                .into_iter()
-                .find(|r| matches!(r.kind, RowKind::Session(..)))
-                .unwrap()
-                .status
-                .as_deref(),
-            Some("connected"),
+            status_for(&a).as_deref(),
+            Some("running"),
             "a live pane is proof the agent is up, whatever the projection says"
         );
     }
@@ -9308,22 +9323,47 @@ mod tests {
             ]);
         }
         let rows = a.rows();
-        // The sidebar lists threads, not machines: with a running session to
-        // stand in for it, the agent's own row folds away.
-        assert!(
-            !rows.iter().any(|r| r.label == "nimble-otter"),
-            "an agent with threads is represented by them: {rows:#?}"
-        );
+        let agent = rows
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .expect("the agent heads its threads");
         let thread = rows
             .iter()
             .position(|r| r.label == "[S] claude-one")
-            .expect("the running session is a thread row");
-        assert_eq!(rows[thread].depth, 0, "threads are top-level rows");
+            .expect("the running session is a child thread");
+        assert_eq!(thread, agent + 1, "nested right under it: {rows:#?}");
+        assert_eq!(rows[thread].depth, 1);
         assert!(
             !rows.iter().any(|r| r.label.contains("setup")),
             "a finished provisioning exec is not a thread"
         );
-        assert!(rows[thread].note.is_empty());
+        assert_eq!(
+            rows[agent].status.as_deref(),
+            Some("running"),
+            "the orb carries the status; no tag rides beside it"
+        );
+        assert!(rows[agent].note.is_empty());
+    }
+
+    /// An agent whose listing came back empty keeps its row and gains a
+    /// dimmed "no sessions" note, so closing the last session never leaves a
+    /// bare name with nothing marking it as an agent.
+    #[test]
+    fn an_emptied_agent_says_it_has_no_sessions() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(vec![]);
+        }
+        let rows = a.rows();
+        let agent = rows
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .expect("the agent keeps its row");
+        assert_eq!(
+            rows[agent + 1].label, "no sessions — n starts one",
+            "{rows:#?}"
+        );
+        assert!(!rows[agent + 1].selectable());
     }
 
     /// Counts appear without expanding every agent: running ones are
@@ -9570,10 +9610,10 @@ mod tests {
             .find(|r| r.label == "[S] claude-sess-7")
             .unwrap();
         assert!(matches!(session_row.kind, RowKind::Session(0, 0, 0, 0, 0)));
-        assert_eq!(session_row.depth, 0, "threads are top-level rows");
+        assert_eq!(session_row.depth, 1, "a child of its agent");
         assert!(
-            !rows.iter().any(|r| r.label == "nimble-otter"),
-            "the thread row stands in for its agent"
+            rows.iter().any(|r| r.label == "nimble-otter"),
+            "the agent still heads its threads"
         );
     }
 
