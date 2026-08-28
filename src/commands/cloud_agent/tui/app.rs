@@ -4281,13 +4281,9 @@ impl App {
 
     /// Launch what the prompt box holds — onto a brand-new agent, the same
     /// default the dashboard has: each task gets a VM of its own. A blank
-    /// prompt does not spend one; only shell, whose box says enter launches
-    /// bare, may go without.
+    /// prompt launches the session bare: the harness comes up empty, ready
+    /// for its first prompt inside.
     fn launch_from_prompt(&mut self) -> Option<Effect> {
-        if !self.shell_selected() && self.prompt.trim().is_empty() {
-            self.status = "Write a prompt first — it seeds the new agent".into();
-            return None;
-        }
         self.launch_new_agent()
     }
 
@@ -7150,10 +7146,11 @@ mod tests {
         assert!(req.force_new, "each prompt gets a fresh agent");
     }
 
-    /// Whitespace is not a prompt — it would seed the agent with nothing and
-    /// look like a bug.
+    /// A blank enter launches the session bare — the harness comes up empty,
+    /// ready for its first prompt inside — rather than nagging for a prompt.
+    /// Whitespace never rides along as one.
     #[test]
-    fn a_blank_prompt_does_not_spend_an_agent() {
+    fn a_blank_prompt_launches_a_bare_session() {
         let mut a = app();
         a.target = Some(Target {
             project_id: "p".into(),
@@ -7162,14 +7159,13 @@ mod tests {
             environment_name: "e".into(),
         });
         a.prompt = "   ".into();
-        assert_eq!(
-            a.on_key(key(KeyCode::Enter)),
-            None,
-            "no VM on a stray enter"
-        );
-        assert!(a.status.contains("Write a prompt"), "{}", a.status);
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("a blank enter launches bare");
+        };
+        assert_eq!(req.prompt, None, "whitespace is not a prompt");
+        assert!(req.force_new, "each launch is its own agent");
 
-        // Shell is the exception: its box says enter launches bare.
+        // Shell too: its box says enter launches bare.
         a.harness = HARNESSES.len() - 1;
         let Effect::Launch(req) = a.on_key(key(KeyCode::Enter)).unwrap() else {
             panic!("expected a launch");
