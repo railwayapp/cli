@@ -829,10 +829,12 @@ fn variables_from_environment_config(variables: &Value) -> Value {
         if value.is_null() {
             continue;
         }
+        let sealed = value.get("isSealed").and_then(Value::as_bool) == Some(true);
         let literal = value.get("value").and_then(Value::as_str);
+        let masked = literal.is_none() || literal == Some("") || literal == Some("*****") || sealed;
         out.insert(
             key.clone(),
-            if literal.is_none() || literal == Some("") {
+            if masked {
                 json!({ "type": "preserve" })
             } else {
                 json!({ "type": "literal", "value": literal })

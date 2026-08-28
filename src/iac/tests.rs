@@ -677,6 +677,33 @@ fn variable_removal_is_destructive() {
 }
 
 #[test]
+fn imported_variables_preserve_sealed_and_inline_decrypted() {
+    let graph = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "repo": "r" },
+                "variables": {
+                    "PUBLIC_URL": { "value": "https://example.com", "isSealed": false },
+                    "SECRET": { "value": "should-not-leak", "isSealed": true },
+                    "MASKED": { "value": "" }
+                }
+            }
+        }
+    }));
+    let vars = graph
+        .resources
+        .iter()
+        .find(|r| r["name"] == "web")
+        .and_then(|r| r.get("variables"))
+        .cloned()
+        .unwrap();
+    assert_eq!(vars["PUBLIC_URL"]["type"], "literal");
+    assert_eq!(vars["PUBLIC_URL"]["value"], "https://example.com");
+    assert_eq!(vars["SECRET"]["type"], "preserve");
+    assert_eq!(vars["MASKED"]["type"], "preserve");
+}
+
+#[test]
 fn preserve_variable_never_plans() {
     let current = env_config(json!({
         "services": { "web": { "source": { "repo": "r" }, "variables": { "SECRET": { "value": "existing" } } } }
@@ -879,7 +906,9 @@ fn image_to_github_clears_credentials() {
     )]);
     let changes = diff(&current, &desired).changes;
     assert!(changes.iter().any(|c| c["field"] == "source"));
-    assert!(changes.iter().any(|c| c["field"] == "deploy" && c["after"] == json!({ "registryCredentials": null })));
+    assert!(changes
+        .iter()
+        .any(|c| c["field"] == "deploy" && c["after"] == json!({ "registryCredentials": null })));
 }
 
 #[test]

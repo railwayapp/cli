@@ -1073,6 +1073,8 @@ mod cli_tests {
                 "--yes",
                 "--confirm-destructive",
             ]);
+            assert_parses(&["config", "pull", "--include-variables"]);
+            assert_parses(&["config", "pull", "--include-variables", "--force"]);
         }
     }
 }

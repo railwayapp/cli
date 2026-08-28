@@ -8,6 +8,12 @@ This project defines its Railway infrastructure in code.
 
 Use this file to describe the Railway project you want: services, databases, buckets, custom domains, replicas, groups, and environment variables.
 
+The TypeScript file imports `railway/iac`. Install the SDK from the repository root:
+
+```bash
+npm install railway
+```
+
 ## Common commands
 
 Create the configuration files:
@@ -44,4 +50,5 @@ railway config apply
 - Keep one `.railway` file for the whole project. A named `export const partial` (or `PARTIAL` / `const Partial`) is a last resort for separate repos that cannot share that file. Do not add it unless omit=delete across repos is a blocker.
 - Use `replicas` for scaling; advanced placement can still specify region names.
 - Use `group("Name", [resources])` to keep large projects organized on the Railway canvas.
-- Secrets imported from Railway are rendered as `preserve()` so existing values are retained without writing secret values to source. Use `railway config pull --omit-preserved-variables` for a smaller import.
+- Secrets imported from Railway are rendered as `preserve()` so existing values are retained without writing secret values to source. Use `railway config pull --omit-preserved-variables` for a smaller import. `railway config pull --include-variables` decrypts and inlines non-sealed values (including secrets that were never sealed).
+- `railway config migrate` finds every `railway.json` / `railway.toml` in the repository and writes them into this one file.

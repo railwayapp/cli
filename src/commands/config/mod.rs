@@ -148,6 +148,10 @@ struct PullArgs {
     #[clap(long)]
     omit_preserved_variables: bool,
 
+    /// Decrypt and inline non-sealed variable values into the authoring file.
+    #[clap(long)]
+    include_variables: bool,
+
     /// Ask an agent to turn imported state into idiomatic authoring code.
     #[clap(long)]
     agent: bool,
@@ -322,7 +326,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
             args.force,
         )?,
         InitMode::ImportFromRailway => {
-            write_pulled_config(&railway_file, args.force, None, true).await?
+            write_pulled_config(&railway_file, args.force, None, true, false).await?
         }
         InitMode::MinimalFile => write_new(
             &railway_file,
@@ -426,8 +430,15 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     let relative_file = format!(".railway/{}", lang.file_name());
     let readme_file = cwd.join(".railway").join("README.md");
 
+    if args.include_variables {
+        eprintln!(
+            "{} non-sealed variables, including secrets, will be decrypted and included in the spec",
+            "Warning:".yellow().bold()
+        );
+    }
+
     if args.json {
-        let graph = load_current_graph(args.runner).await?;
+        let graph = load_current_graph(args.runner, args.include_variables).await?;
         println!("{}", serde_json::to_string_pretty(&graph)?);
         return Ok(());
     }
@@ -438,6 +449,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         args.force,
         args.runner,
         !args.omit_preserved_variables,
+        args.include_variables,
     )
     .await?;
     let wrote_readme = write_asset_if_missing(&readme_file, &iac_readme(lang))?;
@@ -483,8 +495,9 @@ async fn write_pulled_config(
     force: bool,
     runner: Option<String>,
     preserve_variables: bool,
+    include_variables: bool,
 ) -> Result<()> {
-    let graph = load_current_graph(runner).await?;
+    let graph = load_current_graph(runner, include_variables).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
@@ -493,37 +506,28 @@ async fn write_pulled_config(
     )
 }
 
-async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGraph> {
-    // A PID-derived name in the working directory is predictable, and
-    // `create_dir_all` + `fs::write` will happily adopt a directory someone else
-    // precreated and follow a `railway.ts` they left as a symlink. On a shared
-    // workspace that turns this placeholder write into a clobber of any file the
-    // victim can write. Let the OS pick a random owner-only directory instead,
-    // and refuse to write through anything that already exists.
-    let temp_dir = tempfile::Builder::new()
-        .prefix(".railway-config-pull-")
-        .tempdir_in(std::env::current_dir().context("Unable to get current directory")?)
-        .context("Failed to create temporary Railway config directory")?;
-    let temp_file = temp_dir.path().join("railway.ts");
-    {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_file)
-            .context("Failed to create temporary Railway config")?;
-        file.write_all(railway_stub("import-placeholder", AuthoringLang::TypeScript).as_bytes())
-            .context("Failed to write temporary Railway config")?;
-    }
+async fn load_current_graph(
+    runner: Option<String>,
+    decrypt_variables: bool,
+) -> Result<runner::DesiredGraph> {
+    // The native engine's `current` command reads live state and does not
+    // evaluate an authoring file. The legacy TypeScript runner still requires
+    // a file on disk, so keep a throwaway stub only on that path.
+    let temp_dir = if crate::iac::use_legacy_ts_runner(runner.as_deref()) {
+        Some(write_pull_stub()?)
+    } else {
+        None
+    };
+    let file = temp_dir.as_ref().map(|dir| dir.path().join("railway.ts"));
 
     let args = runner::Args {
-        file: Some(temp_file.clone()),
+        file,
         stage: false,
         json: true,
         yes: false,
         confirm_destructive: false,
         apply: false,
-        decrypt_variables: false,
+        decrypt_variables,
         include_types: false,
         runner,
         verbose: false,
@@ -534,7 +538,6 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
         source_tree: None,
     };
     let response = runner::run(&args, "current").await?;
-    // `temp_dir` cleans itself up on drop, including on the error paths below.
     drop(temp_dir);
 
     if !response.ok {
@@ -559,6 +562,25 @@ async fn load_current_graph(runner: Option<String>) -> Result<runner::DesiredGra
     response
         .current_graph
         .context("Railway did not return current project state")
+}
+
+fn write_pull_stub() -> Result<tempfile::TempDir> {
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".railway-config-pull-")
+        .tempdir_in(std::env::current_dir().context("Unable to get current directory")?)
+        .context("Failed to create temporary Railway config directory")?;
+    let temp_file = temp_dir.path().join("railway.ts");
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_file)
+            .context("Failed to create temporary Railway config")?;
+        file.write_all(railway_stub("import-placeholder", AuthoringLang::TypeScript).as_bytes())
+            .context("Failed to write temporary Railway config")?;
+    }
+    Ok(temp_dir)
 }
 
 fn render_graph_as_railway(
