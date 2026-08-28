@@ -36,7 +36,8 @@ pub struct MigrateArgs {
     #[clap(long)]
     delete_files: bool,
 
-    /// Service name to emit in the DSL (defaults to directory name).
+    /// Migrate only the service with this name. With a single Config as Code
+    /// file it instead overrides the emitted service name.
     #[clap(long)]
     service: Option<String>,
 
@@ -266,12 +267,7 @@ async fn discover_cac_services(
         });
     }
 
-    if let Some(filter) = service_filter {
-        services.retain(|service| service.name == filter);
-        if services.is_empty() {
-            bail!("No Config as Code file found for service {filter}.");
-        }
-    }
+    apply_service_filter(&mut services, service_filter)?;
 
     services.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
 
@@ -279,13 +275,29 @@ async fn discover_cac_services(
     for service in &services {
         if !seen.insert(service.name.clone()) {
             bail!(
-                "Two Config as Code files map to the service name {}. Pass --service or rename one of them.",
+                "Two Config as Code files map to the service name {}. Rename one of the directories or remove one of the files.",
                 service.name
             );
         }
     }
 
     Ok(services)
+}
+
+fn apply_service_filter(services: &mut Vec<CacService>, filter: Option<&str>) -> Result<()> {
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+    if services.iter().any(|service| service.name == filter) {
+        services.retain(|service| service.name == filter);
+    } else if services.len() == 1 {
+        // Single-file repos historically used --service to override the
+        // guessed name; keep that working.
+        services[0].name = filter.to_string();
+    } else {
+        bail!("No Config as Code file found for service {filter}.");
+    }
+    Ok(())
 }
 
 fn canonicalize_or_clone(path: &Path) -> PathBuf {
@@ -863,6 +875,35 @@ mod tests {
         assert!(out.contains("project(\"acme\""));
         assert!(out.contains("resources: [web, api]"));
         assert!(!out.contains("export const partial"));
+    }
+
+    #[test]
+    fn service_filter_selects_matching_service() {
+        let mut services = vec![
+            svc("web", CacFile::default()),
+            svc("api", CacFile::default()),
+        ];
+        apply_service_filter(&mut services, Some("api")).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "api");
+    }
+
+    #[test]
+    fn service_filter_renames_a_single_service() {
+        let mut services = vec![svc("guessed-dir", CacFile::default())];
+        apply_service_filter(&mut services, Some("backend")).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "backend");
+    }
+
+    #[test]
+    fn service_filter_errors_when_nothing_matches_multiple() {
+        let mut services = vec![
+            svc("web", CacFile::default()),
+            svc("api", CacFile::default()),
+        ];
+        let err = apply_service_filter(&mut services, Some("worker")).unwrap_err();
+        assert!(err.to_string().contains("worker"));
     }
 
     #[test]
