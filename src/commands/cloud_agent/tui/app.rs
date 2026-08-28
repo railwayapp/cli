@@ -117,6 +117,36 @@ pub struct ConsoleSession {
     /// When the platform says it began — what breaks ties when a pane has to
     /// be matched to a listed session (see [`App::adopt_pane_sessions`]).
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// What the harness inside this session last reported it was doing —
+    /// joined to the session by its durable name at fetch time. `None` when
+    /// the harness never reported (a plain shell, or a report that predates
+    /// name attribution).
+    pub snapshot: Option<ThreadSnapshot>,
+}
+
+/// The reported state of one coding-agent run, from `CloudAgent.sessions` —
+/// the same snapshot the dashboard's session cards render. Display-only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadSnapshot {
+    /// Which harness reported: claude, codex, grok, railway-agent…
+    pub harness: String,
+    /// The harness's own session id — for `railway-agent`, the conversation
+    /// the in-VM daemon addresses over the gate WebSocket.
+    pub session_id: String,
+    /// One of: unknown, working, waiting, idle, failed, done.
+    pub state: String,
+    /// Truncated first prompt of the run.
+    pub prompt: Option<String>,
+    /// Truncated most recent prompt of the run.
+    pub latest_prompt: Option<String>,
+    /// What the agent last said: the newest assistant text of the
+    /// conversation, read from the daemon's catchup transcript over the
+    /// harness gate. Only railway-agent threads have a daemon to ask, so this
+    /// is None for every other harness — their responses exist only inside
+    /// the VM (the hook pipeline deliberately never carries assistant text).
+    pub last_reply: Option<String>,
+    /// The VM's clock at the last report — orders snapshots per session.
+    pub updated_at: String,
 }
 
 /// The env prologue every launch prepends. Everything before it is plumbing —
@@ -152,6 +182,36 @@ impl ConsoleSession {
             }
             _ => self.name.clone(),
         }
+    }
+
+    /// The thread list's label: what is happening in the thread, truncated to
+    /// the tree's width. While the harness works, the prompt names the work;
+    /// once the turn is over, what the agent last said is the news (known for
+    /// railway-agent threads, whose daemon serves the transcript). The short
+    /// name is the fallback for a session nothing has reported from (a plain
+    /// shell, a run that hasn't spoken yet).
+    pub fn thread_label(&self) -> String {
+        if let Some(snapshot) = &self.snapshot {
+            fn clean(text: Option<&str>) -> Option<&str> {
+                text.map(str::trim).filter(|text| !text.is_empty())
+            }
+            let prompt = clean(
+                snapshot
+                    .latest_prompt
+                    .as_deref()
+                    .or(snapshot.prompt.as_deref()),
+            );
+            let reply = clean(snapshot.last_reply.as_deref());
+            let text = if snapshot.state == "working" {
+                prompt.or(reply)
+            } else {
+                reply.or(prompt)
+            };
+            if let Some(text) = text {
+                return truncate(text, 28);
+            }
+        }
+        format!("[S] {}", self.short_name())
     }
 
     /// The harness this session runs, read off its launch line's binary.
@@ -341,6 +401,10 @@ const AUTO_CONNECT_INFLIGHT: usize = 3;
 /// the dashboard, a teammate. 25s is short enough that nobody reaches for ⌥r out
 /// of doubt, and long enough to be invisible in anyone's rate-limit budget.
 pub const AUTO_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How often the watched threads' sessions are re-asked about, for the
+/// sidebar's live labels. See [`App::thread_refresh_in`].
+pub const THREAD_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
@@ -732,9 +796,11 @@ pub enum Effect {
         environment_id: String,
         path: (usize, usize, usize),
     },
-    /// Fetch the reattachable sessions on one agent.
+    /// Fetch the reattachable sessions on one agent, along with the harness
+    /// snapshots that label them (which need the environment id).
     LoadSessions {
         agent_id: String,
+        environment_id: String,
         path: (usize, usize, usize, usize),
     },
     Launch(LaunchRequest),
@@ -861,6 +927,9 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
+    /// The agent `n` was pressed on, when it was: the picked harness launches
+    /// a new session on that box rather than minting a fresh agent.
+    pub harness_pick_agent: Option<String>,
     /// ⌥n's picker cursor while [`Screen::HarnessPick`] is up.
     pub harness_pick: Option<usize>,
     /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
@@ -974,6 +1043,13 @@ pub struct App {
     /// answered by polling harder is how a rate limit becomes a longer rate
     /// limit.
     pub refresh_paused_until: Option<std::time::Instant>,
+    /// When the watched threads were last re-asked about — the fast cadence
+    /// behind the sidebar's live labels, separate from the account refresh.
+    pub last_thread_refresh: Option<std::time::Instant>,
+    /// Agents whose fast thread poll is still in flight, so a slow reply (the
+    /// gate transcript dials can take seconds) is never stacked under a
+    /// second ask for the same agent.
+    pub thread_polls: std::collections::HashSet<String>,
     /// Someone pressed a key for the refresh in flight, so its result is worth
     /// a line when it lands. See [`App::refreshed`].
     pub refresh_announce: bool,
@@ -1025,6 +1101,7 @@ impl App {
             known_environments: Vec::new(),
             target_pick: None,
             harness_pick: None,
+            harness_pick_agent: None,
             manage_prompt: None,
             maximized: false,
             autostart: None,
@@ -1064,6 +1141,8 @@ impl App {
             refreshing: false,
             last_refresh: None,
             refresh_paused_until: None,
+            last_thread_refresh: None,
+            thread_polls: std::collections::HashSet::new(),
             refresh_announce: false,
             answered_at: std::collections::HashMap::new(),
             account_query_unavailable: false,
@@ -1341,7 +1420,9 @@ impl App {
                 _ => Vec::new(),
             };
             // The agent heads its threads: always on the list, so a sleeping
-            // or freshly created agent is reachable too.
+            // or freshly created agent is reachable too — and an emptied one
+            // still says what it is once its last session closes.
+            let empty = matches!(&agent.sessions, LoadSessions::Loaded(_)) && live.is_empty();
             rows.push(Row {
                 depth: 0,
                 kind: RowKind::Agent(w, p, e, a),
@@ -1359,28 +1440,48 @@ impl App {
             // way that matters.
             let agent_live = pending.unwrap_or(status) == "running";
             for (i, session) in live {
-                // Its sessions, as children — the session's NAME is the
-                // identity (every new agent is a session, like the
-                // dashboard), so the row leads with `[S] name` and the seeded
-                // task rides beside it as the note. `connected` is whether
-                // THIS UI is attached; the platform's own `attached` flag
-                // counts other clients too, which is why it flickered.
+                // Each thread leads with what is happening in it — the latest
+                // prompt while the harness works, its last reply once done —
+                // falling back to `[S] name` for a session nothing has
+                // reported from. `connected` is whether THIS UI is attached;
+                // the platform's own `attached` flag counts other clients
+                // too, which is why it flickered.
                 let connected = self.pane_for(&session.name).is_some();
                 let connecting = self.connecting.contains(&session.name);
+                let reported = session.snapshot.as_ref().map(|s| s.state.as_str());
                 rows.push(Row {
                     depth: 1,
                     kind: RowKind::Session(w, p, e, a, i),
-                    label: format!("[S] {}", session.short_name()),
+                    label: session.thread_label(),
                     note: String::new(),
                     status: if connected && agent_live {
                         Some("connected".to_string())
                     } else if connecting && agent_live {
                         Some("connecting".to_string())
+                    } else if agent_live && let Some(state @ ("working" | "waiting")) = reported {
+                        // The harness's own state, when it is worth a glyph:
+                        // a spinner while it works, a hollow mark when it
+                        // waits on a human.
+                        Some(state.to_string())
                     } else {
                         None
                     },
                     expanded: None,
                     dimmed: false,
+                });
+            }
+            // An agent whose listing came back empty says so where its
+            // threads would be — otherwise closing the last session leaves a
+            // bare name with nothing marking it as an agent.
+            if empty {
+                rows.push(Row {
+                    depth: 1,
+                    kind: RowKind::Note(w, p, e),
+                    label: "no sessions — n starts one".into(),
+                    note: String::new(),
+                    status: None,
+                    expanded: None,
+                    dimmed: true,
                 });
             }
             // A list still on its way — or one that failed to come — says so
@@ -1868,6 +1969,7 @@ impl App {
     ) -> Option<Effect> {
         let (w, p, e, a) = path;
         let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
+        let environment_id = env.id.clone();
         let Load::Loaded(agents) = &mut env.agents else {
             return None;
         };
@@ -1881,6 +1983,7 @@ impl App {
         agent.sessions = LoadSessions::Loading;
         Some(Effect::LoadSessions {
             agent_id: agent.id.clone(),
+            environment_id,
             path,
         })
     }
@@ -1892,6 +1995,9 @@ impl App {
         agent_id: &str,
         result: Result<Vec<ConsoleSession>, String>,
     ) {
+        // Whatever this reply says, its agent's fast poll is no longer in
+        // flight (see `threads_to_poll`).
+        self.thread_polls.remove(agent_id);
         let (w, p, e, _) = path;
         // Resolved by id rather than trusting the index the request went out
         // with: the environment can be refetched while sessions are in
@@ -2551,12 +2657,18 @@ impl App {
                 .and_then(|name| self.pane_for(&name))
             {
                 // One click selects the pane and hands it the keyboard: the
-                // next thing typed is meant for the session, and routing it
-                // to the tree fired shortcuts instead. ^o (or Esc) is the way
-                // back to the rows.
+                // next thing typed is meant for the session. One click only
+                // selects — with the sidebar listing threads, most rows are
+                // connected sessions, and a single click that handed the
+                // keyboard over made the tree impossible to browse from a
+                // focused pane. A double click (or enter) steps in.
                 Some(index) => {
                     self.active = Some(index);
-                    self.focus = ManageFocus::Session;
+                    self.focus = if double {
+                        ManageFocus::Session
+                    } else {
+                        ManageFocus::Tree
+                    };
                 }
                 None if double => return self.reattach_row(clicked.kind),
                 // No pane to focus: say how to get one, and re-ask the
@@ -2991,6 +3103,7 @@ impl App {
                             running: true,
                             attached: true,
                             created_at: None,
+                            snapshot: None,
                         };
                         match &mut agent.sessions {
                             LoadSessions::Loaded(sessions) => {
@@ -3157,6 +3270,7 @@ impl App {
                     }
                     return Some(Effect::LoadSessions {
                         agent_id: agent_id.to_string(),
+                        environment_id: self.tree[w].projects[p].envs[e].id.clone(),
                         path: (w, p, e, a),
                     });
                 }
@@ -3614,6 +3728,7 @@ impl App {
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
                 for e in 0..self.tree[w].projects[p].envs.len() {
+                    let environment_id = self.tree[w].projects[p].envs[e].id.clone();
                     let Load::Loaded(agents) = &mut self.tree[w].projects[p].envs[e].agents else {
                         continue;
                     };
@@ -3624,6 +3739,7 @@ impl App {
                         agent.sessions = LoadSessions::Loading;
                         out.push(Effect::LoadSessions {
                             agent_id: agent.id.clone(),
+                            environment_id: environment_id.clone(),
                             path: (w, p, e, a),
                         });
                     }
@@ -3675,13 +3791,21 @@ impl App {
                         // zero threads forever — nothing else re-asks for an
                         // unexpanded row.
                         let failed = matches!(agent.sessions, LoadSessions::Failed(_));
-                        let watched =
-                            agent.expanded || self.sessions.iter().any(|s| s.agent_id == agent.id);
+                        // A loaded thread's row is always on screen now — the
+                        // sidebar lists sessions, not agents — so a running
+                        // agent whose threads are visible stays on the refresh
+                        // cadence: its labels are live status text.
+                        let visible = matches!(&agent.sessions, LoadSessions::Loaded(sessions)
+                            if sessions.iter().any(|s| s.is_interesting()));
+                        let watched = agent.expanded
+                            || visible
+                            || self.sessions.iter().any(|s| s.agent_id == agent.id);
                         if !watched && !failed {
                             continue;
                         }
                         out.push(Effect::LoadSessions {
                             agent_id: agent.id.clone(),
+                            environment_id: env.id.clone(),
                             path: (w, p, e, a),
                         });
                     }
@@ -4155,13 +4279,9 @@ impl App {
 
     /// Launch what the prompt box holds — onto a brand-new agent, the same
     /// default the dashboard has: each task gets a VM of its own. A blank
-    /// prompt does not spend one; only shell, whose box says enter launches
-    /// bare, may go without.
+    /// prompt launches the session bare: the harness comes up empty, ready
+    /// for its first prompt inside.
     fn launch_from_prompt(&mut self) -> Option<Effect> {
-        if !self.shell_selected() && self.prompt.trim().is_empty() {
-            self.status = "Write a prompt first — it seeds the new agent".into();
-            return None;
-        }
         self.launch_new_agent()
     }
 
@@ -4299,12 +4419,20 @@ impl App {
             // then a fresh agent — in the row's own project when the cursor
             // names one (the footer advertises row-local behavior), falling
             // back to the prompt's target from the launcher and the tail.
+            // On an agent (or one of its threads) the box already exists, so
+            // the pick starts a new session ON it instead.
             KeyCode::Char('n') => {
-                if let Some(path) = row.map(|r| r.kind).and_then(|k| self.env_of(k))
+                if let Some(path) = row.as_ref().map(|r| r.kind).and_then(|k| self.env_of(k))
                     && let Some(target) = self.target_at(path)
                 {
                     self.target = Some(target);
                 }
+                self.harness_pick_agent = match row.as_ref().map(|r| r.kind) {
+                    Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => {
+                        self.agent_at(w, p, e, a).map(|(id, _)| id)
+                    }
+                    _ => None,
+                };
                 self.harness_pick = Some(self.harness);
                 self.screen = Screen::HarnessPick;
                 None
@@ -4473,10 +4601,16 @@ impl App {
                 self.harness = cursor.min(HARNESSES.len() - 1);
                 self.harness_pick = None;
                 self.screen = Screen::Manage;
-                self.launch_new_agent()
+                // Picked from an agent's row: a new session on that box, not
+                // a new box.
+                match self.harness_pick_agent.take() {
+                    Some(agent_id) => self.launch(Some(agent_id), true),
+                    None => self.launch_new_agent(),
+                }
             }
             KeyCode::Esc => {
                 self.harness_pick = None;
+                self.harness_pick_agent = None;
                 self.screen = Screen::Manage;
                 None
             }
@@ -4672,6 +4806,9 @@ impl App {
     /// as a hung UI. Expanding it later retries, which is the right amount of
     /// work for the user to have to do.
     pub fn rate_limited(&mut self, retry_after_secs: Option<u64>) {
+        // A rate-limited batch is abandoned, so its in-flight marks would
+        // otherwise stick and stop the fast poll forever.
+        self.thread_polls.clear();
         for ws in &mut self.tree {
             for project in &mut ws.projects {
                 for env in &mut project.envs {
@@ -4836,6 +4973,56 @@ impl App {
     /// made here rather than by the fact of waking up.
     pub fn auto_refresh_due(&self) -> bool {
         self.auto_refresh_in() == Some(std::time::Duration::ZERO)
+    }
+
+    /// Time until the watched threads should be re-asked about — the fast lane
+    /// behind the sidebar's live labels, much tighter than the account
+    /// refresh: a prompt lands and its row should say so in seconds, not at
+    /// the 25s tick. Narrow by construction — [`Self::sessions_to_refresh`]
+    /// names only running agents someone can see — so the cost is one
+    /// per-agent query per tick, and the gate transcript dials behind it are
+    /// cached until a thread actually reports something new.
+    ///
+    /// `None` when there is nothing to poll for, or a rate limit said to wait.
+    pub fn thread_refresh_in(&self) -> Option<std::time::Duration> {
+        if self.screen != Screen::Manage || self.sessions_to_refresh().is_empty() {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        if let Some(until) = self.refresh_paused_until
+            && until > now
+        {
+            return Some(until - now);
+        }
+        let Some(last) = self.last_thread_refresh else {
+            return Some(THREAD_REFRESH_EVERY);
+        };
+        Some(THREAD_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
+    }
+
+    /// Note that the fast thread poll ran, arming the next tick.
+    pub fn thread_refresh_started(&mut self) {
+        self.last_thread_refresh = Some(std::time::Instant::now());
+    }
+
+    /// The fast tick's work: what [`Self::sessions_to_refresh`] names, minus
+    /// agents whose previous ask is still in flight, marked as in flight.
+    pub fn threads_to_poll(&mut self) -> Vec<Effect> {
+        self.thread_refresh_started();
+        let effects: Vec<Effect> = self
+            .sessions_to_refresh()
+            .into_iter()
+            .filter(|effect| match effect {
+                Effect::LoadSessions { agent_id, .. } => !self.thread_polls.contains(agent_id),
+                _ => true,
+            })
+            .collect();
+        for effect in &effects {
+            if let Effect::LoadSessions { agent_id, .. } = effect {
+                self.thread_polls.insert(agent_id.clone());
+            }
+        }
+        effects
     }
 
     /// Note that a refresh has started, so the next automatic one is a full
@@ -5416,6 +5603,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -5470,6 +5658,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+                snapshot: None,
             }]),
         );
         assert_eq!(
@@ -5507,6 +5696,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+                snapshot: None,
             }]),
         );
         assert_eq!(
@@ -5544,9 +5734,11 @@ mod tests {
         assert!(a.maximized, "and the layout stayed put");
     }
 
-    /// Clicking a session's row keeps the keyboard with the session — the
-    /// click says "type here", and the way back to the rows is ^o (or Esc),
-    /// after which x acts on the highlighted row instead of typing into it.
+    /// One click on a session's row selects it and keeps the keyboard in the
+    /// tree — the sidebar is threads now, and a single click that handed the
+    /// keyboard over made the list unbrowsable from a focused pane. A double
+    /// click steps into the pane; ^o (or Esc) is the way back, after which x
+    /// acts on the highlighted row instead of typing into it.
     #[test]
     fn clicking_the_list_takes_the_keyboard_back_from_a_session() {
         let mut a = loaded_app();
@@ -5558,6 +5750,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -5573,10 +5766,13 @@ mod tests {
             .position(|r| r.label == "[S] claude-one")
             .unwrap() as u16;
         a.on_mouse(MouseAction::Down, 5, 3 + row);
+        assert_eq!(a.focus, ManageFocus::Tree, "one click selects the row");
+        // A second click inside the double-click window steps in.
+        a.on_mouse(MouseAction::Down, 5, 3 + row);
         assert_eq!(
             a.focus,
             ManageFocus::Session,
-            "the click means type-into-the-session"
+            "a double click means type-into-the-session"
         );
 
         // ^o hands the keyboard back to the list…
@@ -5618,6 +5814,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+                snapshot: None,
             }]),
         );
 
@@ -5659,6 +5856,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+                snapshot: None,
             }]),
         );
         a
@@ -5813,6 +6011,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000 + i, 0),
+                snapshot: None,
             })
             .collect();
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions));
@@ -5845,6 +6044,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+                snapshot: None,
             }]),
         );
         assert_eq!(a.take_auto_connects().len(), 1, "the attach is in flight");
@@ -6423,7 +6623,7 @@ mod tests {
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "nimble-otter")
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, _)))
             .unwrap();
         assert_eq!(a.active, Some(0), "the attached pane is on screen");
         a.sessions[0].end_dropped_for_test();
@@ -6480,7 +6680,7 @@ mod tests {
         b.cursor = b
             .rows()
             .iter()
-            .position(|r| r.label == "nimble-otter")
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, _)))
             .unwrap();
         b.sessions[0].end_dropped_for_test();
         assert_eq!(b.reap_ended_sessions(), None);
@@ -6814,6 +7014,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.attach_session(
@@ -6873,7 +7074,7 @@ mod tests {
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "nimble-otter")
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, _)))
             .unwrap();
         assert_eq!(a.on_key(key(KeyCode::Esc)), None);
         assert_eq!(a.cursor, 0);
@@ -6943,10 +7144,11 @@ mod tests {
         assert!(req.force_new, "each prompt gets a fresh agent");
     }
 
-    /// Whitespace is not a prompt — it would seed the agent with nothing and
-    /// look like a bug.
+    /// A blank enter launches the session bare — the harness comes up empty,
+    /// ready for its first prompt inside — rather than nagging for a prompt.
+    /// Whitespace never rides along as one.
     #[test]
-    fn a_blank_prompt_does_not_spend_an_agent() {
+    fn a_blank_prompt_launches_a_bare_session() {
         let mut a = app();
         a.target = Some(Target {
             project_id: "p".into(),
@@ -6955,14 +7157,13 @@ mod tests {
             environment_name: "e".into(),
         });
         a.prompt = "   ".into();
-        assert_eq!(
-            a.on_key(key(KeyCode::Enter)),
-            None,
-            "no VM on a stray enter"
-        );
-        assert!(a.status.contains("Write a prompt"), "{}", a.status);
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("a blank enter launches bare");
+        };
+        assert_eq!(req.prompt, None, "whitespace is not a prompt");
+        assert!(req.force_new, "each launch is its own agent");
 
-        // Shell is the exception: its box says enter launches bare.
+        // Shell too: its box says enter launches bare.
         a.harness = HARNESSES.len() - 1;
         let Effect::Launch(req) = a.on_key(key(KeyCode::Enter)).unwrap() else {
             panic!("expected a launch");
@@ -7314,6 +7515,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         };
         assert_eq!(
             minted.short_name(),
@@ -7335,6 +7537,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         };
         assert_eq!(renamed.short_name(), "railway-ld9");
 
@@ -7346,6 +7549,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         };
         assert_eq!(unknown.short_name(), "quiet-depot-x7v");
     }
@@ -7914,7 +8118,7 @@ mod tests {
         a.cursor = a
             .rows()
             .iter()
-            .position(|r| r.label == "nimble-otter")
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, _)))
             .unwrap();
 
         assert_eq!(a.on_key(key(KeyCode::Enter)), None, "no launch");
@@ -7989,6 +8193,7 @@ mod tests {
                     running: true,
                     attached: true,
                     created_at: None,
+                    snapshot: None,
                 },
                 ConsoleSession {
                     name: "claude-two".into(),
@@ -7997,6 +8202,7 @@ mod tests {
                     running: true,
                     attached: true,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
@@ -8110,6 +8316,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.panes = panes_fixture();
@@ -8146,6 +8353,7 @@ mod tests {
                     running: true,
                     attached: true,
                     created_at: None,
+                    snapshot: None,
                 },
                 ConsoleSession {
                     name: "claude-two".into(),
@@ -8154,6 +8362,7 @@ mod tests {
                     running: true,
                     attached: false,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
@@ -8191,7 +8400,17 @@ mod tests {
             .unwrap();
         a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
         assert_eq!(a.active, Some(0), "one click shows the open pane");
-        assert_eq!(a.focus, ManageFocus::Session, "and hands it the keyboard");
+        assert_eq!(
+            a.focus,
+            ManageFocus::Tree,
+            "but the keyboard stays with the tree until a double click"
+        );
+        a.on_mouse(MouseAction::Down, 5, 3 + one as u16);
+        assert_eq!(
+            a.focus,
+            ManageFocus::Session,
+            "a double click hands it the keyboard"
+        );
     }
 
     /// Enter on a project toggles it: the first press opens it straight
@@ -8523,6 +8742,7 @@ mod tests {
                 // The agent says someone is attached; that someone is not us.
                 attached: true,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let row = |a: &App| {
@@ -8555,6 +8775,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -8611,6 +8832,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]),
         );
         assert!(a.ending.contains("claude-one"));
@@ -8621,9 +8843,10 @@ mod tests {
         assert!(a.ending.is_empty());
     }
 
-    /// One click on a connected session row shows the pane AND hands it the
-    /// keyboard — clicking a session and typing must reach the session, not
-    /// fire tree shortcuts.
+    /// One click on a connected session row shows the pane but keeps the
+    /// keyboard in the tree — with the sidebar listing threads, most rows are
+    /// connected sessions, and browsing must stay possible. A double click is
+    /// what steps in to type.
     #[test]
     fn one_click_views_and_two_clicks_connect() {
         let mut a = loaded_app();
@@ -8636,6 +8859,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -8653,10 +8877,10 @@ mod tests {
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
         assert_eq!(a.active, Some(0), "one click shows it");
-        assert_eq!(a.focus, ManageFocus::Session, "and hands it the keyboard");
+        assert_eq!(a.focus, ManageFocus::Tree, "the keyboard stays in the tree");
 
         a.on_mouse(MouseAction::Down, 5, 3 + row);
-        assert_eq!(a.focus, ManageFocus::Session, "a second click keeps it");
+        assert_eq!(a.focus, ManageFocus::Session, "a double click steps in");
     }
 
     /// A reconnect whose target session turns out not to exist launches a
@@ -8675,6 +8899,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
 
@@ -8705,6 +8930,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let effect = b.reattach_target_gone("ca_1", "nimble-otter", "claude-one");
@@ -8728,6 +8954,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         };
         let previous = vec![Agent {
             id: "ca_1".into(),
@@ -8845,6 +9072,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -8887,6 +9115,7 @@ mod tests {
             effect,
             Some(Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             })
         );
@@ -8901,6 +9130,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
+                snapshot: None,
             }]),
         );
         assert!(a.rows().iter().any(|r| r.label == "[S] claude-one"));
@@ -8943,6 +9173,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -8982,6 +9213,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
+                snapshot: None,
             }]),
         );
         assert_eq!(a.selected_row().unwrap().label, "[S] claude-new");
@@ -9001,6 +9233,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -9035,6 +9268,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -9068,6 +9302,7 @@ mod tests {
                     running: true,
                     attached: false,
                     created_at: None,
+                    snapshot: None,
                 },
                 // A finished provisioning exec is not a session anyone has.
                 ConsoleSession {
@@ -9077,6 +9312,7 @@ mod tests {
                     running: false,
                     attached: false,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
@@ -9103,6 +9339,28 @@ mod tests {
         assert!(rows[agent].note.is_empty());
     }
 
+    /// An agent whose listing came back empty keeps its row and gains a
+    /// dimmed "no sessions" note, so closing the last session never leaves a
+    /// bare name with nothing marking it as an agent.
+    #[test]
+    fn an_emptied_agent_says_it_has_no_sessions() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(vec![]);
+        }
+        let rows = a.rows();
+        let agent = rows
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .expect("the agent keeps its row");
+        assert_eq!(
+            rows[agent + 1].label,
+            "no sessions — n starts one",
+            "{rows:#?}"
+        );
+        assert!(!rows[agent + 1].selectable());
+    }
+
     /// Counts appear without expanding every agent: running ones are
     /// prefetched when their environment loads, sleeping ones are not.
     #[test]
@@ -9121,6 +9379,7 @@ mod tests {
             effects[0],
             Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             }
         );
@@ -9320,6 +9579,7 @@ mod tests {
             effect,
             Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             }
         );
@@ -9336,6 +9596,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]),
         );
         let rows = a.rows();
@@ -9367,6 +9628,7 @@ mod tests {
             running: true,
             attached: true,
             created_at: None,
+            snapshot: None,
         };
         assert_eq!(
             session.short_name(),
@@ -9380,6 +9642,7 @@ mod tests {
             command: Some("npm run dev\nmore".into()),
             attached: false,
             created_at: None,
+            snapshot: None,
             ..session.clone()
         };
         assert_eq!(other.command_summary(), "npm run dev");
@@ -9421,6 +9684,7 @@ mod tests {
             running: false,
             attached: false,
             created_at: None,
+            snapshot: None,
         };
         assert!(!exec.is_interesting());
 
@@ -9452,6 +9716,7 @@ mod tests {
                 running: false,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]);
         }
         let rows = a.rows();
@@ -9548,6 +9813,7 @@ mod tests {
             a.refresh_agent_sessions("ca_1"),
             Some(Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             })
         );
@@ -9568,6 +9834,7 @@ mod tests {
             a.refresh_agent_sessions("ca_1"),
             Some(Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             })
         );
@@ -9597,6 +9864,7 @@ mod tests {
             a.sessions_to_refresh(),
             vec![Effect::LoadSessions {
                 agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
                 path: (0, 0, 0, 0)
             }],
             "the expanded one, not the collapsed one and not the sleeping one"
@@ -9623,6 +9891,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         }];
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions.clone()));
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Err("502 from backboard".into()));
@@ -9808,6 +10077,7 @@ mod tests {
             running: true,
             attached: true,
             created_at: None,
+                    snapshot: None,
         };
         assert_eq!(session.short_name(), "claude-3habai");
         // The command is still available, for the pane with room for it.
@@ -10114,6 +10384,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
+            snapshot: None,
         }]);
         if let Load::Loaded(agents) = &mut a.tree[w].projects[p].envs[e].agents {
             agents[0].expanded = true;
@@ -10194,6 +10465,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
+                snapshot: None,
             }]),
         );
 

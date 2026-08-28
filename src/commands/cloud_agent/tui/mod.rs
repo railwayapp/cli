@@ -628,21 +628,66 @@ async fn fetch_sessions(
     client: &reqwest::Client,
     backboard: &str,
     cloud_agent_id: &str,
+    environment_id: &str,
 ) -> Result<Vec<ConsoleSession>> {
-    let res = post_graphql::<queries::CloudAgentConsoleSessions, _>(
+    let res = post_graphql::<queries::CloudAgentSessionThreads, _>(
         client,
         backboard,
-        queries::cloud_agent_console_sessions::Variables {
+        queries::cloud_agent_session_threads::Variables {
             cloud_agent_id: cloud_agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
         },
     )
     .await?;
+    // The harness snapshots that label the console sessions, joined by the
+    // durable session name a report carries. Newest per name wins: one
+    // console session can host several runs over its life.
+    let ws_url = res
+        .cloud_agent
+        .as_ref()
+        .and_then(|a| a.agent_ws_url.clone());
+    let mut snapshots: std::collections::HashMap<String, app::ThreadSnapshot> =
+        std::collections::HashMap::new();
+    for snapshot in res.cloud_agent.map(|a| a.sessions).unwrap_or_default() {
+        let Some(name) = snapshot.session_name else {
+            continue;
+        };
+        let candidate = app::ThreadSnapshot {
+            harness: snapshot.harness,
+            session_id: snapshot.session_id,
+            state: snapshot.state,
+            prompt: snapshot.prompt,
+            latest_prompt: snapshot.latest_prompt,
+            last_reply: None,
+            updated_at: snapshot.updated_at,
+        };
+        match snapshots.entry(name) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if candidate.updated_at > slot.get().updated_at {
+                    slot.insert(candidate);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+        }
+    }
+    fill_daemon_replies(
+        client,
+        backboard,
+        cloud_agent_id,
+        environment_id,
+        ws_url,
+        &mut snapshots,
+    )
+    .await;
     Ok(res
         .cloud_agent_console_sessions
         .map(|conn| {
             conn.edges
                 .into_iter()
                 .map(|edge| ConsoleSession {
+                    snapshot: snapshots.remove(&edge.node.name),
                     name: edge.node.name,
                     kind: format!("{:?}", edge.node.kind),
                     command: Some(edge.node.command),
@@ -793,6 +838,22 @@ pub async fn run(
                 }
                 None
             }
+            // The fast lane for the sidebar's thread labels: re-ask about the
+            // watched sessions every few seconds, far tighter than the
+            // account refresh — a prompt lands and its row should say so in
+            // seconds. Bounded: only visible running agents, one ask in
+            // flight per agent, and the gate dials behind it are cached until
+            // a thread actually reports something new.
+            _ = tokio::time::sleep(app.thread_refresh_in().unwrap_or(std::time::Duration::MAX)),
+                if app.thread_refresh_in().is_some() => {
+                if app.thread_refresh_in() == Some(std::time::Duration::ZERO) {
+                    let effects = app.threads_to_poll();
+                    if !effects.is_empty() {
+                        spawn_session_prefetch(effects, &tx, &client, &backboard, stop_fetching.clone());
+                    }
+                }
+                None
+            }
             // A reattach that stays silent gets its "no response" notice drawn
             // once the stall clock runs out; nothing else would redraw, since
             // a silent pane by definition sends no output to wake the loop.
@@ -907,7 +968,7 @@ pub async fn run(
                     // attaches anyway, the benefit of the doubt.
                     let (info, listed) = tokio::join!(
                         code::connect_info(&environment_id, &agent_id),
-                        fetch_sessions(&client, &backboard, &agent_id),
+                        fetch_sessions(&client, &backboard, &agent_id, &environment_id),
                     );
                     let gone = matches!(
                         &listed,
@@ -1126,8 +1187,12 @@ pub async fn run(
                 });
             }
             Some(Effect::Launch(req)) => dispatch_launch(app, req, &tx, &client, &backboard),
-            Some(Effect::LoadSessions { agent_id, path }) => {
-                spawn_session_fetch(agent_id, path, &tx, &client, &backboard);
+            Some(Effect::LoadSessions {
+                agent_id,
+                environment_id,
+                path,
+            }) => {
+                spawn_session_fetch(agent_id, environment_id, path, &tx, &client, &backboard);
             }
             Some(Effect::LoadAgents {
                 environment_id,
@@ -1137,6 +1202,176 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Fill each railway-agent thread's `last_reply` from the daemon's catchup
+/// transcript, read over the harness gate (`agentWsUrl` + a freshly minted
+/// gate token). Only the daemon harness has a transcript to serve: every
+/// other harness's responses exist solely inside the VM, since the hook
+/// pipeline deliberately never carries assistant text.
+///
+/// Best-effort throughout — a sleeping gate, a stale token, or a slow VM
+/// degrades to prompt-only labels, never to a failed session fetch.
+async fn fill_daemon_replies(
+    client: &reqwest::Client,
+    backboard: &str,
+    cloud_agent_id: &str,
+    environment_id: &str,
+    ws_url: Option<String>,
+    snapshots: &mut std::collections::HashMap<String, app::ThreadSnapshot>,
+) {
+    /// One dial per conversation; bound how many a refresh pays for.
+    const MAX_DIALS: usize = 4;
+    let Some(ws_url) = ws_url else { return };
+    // Newest conversations first, deduped: several console sessions can be
+    // windows onto one daemon conversation.
+    let mut targets: Vec<(String, String)> = snapshots
+        .values()
+        .filter(|snapshot| snapshot.harness == "railway-agent")
+        .map(|snapshot| (snapshot.updated_at.clone(), snapshot.session_id.clone()))
+        .collect();
+    targets.sort_by(|a, b| b.0.cmp(&a.0));
+    targets.dedup_by(|a, b| a.1 == b.1);
+    targets.truncate(MAX_DIALS);
+    if targets.is_empty() {
+        return;
+    }
+    // A conversation only changes when a new report bumps its `updated_at`,
+    // so a transcript read once is good until then. This is what lets the
+    // fast poll tick every few seconds without a WebSocket dial per tick.
+    let (cached, to_dial): (Vec<_>, Vec<_>) = {
+        let cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+        targets.into_iter().partition(|(updated_at, session_id)| {
+            cache
+                .get(session_id)
+                .is_some_and(|(at, _)| at == updated_at)
+        })
+    };
+    for (_, session_id) in &cached {
+        let reply = {
+            let cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+            cache.get(session_id).and_then(|(_, reply)| reply.clone())
+        };
+        if let Some(reply) = reply {
+            apply_reply(snapshots, session_id, reply);
+        }
+    }
+    if to_dial.is_empty() {
+        return;
+    }
+    let Ok(res) = post_graphql::<mutations::CloudAgentHarnessToken, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_harness_token::Variables {
+            id: cloud_agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let token = res.cloud_agent_harness_token;
+    for (updated_at, session_id) in to_dial {
+        let reply = gate_last_reply(&ws_url, &token, &session_id).await;
+        {
+            let mut cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+            // Bounded: the cache only ever holds what an account's live
+            // threads produce, but a very long TUI run shouldn't grow it
+            // forever.
+            if cache.len() > 256 {
+                cache.clear();
+            }
+            cache.insert(session_id.clone(), (updated_at, reply.clone()));
+        }
+        if let Some(reply) = reply {
+            apply_reply(snapshots, &session_id, reply);
+        }
+    }
+}
+
+/// Last-reply cache across fetches: session id → (updated_at it was read at,
+/// the reply). Process-wide by design — fetches run on detached tasks.
+fn reply_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Stamp one conversation's reply onto every console session windowing it.
+fn apply_reply(
+    snapshots: &mut std::collections::HashMap<String, app::ThreadSnapshot>,
+    session_id: &str,
+    reply: String,
+) {
+    for snapshot in snapshots.values_mut() {
+        if snapshot.session_id == session_id {
+            snapshot.last_reply = Some(reply.clone());
+        }
+    }
+}
+
+/// The newest assistant text of one daemon conversation, from the `catchup`
+/// frame the gate pushes first on attach. `None` for an empty session, a
+/// gate that won't dial, or a transcript with no assistant text yet.
+async fn gate_last_reply(ws_url: &str, token: &str, session_id: &str) -> Option<String> {
+    use futures_util::StreamExt;
+    use reqwest_websocket::{Message as WsMessage, RequestBuilderExt};
+    // Session ids are `[A-Za-z0-9._-]` and the token is a JWT; both are
+    // URL-safe as-is.
+    let url = format!("{ws_url}?session_id={session_id}&token={token}");
+    let response = reqwest::Client::default()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .upgrade()
+        .send()
+        .await
+        .ok()?;
+    let mut ws = response.into_websocket().await.ok()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next()).await.ok()??;
+        let Ok(WsMessage::Text(text)) = frame else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("catchup") => return last_assistant_text(&value),
+            // Catchup is the FIRST frame when there is history; the session
+            // lifecycle starting without one means an empty session.
+            Some("ready" | "session_start") => return None,
+            _ => {}
+        }
+    }
+}
+
+/// The last assistant message's text blocks from a catchup payload, joined.
+fn last_assistant_text(catchup: &serde_json::Value) -> Option<String> {
+    let messages = catchup.get("data")?.get("messages")?.as_array()?;
+    for message in messages.iter().rev() {
+        if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = message.get("content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        let text = blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() {
+            // Bounded for storage; the row truncates further for display.
+            return Some(text.chars().take(400).collect());
+        }
+    }
+    None
 }
 
 /// Fetch one environment's agents in the background, delivering the answer —
@@ -1682,6 +1917,7 @@ fn spawn_sweep(
 /// Fetch one agent's sessions in the background.
 fn spawn_session_fetch(
     agent_id: String,
+    environment_id: String,
     path: (usize, usize, usize, usize),
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
@@ -1691,7 +1927,7 @@ fn spawn_session_fetch(
     let client = client.clone();
     let backboard = backboard.to_string();
     tokio::spawn(async move {
-        let result = match fetch_sessions(&client, &backboard, &agent_id).await {
+        let result = match fetch_sessions(&client, &backboard, &agent_id, &environment_id).await {
             Ok(sessions) => Ok(sessions),
             Err(err) => {
                 // Reported as a rate limit rather than as this agent's failure,
@@ -1731,7 +1967,12 @@ fn spawn_session_prefetch(
     tokio::spawn(async move {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(SWEEP_CONCURRENCY));
         for effect in effects {
-            let Effect::LoadSessions { agent_id, path } = effect else {
+            let Effect::LoadSessions {
+                agent_id,
+                environment_id,
+                path,
+            } = effect
+            else {
                 continue;
             };
             if stop.load(Ordering::Relaxed) {
@@ -1745,7 +1986,7 @@ fn spawn_session_prefetch(
             let backboard = backboard.clone();
             let stop = stop.clone();
             tokio::spawn(async move {
-                match fetch_sessions(&client, &backboard, &agent_id).await {
+                match fetch_sessions(&client, &backboard, &agent_id, &environment_id).await {
                     Ok(sessions) => {
                         let _ = tx.send(Message::SessionsLoaded {
                             path,

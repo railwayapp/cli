@@ -18,6 +18,17 @@ type EnvironmentConfig = controllers::config::EnvironmentConfig;
 #[allow(dead_code)]
 pub struct CliEventTrack;
 
+/// Short-lived JWT for a cloud agent's in-VM harness gate (see
+/// `CloudAgent.agentWsUrl`) — the door the manage TUI reads railway-agent
+/// conversation transcripts through.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentHarnessToken.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CloudAgentHarnessToken;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",

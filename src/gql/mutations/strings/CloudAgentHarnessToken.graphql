@@ -1,0 +1,3 @@
+mutation CloudAgentHarnessToken($id: ID!, $environmentId: String!) {
+  cloudAgentHarnessToken(id: $id, environmentId: $environmentId)
+}
