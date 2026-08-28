@@ -390,6 +390,18 @@ pub struct MyCloudAgents;
 )]
 pub struct CloudAgentConsoleSessions;
 
+/// Console sessions and reported harness snapshots in one request — the
+/// manage TUI's thread list, which labels each console session with what the
+/// harness inside it is doing.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentSessionThreads.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct CloudAgentSessionThreads;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",

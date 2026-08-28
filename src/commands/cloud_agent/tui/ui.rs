@@ -1935,11 +1935,14 @@ fn tree_line(theme: &Theme, row: &Row, tick: usize) -> Line<'static> {
         }
         (RowKind::Session(..), _) => {
             // The marker is the state: a spinner while the attach is in
-            // flight, a filled dot when this UI has it open (and the agent is
-            // green — a sleeping agent's sessions never are), a quiet branch
-            // when it is only running on the agent.
+            // flight or the harness is working, a filled dot when this UI has
+            // it open (and the agent is green — a sleeping agent's sessions
+            // never are), a hollow mark when the harness waits on a human, a
+            // quiet branch otherwise.
             let (glyph, color) = match row.status.as_deref() {
                 Some("connecting") => (format!("{} ", spinner_frame(tick)), theme.pending),
+                Some("working") => (format!("{} ", spinner_frame(tick)), theme.running),
+                Some("waiting") => ("◌ ".to_string(), theme.pending),
                 Some(_) => ("● ".to_string(), theme.running),
                 None => ("↳ ".to_string(), theme.dim),
             };
@@ -2199,10 +2202,38 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                     session_state(app, &session.name, session.running).to_string(),
                 ));
                 lines.push(kv("kind", session.kind.to_lowercase()));
+                // What the harness inside says it is doing — the full text the
+                // row's label truncates, and the state the row's glyph encodes.
+                if let Some(snapshot) = &session.snapshot {
+                    lines.push(kv("thread", snapshot.state.clone()));
+                    if let Some(text) = snapshot
+                        .latest_prompt
+                        .as_deref()
+                        .or(snapshot.prompt.as_deref())
+                    {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(vec![
+                            Span::styled(" › ", Style::default().fg(theme.dim)),
+                            Span::styled(
+                                truncate(text, 200),
+                                Style::default().fg(theme.fg),
+                            ),
+                        ]));
+                    }
+                    // The agent's own last words, from the daemon transcript —
+                    // only railway-agent threads have one to read.
+                    if let Some(reply) = snapshot.last_reply.as_deref() {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            format!(" {}", truncate(reply, 300)),
+                            Style::default().fg(theme.fg),
+                        )));
+                    }
+                }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     format!(" {}", session.command_summary()),
-                    Style::default().fg(theme.fg),
+                    Style::default().fg(theme.dim),
                 )));
             }
             lines.push(Line::from(""));
@@ -3424,6 +3455,7 @@ mod tests {
                     running: true,
                     attached: true,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
@@ -3511,6 +3543,7 @@ mod tests {
                     running: true,
                     attached: false,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
@@ -3540,6 +3573,7 @@ mod tests {
                     running: true,
                     attached: true,
                     created_at: None,
+                    snapshot: None,
                 },
                 crate::commands::cloud_agent::tui::app::ConsoleSession {
                     name: "claude-two".into(),
@@ -3548,6 +3582,7 @@ mod tests {
                     running: true,
                     attached: false,
                     created_at: None,
+                    snapshot: None,
                 },
             ]);
         }
