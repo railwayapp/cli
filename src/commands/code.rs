@@ -20,7 +20,7 @@ use crate::errors::RailwayError;
 use crate::gql::{mutations, queries};
 use crate::macros::is_stdout_terminal;
 use crate::util::progress::create_shimmer_spinner;
-use crate::util::shell::shell_join;
+use crate::util::shell::{shell_join, shell_quote};
 
 // ---------------------------------------------------------------------------
 // `railway code --codex` / `railway code --claude` / `railway code --grok` /
@@ -114,7 +114,7 @@ pub async fn command(args: Args) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nEvery session is durable and named; disconnecting prints its\n`<agent>:<session>` reference. `railway code --resume <agent>:<session>` puts\nthe terminal back into that exact conversation — reattaching while the\nsession still runs, and once it has ended (the agent slept, or the harness\nexited) waking the agent if needed and restarting the harness into the same\nconversation.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -158,6 +158,22 @@ pub struct LaunchArgs {
     /// or when auth fails on an existing agent
     #[clap(long)]
     refresh_auth: bool,
+
+    /// Put this terminal back into one exact session — `<agent>:<session>`,
+    /// as printed when you disconnect. Reattaches while the session is still
+    /// running; when it has ended (the agent slept, or the harness exited),
+    /// wakes the agent if needed and restarts the harness into the same
+    /// conversation. Takes the terminal directly, like `railway ca ssh`
+    //
+    // Everything else on this struct describes a launch — which harness,
+    // where, with what variables — and a resume answers all of that from the
+    // session's own record, so the flags that would contradict it conflict
+    // outright rather than being silently ignored.
+    #[clap(long, value_name = "AGENT:SESSION", conflicts_with_all = [
+        "codex", "claude", "grok", "railway", "new", "rm", "refresh_auth",
+        "name", "variables", "env_files", "agent_args",
+    ])]
+    pub resume: Option<String>,
 
     /// Name for a newly created agent (defaults to a generated one)
     #[clap(long)]
@@ -227,6 +243,7 @@ impl LaunchArgs {
             && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
+            && self.resume.is_none()
             && self.name.is_none()
             && self.environment.is_none()
             && self.project.is_none()
@@ -257,8 +274,13 @@ impl LaunchArgs {
     /// The flag half of [`Self::wants_pane`], split off the terminal check so
     /// the rule is checked by tests rather than by reading it — `cargo test`
     /// captures stdout, so the whole predicate is always false under one.
+    ///
+    /// `--resume` joins `--rm` and `-- args` on the direct path: it goes back
+    /// into one known session, so the tree is navigation nobody asked for —
+    /// and the revived half of it runs a command the TUI pipeline has no way
+    /// to build.
     fn pane_shaped(&self) -> bool {
-        !self.rm && self.agent_args.is_empty()
+        !self.rm && self.agent_args.is_empty() && self.resume.is_none()
     }
 
     /// Force one harness, overriding preferences — how the TUI passes the
@@ -776,6 +798,55 @@ fn remote_command(
             shell_join(agent_args)
         ),
     }
+}
+
+/// The environment prelude every session command runs behind: the harness
+/// PATH, the GitHub token, and the carried Claude credential. One string so
+/// launch and resume cannot drift — a resumed claude sourced without the env
+/// guard would land on the login picker instead of the conversation.
+pub(crate) fn session_env_prefix() -> String {
+    format!(
+        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
+    )
+}
+
+/// [`remote_command`]'s shape for reviving a conversation whose durable
+/// session has ended: the harness's native resume, pointed at the id the
+/// harness itself reported while it ran (see
+/// [`crate::controllers::cloud_agent::SessionThread`]).
+///
+/// Keyed by the *reported* harness label rather than [`Agent`], because the
+/// report is the only party that knows what actually ran in the session —
+/// and the labels differ ("railway-agent" reports, "railway" launches).
+/// `None` means this harness has no resume the CLI knows to be safe: grok has
+/// no documented one, and an unrecognised label gets a refusal rather than a
+/// guessed flag executed on someone's VM.
+///
+/// The transcript each resume points at lives on the agent's disk, which
+/// survives sleep — that is what makes a dead session recoverable at all.
+pub(crate) fn resume_remote_command(
+    harness: &str,
+    thread_id: &str,
+    style: SessionStyle,
+) -> Option<String> {
+    let resume = match harness {
+        "claude" => format!("claude --resume {}", shell_quote(thread_id)),
+        "codex" => format!("codex resume {}", shell_quote(thread_id)),
+        // The daemon's `--session <id>` rejoins that exact conversation — the
+        // same flag every launch passes, now with the recorded id instead of
+        // a fresh durable-session name. See [`remote_command`].
+        "railway-agent" => format!("railway-agent-tui --session {}", shell_quote(thread_id)),
+        _ => return None,
+    };
+    let after = match style {
+        SessionStyle::FullTerminal => "; exec bash -l",
+        SessionStyle::Pane => "",
+    };
+    Some(format!(
+        "{}export RAILWAY_CODE_AUTOSTARTED=1; {resume}; {}{after}",
+        session_env_prefix(),
+        terminal_reset_printf()
+    ))
 }
 
 /// SSH options shared by every connection this command runs, plus the info
@@ -2488,6 +2559,15 @@ pub async fn resolve_launch(
 pub async fn launch(args: LaunchArgs) -> Result<()> {
     use colored::Colorize;
 
+    // `--resume` is a reconnection, not a launch: the session's own record
+    // answers where and which harness, so none of the launch pipeline applies.
+    // Checked here rather than in `command` so `railway ca start --resume`
+    // lands on the same path — every caller of the launcher funnels through
+    // this function, while only the terminal-shaped ones pass through there.
+    if let Some(reference) = args.resume.as_deref() {
+        return crate::commands::cloud_agent::resume::command(reference, &args).await;
+    }
+
     // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
     // no credential, so it resolves the environment and returns.
     if args.rm {
@@ -3065,9 +3145,7 @@ async fn prepare_inner(
     };
     ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
-    let env_prefix = format!(
-        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
-    );
+    let env_prefix = session_env_prefix();
     let remote_cmd = remote_command(
         agent,
         &env_prefix,
@@ -3875,6 +3953,80 @@ mod tests {
             "{railway_exec}"
         );
         assert!(!railway_exec.contains("--session"), "{railway_exec}");
+    }
+
+    /// A revive runs the harness's native resume against the id the harness
+    /// itself reported — and refuses harnesses without one, because the
+    /// alternative is a guessed flag executed on someone's VM.
+    #[test]
+    fn resume_command_shapes() {
+        use SessionStyle::FullTerminal;
+
+        let claude = resume_remote_command(
+            "claude",
+            "6cbd52a5-8f3b-4a0e-9a5e-0e8f1c2d3e4f",
+            FullTerminal,
+        )
+        .unwrap();
+        assert!(
+            claude.contains("claude --resume 6cbd52a5-8f3b-4a0e-9a5e-0e8f1c2d3e4f;"),
+            "{claude}"
+        );
+        // The same prelude as a launch: without the env guard a resumed
+        // claude lands on the login picker instead of the conversation, and
+        // without the autostart guard `exec bash -l` relaunches the agent on
+        // top of the user.
+        assert!(claude.contains("RAILWAY_CODE_AUTOSTARTED=1"), "{claude}");
+        assert!(claude.contains(".claude-code-env"), "{claude}");
+        assert!(claude.ends_with("exec bash -l"), "{claude}");
+
+        let codex = resume_remote_command("codex", "thread-1", FullTerminal).unwrap();
+        assert!(codex.contains("codex resume thread-1;"), "{codex}");
+
+        // The daemon rejoins the recorded id — the same `--session` every
+        // launch passes, without the fresh-name fallback.
+        let railway =
+            resume_remote_command("railway-agent", "railway-x1y2z3", FullTerminal).unwrap();
+        assert!(
+            railway.contains("railway-agent-tui --session railway-x1y2z3;"),
+            "{railway}"
+        );
+
+        // An id is platform data, not ours — it rides quoted whatever it is.
+        let odd = resume_remote_command("claude", "id with spaces", FullTerminal).unwrap();
+        assert!(odd.contains("claude --resume 'id with spaces';"), "{odd}");
+
+        for harness in ["grok", "shell", "something-new"] {
+            assert!(
+                resume_remote_command(harness, "id", FullTerminal).is_none(),
+                "{harness} has no known-safe resume"
+            );
+        }
+    }
+
+    /// `--resume` answers where and which harness from the session's own
+    /// record, so the flags that would contradict it must conflict out loud —
+    /// a silently ignored `--claude` reads as the CLI resuming into the wrong
+    /// harness.
+    #[test]
+    fn resume_conflicts_with_launch_flags() {
+        assert!(LaunchArgs::try_parse_from(["code", "--resume", "a:b"]).is_ok());
+        for flags in [
+            ["--resume", "a:b", "--claude"],
+            ["--resume", "a:b", "--new"],
+            ["--resume", "a:b", "--rm"],
+        ] {
+            let argv = std::iter::once("code").chain(flags);
+            assert!(
+                LaunchArgs::try_parse_from(argv).is_err(),
+                "{flags:?} should conflict"
+            );
+        }
+        // The direct path, not the TUI pane: the revived half runs a command
+        // the TUI pipeline has no way to build.
+        let args = LaunchArgs::parse_from(["code", "--resume", "a:b"]);
+        assert!(!args.pane_shaped());
+        assert!(!args.is_bare());
     }
 
     /// A pane session must end when the harness does. The shell fallback that

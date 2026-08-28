@@ -13,6 +13,7 @@ pub mod desktop;
 pub mod lifecycle;
 pub mod mcp_sync;
 pub mod prefs;
+pub mod resume;
 pub mod setup;
 pub mod skills_sync;
 pub mod telemetry;

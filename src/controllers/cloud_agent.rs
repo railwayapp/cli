@@ -379,6 +379,72 @@ pub async fn list_sessions(
         .unwrap_or_default())
 }
 
+/// One harness run's last report, from `CloudAgent.sessions` — the platform's
+/// record of which conversation ran inside a console session, kept after the
+/// session itself has ended. `session_id` is the harness's own id for the
+/// conversation (a Claude Code session UUID, a codex thread id…), which is
+/// exactly what the harness's resume flag takes.
+pub struct SessionThread {
+    /// The durable console session the report was attributed to. `None` for
+    /// reports that predate name attribution.
+    pub session_name: Option<String>,
+    /// Which harness reported: claude, codex, grok, railway-agent…
+    pub harness: String,
+    /// The harness's own session id for the conversation.
+    pub session_id: String,
+    /// The VM's clock at the last report — orders reports within one session.
+    pub updated_at: String,
+}
+
+/// The console sessions and the harness reports on one agent, one request.
+///
+/// Both halves in one call because their join is the caller's whole question:
+/// a console session says whether there is something live to reattach to, and
+/// the thread report is what makes a dead one resumable anyway.
+pub async fn session_threads(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+    environment_id: &str,
+) -> Result<(Vec<ConsoleSession>, Vec<SessionThread>)> {
+    let res = post_graphql::<queries::CloudAgentSessionThreads, _>(
+        client,
+        backboard,
+        queries::cloud_agent_session_threads::Variables {
+            cloud_agent_id: agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    let sessions = res
+        .cloud_agent_console_sessions
+        .map(|conn| {
+            conn.edges
+                .into_iter()
+                .map(|edge| ConsoleSession {
+                    name: edge.node.name,
+                    command: edge.node.command,
+                    running: edge.node.run_state.running,
+                    attached: edge.node.attached,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let threads = res
+        .cloud_agent
+        .map(|a| a.sessions)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| SessionThread {
+            session_name: s.session_name,
+            harness: s.harness,
+            session_id: s.session_id,
+            updated_at: s.updated_at,
+        })
+        .collect();
+    Ok((sessions, threads))
+}
+
 /// How an agent was picked, so callers can say so.
 pub enum Resolution {
     /// The caller named it.

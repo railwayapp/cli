@@ -157,7 +157,7 @@ pub struct DeleteArgs {
 /// across the whole account, so resolving an environment unprompted would add a
 /// request — and, in an unlinked directory, a picker — to commands that do not
 /// need one.
-async fn scope(
+pub(crate) async fn scope(
     configs: &mut Configs,
     client: &reqwest::Client,
     project: Option<String>,
@@ -644,7 +644,10 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
 
     let connected = if !args.command.is_empty() {
         telemetry::track_lifecycle_detached("ssh_command");
-        run_command(&agent, &args.command).await
+        // A one-shot command leaves no session to point a resume at.
+        run_command(&agent, &args.command)
+            .await
+            .map(|code| (code, None))
     } else {
         attach(
             client,
@@ -654,6 +657,7 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
             was_running,
         )
         .await
+        .map(|(code, name)| (code, Some(name)))
     };
 
     // The user's work is done; let detached telemetry finish before the
@@ -665,7 +669,7 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // found already running was someone's deliberate state (possibly a session
     // open in another terminal), and a failed connect here is no reason to
     // suspend it.
-    let exit_code = match connected {
+    let (exit_code, session_name) = match connected {
         Ok(code) => code,
         Err(e) => {
             if !was_running {
@@ -684,6 +688,17 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
         agent.name.cyan(),
         agent.name
     );
+    // The reference `railway code --resume` takes, printed while it is known:
+    // it keeps working after the session ends — even across a sleep — where a
+    // plain reattach stops. This is how the reference is learned at all.
+    // Verified against the listing first, because a freshly started session's
+    // minted name may not be the one the platform recorded.
+    if let Some(minted) = session_name
+        && let Some(name) = listed_session_name(client, &backboard, &agent.id, &minted).await
+    {
+        println!("Back into this exact conversation:");
+        println!("  railway code --resume {}:{name}", agent.name);
+    }
 
     Ok(exit_code)
 }
@@ -708,7 +723,9 @@ async fn run_command(agent: &ca::Agent, command: &[String]) -> Result<i32> {
     Ok(code)
 }
 
-/// Attach to a durable session, or start one when the agent has none.
+/// Attach to a durable session, or start one when the agent has none. Hands
+/// back the remote exit code and the session's name, so the caller can print
+/// the reference `railway code --resume` takes.
 ///
 /// Attaching deliberately skips provisioning: the credential, the skills and
 /// the harness were settled when the session was started, and walking that
@@ -720,8 +737,12 @@ async fn attach(
     agent: &ca::Agent,
     requested: Option<&str>,
     was_running: bool,
-) -> Result<i32> {
+) -> Result<(i32, String)> {
     let sessions = ca::list_sessions(client, backboard, &agent.id).await?;
+    // Whether the asked-for name exists at all, live or not — a dead one is
+    // still resumable, and the error below should say so rather than reading
+    // as a typo.
+    let requested_listed = requested.is_some_and(|name| sessions.iter().any(|s| s.name == name));
     let mut running: Vec<_> = sessions.into_iter().filter(|s| s.running).collect();
 
     // An agent that was asleep a moment ago cannot have a live session:
@@ -747,6 +768,16 @@ async fn attach(
     let session_name = match requested {
         Some(name) => {
             if !running.iter().any(|s| s.name == name) {
+                // The name exists but its process is gone (it exited, or the
+                // agent slept). Attach can't help, but resume can — it
+                // restarts the harness into the same conversation.
+                if requested_listed {
+                    bail!(
+                        "Session {name} on {} isn't running any more. Resume its conversation:\n  railway code --resume {}:{name}",
+                        agent.name,
+                        agent.name,
+                    );
+                }
                 bail!(
                     "Agent {} has no running session named {name:?}.{}",
                     agent.name,
@@ -776,13 +807,14 @@ async fn attach(
         format!("Attaching to {} · {}", agent.name, session_name).dimmed()
     );
     let info = code::connect_info(&agent.environment_id, &agent.id).await?;
+    let attached_name = session_name.clone();
     let code = tokio::task::spawn_blocking(move || {
         native::run_native_ssh_with_opts(
             &info.ssh_target,
             None,
             info.identity.as_deref(),
             Some(native::DurableResume {
-                session_name: &session_name,
+                session_name: &attached_name,
                 resume_from_last_read: false,
             }),
             &info.relay_opts,
@@ -790,14 +822,14 @@ async fn attach(
     })
     .await??;
     native::clear_mouse_tracking();
-    Ok(code)
+    Ok((code, session_name))
 }
 
 /// Start the agent's first session: install and configure the harness, then run
 /// it under a *named* durable session so the platform tracks it, it survives
 /// this ssh dying, and the next `railway ca ssh` reattaches instead of starting
-/// a second copy.
-async fn start_session(agent: &ca::Agent) -> Result<i32> {
+/// a second copy. Hands the name back with the exit code, like [`attach`].
+async fn start_session(agent: &ca::Agent) -> Result<(i32, String)> {
     let harness = code::default_harness()?;
     let launch = LaunchArgs::for_target(
         agent.project_id.clone(),
@@ -821,13 +853,14 @@ async fn start_session(agent: &ca::Agent) -> Result<i32> {
     let target = prepared.ssh_target.clone();
     let identity = prepared.identity.clone();
     let opts = prepared.relay_opts.clone();
+    let started_name = session_name.clone();
     let code = tokio::task::spawn_blocking(move || {
         native::run_native_ssh_with_opts(
             &target,
             Some(&remote),
             identity.as_deref(),
             Some(native::DurableResume {
-                session_name: &session_name,
+                session_name: &started_name,
                 resume_from_last_read: false,
             }),
             &opts,
@@ -835,22 +868,53 @@ async fn start_session(agent: &ca::Agent) -> Result<i32> {
     })
     .await??;
     native::clear_mouse_tracking();
-    Ok(code)
+    Ok((code, session_name))
+}
+
+/// The platform's name for a session this process just ran, for a printed
+/// reference.
+///
+/// The relay lists a session under a name of its own — the name the client
+/// sent rides along only as an env stamp (see the manage TUI's
+/// `adopt_pane_sessions`, which reconciles the same gap) — so a reference is
+/// verified against the listing rather than assumed. Best-effort, and `None`
+/// over a guess: a reference that names a session the platform has no record
+/// of would fail the very command it advertises.
+pub(crate) async fn listed_session_name(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+    minted: &str,
+) -> Option<String> {
+    let sessions = ca::list_sessions(client, backboard, agent_id).await.ok()?;
+    if sessions.iter().any(|s| s.name == minted) {
+        return Some(minted.to_string());
+    }
+    // Renamed by the relay. With exactly one session on the record there is
+    // no doubt which it was; with more, any pick would be the guess above.
+    match &sessions[..] {
+        [only] => Some(only.name.clone()),
+        _ => None,
+    }
 }
 
 /// The running sessions, for an error that has to be actionable — the name is
 /// what `--session` takes, so the name is what this leads with.
-fn describe_sessions(sessions: &[ca::ConsoleSession]) -> String {
+pub(crate) fn describe_sessions(sessions: &[ca::ConsoleSession]) -> String {
     if sessions.is_empty() {
         return String::new();
     }
     let mut out = String::from("\n");
     for session in sessions {
+        // The command identifies the session; it is not the session. An exec
+        // session's record carries its whole provision script, and fifty
+        // dimmed lines of shell bury the names this listing exists to offer.
+        let command = truncate(session.command.lines().next().unwrap_or(""), 60);
         out.push_str(&format!(
             "  {}{}  {}\n",
             session.name,
             if session.attached { " (attached)" } else { "" },
-            session.command.dimmed()
+            command.dimmed()
         ));
     }
     out
