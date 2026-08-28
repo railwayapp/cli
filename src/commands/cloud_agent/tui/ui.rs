@@ -2214,10 +2214,7 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                         lines.push(Line::from(""));
                         lines.push(Line::from(vec![
                             Span::styled(" › ", Style::default().fg(theme.dim)),
-                            Span::styled(
-                                truncate(text, 200),
-                                Style::default().fg(theme.fg),
-                            ),
+                            Span::styled(truncate(text, 200), Style::default().fg(theme.fg)),
                         ]));
                     }
                     // The agent's own last words, from the daemon transcript —

@@ -642,7 +642,10 @@ async fn fetch_sessions(
     // The harness snapshots that label the console sessions, joined by the
     // durable session name a report carries. Newest per name wins: one
     // console session can host several runs over its life.
-    let ws_url = res.cloud_agent.as_ref().and_then(|a| a.agent_ws_url.clone());
+    let ws_url = res
+        .cloud_agent
+        .as_ref()
+        .and_then(|a| a.agent_ws_url.clone());
     let mut snapshots: std::collections::HashMap<String, app::ThreadSnapshot> =
         std::collections::HashMap::new();
     for snapshot in res.cloud_agent.map(|a| a.sessions).unwrap_or_default() {
@@ -669,8 +672,15 @@ async fn fetch_sessions(
             }
         }
     }
-    fill_daemon_replies(client, backboard, cloud_agent_id, environment_id, ws_url, &mut snapshots)
-        .await;
+    fill_daemon_replies(
+        client,
+        backboard,
+        cloud_agent_id,
+        environment_id,
+        ws_url,
+        &mut snapshots,
+    )
+    .await;
     Ok(res
         .cloud_agent_console_sessions
         .map(|conn| {

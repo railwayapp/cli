@@ -1458,9 +1458,7 @@ impl App {
                         Some("connected".to_string())
                     } else if connecting && agent_live {
                         Some("connecting".to_string())
-                    } else if agent_live
-                        && let Some(state @ ("working" | "waiting")) = reported
-                    {
+                    } else if agent_live && let Some(state @ ("working" | "waiting")) = reported {
                         // The harness's own state, when it is worth a glyph:
                         // a spinner while it works, a hollow mark when it
                         // waits on a human.
@@ -5605,7 +5603,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -5660,7 +5658,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert_eq!(
@@ -5698,7 +5696,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert_eq!(
@@ -5752,7 +5750,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -5816,7 +5814,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
 
@@ -5858,7 +5856,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         a
@@ -6013,7 +6011,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000 + i, 0),
-                    snapshot: None,
+                snapshot: None,
             })
             .collect();
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions));
@@ -6046,7 +6044,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert_eq!(a.take_auto_connects().len(), 1, "the attach is in flight");
@@ -7016,7 +7014,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.attach_session(
@@ -7517,7 +7515,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         assert_eq!(
             minted.short_name(),
@@ -7539,7 +7537,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         assert_eq!(renamed.short_name(), "railway-ld9");
 
@@ -7551,7 +7549,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         assert_eq!(unknown.short_name(), "quiet-depot-x7v");
     }
@@ -8318,7 +8316,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.panes = panes_fixture();
@@ -8744,7 +8742,7 @@ mod tests {
                 // The agent says someone is attached; that someone is not us.
                 attached: true,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let row = |a: &App| {
@@ -8777,7 +8775,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -8834,7 +8832,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert!(a.ending.contains("claude-one"));
@@ -8861,7 +8859,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -8901,7 +8899,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
 
@@ -8932,7 +8930,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let effect = b.reattach_target_gone("ca_1", "nimble-otter", "claude-one");
@@ -8956,7 +8954,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         let previous = vec![Agent {
             id: "ca_1".into(),
@@ -9074,7 +9072,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -9132,7 +9130,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert!(a.rows().iter().any(|r| r.label == "[S] claude-one"));
@@ -9175,7 +9173,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let mut pane = session("ca_1", "nimble-otter");
@@ -9215,7 +9213,7 @@ mod tests {
                 running: true,
                 attached: true,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         assert_eq!(a.selected_row().unwrap().label, "[S] claude-new");
@@ -9235,7 +9233,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -9270,7 +9268,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         a.cursor = a
@@ -9356,7 +9354,8 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .expect("the agent keeps its row");
         assert_eq!(
-            rows[agent + 1].label, "no sessions — n starts one",
+            rows[agent + 1].label,
+            "no sessions — n starts one",
             "{rows:#?}"
         );
         assert!(!rows[agent + 1].selectable());
@@ -9597,7 +9596,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
         let rows = a.rows();
@@ -9629,7 +9628,7 @@ mod tests {
             running: true,
             attached: true,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         assert_eq!(
             session.short_name(),
@@ -9643,7 +9642,7 @@ mod tests {
             command: Some("npm run dev\nmore".into()),
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
             ..session.clone()
         };
         assert_eq!(other.command_summary(), "npm run dev");
@@ -9685,7 +9684,7 @@ mod tests {
             running: false,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         };
         assert!(!exec.is_interesting());
 
@@ -9717,7 +9716,7 @@ mod tests {
                 running: false,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]);
         }
         let rows = a.rows();
@@ -9892,7 +9891,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         }];
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(sessions.clone()));
         a.sessions_loaded((0, 0, 0, 0), "ca_1", Err("502 from backboard".into()));
@@ -10385,7 +10384,7 @@ mod tests {
             running: true,
             attached: false,
             created_at: None,
-                    snapshot: None,
+            snapshot: None,
         }]);
         if let Load::Loaded(agents) = &mut a.tree[w].projects[p].envs[e].agents {
             agents[0].expanded = true;
@@ -10466,7 +10465,7 @@ mod tests {
                 running: true,
                 attached: false,
                 created_at: None,
-                    snapshot: None,
+                snapshot: None,
             }]),
         );
 
