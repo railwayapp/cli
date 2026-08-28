@@ -69,6 +69,61 @@ pub fn find_cac_file(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Find every `railway.toml` / `railway.json` under `start`, preferring toml
+/// when both exist in the same directory. Respects `.gitignore`.
+pub fn find_all_cac_files(start: &Path) -> Vec<PathBuf> {
+    use std::collections::BTreeMap;
+
+    let mut by_dir: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    let walker = ignore::WalkBuilder::new(start)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .build();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str());
+        let Some(name) = name else {
+            continue;
+        };
+        if name != "railway.toml" && name != "railway.json" {
+            continue;
+        }
+        if path.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some(
+                    ".railway"
+                        | "node_modules"
+                        | "target"
+                        | "vendor"
+                        | "dist"
+                        | ".next"
+                        | "__pycache__"
+                        | ".venv"
+                        | "venv"
+                )
+            )
+        }) {
+            continue;
+        }
+        let Some(dir) = path.parent() else {
+            continue;
+        };
+        match by_dir.get(dir) {
+            Some(existing) if existing.extension().and_then(|e| e.to_str()) == Some("toml") => {}
+            _ => {
+                by_dir.insert(dir.to_path_buf(), path.to_path_buf());
+            }
+        }
+    }
+    by_dir.into_values().collect()
+}
+
 fn display_path(path: &Path) -> String {
     std::env::current_dir()
         .ok()
@@ -160,5 +215,43 @@ mod tests {
     fn returns_none_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         assert!(find_cac_file(dir.path()).is_none());
+    }
+
+    #[test]
+    fn finds_all_cac_files_in_monorepo() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("packages/web")).unwrap();
+        fs::create_dir_all(dir.path().join("packages/api")).unwrap();
+        fs::create_dir_all(dir.path().join("packages/web/node_modules/other")).unwrap();
+        fs::write(dir.path().join("packages/web/railway.json"), "{}\n").unwrap();
+        fs::write(dir.path().join("packages/api/railway.toml"), "[build]\n").unwrap();
+        fs::write(
+            dir.path()
+                .join("packages/web/node_modules/other/railway.json"),
+            "{}\n",
+        )
+        .unwrap();
+        let found = find_all_cac_files(dir.path());
+        assert_eq!(found.len(), 2);
+        assert!(
+            found
+                .iter()
+                .any(|p| p.ends_with("packages/web/railway.json"))
+        );
+        assert!(
+            found
+                .iter()
+                .any(|p| p.ends_with("packages/api/railway.toml"))
+        );
+    }
+
+    #[test]
+    fn find_all_prefers_toml_in_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("railway.toml"), "[build]\n").unwrap();
+        fs::write(dir.path().join("railway.json"), "{}\n").unwrap();
+        let found = find_all_cac_files(dir.path());
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("railway.toml"));
     }
 }

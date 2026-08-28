@@ -396,9 +396,94 @@ fn decode_eval_output(runtime: &str, output: &std::process::Output) -> Result<Va
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() {
+        if let Some(help) = missing_authoring_package_help(runtime, &stderr, &stdout) {
+            bail!("{help}");
+        }
         bail!("{runtime} failed to evaluate IaC file.\n{stderr}\n{stdout}");
     }
     serde_json::from_str(&stdout).with_context(|| {
         format!("{runtime} returned non-JSON output.\nstdout:\n{stdout}\nstderr:\n{stderr}")
     })
+}
+
+fn missing_authoring_package_help(runtime: &str, stderr: &str, stdout: &str) -> Option<String> {
+    let text = format!("{stderr}\n{stdout}");
+    match runtime {
+        "node" if is_missing_js_railway_package(&text) => Some(
+            "The Railway TypeScript SDK is not installed.\n\
+             \n\
+             `.railway/railway.ts` imports `railway/iac`. Install the package \
+             from the repository root, then re-run this command:\n\
+             \n\
+               npm install railway\n\
+             \n\
+             or `pnpm add railway` / `yarn add railway` / `bun add railway`."
+                .to_string(),
+        ),
+        "python3" if is_missing_python_railway_package(&text) => Some(
+            "The Railway Python SDK is not installed.\n\
+             \n\
+             `.railway/railway.py` imports `railway_sdk`. Install it, then re-run this command:\n\
+             \n\
+               pip install railway-sdk"
+                .to_string(),
+        ),
+        "go run" if is_missing_go_railway_package(&text) => Some(
+            "The Railway Go SDK is not installed.\n\
+             \n\
+             `.railway/railway.go` imports `github.com/railwayapp/railway-go-sdk`. \
+             From `.railway/`, run:\n\
+             \n\
+               go get github.com/railwayapp/railway-go-sdk"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn is_missing_js_railway_package(text: &str) -> bool {
+    let missing_module = text.contains("ERR_MODULE_NOT_FOUND")
+        || text.contains("Cannot find package")
+        || text.contains("Cannot find module");
+    missing_module
+        && (text.contains("package 'railway'")
+            || text.contains("package \"railway\"")
+            || text.contains("'railway/iac'")
+            || text.contains("\"railway/iac\"")
+            || text.contains("/railway/iac")
+            || text.contains("imported from") && text.contains("'railway'"))
+}
+
+fn is_missing_python_railway_package(text: &str) -> bool {
+    text.contains("ModuleNotFoundError") && text.contains("railway_sdk")
+}
+
+fn is_missing_go_railway_package(text: &str) -> bool {
+    (text.contains("cannot find module") || text.contains("cannot find package"))
+        && text.contains("railway-go-sdk")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_node_missing_railway_package() {
+        let stderr = r#"node:internal/modules/package_json_reader:301
+  throw new ERR_MODULE_NOT_FOUND(packageName, fileURLToPath(base), null);
+        ^
+
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'railway' imported from /tmp/.railway-config-pull-ioRDH0/railway.ts
+"#;
+        let help = missing_authoring_package_help("node", stderr, "").unwrap();
+        assert!(help.contains("npm install railway"));
+        assert!(help.contains("railway/iac"));
+        assert!(!help.contains("package_json_reader"));
+    }
+
+    #[test]
+    fn ignores_unrelated_node_module_errors() {
+        let stderr = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'left-pad'";
+        assert!(missing_authoring_package_help("node", stderr, "").is_none());
+    }
 }

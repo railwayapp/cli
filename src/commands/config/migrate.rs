@@ -1,18 +1,23 @@
 //! Migrate Config as Code (`railway.json` / `railway.toml`) into
 //! `.railway/railway.ts`. CaC → graph/DSL translation lives in the CLI only.
 
-use std::{fs, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 
 use crate::{
-    client::{GQLClient, post_graphql},
+    client::{GQLClient, post_graphql, post_graphql_raw},
     config::Configs,
     gql::mutations::{self, ServiceInstanceUpdate},
-    util::cac_deprecation::find_cac_file,
+    util::cac_deprecation::{find_all_cac_files, find_cac_file},
 };
 
 use super::*;
@@ -77,6 +82,13 @@ struct CacDeploy {
     overlap_seconds: Option<i64>,
 }
 
+struct CacService {
+    name: String,
+    path: PathBuf,
+    service_id: Option<String>,
+    cac: CacFile,
+}
+
 pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     if !matches!(args.lang.as_str(), "ts" | "py" | "go") {
         bail!("--lang must be one of: ts, py, go");
@@ -86,14 +98,9 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     }
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
-    let cac_path = find_cac_file(&cwd)
-        .context("No railway.json or railway.toml found in this directory or its parents.")?;
-
-    let cac = parse_cac_file(&cac_path)?;
-    let service_name = args
-        .service
-        .clone()
-        .unwrap_or_else(|| guess_service_name(&cwd, &cac_path));
+    let services = discover_cac_services(&cwd, args.service.as_deref()).await?;
+    let project_name = project_name_for_emit(&cwd, &services).await;
+    let named_partial = services.len() == 1;
 
     let railway_dir = cwd.join(".railway");
     let ext = match args.lang.as_str() {
@@ -103,25 +110,41 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     };
     let railway_file = railway_dir.join(format!("railway.{ext}"));
     let emitted = match args.lang.as_str() {
-        "py" => emit_railway_py(&service_name, &cac),
-        "go" => emit_railway_go(&service_name, &cac),
-        _ => emit_railway_ts(&service_name, &cac),
+        "py" => emit_railway_py(&project_name, &services, named_partial),
+        "go" => emit_railway_go(&project_name, &services, named_partial),
+        _ => emit_railway_ts(&project_name, &services, named_partial),
     };
 
-    eprintln!(
-        "{} {}",
-        "Found".dimmed(),
-        cac_path.display().to_string().cyan()
-    );
-    eprintln!("{} service {}", "Migrating".dimmed(), service_name.cyan());
+    for service in &services {
+        eprintln!(
+            "{} {} → {}",
+            "Found".dimmed(),
+            display_rel(&cwd, &service.path).cyan(),
+            service.name.cyan()
+        );
+    }
+    if services.len() > 1 {
+        eprintln!(
+            "{} {} services into one {}",
+            "Merging".dimmed(),
+            services.len().to_string().cyan(),
+            format!(".railway/railway.{ext}").cyan()
+        );
+    } else {
+        eprintln!(
+            "{} service {}",
+            "Migrating".dimmed(),
+            services[0].name.cyan()
+        );
+    }
 
     if !args.apply {
         println!("{emitted}");
         eprintln!(
-            "\n{} Dry-run only. Re-run with {} to write {} and clear the Railway Config File setting.",
+            "\n{} Dry-run only. Re-run with {} to write {} and clear Railway Config File settings.",
             "Note:".yellow().bold(),
             "railway config migrate --apply".cyan(),
-            ".railway/railway.{ts,py,go}".cyan()
+            format!(".railway/railway.{ext}").cyan()
         );
         eprintln!(
             "  {} Review with {} then {}",
@@ -166,16 +189,18 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         _ => {}
     }
 
-    clear_railway_config_file_on_linked_service().await?;
+    clear_railway_config_files(&services).await?;
 
     if args.delete_files {
-        fs::remove_file(&cac_path)
-            .with_context(|| format!("Failed to delete {}", cac_path.display()))?;
-        eprintln!(
-            "{} {}",
-            "Deleted".green().bold(),
-            cac_path.display().to_string().cyan()
-        );
+        for service in &services {
+            fs::remove_file(&service.path)
+                .with_context(|| format!("Failed to delete {}", service.path.display()))?;
+            eprintln!(
+                "{} {}",
+                "Deleted".green().bold(),
+                display_rel(&cwd, &service.path).cyan()
+            );
+        }
     }
 
     eprintln!(
@@ -185,6 +210,243 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         "railway config apply".cyan()
     );
     Ok(())
+}
+
+async fn discover_cac_services(
+    cwd: &Path,
+    service_filter: Option<&str>,
+) -> Result<Vec<CacService>> {
+    let root = git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let mut files = find_all_cac_files(&root);
+    if files.is_empty() {
+        if let Some(one) = find_cac_file(cwd) {
+            files.push(one);
+        }
+    }
+    if files.is_empty() {
+        bail!("No railway.json or railway.toml found in this repository.");
+    }
+
+    let env_index = environment_cac_index(&root).await.unwrap_or_default();
+    let mut claimed = HashSet::new();
+    let mut services = Vec::new();
+
+    for (rel, meta) in &env_index {
+        let path = root.join(rel);
+        if !path.is_file() {
+            eprintln!(
+                "{} {} is set as the Railway Config File for {} but was not found on disk.",
+                "Warning:".yellow().bold(),
+                rel.cyan(),
+                meta.name.cyan()
+            );
+            continue;
+        }
+        let cac = parse_cac_file(&path)?;
+        claimed.insert(canonicalize_or_clone(&path));
+        services.push(CacService {
+            name: meta.name.clone(),
+            path,
+            service_id: Some(meta.id.clone()),
+            cac,
+        });
+    }
+
+    for path in files {
+        if claimed.contains(&canonicalize_or_clone(&path)) {
+            continue;
+        }
+        let name = guess_service_name(cwd, &path);
+        let cac = parse_cac_file(&path)?;
+        services.push(CacService {
+            name,
+            path,
+            service_id: None,
+            cac,
+        });
+    }
+
+    if let Some(filter) = service_filter {
+        services.retain(|service| service.name == filter);
+        if services.is_empty() {
+            bail!("No Config as Code file found for service {filter}.");
+        }
+    }
+
+    services.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
+
+    let mut seen = HashSet::new();
+    for service in &services {
+        if !seen.insert(service.name.clone()) {
+            bail!(
+                "Two Config as Code files map to the service name {}. Pass --service or rename one of them.",
+                service.name
+            );
+        }
+    }
+
+    Ok(services)
+}
+
+fn canonicalize_or_clone(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn git_root(start: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn display_rel(cwd: &Path, path: &Path) -> String {
+    path.strip_prefix(cwd)
+        .or_else(|_| path.strip_prefix(git_root(cwd).unwrap_or_else(|| cwd.to_path_buf())))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+struct EnvCacMeta {
+    id: String,
+    name: String,
+}
+
+async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMeta>> {
+    let configs = Configs::new()?;
+    let linked = configs.get_linked_project().await?;
+    let environment_id = linked
+        .environment
+        .clone()
+        .context("No linked environment")?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let endpoint = configs.get_backboard();
+
+    #[derive(Deserialize)]
+    struct EnvQuery {
+        environment: EnvNode,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EnvNode {
+        config: JsonValue,
+    }
+    #[derive(Deserialize)]
+    struct ProjectQuery {
+        project: Option<ProjectNode>,
+    }
+    #[derive(Deserialize)]
+    struct ProjectNode {
+        services: Option<ServiceConnection>,
+    }
+    #[derive(Deserialize)]
+    struct ServiceConnection {
+        edges: Vec<ServiceEdge>,
+    }
+    #[derive(Deserialize)]
+    struct ServiceEdge {
+        node: ServiceNode,
+    }
+    #[derive(Deserialize)]
+    struct ServiceNode {
+        id: String,
+        name: Option<String>,
+    }
+
+    let env = post_graphql_raw::<EnvQuery, _>(
+        &client,
+        &endpoint,
+        "query IacMigrateEnv($id: String!) { environment(id: $id) { config } }",
+        json!({ "id": environment_id }),
+    )
+    .await?;
+    let names = post_graphql_raw::<ProjectQuery, _>(
+        &client,
+        &endpoint,
+        "query IacMigrateServices($id: String!) { project(id: $id) { services(first: 1000) { edges { node { id name } } } } }",
+        json!({ "id": linked.project }),
+    )
+    .await
+    .ok()
+    .and_then(|data| data.project)
+    .and_then(|project| project.services)
+    .map(|connection| {
+        connection
+            .edges
+            .into_iter()
+            .map(|edge| (edge.node.id, edge.node.name.unwrap_or_default()))
+            .collect::<BTreeMap<_, _>>()
+    })
+    .unwrap_or_default();
+
+    let mut index = BTreeMap::new();
+    let Some(services) = env
+        .environment
+        .config
+        .get("services")
+        .and_then(JsonValue::as_object)
+    else {
+        return Ok(index);
+    };
+    for (id, service) in services {
+        let Some(config_file) = service.get("configFile").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        if !is_cac_config_file(config_file) {
+            continue;
+        }
+        let rel = config_file.trim_start_matches("./");
+        let name = names
+            .get(id)
+            .cloned()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| guess_service_name(root, Path::new(rel)));
+        index.insert(
+            rel.to_string(),
+            EnvCacMeta {
+                id: id.clone(),
+                name,
+            },
+        );
+    }
+    Ok(index)
+}
+
+fn is_cac_config_file(path: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    name == "railway.json" || name == "railway.toml"
+}
+
+async fn project_name_for_emit(cwd: &Path, services: &[CacService]) -> String {
+    if let Ok(configs) = Configs::new() {
+        if let Ok(linked) = configs.get_linked_project().await {
+            if let Some(name) = linked.name.filter(|name| !name.is_empty()) {
+                return name;
+            }
+        }
+    }
+    git_root(cwd)
+        .and_then(|root| root.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .filter(|name| !name.is_empty())
+        .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| {
+            services
+                .first()
+                .map(|service| service.name.clone())
+                .unwrap_or_else(|| "app".to_string())
+        })
 }
 
 fn parse_cac_file(path: &Path) -> Result<CacFile> {
@@ -218,82 +480,107 @@ fn guess_service_name(cwd: &Path, cac_path: &Path) -> String {
         .unwrap_or_else(|| "web".to_string())
 }
 
-fn emit_railway_py(service_name: &str, cac: &CacFile) -> String {
-    let mut kwargs = Vec::new();
-    if let Some(cmd) = &cac.build.build_command {
-        kwargs.push(format!("        build={}", js_string(cmd)));
+fn emit_railway_py(project_name: &str, services: &[CacService], named_partial: bool) -> String {
+    let mut stmts = Vec::new();
+    let mut idents = Vec::new();
+    for service in services {
+        let ident = service_ident(&service.name, &idents);
+        let mut kwargs = Vec::new();
+        if let Some(cmd) = &service.cac.build.build_command {
+            kwargs.push(format!("        build={}", js_string(cmd)));
+        }
+        if let Some(cmd) = &service.cac.deploy.start_command {
+            kwargs.push(format!("        start={}", js_string(cmd)));
+        }
+        if let Some(path) = &service.cac.deploy.healthcheck_path {
+            kwargs.push(format!("        healthcheck={}", js_string(path)));
+        }
+        stmts.push(if kwargs.is_empty() {
+            format!("    {ident} = service({})", js_string(&service.name))
+        } else {
+            format!(
+                "    {ident} = service(\n        {},\n{},\n    )",
+                js_string(&service.name),
+                kwargs.join(",\n")
+            )
+        });
+        idents.push(ident);
     }
-    if let Some(cmd) = &cac.deploy.start_command {
-        kwargs.push(format!("        start={}", js_string(cmd)));
-    }
-    if let Some(path) = &cac.deploy.healthcheck_path {
-        kwargs.push(format!("        healthcheck={}", js_string(path)));
-    }
-    let service_call = if kwargs.is_empty() {
-        format!("    web = service({})", js_string(service_name))
-    } else {
+    let partial = if named_partial {
         format!(
-            "    web = service(\n        {},\n{},\n    )",
-            js_string(service_name),
-            kwargs.join(",\n")
+            "\n# Last resort for a per-service CaC repo. Prefer one .railway file for the\n# project and drop this if you later combine services into that file.\nPARTIAL = {}\n",
+            js_string(&services[0].name)
         )
+    } else {
+        String::new()
     };
     format!(
         r#"from railway_sdk import define_railway, project, service
-
-# Last resort for a per-service CaC repo. Prefer one .railway file for the
-# project and drop this if you later combine services into that file.
-PARTIAL = {project}
-
+{partial}
 @define_railway
 def main(ctx=None):
-{service_call}
-    return project({project}, resources=[web])
+{stmts}
+    return project({project}, resources=[{resources}])
 "#,
-        service_call = service_call,
-        project = js_string(service_name),
+        stmts = stmts.join("\n"),
+        project = js_string(project_name),
+        resources = idents.join(", "),
     )
 }
 
-fn emit_railway_go(service_name: &str, cac: &CacFile) -> String {
-    let mut fields = Vec::new();
-    if let Some(cmd) = &cac.build.build_command {
-        fields.push(format!("\t\t\"build\": {},", js_string(cmd)));
+fn emit_railway_go(project_name: &str, services: &[CacService], named_partial: bool) -> String {
+    let mut stmts = Vec::new();
+    let mut idents = Vec::new();
+    for service in services {
+        let ident = service_ident(&service.name, &idents);
+        let mut fields = Vec::new();
+        if let Some(cmd) = &service.cac.build.build_command {
+            fields.push(format!("\t\t\"build\": {},", js_string(cmd)));
+        }
+        if let Some(cmd) = &service.cac.deploy.start_command {
+            fields.push(format!("\t\t\"start\": {},", js_string(cmd)));
+        }
+        if let Some(path) = &service.cac.deploy.healthcheck_path {
+            fields.push(format!("\t\t\"healthcheck\": {},", js_string(path)));
+        }
+        let config_block = if fields.is_empty() {
+            "nil".to_string()
+        } else {
+            format!("railway.ServiceConfig{{\n{}\n\t}}", fields.join("\n"))
+        };
+        stmts.push(format!(
+            "\t{ident} := railway.ServiceNamed({}, {config_block})",
+            js_string(&service.name)
+        ));
+        idents.push(ident);
     }
-    if let Some(cmd) = &cac.deploy.start_command {
-        fields.push(format!("\t\t\"start\": {},", js_string(cmd)));
-    }
-    if let Some(path) = &cac.deploy.healthcheck_path {
-        fields.push(format!("\t\t\"healthcheck\": {},", js_string(path)));
-    }
-    let config_block = if fields.is_empty() {
-        "nil".to_string()
+    let partial = if named_partial {
+        format!(
+            "\n// Last resort for a per-service CaC repo. Prefer one .railway file for the\n// project and drop this if you later combine services into that file.\nconst Partial = {}\n",
+            js_string(&services[0].name)
+        )
     } else {
-        format!("railway.ServiceConfig{{\n{}\n\t}}", fields.join("\n"))
+        String::new()
     };
+    let resources = idents.join(", ");
     format!(
         r#"package main
 
 import "github.com/railwayapp/railway-go-sdk"
-
-// Last resort for a per-service CaC repo. Prefer one .railway file for the
-// project and drop this if you later combine services into that file.
-const Partial = {name}
-
+{partial}
 func Railway(ctx railway.Context) railway.Project {{
 	ctx = railway.NewContext(ctx)
-	web := railway.ServiceNamed({name}, {config})
-	return railway.ProjectNamed({name}, []any{{web}})
+{stmts}
+	return railway.ProjectNamed({project}, []any{{{resources}}})
 }}
 "#,
-        name = js_string(service_name),
-        config = config_block,
+        stmts = stmts.join("\n"),
+        project = js_string(project_name),
     )
 }
 
-fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
+fn emit_service_fields(cac: &CacFile) -> Vec<String> {
     let mut fields: Vec<String> = Vec::new();
-
     if let Some(cmd) = &cac.build.build_command {
         fields.push(format!("    build: {},", js_string(cmd)));
     }
@@ -312,7 +599,6 @@ fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
     if let Some(regions) = &cac.deploy.multi_region_config {
         fields.push(format!("    replicas: {},", json_to_ts(regions)));
     } else if let Some(region) = &cac.deploy.region {
-        // Single-region placement via replicas map is the IaC form.
         fields.push(format!("    replicas: {{ {}: 1 }},", js_string(region)));
     }
     if let Some(dockerfile) = &cac.build.dockerfile_path {
@@ -341,34 +627,71 @@ fn emit_railway_ts(service_name: &str, cac: &CacFile) -> String {
             .join(", ");
         fields.push(format!("    // watchPatterns from CaC: [{arr}]"));
     }
+    fields
+}
 
-    let body = if fields.is_empty() {
-        format!("  const web = service({});\n", js_string(service_name))
-    } else {
+fn emit_railway_ts(project_name: &str, services: &[CacService], named_partial: bool) -> String {
+    let mut stmts = Vec::new();
+    let mut idents = Vec::new();
+    for service in services {
+        let ident = service_ident(&service.name, &idents);
+        let fields = emit_service_fields(&service.cac);
+        stmts.push(if fields.is_empty() {
+            format!("  const {ident} = service({});", js_string(&service.name))
+        } else {
+            format!(
+                "  const {ident} = service({}, {{\n{}\n  }});",
+                js_string(&service.name),
+                fields.join("\n")
+            )
+        });
+        idents.push(ident);
+    }
+    let partial = if named_partial {
         format!(
-            "  const web = service({}, {{\n{}\n  }});\n",
-            js_string(service_name),
-            fields.join("\n")
+            "\n// Last resort for a per-service CaC repo. Prefer one .railway file for the\n// project and drop this if you later combine services into that file.\nexport const partial = {};\n",
+            js_string(&services[0].name)
         )
+    } else {
+        String::new()
     };
-
     format!(
         r#"import {{ defineRailway, project, service }} from "railway/iac";
-
-// Last resort for a per-service CaC repo. Prefer one .railway file for the
-// project and drop this if you later combine services into that file.
-export const partial = {project};
-
+{partial}
 export default defineRailway(() => {{
 {body}
   return project({project}, {{
-    resources: [web],
+    resources: [{resources}],
   }});
 }});
 "#,
-        body = body,
-        project = js_string(service_name),
+        body = stmts.join("\n"),
+        project = js_string(project_name),
+        resources = idents.join(", "),
     )
+}
+
+fn service_ident(name: &str, taken: &[String]) -> String {
+    let mut ident: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if ident.is_empty() || ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        ident = format!("service_{ident}");
+    }
+    if matches!(
+        ident.as_str(),
+        "service" | "project" | "default" | "package" | "func" | "main"
+    ) {
+        ident = format!("{ident}_service");
+    }
+    let base = ident.clone();
+    let mut n = 2;
+    while taken.contains(&ident) {
+        ident = format!("{base}_{n}");
+        n += 1;
+    }
+    ident
 }
 
 fn js_string(value: &str) -> String {
@@ -396,7 +719,7 @@ fn json_to_ts(value: &JsonValue) -> String {
     }
 }
 
-async fn clear_railway_config_file_on_linked_service() -> Result<()> {
+async fn clear_railway_config_files(services: &[CacService]) -> Result<()> {
     let configs = Configs::new()?;
     let linked = match configs.get_linked_project().await {
         Ok(linked) => linked,
@@ -408,13 +731,6 @@ async fn clear_railway_config_file_on_linked_service() -> Result<()> {
             return Ok(());
         }
     };
-    let Some(service_id) = linked.service.clone() else {
-        eprintln!(
-            "{} No linked service — skipped clearing Railway Config File.",
-            "Warning:".yellow().bold()
-        );
-        return Ok(());
-    };
 
     let Some(environment_id) = linked.environment.clone() else {
         eprintln!(
@@ -424,34 +740,71 @@ async fn clear_railway_config_file_on_linked_service() -> Result<()> {
         return Ok(());
     };
 
+    let mut ids: Vec<(String, String)> = services
+        .iter()
+        .filter_map(|service| {
+            service
+                .service_id
+                .clone()
+                .map(|id| (service.name.clone(), id))
+        })
+        .collect();
+    if ids.is_empty() {
+        if let Some(service_id) = linked.service.clone() {
+            let name = services
+                .first()
+                .map(|service| service.name.clone())
+                .unwrap_or_else(|| "linked service".to_string());
+            ids.push((name, service_id));
+        }
+    }
+    if ids.is_empty() {
+        eprintln!(
+            "{} No service IDs to clear — skipped clearing Railway Config File.",
+            "Warning:".yellow().bold()
+        );
+        return Ok(());
+    }
+
     let client = GQLClient::new_authorized(&configs)?;
-    let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
-        // Empty string clears the dashboard config-file path.
-        railway_config_file: Some(String::new()),
-        ..Default::default()
-    };
-    let vars = mutations::service_instance_update::Variables {
-        service_id,
-        environment_id: Some(environment_id),
-        input,
-    };
-
-    post_graphql::<ServiceInstanceUpdate, _>(&client, configs.get_backboard(), vars)
-        .await
-        .context(
-            "Failed to clear railwayConfigFile on the linked service. Clear it in the dashboard if set.",
-        )?;
-
-    eprintln!(
-        "{} Cleared Railway Config File on the linked service",
-        "Updated".green().bold()
-    );
+    for (name, service_id) in ids {
+        let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
+            railway_config_file: Some(String::new()),
+            ..Default::default()
+        };
+        let vars = mutations::service_instance_update::Variables {
+            service_id,
+            environment_id: Some(environment_id.clone()),
+            input,
+        };
+        post_graphql::<ServiceInstanceUpdate, _>(&client, configs.get_backboard(), vars)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to clear railwayConfigFile on {name}. Clear it in the dashboard if set."
+                )
+            })?;
+        eprintln!(
+            "{} Cleared Railway Config File on {}",
+            "Updated".green().bold(),
+            name.cyan()
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn svc(name: &str, cac: CacFile) -> CacService {
+        CacService {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            service_id: None,
+            cac,
+        }
+    }
 
     #[test]
     fn emits_build_and_start() {
@@ -466,19 +819,50 @@ mod tests {
                 ..Default::default()
             },
         };
-        let out = emit_railway_ts("api", &cac);
+        let services = [svc("api", cac)];
+        let out = emit_railway_ts("api", &services, true);
         assert!(out.contains("build: \"pnpm build\""));
         assert!(out.contains("start: \"pnpm start\""));
         assert!(out.contains("healthcheck: \"/health\""));
         assert!(out.contains("service(\"api\""));
         assert!(out.contains("export const partial = \"api\""));
-        let py = emit_railway_py("api", &cac);
+        let py = emit_railway_py("api", &services, true);
         assert!(py.contains("from railway_sdk import"));
         assert!(py.contains("PARTIAL = \"api\""));
-        let go = emit_railway_go("api", &cac);
+        let go = emit_railway_go("api", &services, true);
         assert!(go.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(go.contains("railway.ServiceNamed"));
         assert!(go.contains("const Partial = \"api\""));
+    }
+
+    #[test]
+    fn merges_multiple_services_without_a_partial() {
+        let web = svc(
+            "web",
+            CacFile {
+                build: CacBuild {
+                    build_command: Some("pnpm --filter web build".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let api = svc(
+            "api",
+            CacFile {
+                deploy: CacDeploy {
+                    start_command: Some("node server.js".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let out = emit_railway_ts("acme", &[web, api], false);
+        assert!(out.contains("service(\"web\""));
+        assert!(out.contains("service(\"api\""));
+        assert!(out.contains("project(\"acme\""));
+        assert!(out.contains("resources: [web, api]"));
+        assert!(!out.contains("export const partial"));
     }
 
     #[test]

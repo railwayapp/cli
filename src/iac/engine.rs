@@ -151,6 +151,10 @@ pub async fn run(
     linked_project: &LinkedProject,
     command: &str,
 ) -> Result<Value> {
+    if command == "current" {
+        return import_current_environment(args, configs, linked_project).await;
+    }
+
     let cwd = std::env::current_dir()?;
     let file = args
         .file
@@ -277,6 +281,68 @@ pub async fn run(
         preview,
     })?;
     Ok(serialized)
+}
+
+/// Import live environment state without evaluating an authoring file.
+///
+/// `railway config pull` only needs the current graph. Evaluating a stub
+/// `service("web")` file was colliding with Config as Code ownership checks
+/// and required the `railway` npm package to be installed.
+async fn import_current_environment(
+    args: &NativeRun,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+) -> Result<Value> {
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let environment_id = linked_project.environment_id()?;
+    let current =
+        fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
+            .await?;
+    let mut options = EnvironmentConfigToGraphOptions {
+        project_name: linked_project.name.clone(),
+        ..Default::default()
+    };
+    if let Some(project_id) = current
+        .project_id
+        .clone()
+        .or_else(|| Some(linked_project.project.clone()))
+    {
+        fill_name_maps(
+            &client,
+            &endpoint,
+            &project_id,
+            current.id.as_str(),
+            &current,
+            &mut options,
+        )
+        .await?;
+    }
+    let current_graph = environment_config_to_graph(&current.config, &options);
+    Ok(serde_json::to_value(RunnerWire {
+        ok: true,
+        command: "current".to_string(),
+        file: args
+            .file
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        current_environment: Some(json!({
+            "projectId": current.project_id,
+            "projectName": options.project_name,
+            "environmentId": current.id,
+            "environmentName": current.name,
+            "configEtag": current.config_etag,
+        })),
+        change_set: None,
+        diff: None,
+        diagnostics: Vec::new(),
+        current_graph: Some(current_graph),
+        desired_graph: None,
+        apply_result: None,
+        claim: false,
+        preview: None,
+    })?)
 }
 
 #[derive(serde::Serialize)]
