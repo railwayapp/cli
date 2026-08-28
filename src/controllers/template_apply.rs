@@ -293,7 +293,7 @@ pub async fn stage_and_commit_patch(
 /// own `environmentStageChanges` call), optionally skipping the deploy
 /// trigger. Returns whether deploys ran.
 pub(crate) async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool) -> Result<bool> {
-    post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
+    let response = post_graphql::<mutations::EnvironmentPatchCommitStaged, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
         mutations::environment_patch_commit_staged::Variables {
@@ -304,6 +304,26 @@ pub(crate) async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool)
     )
     .await
     .context("Failed to commit staged changes")?;
+
+    // Committing the patch starts a `commitPatchToEnvironment` workflow that
+    // actually applies it -- creating and DELETING services (e.g. tearing down
+    // every member of a reverted HA cluster). That workflow runs regardless of
+    // `skip_deploys` (which only suppresses the deploy trigger, not the
+    // create/delete), and the mutation returns its id as soon as the workflow
+    // STARTS. Callers act on the post-commit environment right away -- notably
+    // `postgres ha revert`, which re-reads the config and sweeps any members
+    // still present with direct ServiceDelete calls. Returning before the
+    // workflow finishes races that sweep against the backend's own deletion of
+    // the same services: whichever loses hits `NotFoundError("Service")` and
+    // the command exits 1. Wait for it, exactly like the
+    // `templateDeployV2`/`templateRevert` commits above do.
+    crate::controllers::workflow::wait_for_workflow(
+        &ctx.client,
+        &ctx.configs,
+        response.environment_patch_commit_staged,
+    )
+    .await?;
+
     Ok(auto_deploy)
 }
 
