@@ -22,7 +22,10 @@ use anyhow::{Result, bail};
 use colored::Colorize;
 
 use crate::client::GQLClient;
-use crate::commands::cloud_agent::lifecycle::{describe_sessions, listed_session_name, scope};
+use crate::commands::cloud_agent::herdr;
+use crate::commands::cloud_agent::lifecycle::{
+    attached_session_name, describe_sessions, listed_session_name, scope,
+};
 use crate::commands::cloud_agent::telemetry;
 use crate::commands::cloud_agent::tui::session;
 use crate::commands::code::{self, LaunchArgs};
@@ -191,6 +194,14 @@ async fn connect(reference: &str, launch: &LaunchArgs) -> Result<i32> {
     let (session_name, remote) = match &revival {
         None => {
             telemetry::track_lifecycle_detached("resume_attach");
+            // The requested name is listed — the herdr pane (when this is
+            // one) can hold it straight away.
+            if let Some(env) = herdr::pane_env() {
+                herdr::report_session_detached(
+                    env,
+                    herdr::session_reference(&agent.id, &target.session),
+                );
+            }
             (target.session.clone(), None)
         }
         Some((harness, remote_cmd, session_name)) => {
@@ -203,6 +214,30 @@ async fn connect(reference: &str, launch: &LaunchArgs) -> Result<i32> {
                 )
                 .dimmed()
             );
+            // The revive mints a new durable name, so the reference the herdr
+            // pane holds is now stale. Resolve the listed name in the
+            // background — the relay names sessions itself — and replace it
+            // while the session is still running (see `start_session`).
+            if let Some(env) = herdr::pane_env() {
+                let client = client.clone();
+                let backboard = backboard.clone();
+                let agent_id = agent.id.clone();
+                let minted = session_name.clone();
+                tokio::spawn(async move {
+                    for _ in 0..6 {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if let Some(listed) =
+                            attached_session_name(&client, &backboard, &agent_id, &minted).await
+                        {
+                            herdr::report_session_detached(
+                                env,
+                                herdr::session_reference(&agent_id, &listed),
+                            );
+                            return;
+                        }
+                    }
+                });
+            }
             (session_name.clone(), Some(vec![remote_cmd.clone()]))
         }
     };
@@ -258,6 +293,10 @@ async fn connect(reference: &str, launch: &LaunchArgs) -> Result<i32> {
     if let Some(name) = listed_session_name(client, &backboard, &agent.id, &session_name).await {
         println!("Back into this exact conversation:");
         println!("  railway code --resume {}:{name}", agent.name);
+        // Same correction the printed hint just made, for the herdr pane.
+        if let Some(env) = herdr::pane_env() {
+            herdr::report_session_detached(env, herdr::session_reference(&agent.id, &name));
+        }
     }
 
     Ok(exit_code)

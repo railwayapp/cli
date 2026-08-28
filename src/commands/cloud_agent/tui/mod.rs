@@ -740,6 +740,12 @@ pub async fn run(
     let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
 
     loop {
+        // Whatever this iteration changed — a launch landing, an adopt
+        // renaming a session, the cursor moving panes — the herdr pane this
+        // TUI may run in hears about the active session here, once per
+        // change. A no-op outside a herdr pane.
+        app.report_pane_session();
+
         // Coalesce frames under load: with more messages already waiting,
         // painting now just repeats a screen that is about to change again.
         // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown

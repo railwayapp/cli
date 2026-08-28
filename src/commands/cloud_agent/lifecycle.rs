@@ -15,6 +15,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 
 use crate::client::GQLClient;
+use crate::commands::cloud_agent::herdr;
 use crate::commands::cloud_agent::telemetry;
 use crate::commands::cloud_agent::tui::session;
 use crate::commands::code::{self, LaunchArgs, Progress};
@@ -698,6 +699,11 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     {
         println!("Back into this exact conversation:");
         println!("  railway code --resume {}:{name}", agent.name);
+        // The verified name is also the best thing a herdr pane can hold —
+        // it corrects a minted name the mid-run report couldn't resolve.
+        if let Some(env) = herdr::pane_env() {
+            herdr::report_session_detached(env, herdr::session_reference(&agent.id, &name));
+        }
     }
 
     Ok(exit_code)
@@ -789,7 +795,7 @@ async fn attach(
         None => match running.len() {
             0 => {
                 telemetry::track_lifecycle_detached("ssh_new_session");
-                return start_session(agent).await;
+                return start_session(client, backboard, agent).await;
             }
             1 => running[0].name.clone(),
             _ => bail!(
@@ -802,6 +808,11 @@ async fn attach(
     };
 
     telemetry::track_lifecycle_detached("ssh_attach");
+    // A listed name is already the durable identity, so the herdr pane (when
+    // this is one) can hear about it before the session even opens.
+    if let Some(env) = herdr::pane_env() {
+        herdr::report_session_detached(env, herdr::session_reference(&agent.id, &session_name));
+    }
     println!(
         "{}",
         format!("Attaching to {} · {}", agent.name, session_name).dimmed()
@@ -829,7 +840,11 @@ async fn attach(
 /// it under a *named* durable session so the platform tracks it, it survives
 /// this ssh dying, and the next `railway ca ssh` reattaches instead of starting
 /// a second copy. Hands the name back with the exit code, like [`attach`].
-async fn start_session(agent: &ca::Agent) -> Result<(i32, String)> {
+async fn start_session(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &ca::Agent,
+) -> Result<(i32, String)> {
     let harness = code::default_harness()?;
     let launch = LaunchArgs::for_target(
         agent.project_id.clone(),
@@ -849,6 +864,30 @@ async fn start_session(agent: &ca::Agent) -> Result<(i32, String)> {
     progress.finish();
 
     let session_name = session::durable_name(prepared.harness);
+    // Resolve the name the platform will actually list — the relay names
+    // sessions itself, and the minted one rides only as an env stamp — and
+    // report it to the herdr pane while the session is still running: a
+    // restore prompted by a crash has only what was reported before it.
+    if let Some(env) = herdr::pane_env() {
+        let client = client.clone();
+        let backboard = backboard.to_string();
+        let agent_id = agent.id.clone();
+        let minted = session_name.clone();
+        tokio::spawn(async move {
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if let Some(listed) =
+                    attached_session_name(&client, &backboard, &agent_id, &minted).await
+                {
+                    herdr::report_session_detached(
+                        env,
+                        herdr::session_reference(&agent_id, &listed),
+                    );
+                    return;
+                }
+            }
+        });
+    }
     let remote = vec![prepared.remote_cmd.clone()];
     let target = prepared.ssh_target.clone();
     let identity = prepared.identity.clone();
@@ -869,6 +908,32 @@ async fn start_session(agent: &ca::Agent) -> Result<(i32, String)> {
     .await??;
     native::clear_mouse_tracking();
     Ok((code, session_name))
+}
+
+/// The listed name of the session this process is attached to right now —
+/// the mid-run counterpart of [`listed_session_name`], for reporting a
+/// reference while the session is still going.
+///
+/// Prefers the minted name when the platform lists it; otherwise the sole
+/// running-and-attached session, because this process is demonstrably
+/// attached to one. Two candidates mean another terminal is attached too,
+/// and `None` beats labelling the wrong one — the same conservatism as the
+/// manage TUI's `adopt_pane_sessions`.
+pub(crate) async fn attached_session_name(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+    minted: &str,
+) -> Option<String> {
+    let sessions = ca::list_sessions(client, backboard, agent_id).await.ok()?;
+    if sessions.iter().any(|s| s.name == minted) {
+        return Some(minted.to_string());
+    }
+    let mut attached = sessions.into_iter().filter(|s| s.running && s.attached);
+    match (attached.next(), attached.next()) {
+        (Some(only), None) => Some(only.name),
+        _ => None,
+    }
 }
 
 /// The platform's name for a session this process just ran, for a printed

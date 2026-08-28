@@ -970,6 +970,9 @@ pub struct App {
     pub sessions: Vec<super::session::Session>,
     /// Index into `sessions` of the one being rendered.
     pub active: Option<usize>,
+    /// The `--resume` reference last reported to a herdr pane, so the render
+    /// loop's check is a string compare and a change reports exactly once.
+    pub herdr_reported: Option<String>,
     pub focus: ManageFocus,
     /// The task being prepared, and the steps reported so far.
     pub loading: Loading,
@@ -1114,6 +1117,7 @@ impl App {
             screen: Screen::Manage,
             sessions: Vec::new(),
             active: None,
+            herdr_reported: None,
             focus: ManageFocus::Tree,
             loading: Loading::default(),
             pending_select: None,
@@ -2805,6 +2809,34 @@ impl App {
 
     pub fn active_session(&self) -> Option<&super::session::Session> {
         self.active.and_then(|i| self.sessions.get(i))
+    }
+
+    /// Tell the herdr pane this TUI runs in which session it is showing, when
+    /// that changed. Called every loop iteration; a no-op outside a herdr
+    /// pane, and a string compare inside one.
+    ///
+    /// The reference tracks the *active* pane because that is what a restore
+    /// should come back to — the others are one ⌥f away once it has. A rename
+    /// by [`Self::adopt_pane_sessions`] re-reports through the same compare,
+    /// which is what replaces the short-lived minted name with the listed one
+    /// a resume can actually find.
+    pub fn report_pane_session(&mut self) {
+        let Some(env) = super::super::herdr::pane_env() else {
+            return;
+        };
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        if session.ended() {
+            return;
+        }
+        let reference =
+            super::super::herdr::session_reference(&session.agent_id, &session.durable_name);
+        if self.herdr_reported.as_deref() == Some(reference.as_str()) {
+            return;
+        }
+        self.herdr_reported = Some(reference.clone());
+        super::super::herdr::report_session_detached(env, reference);
     }
 
     /// Show the pane belonging to the session row under the cursor, if it has

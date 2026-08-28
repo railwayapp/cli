@@ -10,6 +10,7 @@
 
 pub mod access;
 pub mod desktop;
+pub mod herdr;
 pub mod lifecycle;
 pub mod mcp_sync;
 pub mod prefs;
