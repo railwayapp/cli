@@ -139,6 +139,73 @@ pub async fn command(
     }
 }
 
+/// The members `ha revert` must still sweep after `templateRevert`, and the
+/// one attached service it must never touch.
+///
+/// templateRevert tears down the members the template itself tracks; a node
+/// added later by LIVE scaling only belongs to the cluster through the
+/// environment config -- the dashboard's revert finds those via canvas-group
+/// membership, which the public API can't stamp. Reverting IS the
+/// instruction to remove every member, so sweep any pre-revert member still
+/// alive afterwards (volume first, then the service, same as scale-down),
+/// matched against the pre-revert snapshot by id: the revert patch clears
+/// parentServiceId on stragglers, so they can't be re-derived from the fresh
+/// config. The public patch path also DROPS parentServiceId (confirmed live:
+/// staging round-trips clusterRole but not the parent link), so a node added
+/// by live scaling is invisible to the membership snapshot too -- a
+/// role-stamped service with NO parent is not a legitimate end state of any
+/// flow, so those are swept as cluster debris as well.
+///
+/// The exception on BOTH paths is the PgBouncer pooler. It hangs off the
+/// root exactly like a member (parent = root, role "edge"), so the
+/// membership walk picks it up and the parent-dropping patch path strands it
+/// looking like debris -- but it belongs to the postgres-with-pgbouncer
+/// feature, not to the HA conversion: it may well predate the convert, and
+/// reverting the cluster to standalone is not an instruction to remove
+/// pooling. `pgbouncer remove` is. Deleting it here silently destroyed a
+/// customer-configured pooler on every revert of a pooled cluster.
+fn revert_sweep_targets(
+    pre_revert_members: &[(String, String)],
+    config: &EnvironmentConfig,
+    root_id: &str,
+    names: &std::collections::BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let is_pooler = |id: &str| {
+        config
+            .services
+            .get(id)
+            .is_some_and(postgres_plugins::is_pgbouncer_service)
+    };
+    let mut leftovers: Vec<(String, String)> = pre_revert_members
+        .iter()
+        .filter(|(member_id, _)| {
+            config
+                .services
+                .get(member_id)
+                .is_some_and(|service| !service.is_deleted.unwrap_or(false))
+                && !is_pooler(member_id)
+        })
+        .cloned()
+        .collect();
+    for (id, service) in &config.services {
+        let orphaned_member = matches!(
+            service.cluster_role.as_deref(),
+            Some("replica") | Some("internal") | Some("edge")
+        ) && service.parent_service_id.is_none()
+            && !service.is_deleted.unwrap_or(false)
+            && id.as_str() != root_id
+            && !is_pooler(id)
+            && !leftovers.iter().any(|(seen, _)| seen == id);
+        if orphaned_member {
+            leftovers.push((
+                id.clone(),
+                names.get(id).cloned().unwrap_or_else(|| id.clone()),
+            ));
+        }
+    }
+    leftovers
+}
+
 /// Members whose live Patroni role/state actually matters for `status` and
 /// `switchover`/`revert`'s precheck -- the data nodes (root + replicas).
 /// Coordinator/edge members don't run Patroni themselves. Each entry is
@@ -522,45 +589,8 @@ async fn revert(
         .await?
         .config;
 
-    // templateRevert tears down the members the template itself tracks; a
-    // node added later by LIVE scaling only belongs to the cluster through
-    // the environment config -- the dashboard's revert finds those via
-    // canvas-group membership, which the public API can't stamp. Reverting
-    // IS the instruction to remove every member, so sweep any pre-revert
-    // member still alive afterwards (volume first, then the service, same
-    // as scale-down). Matched against the pre-revert snapshot by id: the
-    // revert patch clears parentServiceId on stragglers, so they can't be
-    // re-derived from the fresh config.
-    let mut leftovers: Vec<(String, String)> = pre_revert_members
-        .into_iter()
-        .filter(|(member_id, _)| {
-            config
-                .services
-                .get(member_id)
-                .is_some_and(|service| !service.is_deleted.unwrap_or(false))
-        })
-        .collect();
-    // The public patch path DROPS parentServiceId (confirmed live: staging
-    // it round-trips clusterRole but not the parent link), so a node added
-    // by live scaling is invisible to the membership snapshot too. A
-    // role-stamped service with NO parent is not a legitimate end state of
-    // any flow -- treat those as cluster debris and sweep them as well.
     let names = service_name_map(&ctx);
-    for (id, service) in &config.services {
-        let orphaned_member = matches!(
-            service.cluster_role.as_deref(),
-            Some("replica") | Some("internal") | Some("edge")
-        ) && service.parent_service_id.is_none()
-            && !service.is_deleted.unwrap_or(false)
-            && id.as_str() != root.root_id
-            && !leftovers.iter().any(|(seen, _)| seen == id);
-        if orphaned_member {
-            leftovers.push((
-                id.clone(),
-                names.get(id).cloned().unwrap_or_else(|| id.clone()),
-            ));
-        }
-    }
+    let leftovers = revert_sweep_targets(&pre_revert_members, &config, &root.root_id, &names);
     for (member_id, member_name) in &leftovers {
         if !json {
             println!(
@@ -1101,5 +1131,80 @@ mod tests {
     fn format_lag_renders_numbers_and_strings_without_quoting() {
         assert_eq!(format_lag(&serde_json::json!(0)), "0");
         assert_eq!(format_lag(&serde_json::json!("unknown")), "unknown");
+    }
+
+    #[test]
+    fn revert_sweep_never_deletes_the_pgbouncer_pooler() {
+        use crate::controllers::config::{ServiceInstance, ServiceSource};
+
+        let service =
+            |parent: Option<&str>, role: Option<&str>, image: Option<&str>| ServiceInstance {
+                parent_service_id: parent.map(str::to_string),
+                cluster_role: role.map(str::to_string),
+                source: image.map(|i| ServiceSource {
+                    image: Some(i.to_string()),
+                    ..ServiceSource::default()
+                }),
+                ..ServiceInstance::default()
+            };
+
+        // Post-revert config: the pooler and a live-scaled replica survive
+        // with their parent link cleared by the revert patch; the haproxy
+        // edge was orphaned earlier by the parent-dropping public patch.
+        let mut config = EnvironmentConfig::default();
+        config.services.insert(
+            "root".to_string(),
+            service(
+                None,
+                Some("root"),
+                Some("ghcr.io/railwayapp-templates/postgres-ssl:16"),
+            ),
+        );
+        config.services.insert(
+            "pooler".to_string(),
+            service(
+                None,
+                Some("edge"),
+                Some("ghcr.io/railwayapp-templates/pgbouncer:latest"),
+            ),
+        );
+        config.services.insert(
+            "replica-1".to_string(),
+            service(None, Some("replica"), None),
+        );
+        config.services.insert(
+            "haproxy".to_string(),
+            service(
+                None,
+                Some("edge"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/haproxy:3.2"),
+            ),
+        );
+
+        // The membership snapshot picked the pooler up too: it hangs off the
+        // root exactly like a member does.
+        let pre_revert_members = vec![
+            ("replica-1".to_string(), "postgres-replica-1".to_string()),
+            ("pooler".to_string(), "PgBouncer".to_string()),
+        ];
+        let names: std::collections::BTreeMap<String, String> =
+            [("haproxy", "Postgres HA"), ("pooler", "PgBouncer")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+
+        let mut targets = revert_sweep_targets(&pre_revert_members, &config, "root", &names);
+        targets.sort();
+
+        // The replica (snapshot path) and the orphaned haproxy (debris path)
+        // are swept; the pooler is excluded from BOTH paths, and the root is
+        // never a target.
+        assert_eq!(
+            targets,
+            vec![
+                ("haproxy".to_string(), "Postgres HA".to_string()),
+                ("replica-1".to_string(), "postgres-replica-1".to_string()),
+            ]
+        );
     }
 }
