@@ -198,6 +198,24 @@ pub fn compute_ha_state(
     }
 }
 
+/// True when this service IS the PgBouncer pooler, by image -- the same
+/// discriminator `compute_pgbouncer_state` attaches with. The pooler hangs
+/// off the root exactly like an HA member does (parent = root, role "edge"),
+/// so anything walking cluster membership to DELETE services must ask this:
+/// the pooler belongs to the postgres-with-pgbouncer feature, not to the HA
+/// conversion, and `pgbouncer remove` is its only legitimate remover.
+pub fn is_pgbouncer_service(service: &ServiceInstance) -> bool {
+    service
+        .source
+        .as_ref()
+        .and_then(|s| s.image.as_deref())
+        .is_some_and(|image| {
+            image
+                .to_ascii_lowercase()
+                .contains(PGBOUNCER_IMAGE_IDENTIFIER)
+        })
+}
+
 /// Resolves PgBouncer attachment for a cluster/standalone `root_service_id`:
 /// the non-deleted child service whose image is a PgBouncer image.
 pub fn compute_pgbouncer_state(
@@ -207,15 +225,7 @@ pub fn compute_pgbouncer_state(
     let edge = config.services.iter().find(|(_, service)| {
         !service.is_deleted.unwrap_or(false)
             && service.parent_service_id.as_deref() == Some(root_service_id)
-            && service
-                .source
-                .as_ref()
-                .and_then(|s| s.image.as_deref())
-                .is_some_and(|image| {
-                    image
-                        .to_ascii_lowercase()
-                        .contains(PGBOUNCER_IMAGE_IDENTIFIER)
-                })
+            && is_pgbouncer_service(service)
     });
 
     let Some((edge_id, edge_service)) = edge else {
