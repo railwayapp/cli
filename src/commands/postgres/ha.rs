@@ -504,7 +504,50 @@ async fn revert(
     let ha_state = postgres_plugins::compute_ha_state(&config, &root.root_id, &names);
 
     if !ha_state.is_cluster {
-        bail!("{} is not an HA cluster.", root.root_name);
+        // A revert that died mid-sweep leaves no cluster to detect --
+        // templateRevert already cleared the root's HA marker and the
+        // survivors' parent links -- but the members it never got to are
+        // still deployed and still billing, stamped with a cluster role and
+        // no parent. Bailing here would strand them with no command able to
+        // remove them (this is exactly what re-running `ha revert` after a
+        // transient delete failure used to do), so finish the sweep instead.
+        let leftovers = revert_sweep_targets(&[], &config, &root.root_id, &names);
+        if leftovers.is_empty() {
+            bail!("{} is not an HA cluster.", root.root_name);
+        }
+        if !confirm_or_bail(
+            &format!(
+                "{} is already standalone, but {} cluster member(s) from an earlier revert are still deployed. Remove them?",
+                root.root_name.red(),
+                leftovers.len()
+            ),
+            args.yes,
+        )? {
+            println!("Cancelled.");
+            return Ok(());
+        }
+        for (member_id, member_name) in &leftovers {
+            if !json {
+                println!(
+                    "Removing cluster member {} left behind by an earlier revert...",
+                    member_name.bold()
+                );
+            }
+            cluster_scale::delete_member(&ctx, &config, member_id)
+                .await
+                .with_context(|| format!("Failed to remove cluster member {member_name}"))?;
+        }
+        let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+            .await?
+            .config;
+        if !json {
+            println!(
+                "Removed {} cluster member(s) left behind by an earlier revert of {}.",
+                leftovers.len(),
+                root.root_name.bold()
+            );
+        }
+        return print_status(&ctx, &config, json, false).await;
     }
 
     // Live precheck: revert is only safe while the root is the current
@@ -1204,6 +1247,21 @@ mod tests {
             vec![
                 ("haproxy".to_string(), "Postgres HA".to_string()),
                 ("replica-1".to_string(), "postgres-replica-1".to_string()),
+            ]
+        );
+
+        // A RESUMED revert has no membership snapshot at all -- the earlier
+        // run's templateRevert already cleared the HA marker -- so the debris
+        // scan alone must still find what the dead sweep left behind (and
+        // still never the pooler). This is the path a re-run takes after a
+        // member delete failed transiently.
+        let mut resumed = revert_sweep_targets(&[], &config, "root", &names);
+        resumed.sort();
+        assert_eq!(
+            resumed,
+            vec![
+                ("haproxy".to_string(), "Postgres HA".to_string()),
+                ("replica-1".to_string(), "replica-1".to_string()),
             ]
         );
     }
