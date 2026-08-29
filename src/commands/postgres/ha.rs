@@ -628,9 +628,37 @@ async fn revert(
     .await
     .context("Failed to revert HA cluster")?;
 
-    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
-        .await?
-        .config;
+    // templateRevert COMMITS the reverted config, but the commit only
+    // enqueues the apply -- until it lands, a fresh config read still shows
+    // the root HA-enabled. Wait it out (bounded) before sweeping: a sweep
+    // failure past this point is then retryable, because the re-run's
+    // `is_cluster` check sees the applied (standalone) config and takes the
+    // resume path. Without the wait, a retry arriving inside the apply
+    // window took the NORMAL path instead and died in the leader precheck,
+    // probing a half-torn-down cluster and advising an impossible
+    // switchover. On timeout, proceed -- the sweep itself only needs the
+    // pre-revert snapshot, and stopping here would leave every member
+    // running.
+    let mut config;
+    let apply_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+            .await?
+            .config;
+        let still_ha =
+            postgres_plugins::compute_ha_state(&config, &root.root_id, &service_name_map(&ctx))
+                .is_cluster;
+        if !still_ha {
+            break;
+        }
+        if std::time::Instant::now() >= apply_deadline {
+            eprintln!(
+                "Warning: the reverted configuration has not finished applying yet; sweeping remaining members anyway."
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 
     let names = service_name_map(&ctx);
     let leftovers = revert_sweep_targets(&pre_revert_members, &config, &root.root_id, &names);
