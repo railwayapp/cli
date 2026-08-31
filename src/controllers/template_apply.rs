@@ -157,6 +157,35 @@ pub async fn fetch_adoption_rules(
         .unwrap_or_default())
 }
 
+/// The image repositories the companion's own slots run -- the evidence
+/// `ha revert` uses to tell ITS cluster's debris apart from every other
+/// service in the environment. See
+/// [`adoption_eligibility::companion_image_repositories`].
+///
+/// Best-effort: a failed fetch returns an empty list rather than an error,
+/// because revert must still tear the cluster down. The caller narrows what
+/// it will delete instead of widening it.
+pub async fn fetch_companion_image_repositories(
+    ctx: &ServiceContext,
+    template_code: &str,
+) -> Vec<String> {
+    let detail = post_graphql::<queries::TemplateDetail, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::template_detail::Variables {
+            code: template_code.to_string(),
+        },
+    )
+    .await;
+
+    detail
+        .ok()
+        .and_then(|detail| detail.template.serialized_config)
+        .as_ref()
+        .map(adoption_eligibility::companion_image_repositories)
+        .unwrap_or_default()
+}
+
 /// Fetches a template by code, adjusts its `serializedConfig` for the
 /// requested replica/internal/edge counts and edge-variable overrides, then
 /// deploys it onto `params.service_id` as the existing cluster root.

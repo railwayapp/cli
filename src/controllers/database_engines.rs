@@ -226,13 +226,30 @@ pub struct ImageTagVersion {
     pub minor: Option<i64>,
 }
 
+/// The leading run of digits of a tag component, ignoring any variant suffix
+/// attached to it. This is the half of the contract the CLI kept getting
+/// wrong: a component is versioned by what it STARTS with, not by being
+/// numeric end to end.
+fn leading_number(component: &str) -> Option<i64> {
+    let digits: String = component.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Mirrors the server's `extractImageTagVersion`
+/// (`packages/backboard/src/controllers/templates/adoptionImageEligibility.ts`),
+/// which reads the tag's leading `major[.minor]` and ignores everything past
+/// it -- patch digits and `-variant` suffixes alike.
+///
+/// Parsing a component only when it is numeric end to end read `8.2-alpine`
+/// as having no minor and `7-bookworm` as having no version at all, so the
+/// CLI refused conversions the server would have accepted: a distro-variant
+/// tag is pinned to a real `major.minor` as far as the gate that matters is
+/// concerned.
 pub fn image_tag_version(image: Option<&str>) -> Option<ImageTagVersion> {
     let tag = parse_image_ref(image?)?.tag?;
     let mut parts = tag.split('.');
-    let major: i64 = parts.next()?.parse().ok()?;
-    // Only a purely numeric second component is a minor: `8.2` is, the `2-alpine`
-    // of `8.2-alpine` is not.
-    let minor = parts.next().and_then(|part| part.parse::<i64>().ok());
+    let major = leading_number(parts.next()?)?;
+    let minor = parts.next().and_then(leading_number);
     Some(ImageTagVersion { major, minor })
 }
 
@@ -286,11 +303,25 @@ mod tests {
         assert_eq!(v.major, 16);
         assert_eq!(v.minor, None);
 
-        // A suffixed tag carries a major but no readable minor.
+        // A variant suffix does not erase the version underneath it. The
+        // server reads both of these as pinned (`8.2` and `7`), so a CLI that
+        // read "no minor" / "no version" refused conversions the server would
+        // have accepted.
         let v = image_tag_version(Some("redis:8.2-alpine")).unwrap();
         assert_eq!(v.major, 8);
+        assert_eq!(v.minor, Some(2));
+
+        let v = image_tag_version(Some("redis:7-bookworm")).unwrap();
+        assert_eq!(v.major, 7);
         assert_eq!(v.minor, None);
 
+        // Anything past the minor is ignored, patch digits included.
+        let v = image_tag_version(Some("postgres:16.4.2")).unwrap();
+        assert_eq!(v.major, 16);
+        assert_eq!(v.minor, Some(4));
+
+        // A tag has to START with digits to carry a version.
+        assert!(image_tag_version(Some("ghcr.io/x/y:v8.2")).is_none());
         assert!(image_tag_version(Some("ghcr.io/x/y:latest")).is_none());
         assert!(image_tag_version(Some("ghcr.io/x/y")).is_none());
         // A digest is not a version: `sha256:23a8...` must never read as 23.

@@ -39,7 +39,7 @@ use crate::{
     controllers::{
         config::{
             ClusterWiring, DeployConfig, EnvironmentConfig, RegionConfig, ServiceInstance,
-            Variable, VolumeMount, fetch_environment_config,
+            Variable, VolumeInstance, VolumeMount, fetch_environment_config,
         },
         project::ServiceContext,
         template_apply::{self, format_data_node_entry, private_domain_ref},
@@ -168,7 +168,7 @@ pub async fn scale_cluster(
         validate_data_node_quorum(&wiring, target)?;
     }
 
-    let mut patch: BTreeMap<String, ServiceInstance> = BTreeMap::new();
+    let mut patch = ScalePatch::default();
     let mut replicas_summary = None;
     let mut coordinators_summary = None;
     let mut edge_summary = None;
@@ -198,10 +198,11 @@ pub async fn scale_cluster(
     }
 
     if let Some(target) = params.edge {
-        edge_summary = scale_edge(&config, root_id, target, &mut patch)?;
+        edge_summary = scale_edge(&config, root_id, target, &mut patch.services)?;
     }
 
     let created_ids: Vec<String> = patch
+        .services
         .iter()
         .filter(|(id, service)| {
             service.parent_service_id.is_some() && !config.services.contains_key(*id)
@@ -213,7 +214,8 @@ pub async fn scale_cluster(
         false
     } else {
         let env_patch = EnvironmentConfig {
-            services: patch,
+            services: patch.services,
+            volumes: patch.volumes,
             ..EnvironmentConfig::default()
         };
         stage_and_commit(ctx, env_patch, params.auto_deploy).await?
@@ -253,6 +255,26 @@ pub async fn scale_cluster(
     })
 }
 
+/// The staged patch a scale builds up: the member services it adds, removes
+/// or rewires, plus the volume INSTANCES those members mount.
+///
+/// Volumes ride in the SAME patch as the services on purpose -- backboard
+/// sizes a new replica volume off the `clusterRole`/`parentServiceId` of
+/// whichever service mounts it, read from the resolved config, so the volume
+/// instance has to be created by the patch that stamps them and not ahead of
+/// it. See `create_clone_volume`.
+#[derive(Default)]
+struct ScalePatch {
+    services: BTreeMap<String, ServiceInstance>,
+    volumes: BTreeMap<String, VolumeInstance>,
+}
+
+impl ScalePatch {
+    fn is_empty(&self) -> bool {
+        self.services.is_empty() && self.volumes.is_empty()
+    }
+}
+
 async fn stage_and_commit(
     ctx: &ServiceContext,
     patch: EnvironmentConfig,
@@ -285,7 +307,7 @@ async fn scale_replicas(
     root_name: &str,
     target_count: i64,
     names: &BTreeMap<String, String>,
-    patch: &mut BTreeMap<String, ServiceInstance>,
+    patch: &mut ScalePatch,
 ) -> Result<(ScaleDimensionSummary, Vec<(String, String)>)> {
     let root = config
         .services
@@ -339,7 +361,18 @@ async fn scale_replicas(
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
             let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
 
-            patch.insert(
+            // Stage the volume INSTANCE alongside the service that mounts
+            // it, so the same patch that stamps this node's role and parent
+            // is the one that creates the volume -- that pairing is what
+            // sizes a replica's volume against its primary.
+            patch.volumes.insert(
+                volume.id.clone(),
+                VolumeInstance {
+                    is_created: Some(true),
+                    ..VolumeInstance::default()
+                },
+            );
+            patch.services.insert(
                 node.id.clone(),
                 ServiceInstance {
                     parent_service_id: Some(root_id.to_string()),
@@ -406,9 +439,8 @@ async fn scale_replicas(
 
     let (summary, added_ids) = summary;
     restamp_replica_wiring(
-        patch,
+        &mut patch.services,
         &wiring,
-        root_id,
         root_name,
         routing_edge_id.as_deref(),
         &existing,
@@ -429,7 +461,7 @@ async fn scale_internal(
     target_count: i64,
     names: &BTreeMap<String, String>,
     fresh_replica_roster: Option<&[(String, String)]>,
-    patch: &mut BTreeMap<String, ServiceInstance>,
+    patch: &mut ScalePatch,
 ) -> Result<ScaleDimensionSummary> {
     let root = config
         .services
@@ -500,7 +532,18 @@ async fn scale_internal(
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
             let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
 
-            patch.insert(
+            // Stage the volume INSTANCE alongside the service that mounts
+            // it, so the same patch that stamps this node's role and parent
+            // is the one that creates the volume -- that pairing is what
+            // sizes a replica's volume against its primary.
+            patch.volumes.insert(
+                volume.id.clone(),
+                VolumeInstance {
+                    is_created: Some(true),
+                    ..VolumeInstance::default()
+                },
+            );
+            patch.services.insert(
                 node.id.clone(),
                 ServiceInstance {
                     parent_service_id: Some(root_id.to_string()),
@@ -569,7 +612,7 @@ async fn scale_internal(
         }
     };
 
-    restamp_internal_wiring(patch, &wiring, &existing, &data_node_ids);
+    restamp_internal_wiring(&mut patch.services, &wiring, &existing, &data_node_ids);
 
     Ok(summary)
 }
@@ -655,24 +698,32 @@ fn set_patch_var(
     );
 }
 
-/// Restamps the root's declared wiring after a replica scale up/down: each
-/// replica's own identity variable, the routing edge's data-node list, the
-/// peer list joining nodes boot against, and consensus quorum on root +
-/// replicas. Mirrors `useScaleHACluster.tsx`'s `scaleReplicaNodes` restamp
-/// step / `template_apply::restamp_after_replica_adjust`, against
+/// Restamps the root's declared wiring after a replica scale up/down: the
+/// joining nodes' own identity variable, the routing edge's data-node list,
+/// and the peer list and consensus quorum those joining nodes boot against.
+/// Mirrors `useScaleHACluster.tsx`'s `scaleReplicaNodes` restamp step against
 /// `EnvironmentConfig`.
+///
+/// Only the routing edge's list is rebuilt fleet-wide; everything else is
+/// stamped on JOINING nodes only, so a scale-down restamps nothing at all.
+/// See the quorum block below for what stamping a survivor actually costs.
 fn restamp_replica_wiring(
     patch: &mut BTreeMap<String, ServiceInstance>,
     wiring: &ClusterWiring,
-    root_id: &str,
     root_name: &str,
     routing_edge_id: Option<&str>,
     replicas_after: &[(String, String)],
     newly_added_ids: &[String],
 ) {
+    // A replica's identity is its own name, which a scale never changes, so
+    // survivors already carry the right value -- and the one they carry may
+    // be a template reference rather than the literal this would overwrite it
+    // with. Stamp the joining nodes, which have no value yet.
     if let Some(var_name) = &wiring.replica_node_name_variable {
         for (id, name) in replicas_after {
-            set_patch_var(patch, id, var_name, name.to_ascii_lowercase());
+            if newly_added_ids.iter().any(|added| added == id) {
+                set_patch_var(patch, id, var_name, name.to_ascii_lowercase());
+            }
         }
     }
 
@@ -716,11 +767,25 @@ fn restamp_replica_wiring(
         set_patch_var(patch, edge_id, data_var, list);
     }
 
-    if let Some(quorum_var) = &wiring.quorum_variable {
+    // Consensus quorum (e.g. SENTINEL_QUORUM), at a majority of the post-scale
+    // data-node set -- on the JOINING nodes only, for the same reason the peer
+    // list above is. An existing node reads this env exactly once, on the
+    // first boot that writes its coordinator config, and never again: stamping
+    // it changes nothing functionally, while the variable edit still marks
+    // every node stale and restarts the whole fleet at once, racing the
+    // coordinator into a spurious failover mid-scale. Survivors converge at
+    // runtime through the image's own quorum-sync watcher instead -- which is
+    // also why a scale-DOWN stamps nothing here.
+    //
+    // On a real cluster the survivors' copy is a reference to the root's
+    // (`${{Redis-1.SENTINEL_QUORUM}}`), so overwriting it with a literal was
+    // not even a no-op edit -- it detached them from the root's value.
+    if let Some(quorum_var) = &wiring.quorum_variable
+        && !newly_added_ids.is_empty()
+    {
         let data_node_count = replicas_after.len() + 1; // + root
         let quorum = (data_node_count / 2 + 1).to_string();
-        set_patch_var(patch, root_id, quorum_var, quorum.clone());
-        for (id, _) in replicas_after {
+        for id in newly_added_ids {
             set_patch_var(patch, id, quorum_var, quorum.clone());
         }
     }
@@ -967,10 +1032,22 @@ struct CreatedVolume {
     id: String,
 }
 
-/// Creates a volume for a new node at `mount_path`, best-effort naming it
-/// `<node_name>-volume` (retrying with a short unique suffix on a name
-/// clash, and simply leaving it unnamed if that also fails -- volume names
-/// are cosmetic).
+/// Creates the VOLUME RECORD for a new node at `mount_path`, best-effort
+/// naming it `<node_name>-volume` (retrying with a short unique suffix on a
+/// name clash, and simply leaving it unnamed if that also fails -- volume
+/// names are cosmetic).
+///
+/// `environmentId: null` deliberately means "no environment": the record is
+/// created bare, and the caller stages the volume INSTANCE in the same patch
+/// that stamps the node's `clusterRole`/`parentServiceId`. Passing this
+/// environment instead provisioned the instance right here, ahead of the
+/// patch and ahead of the role/parent stamps, which is the whole defect --
+/// backboard sizes a new replica volume to hold a full base backup of its
+/// primary (`resolveNewVolumeInstanceSizeMB`), keyed on exactly that
+/// role/parent pair, and an instance created before either exists reads as an
+/// ordinary volume and lands on the flat plan default. It also spent a
+/// patch-system redeploy per volume on the way. This is the same split the
+/// dashboard's `useScaleHACluster` uses.
 async fn create_clone_volume(
     ctx: &ServiceContext,
     service_id: &str,
@@ -982,7 +1059,7 @@ async fn create_clone_volume(
         ctx.configs.get_backboard(),
         mutations::volume_create::Variables {
             project_id: ctx.project_id.clone(),
-            environment_id: ctx.environment_id.clone(),
+            environment_id: None,
             service_id: service_id.to_string(),
             mount_path: mount_path.to_string(),
         },
@@ -1225,15 +1302,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restamp_replica_wiring_stamps_identity_edge_list_and_quorum() {
-        let wiring = ClusterWiring {
+    fn replica_scale_wiring() -> ClusterWiring {
+        ClusterWiring {
             replica_node_name_variable: Some("PATRONI_NAME".to_string()),
             data_nodes_variable: Some("POSTGRES_NODES".to_string()),
             data_nodes_entry_format: Some("{host}:${{{rootName}.PGPORT}}:8008".to_string()),
             quorum_variable: Some("QUORUM".to_string()),
             ..ClusterWiring::default()
-        };
+        }
+    }
+
+    #[test]
+    fn restamp_replica_wiring_stamps_identity_and_quorum_on_joining_nodes_only() {
+        let wiring = replica_scale_wiring();
+        // 1 -> 2 replicas: r1 survives the scale, r2 is joining.
         let replicas = vec![
             ("r1".to_string(), "postgres-replica-1".to_string()),
             ("r2".to_string(), "postgres-replica-2".to_string()),
@@ -1243,21 +1325,40 @@ mod tests {
         restamp_replica_wiring(
             &mut patch,
             &wiring,
-            "root",
             "db-prod",
             Some("edge"),
             &replicas,
-            &[],
+            &["r2".to_string()],
         );
 
+        // The joining node gets its identity and the post-scale quorum.
         assert_eq!(
-            patch["r1"].variables["PATRONI_NAME"]
+            patch["r2"].variables["PATRONI_NAME"]
                 .as_ref()
                 .unwrap()
                 .value
                 .as_deref(),
-            Some("postgres-replica-1")
+            Some("postgres-replica-2")
         );
+        assert_eq!(
+            patch["r2"].variables["QUORUM"]
+                .as_ref()
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("2")
+        );
+
+        // The survivor and the root are not touched at all. Editing either
+        // one's variables marks it stale and restarts it -- a whole-fleet
+        // restart mid-scale is what races the coordinator into a spurious
+        // failover, and the value it would be "corrected" to is one the
+        // running node never reads again anyway.
+        assert!(!patch.contains_key("r1"));
+        assert!(!patch.contains_key("root"));
+
+        // The routing edge's list is the one thing rebuilt fleet-wide: it is
+        // read per connection, not once at boot.
         let edge_list = patch["edge"].variables["POSTGRES_NODES"]
             .as_ref()
             .unwrap()
@@ -1266,14 +1367,24 @@ mod tests {
             .unwrap();
         assert!(edge_list.contains("db-prod"));
         assert_eq!(edge_list.split(',').count(), 3);
-        assert_eq!(
-            patch["root"].variables["QUORUM"]
-                .as_ref()
-                .unwrap()
-                .value
-                .as_deref(),
-            Some("2")
-        );
+    }
+
+    #[test]
+    fn restamp_replica_wiring_touches_no_node_on_a_scale_down() {
+        let wiring = replica_scale_wiring();
+        // 3 -> 2 replicas: nothing is joining, so nothing is stamped. The
+        // survivors' quorum converges through the image's own quorum-sync
+        // watcher as the removed nodes drop out.
+        let replicas = vec![
+            ("r1".to_string(), "postgres-replica-1".to_string()),
+            ("r2".to_string(), "postgres-replica-2".to_string()),
+        ];
+        let mut patch = BTreeMap::new();
+
+        restamp_replica_wiring(&mut patch, &wiring, "db-prod", Some("edge"), &replicas, &[]);
+
+        assert_eq!(patch.keys().collect::<Vec<_>>(), vec!["edge"]);
+        assert!(patch["edge"].variables.contains_key("POSTGRES_NODES"));
     }
 
     #[test]
@@ -1474,7 +1585,6 @@ mod tests {
         restamp_replica_wiring(
             &mut patch,
             &wiring,
-            "root",
             "db",
             Some("edge"),
             &[("r1".to_string(), "replica-1".to_string())],
@@ -1499,7 +1609,6 @@ mod tests {
         restamp_replica_wiring(
             &mut patch,
             &wiring,
-            "root",
             "Redis-1",
             None,
             &replicas,
@@ -1542,7 +1651,6 @@ mod tests {
         restamp_replica_wiring(
             &mut patch,
             &wiring,
-            "root",
             "MySQL-1",
             None,
             &[("r1".to_string(), "MySQL-2".to_string())],
@@ -1586,6 +1694,204 @@ mod tests {
         };
         for replicas in [0, 1, 2, 3] {
             assert!(validate_data_node_quorum(&external_coordinator, replicas).is_ok());
+        }
+    }
+
+    /// A `ServiceContext` pointed at a stub backboard.
+    fn mock_context(
+        server: &crate::testkit::MockBackboard,
+        dir: &tempfile::TempDir,
+    ) -> ServiceContext {
+        ServiceContext {
+            client: reqwest::Client::new(),
+            configs: server.configs(dir),
+            project: serde_json::from_value(serde_json::json!({
+                "id": "proj-1",
+                "name": "db",
+                "workspaceId": null,
+                "deletedAt": null,
+                "workspace": null,
+                "buckets": { "edges": [] },
+                "environments": { "edges": [] },
+                "services": { "edges": [] },
+            }))
+            .unwrap(),
+            project_id: "proj-1".to_string(),
+            environment_id: "env-1".to_string(),
+            environment_name: "production".to_string(),
+            service_id: "root".to_string(),
+            service_name: "Redis-1".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn scaling_up_stages_the_new_replica_volume_in_the_same_patch_as_its_role_and_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = crate::testkit::MockBackboard::spawn();
+
+        let environment_config = serde_json::json!({
+            "services": {
+                "root": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/redis-ha/redis-sentinel:8.4" },
+                    "clusterRole": "root",
+                    "clusterWiring": {
+                        "quorumVariable": "SENTINEL_QUORUM",
+                        "peerHostsVariable": "SENTINEL_HOSTS",
+                        "peerHostsEntryFormat": "{host}:26379",
+                    },
+                },
+                "replica-1": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/redis-ha/redis-sentinel:8.4" },
+                    "clusterRole": "replica",
+                    "parentServiceId": "root",
+                    "volumeMounts": { "vol-1": { "mountPath": "/data" } },
+                },
+                "replica-2": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/redis-ha/redis-sentinel:8.4" },
+                    "clusterRole": "replica",
+                    "parentServiceId": "root",
+                    "volumeMounts": { "vol-2": { "mountPath": "/data" } },
+                },
+            }
+        });
+        let environment_payload = serde_json::json!({
+            "environment": { "id": "env-1", "name": "production", "config": environment_config }
+        });
+
+        server.stub("GetEnvironmentConfig", environment_payload.clone());
+        // 2 -> 4 replicas: the data nodes carry the failover vote here, so
+        // only an odd total (5) clears the quorum fence.
+        server.stub(
+            "ServiceCreate",
+            serde_json::json!({
+                "serviceCreate": { "id": "replica-3", "name": "Redis-4" }
+            }),
+        );
+        server.stub(
+            "ServiceCreate",
+            serde_json::json!({
+                "serviceCreate": { "id": "replica-4", "name": "Redis-5" }
+            }),
+        );
+        server.stub(
+            "VolumeCreate",
+            serde_json::json!({
+                "volumeCreate": { "id": "vol-3", "name": "Redis-4-volume" }
+            }),
+        );
+        server.stub(
+            "VolumeCreate",
+            serde_json::json!({
+                "volumeCreate": { "id": "vol-4", "name": "Redis-5-volume" }
+            }),
+        );
+        server.stub(
+            "VolumeNameUpdate",
+            serde_json::json!({ "volumeUpdate": { "name": "Redis-4-volume" } }),
+        );
+        server.stub(
+            "EnvironmentStagedChanges",
+            serde_json::json!({
+                "environmentStagedChanges": { "id": "patch-0", "status": "STAGED", "patch": null }
+            }),
+        );
+        server.stub(
+            "EnvironmentStageChanges",
+            serde_json::json!({
+                "environmentStageChanges": { "id": "patch-1", "status": "STAGED" }
+            }),
+        );
+        server.stub(
+            "EnvironmentPatchCommitStaged",
+            serde_json::json!({
+                "environmentPatchCommitStaged": "wf-1"
+            }),
+        );
+        server.stub(
+            "WorkflowStatus",
+            serde_json::json!({
+                "workflowStatus": { "status": "Complete", "error": null }
+            }),
+        );
+
+        let ctx = mock_context(&server, &dir);
+        let names = names(&[
+            ("root", "Redis-1"),
+            ("replica-1", "Redis-2"),
+            ("replica-2", "Redis-3"),
+        ]);
+
+        scale_cluster(
+            &ctx,
+            "root",
+            "Redis-1",
+            &names,
+            ScaleClusterParams {
+                replicas: Some(4),
+                coordinators: None,
+                edge: None,
+                auto_deploy: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The volume RECORD is created with no environment: creating the
+        // instance here would put it outside the patch, ahead of the
+        // clusterRole/parentServiceId stamps that size it against the primary.
+        let volume_create = server.variables_for("VolumeCreate");
+        assert_eq!(volume_create.len(), 2);
+        for variables in &volume_create {
+            assert_eq!(
+                variables.get("environmentId"),
+                Some(&serde_json::Value::Null),
+                "the volume instance must not be provisioned outside the patch"
+            );
+        }
+
+        // The instance is created BY the staged patch instead, in the same
+        // input that carries the node's role and parent -- which is what
+        // `resolveNewVolumeInstanceSizeMB` reads to match the primary's size.
+        let staged = server.variables_for("EnvironmentStageChanges");
+        assert_eq!(staged.len(), 1);
+        let input = staged[0].get("input").unwrap();
+        for volume_id in ["vol-3", "vol-4"] {
+            assert_eq!(
+                input.pointer(&format!("/volumes/{volume_id}/isCreated")),
+                Some(&serde_json::Value::Bool(true)),
+                "{volume_id} was not staged for creation by the patch"
+            );
+        }
+        for (service_id, volume_id) in [("replica-3", "vol-3"), ("replica-4", "vol-4")] {
+            assert_eq!(
+                input.pointer(&format!("/services/{service_id}/clusterRole")),
+                Some(&serde_json::Value::String("replica".to_string()))
+            );
+            assert_eq!(
+                input.pointer(&format!("/services/{service_id}/parentServiceId")),
+                Some(&serde_json::Value::String("root".to_string()))
+            );
+            assert_eq!(
+                input.pointer(&format!(
+                    "/services/{service_id}/volumeMounts/{volume_id}/mountPath"
+                )),
+                Some(&serde_json::Value::String("/data".to_string()))
+            );
+        }
+
+        // And the surviving nodes are still not restamped (see
+        // `restamp_replica_wiring`): only the joining node carries quorum.
+        assert_eq!(
+            input.pointer("/services/replica-3/variables/SENTINEL_QUORUM/value"),
+            Some(&serde_json::Value::String("3".to_string()))
+        );
+        for survivor in ["replica-1", "replica-2", "root"] {
+            assert!(
+                input
+                    .pointer(&format!("/services/{survivor}/variables/SENTINEL_QUORUM"))
+                    .is_none(),
+                "{survivor} was restamped and will restart with the rest of the fleet"
+            );
         }
     }
 }

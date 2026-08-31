@@ -18,7 +18,7 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::controllers::{
-    adoption_eligibility::{AdoptionRules, AdoptionTarget},
+    adoption_eligibility::{self, AdoptionRules, AdoptionTarget},
     cluster_probe,
     cluster_scale::{self, EdgeScaleSummary, ScaleClusterParams, ScaleDimensionSummary},
     config::{ClusterWiring, EnvironmentConfig, fetch_environment_config},
@@ -154,7 +154,7 @@ pub async fn command(
 }
 
 /// The members `ha revert` must still sweep after `templateRevert`, and the
-/// one attached service it must never touch.
+/// services it must never touch.
 ///
 /// templateRevert tears down the members the template itself tracks; a node
 /// added later by LIVE scaling only belongs to the cluster through the
@@ -164,16 +164,23 @@ pub async fn command(
 /// alive afterwards (volume first, then the service, same as scale-down),
 /// matched against the pre-revert snapshot by id: the revert patch clears
 /// parentServiceId on stragglers, so they can't be re-derived from the fresh
-/// config. The public patch path also DROPS parentServiceId (confirmed live:
-/// staging round-trips clusterRole but not the parent link), so a node added
-/// by live scaling is invisible to the membership snapshot too -- a
-/// role-stamped service with NO parent is not a legitimate end state of any
-/// flow, so those are swept as cluster debris as well.
+/// config.
 ///
-/// The exception on BOTH paths is the engine's pooler, where it declares one.
-/// It hangs off the root exactly like a member (parent = root, role "edge"),
-/// so the membership walk picks it up and the parent-dropping patch path
-/// strands it looking like debris -- but it belongs to the pooling feature,
+/// The public patch path also DROPS parentServiceId on creation, so a node
+/// added by live scaling is invisible to the membership snapshot too. Those
+/// are swept as debris, but only on evidence that they are THIS cluster's
+/// debris: a role-stamped, parentless service qualifies just when it runs an
+/// image the engine's own companion publishes (`companion_repositories`).
+/// Without that scope the scan was environment-wide -- every orphan of every
+/// engine, so reverting a Redis cluster in a mixed environment would delete
+/// the Postgres cluster's live-scaled replicas, and a role stamp was the only
+/// thing standing between an unrelated service and deletion. An empty
+/// `companion_repositories` (the record was unreachable) skips the debris
+/// scan entirely: the snapshot members are the part we can still prove.
+///
+/// The pooler is excluded from BOTH paths where the engine declares one. It
+/// hangs off the root exactly like a member (parent = root, role "edge"), so
+/// the membership walk picks it up -- but it belongs to the pooling feature,
 /// not to the HA conversion: it may well predate the convert, and reverting
 /// the cluster to standalone is not an instruction to remove pooling. `pool
 /// remove` is. Deleting it here silently destroyed a customer-configured
@@ -184,6 +191,7 @@ fn revert_sweep_targets(
     config: &EnvironmentConfig,
     root_id: &str,
     names: &BTreeMap<String, String>,
+    companion_repositories: &[String],
 ) -> Vec<(String, String)> {
     let is_pooler = |id: &str| {
         engine.pooling.is_some_and(|pooling| {
@@ -204,11 +212,21 @@ fn revert_sweep_targets(
         })
         .cloned()
         .collect();
+
+    if companion_repositories.is_empty() {
+        return leftovers;
+    }
+
     for (id, service) in &config.services {
+        let runs_a_companion_image = adoption_eligibility::image_is_from_repository(
+            service.source.as_ref().and_then(|s| s.image.as_deref()),
+            companion_repositories,
+        );
         let orphaned_member = matches!(
             service.cluster_role.as_deref(),
             Some("replica") | Some("internal") | Some("edge")
         ) && service.parent_service_id.is_none()
+            && runs_a_companion_image
             && !service.is_deleted.unwrap_or(false)
             && id.as_str() != root_id
             && !is_pooler(id)
@@ -693,6 +711,26 @@ async fn revert(
     let names = service_name_map(&ctx);
     let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
 
+    let template_code = engine
+        .ha
+        .map(|ha| ha.template_code.to_string())
+        .with_context(|| {
+            format!(
+                "{} has no high-availability companion template.",
+                engine.display_name
+            )
+        })?;
+
+    // What this engine's companion actually deploys, so the sweep below can
+    // recognize its own debris instead of every orphan in the environment.
+    let companion_repositories =
+        template_apply::fetch_companion_image_repositories(&ctx, &template_code).await;
+    if companion_repositories.is_empty() {
+        eprintln!(
+            "Warning: could not read the {template_code} template's images, so members left behind by an earlier scale-up cannot be told apart from unrelated services and will be left in place. Re-run once the template is reachable, or remove them from the dashboard."
+        );
+    }
+
     if !ha_state.is_cluster {
         // A revert that died mid-sweep leaves no cluster to detect --
         // templateRevert already cleared the root's HA marker and the
@@ -701,15 +739,29 @@ async fn revert(
         // no parent. Bailing here would strand them with no command able to
         // remove them (this is exactly what re-running `ha revert` after a
         // transient delete failure used to do), so finish the sweep instead.
-        let leftovers = revert_sweep_targets(engine, &[], &config, &root.root_id, &names);
+        let leftovers = revert_sweep_targets(
+            engine,
+            &[],
+            &config,
+            &root.root_id,
+            &names,
+            &companion_repositories,
+        );
         if leftovers.is_empty() {
             bail!("{} is not an HA cluster.", root.root_name);
         }
+        // Name them. This path deletes services the user never listed, on
+        // evidence they cannot see, so the prompt has to show its work.
         if !confirm_or_bail(
             &format!(
-                "{} is already standalone, but {} cluster member(s) from an earlier revert are still deployed. Remove them?",
+                "{} is already standalone, but {} cluster member(s) from an earlier revert are still deployed: {}. Remove them?",
                 root.root_name.red(),
-                leftovers.len()
+                leftovers.len(),
+                leftovers
+                    .iter()
+                    .map(|(_, name)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             args.yes,
         )? {
@@ -739,16 +791,6 @@ async fn revert(
         }
         return print_status(engine, &ctx, &config, json, false).await;
     }
-
-    let template_code = engine
-        .ha
-        .map(|ha| ha.template_code.to_string())
-        .with_context(|| {
-            format!(
-                "{} has no high-availability companion template.",
-                engine.display_name
-            )
-        })?;
 
     // Live precheck: revert is only safe while the root is the current
     // primary. A stale former primary still running as a replica would
@@ -860,8 +902,14 @@ async fn revert(
     }
 
     let names = service_name_map(&ctx);
-    let leftovers =
-        revert_sweep_targets(engine, &pre_revert_members, &config, &root.root_id, &names);
+    let leftovers = revert_sweep_targets(
+        engine,
+        &pre_revert_members,
+        &config,
+        &root.root_id,
+        &names,
+        &companion_repositories,
+    );
     for (member_id, member_name) in &leftovers {
         if !json {
             println!(
@@ -1620,8 +1668,35 @@ mod tests {
         assert_eq!(format_lag(&serde_json::json!("unknown")), "unknown");
     }
 
-    #[test]
-    fn revert_sweep_never_deletes_the_engines_pooler() {
+    /// The repositories `postgres-ha` declares across its slots, as
+    /// `companion_image_repositories` reads them off the live record.
+    fn postgres_ha_repositories() -> Vec<String> {
+        [
+            "ghcr.io/railwayapp-templates/postgres-ha/etcd",
+            "ghcr.io/railwayapp-templates/postgres-ha/haproxy",
+            "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn redis_ha_repositories() -> Vec<String> {
+        [
+            "ghcr.io/railwayapp-templates/redis-ha/haproxy",
+            "ghcr.io/railwayapp-templates/redis-ha/redis-sentinel",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    /// A mixed environment mid-revert: a Postgres HA cluster (whose pooler
+    /// and live-scaled replica lost their parent links to the revert patch,
+    /// and whose haproxy was orphaned earlier by the parent-dropping public
+    /// patch) sitting beside an unrelated app service that happens to carry
+    /// an edge role.
+    fn mixed_environment() -> (EnvironmentConfig, BTreeMap<String, String>) {
         use crate::controllers::config::{ServiceInstance, ServiceSource};
 
         let service =
@@ -1635,16 +1710,13 @@ mod tests {
                 ..ServiceInstance::default()
             };
 
-        // Post-revert config: the pooler and a live-scaled replica survive
-        // with their parent link cleared by the revert patch; the haproxy
-        // edge was orphaned earlier by the parent-dropping public patch.
         let mut config = EnvironmentConfig::default();
         config.services.insert(
             "root".to_string(),
             service(
                 None,
                 Some("root"),
-                Some("ghcr.io/railwayapp-templates/postgres-ssl:16"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16"),
             ),
         );
         config.services.insert(
@@ -1657,7 +1729,11 @@ mod tests {
         );
         config.services.insert(
             "replica-1".to_string(),
-            service(None, Some("replica"), None),
+            service(
+                None,
+                Some("replica"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16"),
+            ),
         );
         config.services.insert(
             "haproxy".to_string(),
@@ -1668,19 +1744,38 @@ mod tests {
             ),
         );
 
+        let names: BTreeMap<String, String> = [
+            ("haproxy", "Postgres HA"),
+            ("pooler", "PgBouncer"),
+            ("replica-1", "Postgres-2"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        (config, names)
+    }
+
+    #[test]
+    fn revert_sweep_never_deletes_the_engines_pooler() {
+        let (config, names) = mixed_environment();
+        let repositories = postgres_ha_repositories();
+
         // The membership snapshot picked the pooler up too: it hangs off the
         // root exactly like a member does.
         let pre_revert_members = vec![
-            ("replica-1".to_string(), "postgres-replica-1".to_string()),
+            ("replica-1".to_string(), "Postgres-2".to_string()),
             ("pooler".to_string(), "PgBouncer".to_string()),
         ];
-        let names: BTreeMap<String, String> = [("haproxy", "Postgres HA"), ("pooler", "PgBouncer")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
 
-        let mut targets =
-            revert_sweep_targets(&POSTGRES, &pre_revert_members, &config, "root", &names);
+        let mut targets = revert_sweep_targets(
+            &POSTGRES,
+            &pre_revert_members,
+            &config,
+            "root",
+            &names,
+            &repositories,
+        );
         targets.sort();
 
         // The replica (snapshot path) and the orphaned haproxy (debris path)
@@ -1690,7 +1785,7 @@ mod tests {
             targets,
             vec![
                 ("haproxy".to_string(), "Postgres HA".to_string()),
-                ("replica-1".to_string(), "postgres-replica-1".to_string()),
+                ("replica-1".to_string(), "Postgres-2".to_string()),
             ]
         );
 
@@ -1699,28 +1794,62 @@ mod tests {
         // scan alone must still find what the dead sweep left behind (and
         // still never the pooler). This is the path a re-run takes after a
         // member delete failed transiently.
-        let mut resumed = revert_sweep_targets(&POSTGRES, &[], &config, "root", &names);
+        let mut resumed =
+            revert_sweep_targets(&POSTGRES, &[], &config, "root", &names, &repositories);
         resumed.sort();
         assert_eq!(
             resumed,
             vec![
                 ("haproxy".to_string(), "Postgres HA".to_string()),
-                ("replica-1".to_string(), "replica-1".to_string()),
+                ("replica-1".to_string(), "Postgres-2".to_string()),
             ]
         );
+    }
 
-        // An engine that declares no pooler has no such exception to make:
-        // the same edge child is ordinary cluster debris to Redis, whose
-        // clusters never carry one.
-        let mut without_pooler = revert_sweep_targets(&REDIS, &[], &config, "root", &names);
-        without_pooler.sort();
+    #[test]
+    fn revert_sweep_never_reaches_another_engines_cluster() {
+        // Reverting a REDIS cluster in this environment. Every orphan here
+        // belongs to the Postgres cluster, and a `clusterRole` stamp is all
+        // they have in common with Redis debris -- which is exactly why the
+        // role stamp alone cannot be the test. Scoped to what the redis-ha
+        // companion actually publishes, none of them match.
+        let (config, names) = mixed_environment();
+
+        let swept = revert_sweep_targets(
+            &REDIS,
+            &[],
+            &config,
+            "redis-root",
+            &names,
+            &redis_ha_repositories(),
+        );
+
+        assert!(
+            swept.is_empty(),
+            "a redis revert swept the postgres cluster: {swept:?}"
+        );
+    }
+
+    #[test]
+    fn revert_sweep_skips_the_debris_scan_when_the_companion_is_unreadable() {
+        // No repositories means the template record was unreachable, so
+        // there is no evidence tying any orphan to this cluster. The
+        // snapshot members are still provably members and are still swept;
+        // the debris scan is skipped rather than widened to everything.
+        let (config, names) = mixed_environment();
+
+        let swept = revert_sweep_targets(
+            &POSTGRES,
+            &[("replica-1".to_string(), "Postgres-2".to_string())],
+            &config,
+            "root",
+            &names,
+            &[],
+        );
+
         assert_eq!(
-            without_pooler,
-            vec![
-                ("haproxy".to_string(), "Postgres HA".to_string()),
-                ("pooler".to_string(), "PgBouncer".to_string()),
-                ("replica-1".to_string(), "replica-1".to_string()),
-            ]
+            swept,
+            vec![("replica-1".to_string(), "Postgres-2".to_string())]
         );
     }
 

@@ -259,16 +259,29 @@ pub fn member_identity_name(
         .unwrap_or_else(|| service_name.to_ascii_lowercase())
 }
 
-/// If `service_id` is an edge child (a pooler or router in front of the
-/// database), resolves to its parent -- the actual database root -- so a
-/// command invoked with `--service` pointed at an edge node still operates on
-/// the right root.
+/// If `service_id` is any non-root member of a cluster -- a pooler or router
+/// in front of the database, a replica, or a coordinator -- resolves to its
+/// parent, the actual database root, so a command invoked with `--service`
+/// pointed at a member still operates on the right root.
+///
+/// Every member role hops, not just `edge`. Pointing `--service` at a REPLICA
+/// used to leave the replica standing in for the root: `ha revert` then
+/// prechecked the replica's own primariness, handed `templateRevert` the
+/// replica's id (whose resolver validates no root), and took a sweep snapshot
+/// that listed the TRUE root as a deletable member.
 pub fn resolve_root_service_id(config: &EnvironmentConfig, service_id: &str) -> String {
     match config.services.get(service_id) {
-        Some(service) if service.cluster_role.as_deref() == Some("edge") => service
-            .parent_service_id
-            .clone()
-            .unwrap_or_else(|| service_id.to_string()),
+        Some(service)
+            if matches!(
+                service.cluster_role.as_deref(),
+                Some("edge") | Some("replica") | Some("internal")
+            ) =>
+        {
+            service
+                .parent_service_id
+                .clone()
+                .unwrap_or_else(|| service_id.to_string())
+        }
         _ => service_id.to_string(),
     }
 }
@@ -609,5 +622,28 @@ mod tests {
         };
         let config = config_with(vec![("edge", orphan)]);
         assert_eq!(resolve_root_service_id(&config, "edge"), "edge");
+    }
+
+    #[test]
+    fn resolve_root_service_id_follows_a_replica_or_coordinator_to_its_parent() {
+        // `--service` pointed at a REPLICA used to resolve to the replica
+        // itself. `ha revert` then prechecked the replica's own primariness,
+        // handed templateRevert the replica's id, and took a sweep snapshot
+        // in which the TRUE ROOT was just another deletable member.
+        let config = config_with(vec![
+            ("root", declared_root("PATRONI_ENABLED", true)),
+            ("replica-1", child_service("root", "replica")),
+            ("etcd-1", child_service("root", "internal")),
+            ("haproxy", child_service("root", "edge")),
+        ]);
+
+        for member in ["replica-1", "etcd-1", "haproxy"] {
+            assert_eq!(
+                resolve_root_service_id(&config, member),
+                "root",
+                "{member} did not resolve to the cluster root"
+            );
+        }
+        assert_eq!(resolve_root_service_id(&config, "root"), "root");
     }
 }
