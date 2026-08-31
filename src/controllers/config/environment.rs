@@ -64,59 +64,20 @@ pub struct ServiceInstance {
     /// active (e.g. `PATRONI_ENABLED`, `SENTINEL_ENABLED`, `GR_ENABLED`). This
     /// is what makes "is this actually a cluster?" a declared question rather
     /// than a per-engine hardcode.
+    ///
+    /// Note there is deliberately NO `haConversionConfig` field here even
+    /// though a service's stored config may carry one: conversion bounds are
+    /// read from the COMPANION template record (the same record the
+    /// server-side gate reads -- see `adoption_eligibility`), because a
+    /// standalone service's copy can be partial, stale, or absent entirely.
+    /// Not parsing it keeps it impossible to trust by accident.
     pub ha_active_variable: Option<String>,
-    /// Template-authored bounds for the HA conversion flow -- which roles the
-    /// engine's cluster even has, the counts each accepts, and the image
-    /// majors its companion publishes data-node images for.
-    pub ha_conversion_config: Option<HaConversionConfig>,
     /// Template-declared coordination-variable wiring for HA scale helpers,
     /// stamped on the root service at conversion time. `None` for legacy
     /// (pre-`clusterWiring`) Patroni clusters -- callers fall back to the
     /// historical hardcoded Patroni wiring in that case (see
     /// `cluster_scale::resolve_cluster_wiring`).
     pub cluster_wiring: Option<ClusterWiring>,
-}
-
-/// Template-authored configuration for the HA conversion flow, mirroring
-/// `haConversionConfigSchema` in
-/// `common/javascript/models/src/environment/schema.ts`.
-///
-/// The CLI reads this rather than hardcoding per-engine topology: a cluster
-/// whose template declares no `internal` selector has no coordinator nodes at
-/// all (Redis colocates Sentinel, MySQL's Group Replication is built in), so
-/// `--coordinators` is refused for it, and `supportedImageMajorVersions` is
-/// what the conversion gate accepts -- shipping a new major stays a template
-/// update rather than a CLI release.
-#[skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
-#[serde(default, rename_all = "camelCase")]
-pub struct HaConversionConfig {
-    pub description: Option<String>,
-    pub replica: Option<HaConversionRoleSelector>,
-    pub internal: Option<HaConversionRoleSelector>,
-    pub edge: Option<HaConversionRoleSelector>,
-    /// Image majors the HA companion publishes data-node images for.
-    pub supported_image_major_versions: Option<Vec<i64>>,
-    /// Pin conversion to the source's exact `major.minor` rather than the bare
-    /// major. Declared where the HA repo publishes minor alias tags and the
-    /// engine's replication is not minor-agnostic.
-    pub pin_to_minor_version: Option<bool>,
-}
-
-/// One role's selector in the conversion flow: what to call it, and which
-/// counts it accepts.
-#[skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
-#[serde(default, rename_all = "camelCase")]
-pub struct HaConversionRoleSelector {
-    pub label: Option<String>,
-    pub description: Option<String>,
-    /// Singular display noun for a node of this role (e.g. "Redis", "etcd").
-    pub node_label: Option<String>,
-    /// The counts the template allows for this role. Empty/absent means the
-    /// template declares no bound and any non-negative count is accepted.
-    pub options: Option<Vec<i64>>,
-    pub default_value: Option<i64>,
 }
 
 /// Coordinates of a declared HTTP probe against a node's own private address:
