@@ -42,8 +42,7 @@ pub async fn get_ssh_connect_params(
     configs: &Configs,
     client: &Client,
 ) -> Result<SshConnectParams> {
-    let needs_linked_project =
-        args.project.is_none() || args.environment.is_none() || args.service.is_none();
+    let needs_linked_project = args.project.is_none() || args.environment.is_none();
 
     let linked_project = if needs_linked_project {
         Some(configs.get_linked_project().await?)
@@ -71,6 +70,8 @@ pub async fn get_ssh_connect_params(
 
     let (service_id, service_name) = if let Some(service_id_or_name) = args.service {
         find_service_by_name(&project, &service_id_or_name)?
+    } else if let [service] = project.services.edges.as_slice() {
+        (service.node.id.clone(), service.node.name.clone())
     } else {
         let service_id = get_or_prompt_service(linked_project.clone(), project.clone(), None)
             .await?
@@ -101,7 +102,7 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn resolves_explicit_project_name_without_a_link() {
+    async fn resolves_explicit_project_name_without_a_link_or_service() {
         let dir = tempfile::tempdir().unwrap();
         let server = MockBackboard::spawn();
         server.stub_graphql_error("Project", "Project not found");
@@ -167,7 +168,7 @@ mod tests {
             Args {
                 subcommand: None,
                 project: Some("preview-environments".to_string()),
-                service: Some("api".to_string()),
+                service: None,
                 environment: Some("production".to_string()),
                 deployment_instance: None,
                 session: None,
