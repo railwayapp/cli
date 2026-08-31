@@ -128,7 +128,7 @@ async fn create_service(
             branch: None,
             name: args.name.clone(),
             project_id: project.id.clone(),
-            environment_id: environment.node.id.clone(),
+            environment_id: Some(environment.node.id.clone()),
             source: Some(ServiceSourceInput {
                 image: Some(image.to_string()),
                 repo: None,

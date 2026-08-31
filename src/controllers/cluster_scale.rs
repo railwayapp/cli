@@ -41,6 +41,8 @@ use crate::{
             ClusterWiring, DeployConfig, EnvironmentConfig, RegionConfig, ServiceInstance,
             Variable, VolumeInstance, VolumeMount, fetch_environment_config,
         },
+        database_engines::DatabaseEngine,
+        database_plugins,
         project::ServiceContext,
         template_apply::{self, format_data_node_entry, private_domain_ref},
     },
@@ -58,6 +60,13 @@ pub struct ScaleClusterParams {
     pub coordinators: Option<i64>,
     pub edge: Option<i64>,
     pub auto_deploy: bool,
+    /// The data node currently acting as the cluster's primary, when the
+    /// caller could determine it from a live probe. Scale-down never deletes
+    /// this node, whatever its number: after a failover the highest-numbered
+    /// replica may well BE the acting primary, and deleting it is a write
+    /// outage plus whatever acked writes had not replicated yet. `None`
+    /// means "could not be determined" -- the caller has already warned.
+    pub live_primary_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -79,6 +88,7 @@ pub struct EdgeScaleSummary {
     pub target_replicas: i64,
 }
 
+#[derive(Debug)]
 pub struct ScaleClusterResult {
     /// `true` if the staged patch was committed with deploys enabled.
     pub deployed: bool,
@@ -141,6 +151,7 @@ pub fn validate_data_node_quorum(wiring: &ClusterWiring, replicas_target: i64) -
 /// this map.
 pub async fn scale_cluster(
     ctx: &ServiceContext,
+    engine: &DatabaseEngine,
     root_id: &str,
     root_name: &str,
     names: &BTreeMap<String, String>,
@@ -175,8 +186,18 @@ pub async fn scale_cluster(
     let mut fresh_replica_roster: Option<Vec<(String, String)>> = None;
 
     if let Some(target) = params.replicas {
-        let (summary, roster) =
-            scale_replicas(ctx, &config, root_id, root_name, target, names, &mut patch).await?;
+        let (summary, roster) = scale_replicas(
+            ctx,
+            &config,
+            engine,
+            root_id,
+            root_name,
+            target,
+            names,
+            params.live_primary_id.as_deref(),
+            &mut patch,
+        )
+        .await?;
         replicas_summary = Some(summary);
         fresh_replica_roster = Some(roster);
     }
@@ -198,17 +219,8 @@ pub async fn scale_cluster(
     }
 
     if let Some(target) = params.edge {
-        edge_summary = scale_edge(&config, root_id, target, &mut patch.services)?;
+        edge_summary = scale_edge(&config, engine, root_id, target, &mut patch.services)?;
     }
-
-    let created_ids: Vec<String> = patch
-        .services
-        .iter()
-        .filter(|(id, service)| {
-            service.parent_service_id.is_some() && !config.services.contains_key(*id)
-        })
-        .map(|(id, _)| id.clone())
-        .collect();
 
     let deployed = if patch.is_empty() {
         false
@@ -220,32 +232,6 @@ pub async fn scale_cluster(
         };
         stage_and_commit(ctx, env_patch, params.auto_deploy).await?
     };
-
-    // The public patch path silently drops parentServiceId (confirmed
-    // live), which orphans brand-new members from the cluster topology --
-    // status won't list them and revert has to sweep them heuristically.
-    // Verify and warn loudly rather than letting it surprise later.
-    if !created_ids.is_empty() {
-        let after = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, false)
-            .await
-            .map(|response| response.config)
-            .unwrap_or_default();
-        let dropped: Vec<&String> = created_ids
-            .iter()
-            .filter(|id| {
-                after
-                    .services
-                    .get(*id)
-                    .is_none_or(|service| service.parent_service_id.is_none())
-            })
-            .collect();
-        if !dropped.is_empty() {
-            eprintln!(
-                "Warning: the platform dropped the parent link on {} new cluster member(s); they will still serve traffic (wiring is stamped), but `ha status` won't list them as members until the link is restored. `ha revert` still removes them.",
-                dropped.len()
-            );
-        }
-    }
 
     Ok(ScaleClusterResult {
         deployed,
@@ -262,7 +248,12 @@ pub async fn scale_cluster(
 /// sizes a new replica volume off the `clusterRole`/`parentServiceId` of
 /// whichever service mounts it, read from the resolved config, so the volume
 /// instance has to be created by the patch that stamps them and not ahead of
-/// it. See `create_clone_volume`.
+/// it. See `create_clone_volume`. The member SERVICE instances are created by
+/// the patch for the same class of reason -- the patch-apply workflow's
+/// instance-create path is the only one that persists the parent link (see
+/// `create_clone_service`) -- and deletions are staged rather than issued
+/// directly, so the whole scale commits atomically and the platform's
+/// cluster-primacy commit guard can inspect it.
 #[derive(Default)]
 struct ScalePatch {
     services: BTreeMap<String, ServiceInstance>,
@@ -303,10 +294,12 @@ async fn stage_and_commit(
 async fn scale_replicas(
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
+    engine: &DatabaseEngine,
     root_id: &str,
     root_name: &str,
     target_count: i64,
     names: &BTreeMap<String, String>,
+    live_primary_id: Option<&str>,
     patch: &mut ScalePatch,
 ) -> Result<(ScaleDimensionSummary, Vec<(String, String)>)> {
     let root = config
@@ -325,7 +318,7 @@ async fn scale_replicas(
          routing list stale. The root service declares no `clusterWiring`."
             .to_string()
     })?;
-    let routing_edge_id = find_routing_edge_id(config, root_id);
+    let routing_edge_id = find_routing_edge_id(config, engine, root_id);
 
     let summary = if target_count > current_count {
         let Some((source_id, source_name)) = existing.first().cloned() else {
@@ -338,10 +331,10 @@ async fn scale_replicas(
             .services
             .get(&source_id)
             .context("Replica disappeared from environment config mid-scale")?;
-        let source_image = source
+        source
             .source
             .as_ref()
-            .and_then(|s| s.image.clone())
+            .and_then(|s| s.image.as_ref())
             .context("Replica has no source image to clone")?;
         let mount_path = source
             .volume_mounts
@@ -358,39 +351,18 @@ async fn scale_replicas(
         let mut added_ids = Vec::with_capacity(to_add as usize);
         for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
-            let node = create_clone_service(ctx, &node_name, &source_image).await?;
-            let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
+            let node = create_clone_service(ctx, &node_name).await?;
+            let volume = create_clone_volume(ctx, &mount_path, &node.name).await?;
 
-            // Stage the volume INSTANCE alongside the service that mounts
-            // it, so the same patch that stamps this node's role and parent
-            // is the one that creates the volume -- that pairing is what
-            // sizes a replica's volume against its primary.
-            patch.volumes.insert(
-                volume.id.clone(),
-                VolumeInstance {
-                    is_created: Some(true),
-                    ..VolumeInstance::default()
-                },
-            );
-            patch.services.insert(
-                node.id.clone(),
-                ServiceInstance {
-                    parent_service_id: Some(root_id.to_string()),
-                    cluster_role: Some("replica".to_string()),
-                    variables: source.variables.clone(),
-                    volume_mounts: BTreeMap::from([(
-                        volume.id,
-                        VolumeMount {
-                            mount_path: Some(mount_path.clone()),
-                            ..VolumeMount::default()
-                        },
-                    )]),
-                    deploy: Some(DeployConfig {
-                        required_mount_path: Some(mount_path.clone()),
-                        ..DeployConfig::default()
-                    }),
-                    ..ServiceInstance::default()
-                },
+            stage_new_member(
+                patch,
+                root_id,
+                root,
+                "replica",
+                &node,
+                source,
+                &volume,
+                &mount_path,
             );
 
             added_ids.push(node.id.clone());
@@ -412,17 +384,35 @@ async fn scale_replicas(
             .map(|(_, name)| derive_node_base_name(name, "Replica"))
             .unwrap_or_else(|| "Replica".to_string());
 
-        // Highest-numbered replicas go first -- the root itself is never in
-        // this list (replicas only), so no separate "never the primary"
-        // exclusion is needed here (unlike coordinator scale-down below).
+        // Highest-numbered replicas go first -- but never the node currently
+        // ACTING as the primary. The root itself is never in this list
+        // (replicas only), which covers the healthy case; after a failover
+        // the acting primary is one of these replicas, and its number says
+        // nothing about its role.
         let mut sorted = existing.clone();
         sorted
             .sort_by_key(|(_, name)| std::cmp::Reverse(node_number(name, &base_name).unwrap_or(0)));
+        let removable: Vec<(String, String)> = sorted
+            .into_iter()
+            .filter(|(id, _)| Some(id.as_str()) != live_primary_id)
+            .collect();
+        if (removable.len() as i64) < to_remove {
+            let primary_name = existing
+                .iter()
+                .find(|(id, _)| Some(id.as_str()) == live_primary_id)
+                .map(|(_, name)| name.as_str())
+                .unwrap_or("a replica");
+            bail!(
+                "Cannot scale down to {target_count} replica(s): {primary_name} is currently \
+                 acting as the cluster's primary. Run `ha switchover --to {root_name}` first, \
+                 then scale down."
+            );
+        }
         let to_delete: Vec<(String, String)> =
-            sorted.into_iter().take(to_remove as usize).collect();
+            removable.into_iter().take(to_remove as usize).collect();
 
         for (id, _) in &to_delete {
-            delete_member(ctx, config, id).await?;
+            stage_member_deletion(patch, config, id);
         }
 
         let removed: Vec<String> = to_delete.iter().map(|(_, name)| name.clone()).collect();
@@ -448,6 +438,90 @@ async fn scale_replicas(
     );
 
     Ok((summary, existing))
+}
+
+/// Stages one brand-new cluster member and its volume into the patch. Both
+/// records were created detached (no environment), so the patch commit is
+/// what creates their instances: the volume that way for the sizing pairing
+/// described on [`ScalePatch`], and the SERVICE because the patch-apply
+/// workflow's instance-create path is the only one that persists
+/// `parentServiceId` -- an instance pre-created by `serviceCreate` takes the
+/// update path instead, which applies the role but silently drops the parent
+/// link, orphaning the member from every parent-chain membership walk.
+#[allow(clippy::too_many_arguments)]
+fn stage_new_member(
+    patch: &mut ScalePatch,
+    root_id: &str,
+    root: &ServiceInstance,
+    role: &str,
+    node: &CreatedNode,
+    source: &ServiceInstance,
+    volume: &CreatedVolume,
+    mount_path: &str,
+) {
+    patch.volumes.insert(
+        volume.id.clone(),
+        VolumeInstance {
+            is_created: Some(true),
+            ..VolumeInstance::default()
+        },
+    );
+    patch.services.insert(
+        node.id.clone(),
+        ServiceInstance {
+            is_created: Some(true),
+            parent_service_id: Some(root_id.to_string()),
+            cluster_role: Some(role.to_string()),
+            // Keep the new node in the cluster's canvas group, like the
+            // members the conversion itself created.
+            group_id: root.group_id.clone(),
+            variables: source.variables.clone(),
+            // The image rides the patch too now that the service record is
+            // created bare.
+            source: source.source.clone(),
+            volume_mounts: BTreeMap::from([(
+                volume.id.clone(),
+                VolumeMount {
+                    mount_path: Some(mount_path.to_string()),
+                    ..VolumeMount::default()
+                },
+            )]),
+            // The sibling's whole deploy config -- healthcheck, region
+            // placement, start command -- not just the mount requirement: a
+            // node cloned into a different region than the cluster it joins
+            // replicates cross-region forever.
+            deploy: Some(DeployConfig {
+                required_mount_path: Some(mount_path.to_string()),
+                ..source.deploy.clone().unwrap_or_default()
+            }),
+            ..ServiceInstance::default()
+        },
+    );
+}
+
+/// Stages a member's deletion (volumes first, then the service) into the
+/// patch, mirroring the frontend's `deleteVolume`/`deleteService` builder
+/// calls. Staged rather than deleted directly so the whole scale commits
+/// atomically and the platform's cluster-primacy commit guard sees it.
+fn stage_member_deletion(patch: &mut ScalePatch, config: &EnvironmentConfig, id: &str) {
+    if let Some(service) = config.services.get(id) {
+        for volume_id in service.volume_mounts.keys() {
+            patch.volumes.insert(
+                volume_id.clone(),
+                VolumeInstance {
+                    is_deleted: Some(true),
+                    ..VolumeInstance::default()
+                },
+            );
+        }
+    }
+    patch.services.insert(
+        id.to_string(),
+        ServiceInstance {
+            is_deleted: Some(true),
+            ..ServiceInstance::default()
+        },
+    );
 }
 
 // --- coordinator (internal) scaling -------------------------------------
@@ -498,6 +572,7 @@ async fn scale_internal(
         .chain(replica_ids)
         .collect();
 
+    let mut added_ids: Vec<String> = Vec::new();
     let summary = if target_count > current_count {
         let Some((source_id, source_name)) = existing.first().cloned() else {
             bail!(
@@ -510,10 +585,10 @@ async fn scale_internal(
             .services
             .get(&source_id)
             .context("Coordinator node disappeared from environment config mid-scale")?;
-        let source_image = source
+        source
             .source
             .as_ref()
-            .and_then(|s| s.image.clone())
+            .and_then(|s| s.image.as_ref())
             .context("Coordinator node has no source image to clone")?;
         let mount_path = source
             .volume_mounts
@@ -529,41 +604,21 @@ async fn scale_internal(
         let mut added = Vec::with_capacity(to_add as usize);
         for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
-            let node = create_clone_service(ctx, &node_name, &source_image).await?;
-            let volume = create_clone_volume(ctx, &node.id, &mount_path, &node.name).await?;
+            let node = create_clone_service(ctx, &node_name).await?;
+            let volume = create_clone_volume(ctx, &mount_path, &node.name).await?;
 
-            // Stage the volume INSTANCE alongside the service that mounts
-            // it, so the same patch that stamps this node's role and parent
-            // is the one that creates the volume -- that pairing is what
-            // sizes a replica's volume against its primary.
-            patch.volumes.insert(
-                volume.id.clone(),
-                VolumeInstance {
-                    is_created: Some(true),
-                    ..VolumeInstance::default()
-                },
-            );
-            patch.services.insert(
-                node.id.clone(),
-                ServiceInstance {
-                    parent_service_id: Some(root_id.to_string()),
-                    cluster_role: Some("internal".to_string()),
-                    variables: source.variables.clone(),
-                    volume_mounts: BTreeMap::from([(
-                        volume.id,
-                        VolumeMount {
-                            mount_path: Some(mount_path.clone()),
-                            ..VolumeMount::default()
-                        },
-                    )]),
-                    deploy: Some(DeployConfig {
-                        required_mount_path: Some(mount_path.clone()),
-                        ..DeployConfig::default()
-                    }),
-                    ..ServiceInstance::default()
-                },
+            stage_new_member(
+                patch,
+                root_id,
+                root,
+                "internal",
+                &node,
+                source,
+                &volume,
+                &mount_path,
             );
 
+            added_ids.push(node.id.clone());
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
         }
@@ -600,7 +655,7 @@ async fn scale_internal(
             removable.into_iter().take(to_remove as usize).collect();
 
         for (id, _) in &to_delete {
-            delete_member(ctx, config, id).await?;
+            stage_member_deletion(patch, config, id);
         }
 
         let removed: Vec<String> = to_delete.iter().map(|(_, name)| name.clone()).collect();
@@ -612,7 +667,13 @@ async fn scale_internal(
         }
     };
 
-    restamp_internal_wiring(&mut patch.services, &wiring, &existing, &data_node_ids);
+    restamp_internal_wiring(
+        &mut patch.services,
+        &wiring,
+        &existing,
+        &added_ids,
+        &data_node_ids,
+    );
 
     Ok(summary)
 }
@@ -625,11 +686,12 @@ async fn scale_internal(
 /// finds the one active region entry and sets its replica count directly.
 fn scale_edge(
     config: &EnvironmentConfig,
+    engine: &DatabaseEngine,
     root_id: &str,
     target_count: i64,
     patch: &mut BTreeMap<String, ServiceInstance>,
 ) -> Result<Option<EdgeScaleSummary>> {
-    let edge_id = find_routing_edge_id(config, root_id)
+    let edge_id = find_routing_edge_id(config, engine, root_id)
         .context("Routing edge service (e.g. HAProxy) not found in this cluster")?;
     let edge = config
         .services
@@ -801,11 +863,18 @@ fn restamp_internal_wiring(
     patch: &mut BTreeMap<String, ServiceInstance>,
     wiring: &ClusterWiring,
     internal_after: &[(String, String)],
+    newly_added_ids: &[String],
     data_node_ids: &[String],
 ) {
+    // Identity on JOINING nodes only, for the same reason the replica path
+    // stamps its identity that way: a node's identity is its own name, which
+    // a scale never changes, so restamping a running coordinator only marks
+    // it stale -- and coordinators restarting together is quorum loss.
     if let Some(var_name) = &wiring.internal_node_name_variable {
         for (id, name) in internal_after {
-            set_patch_var(patch, id, var_name, name.to_ascii_lowercase());
+            if newly_added_ids.iter().any(|added| added == id) {
+                set_patch_var(patch, id, var_name, name.to_ascii_lowercase());
+            }
         }
     }
 
@@ -878,21 +947,25 @@ fn members_of_role(
 }
 
 /// The cluster's non-pooling routing edge (e.g. HAProxy) among `root_id`'s
-/// children -- excludes a stacked PgBouncer edge, which also carries
-/// `clusterRole == "edge"` under the same root. Mirrors
+/// children -- excludes a stacked pooler edge, which also carries
+/// `clusterRole == "edge"` under the same root, identified through the
+/// engine's own declared pooling spec rather than an image name compiled in
+/// here. An engine that ships no pooler has nothing to exclude. Mirrors
 /// `useScaleHACluster.tsx`'s `routingEdgeService` filter.
-fn find_routing_edge_id(config: &EnvironmentConfig, root_id: &str) -> Option<String> {
+fn find_routing_edge_id(
+    config: &EnvironmentConfig,
+    engine: &DatabaseEngine,
+    root_id: &str,
+) -> Option<String> {
     config
         .services
         .iter()
         .find(|(_, s)| {
             s.parent_service_id.as_deref() == Some(root_id)
                 && s.cluster_role.as_deref() == Some("edge")
-                && !s
-                    .source
-                    .as_ref()
-                    .and_then(|src| src.image.as_deref())
-                    .is_some_and(|image| image.to_ascii_lowercase().contains("pgbouncer"))
+                && !engine
+                    .pooling
+                    .is_some_and(|pooling| database_plugins::is_pooler_service(s, &pooling))
         })
         .map(|(id, _)| id.clone())
 }
@@ -981,19 +1054,20 @@ struct CreatedNode {
 /// Creates one new replica/coordinator service cloning `source_image`,
 /// retrying once with a random suffix on a name collision. Mirrors
 /// `useScaleHACluster.tsx`'s `createServiceWithRetry`.
-async fn create_clone_service(
-    ctx: &ServiceContext,
-    base_name: &str,
-    source_image: &str,
-) -> Result<CreatedNode> {
+async fn create_clone_service(ctx: &ServiceContext, base_name: &str) -> Result<CreatedNode> {
     let build_vars = |name: String| mutations::service_create::Variables {
         name: Some(name),
         project_id: ctx.project_id.clone(),
-        environment_id: ctx.environment_id.clone(),
-        source: Some(mutations::service_create::ServiceSourceInput {
-            image: Some(source_image.to_string()),
-            repo: None,
-        }),
+        // A bare Service ROW, deployed to no environment -- the instance is
+        // created by the staged patch (`isCreated`), because the patch-apply
+        // workflow's instance-create path is the only one that persists
+        // `parentServiceId`. An instance pre-created here would take the
+        // update path at commit, which applies the role but silently drops
+        // the parent link, orphaning the member from every parent-chain
+        // membership walk. The image rides the patch for the same reason
+        // the dashboard's flow passes no source here.
+        environment_id: None,
+        source: None,
         variables: None,
         branch: None,
     };
@@ -1050,7 +1124,6 @@ struct CreatedVolume {
 /// dashboard's `useScaleHACluster` uses.
 async fn create_clone_volume(
     ctx: &ServiceContext,
-    service_id: &str,
     mount_path: &str,
     node_name: &str,
 ) -> Result<CreatedVolume> {
@@ -1060,7 +1133,9 @@ async fn create_clone_volume(
         mutations::volume_create::Variables {
             project_id: ctx.project_id.clone(),
             environment_id: None,
-            service_id: service_id.to_string(),
+            // Detached like the service record: the mount is declared by the
+            // staged patch's volumeMounts, alongside the instance creation.
+            service_id: None,
             mount_path: mount_path.to_string(),
         },
     )
@@ -1198,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn next_node_number_starts_at_two_from_empty() {
+    fn next_node_number_starts_at_one_from_empty() {
         let names: Vec<String> = vec![];
         assert_eq!(next_node_number(&names, "postgres-replica"), 1);
     }
@@ -1281,8 +1356,9 @@ mod tests {
         };
         let config = config_with(vec![("pgbouncer", pgbouncer), ("haproxy", haproxy)]);
 
+        use crate::controllers::database_engines::POSTGRES;
         assert_eq!(
-            find_routing_edge_id(&config, "root"),
+            find_routing_edge_id(&config, &POSTGRES, "root"),
             Some("haproxy".to_string())
         );
     }
@@ -1402,16 +1478,29 @@ mod tests {
         ];
         let mut patch = BTreeMap::new();
 
-        restamp_internal_wiring(&mut patch, &wiring, &internal, &["root".to_string()]);
+        // e3 is the node this scale-up added; running coordinators keep
+        // their identity (restarting them together is quorum loss).
+        restamp_internal_wiring(
+            &mut patch,
+            &wiring,
+            &internal,
+            &["e3".to_string()],
+            &["root".to_string()],
+        );
 
         assert_eq!(
-            patch["e2"].variables["ETCD_NAME"]
+            patch["e3"].variables["ETCD_NAME"]
                 .as_ref()
                 .unwrap()
                 .value
                 .as_deref(),
-            Some("etcd-2")
+            Some("etcd-3")
         );
+        // The coordinators already running keep their identity: restamping
+        // them would mark every one stale, and coordinators restarting
+        // together is quorum loss.
+        assert!(!patch.contains_key("e1"));
+        assert!(!patch.contains_key("e2"));
         let hosts = patch["root"].variables["PATRONI_ETCD3_HOSTS"]
             .as_ref()
             .unwrap()
@@ -1450,7 +1539,15 @@ mod tests {
             "existing-list".to_string(),
         );
 
-        let summary = scale_edge(&config, "root", 3, &mut patch).unwrap().unwrap();
+        let summary = scale_edge(
+            &config,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            3,
+            &mut patch,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(summary.previous_replicas, 1);
         assert_eq!(summary.target_replicas, 3);
 
@@ -1492,7 +1589,14 @@ mod tests {
         let config = config_with(vec![("edge-id", edge)]);
         let mut patch = BTreeMap::new();
 
-        let summary = scale_edge(&config, "root", 2, &mut patch).unwrap();
+        let summary = scale_edge(
+            &config,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            2,
+            &mut patch,
+        )
+        .unwrap();
         assert!(summary.is_none());
         assert!(patch.is_empty());
     }
@@ -1514,7 +1618,14 @@ mod tests {
         let edge = service("edge", "root");
         let config = config_with(vec![("edge-id", edge)]);
         let mut patch = BTreeMap::new();
-        let err = scale_edge(&config, "root", 2, &mut patch).unwrap_err();
+        let err = scale_edge(
+            &config,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            2,
+            &mut patch,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("no multi-region config"));
     }
 
@@ -1522,7 +1633,14 @@ mod tests {
     fn scale_edge_errors_without_an_edge_service() {
         let config = config_with(vec![("replica-1", service("replica", "root"))]);
         let mut patch = BTreeMap::new();
-        let err = scale_edge(&config, "root", 2, &mut patch).unwrap_err();
+        let err = scale_edge(
+            &config,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            2,
+            &mut patch,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("edge service"));
     }
 
@@ -1823,6 +1941,7 @@ mod tests {
 
         scale_cluster(
             &ctx,
+            &crate::controllers::database_engines::REDIS,
             "root",
             "Redis-1",
             &names,
@@ -1831,6 +1950,7 @@ mod tests {
                 coordinators: None,
                 edge: None,
                 auto_deploy: false,
+                live_primary_id: None,
             },
         )
         .await
@@ -1847,6 +1967,26 @@ mod tests {
                 Some(&serde_json::Value::Null),
                 "the volume instance must not be provisioned outside the patch"
             );
+            assert_eq!(
+                variables.get("serviceId"),
+                Some(&serde_json::Value::Null),
+                "the mount is declared by the staged patch, not the record"
+            );
+        }
+
+        // The service RECORD too: an instance pre-created by serviceCreate
+        // takes the patch-apply UPDATE path at commit, which applies the
+        // role but silently drops parentServiceId -- the member must be
+        // created BY the patch for the parent link to persist.
+        let service_create = server.variables_for("ServiceCreate");
+        assert_eq!(service_create.len(), 2);
+        for variables in &service_create {
+            assert_eq!(
+                variables.get("environmentId"),
+                Some(&serde_json::Value::Null),
+                "the service instance must be created by the patch, not here"
+            );
+            assert_eq!(variables.get("source"), Some(&serde_json::Value::Null));
         }
 
         // The instance is created BY the staged patch instead, in the same
@@ -1863,6 +2003,18 @@ mod tests {
             );
         }
         for (service_id, volume_id) in [("replica-3", "vol-3"), ("replica-4", "vol-4")] {
+            assert_eq!(
+                input.pointer(&format!("/services/{service_id}/isCreated")),
+                Some(&serde_json::Value::Bool(true)),
+                "{service_id}'s instance was not staged for creation by the patch"
+            );
+            assert_eq!(
+                input.pointer(&format!("/services/{service_id}/source/image")),
+                Some(&serde_json::Value::String(
+                    "ghcr.io/railwayapp-templates/redis-ha/redis-sentinel:8.4".to_string()
+                )),
+                "the image rides the patch now that the record is created bare"
+            );
             assert_eq!(
                 input.pointer(&format!("/services/{service_id}/clusterRole")),
                 Some(&serde_json::Value::String("replica".to_string()))
@@ -1893,5 +2045,171 @@ mod tests {
                 "{survivor} was restamped and will restart with the rest of the fleet"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn scaling_down_stages_deletions_and_never_removes_the_acting_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = crate::testkit::MockBackboard::spawn();
+
+        // A Postgres-shaped cluster (external etcd quorum, so 2 -> 1 replicas
+        // clears the fence) whose PRIMARY failed over onto the
+        // highest-numbered replica -- the one deletion-by-number picks first.
+        let environment_config = serde_json::json!({
+            "services": {
+                "root": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16" },
+                    "clusterRole": "root",
+                    "clusterWiring": {
+                        "replicaNodeNameVariable": "PATRONI_NAME",
+                    },
+                },
+                "replica-1": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16" },
+                    "clusterRole": "replica",
+                    "parentServiceId": "root",
+                    "volumeMounts": { "vol-1": { "mountPath": "/var/lib/postgresql/data" } },
+                },
+                "replica-2": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16" },
+                    "clusterRole": "replica",
+                    "parentServiceId": "root",
+                    "volumeMounts": { "vol-2": { "mountPath": "/var/lib/postgresql/data" } },
+                },
+            }
+        });
+        server.stub(
+            "GetEnvironmentConfig",
+            serde_json::json!({
+                "environment": { "id": "env-1", "name": "production", "config": environment_config }
+            }),
+        );
+        server.stub(
+            "EnvironmentStagedChanges",
+            serde_json::json!({
+                "environmentStagedChanges": { "id": "patch-0", "status": "STAGED", "patch": null }
+            }),
+        );
+        server.stub(
+            "EnvironmentStageChanges",
+            serde_json::json!({
+                "environmentStageChanges": { "id": "patch-1", "status": "STAGED" }
+            }),
+        );
+        server.stub(
+            "EnvironmentPatchCommitStaged",
+            serde_json::json!({ "environmentPatchCommitStaged": "wf-1" }),
+        );
+        server.stub(
+            "WorkflowStatus",
+            serde_json::json!({
+                "workflowStatus": { "status": "Complete", "error": null }
+            }),
+        );
+
+        let ctx = mock_context(&server, &dir);
+        let names = names(&[
+            ("root", "Postgres"),
+            ("replica-1", "postgres-replica-1"),
+            ("replica-2", "postgres-replica-2"),
+        ]);
+
+        let result = scale_cluster(
+            &ctx,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            "Postgres",
+            &names,
+            ScaleClusterParams {
+                replicas: Some(1),
+                coordinators: None,
+                edge: None,
+                auto_deploy: false,
+                // The live probe found the acting primary on replica-2.
+                live_primary_id: Some("replica-2".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Deletion order is by node number, which would pick replica-2 -- but
+        // replica-2 is ACTING as the primary, so replica-1 goes instead.
+        assert_eq!(
+            result.replicas.unwrap().removed,
+            vec!["postgres-replica-1".to_string()]
+        );
+
+        // The deletion is STAGED (volume first, then the service), never
+        // issued as direct ServiceDelete/VolumeDelete calls: the whole scale
+        // commits atomically and the platform's cluster-primacy commit guard
+        // inspects the patch. An unstubbed direct delete would have failed
+        // this test loudly.
+        let staged = server.variables_for("EnvironmentStageChanges");
+        assert_eq!(staged.len(), 1);
+        let input = staged[0].get("input").unwrap();
+        assert_eq!(
+            input.pointer("/services/replica-1/isDeleted"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert_eq!(
+            input.pointer("/volumes/vol-1/isDeleted"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(input.pointer("/services/replica-2/isDeleted").is_none());
+        assert!(input.pointer("/volumes/vol-2").is_none());
+    }
+
+    #[tokio::test]
+    async fn scaling_down_past_the_acting_primary_is_refused_with_the_switchover_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = crate::testkit::MockBackboard::spawn();
+
+        // One replica left, and it is the acting primary: honoring the count
+        // would require deleting it, so the scale must refuse instead.
+        let environment_config = serde_json::json!({
+            "services": {
+                "root": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16" },
+                    "clusterRole": "root",
+                    "clusterWiring": { "replicaNodeNameVariable": "PATRONI_NAME" },
+                },
+                "replica-1": {
+                    "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16" },
+                    "clusterRole": "replica",
+                    "parentServiceId": "root",
+                    "volumeMounts": { "vol-1": { "mountPath": "/var/lib/postgresql/data" } },
+                },
+            }
+        });
+        server.stub(
+            "GetEnvironmentConfig",
+            serde_json::json!({
+                "environment": { "id": "env-1", "name": "production", "config": environment_config }
+            }),
+        );
+
+        let ctx = mock_context(&server, &dir);
+        let names = names(&[("root", "Postgres"), ("replica-1", "postgres-replica-1")]);
+
+        let err = scale_cluster(
+            &ctx,
+            &crate::controllers::database_engines::POSTGRES,
+            "root",
+            "Postgres",
+            &names,
+            ScaleClusterParams {
+                replicas: Some(0),
+                coordinators: None,
+                edge: None,
+                auto_deploy: false,
+                live_primary_id: Some("replica-1".to_string()),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("acting as the cluster's primary"));
+        assert!(err.contains("ha switchover --to Postgres"));
     }
 }

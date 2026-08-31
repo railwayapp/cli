@@ -1052,8 +1052,37 @@ async fn scale(
         return Ok(());
     }
 
+    // When replicas are being REMOVED, ask the cluster which node currently
+    // holds the primary role, so scale-down never deletes the acting primary:
+    // deletion order is by node number, and after a failover the primary can
+    // be ANY replica, whatever its number. Degrades to a warning when no
+    // member answers -- the same posture as revert's primacy precheck.
+    let current_replicas = ha_state
+        .members
+        .iter()
+        .filter(|m| m.cluster_role.as_deref() == Some("replica"))
+        .count() as i64;
+    let live_primary_id = match args.replicas {
+        Some(target) if target < current_replicas => {
+            let live = probe_data_nodes(engine, &ctx, &config, &ha_state).await;
+            let primary = live
+                .iter()
+                .find(|(_, member)| member.is_primary == Some(true))
+                .map(|(id, _)| id.clone());
+            if primary.is_none() {
+                eprintln!(
+                    "Warning: could not determine {}'s current primary before scaling down; removing the highest-numbered replica(s) by name alone.",
+                    root.root_name
+                );
+            }
+            primary
+        }
+        _ => None,
+    };
+
     let result = cluster_scale::scale_cluster(
         &ctx,
+        engine,
         &root.root_id,
         &root.root_name,
         &names,
@@ -1062,6 +1091,7 @@ async fn scale(
             coordinators: args.coordinators,
             edge: args.edge,
             auto_deploy: !args.no_deploy,
+            live_primary_id,
         },
     )
     .await

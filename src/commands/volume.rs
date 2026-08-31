@@ -862,7 +862,7 @@ async fn add(
         );
     }
     let volume = mutations::volume_create::Variables {
-        service_id: service.clone(),
+        service_id: Some(service.clone()),
         environment_id: Some(environment.clone()),
         mount_path: mount.clone(),
         project_id: project.id,

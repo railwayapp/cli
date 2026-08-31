@@ -327,7 +327,7 @@ async fn create_service(
     let vars = mutations::service_create::Variables {
         name: service,
         project_id: linked_project.project.clone(),
-        environment_id: linked_project.environment_id()?.to_string(),
+        environment_id: Some(linked_project.environment_id()?.to_string()),
         source: Some(source),
         variables,
         branch,
