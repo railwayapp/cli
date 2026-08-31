@@ -91,6 +91,18 @@ struct RevertArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
+    /// Also delete role-stamped services in this environment that run this
+    /// engine's cluster images but have no cluster parent left (debris from
+    /// a revert that died mid-sweep).
+    ///
+    /// Separate from --yes on purpose: an earlier revert clears the parent
+    /// links before it deletes, so nothing on these services still ties them
+    /// to the root you named -- image lineage narrows the match to this
+    /// engine, but two clusters of the same engine in one environment remain
+    /// indistinguishable.
+    #[clap(long)]
+    remove_orphans: bool,
+
     /// Commit the config change without triggering deploys (applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
@@ -750,19 +762,48 @@ async fn revert(
         if leftovers.is_empty() {
             bail!("{} is not an HA cluster.", root.root_name);
         }
-        // Name them. This path deletes services the user never listed, on
-        // evidence they cannot see, so the prompt has to show its work.
+
+        // These are not provably this root's members. templateRevert clears
+        // the survivors' parent links before it deletes them, so by the time
+        // a resumed sweep runs, nothing on a service still ties it to the
+        // root it belonged to. The companion-image scope in
+        // `revert_sweep_targets` narrows the match to this ENGINE's cluster
+        // debris, but two clusters of the same engine in one environment
+        // remain indistinguishable -- and `ha revert` reaches this branch for
+        // ANY database whose HA-active variable is not true, i.e. every
+        // ordinary standalone. So: name every service up front, say what the
+        // attribution rests on, and require an explicit opt-in rather than
+        // riding on the generic --yes -- without it, a scripted
+        // `ha revert --yes` against an ordinary standalone could delete a
+        // same-engine cluster's members.
+        let listing = leftovers
+            .iter()
+            .map(|(_, name)| format!("  - {}", name.bold()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!(
+            "{} is already standalone, but {} role-stamped service(s) in this environment run {} cluster images and have no cluster parent:\n{}",
+            root.root_name.red(),
+            leftovers.len(),
+            engine.display_name,
+            listing
+        );
+        println!(
+            "These look like debris from a revert that died mid-sweep. They are matched by \
+             image lineage, not by membership -- a revert clears parent links before deleting, \
+             so another {} cluster in this environment could leave services in the same state. \
+             Check the names above before continuing.",
+            engine.display_name
+        );
+        if !args.remove_orphans {
+            bail!(
+                "Refusing to delete services that cannot be attributed to {} with certainty. \
+                 Re-run with --remove-orphans once you have confirmed the list above belongs to it.",
+                root.root_name
+            );
+        }
         if !confirm_or_bail(
-            &format!(
-                "{} is already standalone, but {} cluster member(s) from an earlier revert are still deployed: {}. Remove them?",
-                root.root_name.red(),
-                leftovers.len(),
-                leftovers
-                    .iter()
-                    .map(|(_, name)| name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            &format!("Delete the {} service(s) listed above?", leftovers.len()),
             args.yes,
         )? {
             println!("Cancelled.");
@@ -1374,6 +1415,16 @@ mod tests {
             Args::parse_from(["ha", "revert", "--yes"]).command,
             Commands::Revert(RevertArgs {
                 yes: true,
+                no_deploy: false,
+                // --yes alone must NOT arm the orphan sweep.
+                remove_orphans: false
+            })
+        ));
+        assert!(matches!(
+            Args::parse_from(["ha", "revert", "--yes", "--remove-orphans"]).command,
+            Commands::Revert(RevertArgs {
+                yes: true,
+                remove_orphans: true,
                 no_deploy: false
             })
         ));
@@ -1827,6 +1878,111 @@ mod tests {
         assert!(
             swept.is_empty(),
             "a redis revert swept the postgres cluster: {swept:?}"
+        );
+    }
+
+    #[test]
+    fn the_resumed_sweep_matches_a_same_engine_clusters_orphans_too() {
+        // Pins WHY the resumed-sweep path is gated behind --remove-orphans
+        // and a named listing instead of riding on --yes.
+        //
+        // The companion-image scope keeps another ENGINE's debris out, but
+        // it cannot tell two clusters of the SAME engine apart: a revert
+        // clears the survivors' parent links before deleting them, so
+        // nothing on a service still ties it to the root it belonged to.
+        // And `ha revert` reaches the resumed-sweep branch for any database
+        // whose HA-active variable is not true -- i.e. every ordinary
+        // standalone. If a future change makes the scan scopable to the
+        // NAMED root, this test should fail, and the gate in `revert` can
+        // come off with it.
+        use crate::controllers::config::{ServiceInstance, ServiceSource};
+
+        let service =
+            |parent: Option<&str>, role: Option<&str>, image: Option<&str>| ServiceInstance {
+                parent_service_id: parent.map(str::to_string),
+                cluster_role: role.map(str::to_string),
+                source: image.map(|i| ServiceSource {
+                    image: Some(i.to_string()),
+                    ..ServiceSource::default()
+                }),
+                ..ServiceInstance::default()
+            };
+
+        let mut config = EnvironmentConfig::default();
+        // The service the operator names: an ordinary standalone Postgres,
+        // never a cluster, nothing to do with anything below.
+        config.services.insert(
+            "db-b".to_string(),
+            service(
+                None,
+                None,
+                Some("ghcr.io/railwayapp-templates/postgres-ssl:16"),
+            ),
+        );
+        // A DIFFERENT Postgres cluster's members, orphaned when its own root
+        // went away. Still deployed, still billing -- and running exactly
+        // the images the postgres-ha companion publishes.
+        config.services.insert(
+            "db-a-replica".to_string(),
+            service(
+                None,
+                Some("replica"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16"),
+            ),
+        );
+        config.services.insert(
+            "db-a-haproxy".to_string(),
+            service(
+                None,
+                Some("edge"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/haproxy:3.2"),
+            ),
+        );
+        // A third, intact cluster: its links are unbroken, so it is safe.
+        config.services.insert(
+            "db-c-root".to_string(),
+            service(
+                None,
+                Some("root"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16"),
+            ),
+        );
+        config.services.insert(
+            "db-c-replica".to_string(),
+            service(
+                Some("db-c-root"),
+                Some("replica"),
+                Some("ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:16"),
+            ),
+        );
+
+        let names: BTreeMap<String, String> = config
+            .services
+            .keys()
+            .map(|k| (k.clone(), k.clone()))
+            .collect();
+
+        let mut targets = revert_sweep_targets(
+            &POSTGRES,
+            &[],
+            &config,
+            "db-b",
+            &names,
+            &postgres_ha_repositories(),
+        );
+        targets.sort();
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db-a-haproxy", "db-a-replica"],
+            "reverting db-b matches a same-engine cluster's orphans -- hence the opt-in gate"
+        );
+        assert!(
+            !targets.iter().any(|(id, _)| id == "db-c-replica"),
+            "an intact cluster's members keep their parent link and must never match"
         );
     }
 
