@@ -118,6 +118,55 @@ pub fn rules_from_template(serialized_config: &Value) -> AdoptionRules {
     }
 }
 
+/// Every image repository the companion template's own slots run,
+/// registry-qualified and deduplicated.
+///
+/// This is what a cluster's DEBRIS looks like from the outside. A member
+/// stranded by the parent-dropping patch path carries a cluster role and no
+/// parent, which on its own says only "some cluster owned this once" -- not
+/// which one. Each HA companion publishes its nodes and sidecars under its
+/// own repository prefix (`postgres-ha/*`, `redis-ha/*`, `mysql-ha/*`), so
+/// the image is the surviving evidence of which companion built a service
+/// after the parent link is gone.
+///
+/// Read from the companion RECORD for the same reason every other gate here
+/// is: it is the authority on what that companion actually deploys, and it
+/// stays right when a template adds a sidecar the CLI has never heard of.
+pub fn companion_image_repositories(serialized_config: &Value) -> Vec<String> {
+    let Some(services) = serialized_config.get("services").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut repositories: Vec<String> = services
+        .values()
+        .filter_map(|service| {
+            let image = service.get("source")?.get("image")?.as_str()?;
+            let parsed = parse_image_ref(image)?;
+            Some(match &parsed.domain {
+                Some(domain) => format!("{domain}/{}", parsed.path),
+                None => parsed.path.clone(),
+            })
+        })
+        .collect();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Whether `image` runs out of one of `repositories`, comparing the
+/// registry-qualified repository exactly -- never by prefix, for the reason
+/// [`AdoptionRules::image_repository_is_eligible`] spells out.
+pub fn image_is_from_repository(image: Option<&str>, repositories: &[String]) -> bool {
+    let Some(parsed) = image.and_then(parse_image_ref) else {
+        return false;
+    };
+    let qualified = match &parsed.domain {
+        Some(domain) => format!("{domain}/{}", parsed.path),
+        None => parsed.path.clone(),
+    };
+    repositories.contains(&qualified)
+}
+
 /// What the service brings to the check.
 pub struct AdoptionTarget<'a> {
     pub image: Option<&'a str>,
@@ -494,5 +543,58 @@ mod tests {
                 ))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn companion_image_repositories_reads_every_slot_the_template_deploys() {
+        // Shaped after the live `postgres-ha` record: root and replicas share
+        // one repository, the coordinator and routing tiers have their own.
+        let repositories = companion_image_repositories(&serde_json::json!({
+            "services": {
+                "a": { "clusterRole": "root",
+                       "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:18" } },
+                "b": { "clusterRole": "replica",
+                       "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni:18" } },
+                "c": { "clusterRole": "internal",
+                       "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/etcd:3" } },
+                "d": { "clusterRole": "edge",
+                       "source": { "image": "ghcr.io/railwayapp-templates/postgres-ha/haproxy:3" } },
+                "e": { "clusterRole": "edge" },
+            }
+        }));
+
+        // Tags dropped, duplicates collapsed, imageless slots skipped.
+        assert_eq!(
+            repositories,
+            vec![
+                "ghcr.io/railwayapp-templates/postgres-ha/etcd".to_string(),
+                "ghcr.io/railwayapp-templates/postgres-ha/haproxy".to_string(),
+                "ghcr.io/railwayapp-templates/postgres-ha/postgres-patroni".to_string(),
+            ]
+        );
+
+        assert!(companion_image_repositories(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn image_is_from_repository_matches_the_repository_exactly() {
+        let repositories = vec!["ghcr.io/railwayapp-templates/postgres-ha/haproxy".to_string()];
+
+        assert!(image_is_from_repository(
+            Some("ghcr.io/railwayapp-templates/postgres-ha/haproxy:3.2"),
+            &repositories
+        ));
+
+        // A sibling under the same prefix is a different repository, and so
+        // is a lookalike registry -- neither may pass on a prefix match.
+        assert!(!image_is_from_repository(
+            Some("ghcr.io/railwayapp-templates/postgres-ha/haproxy-sidecar:1"),
+            &repositories
+        ));
+        assert!(!image_is_from_repository(
+            Some("evil.example.com/railwayapp-templates/postgres-ha/haproxy:3.2"),
+            &repositories
+        ));
+        assert!(!image_is_from_repository(None, &repositories));
     }
 }
