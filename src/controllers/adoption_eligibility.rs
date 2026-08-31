@@ -448,6 +448,38 @@ mod tests {
     }
 
     #[test]
+    fn suffixed_tags_are_read_the_way_the_server_side_gate_reads_them() {
+        // The platform's gate parses the LEADING major.minor of a tag and
+        // ignores the variant suffix, so the pre-flight must too -- refusing
+        // `redis:8.2-alpine` for "declaring only a major" blocked a
+        // conversion the backend accepts (and pins to 8.2).
+        let rules = rules_from_template(&json!({
+            "services": {
+                "root": {
+                    "clusterRole": "root",
+                    "haConversionConfig": {
+                        "supportedImageMajorVersions": [7, 8],
+                        "pinToMinorVersion": true
+                    }
+                }
+            }
+        }));
+        assert!(
+            rules
+                .blockers(&target("redis:8.2-alpine", false))
+                .is_empty()
+        );
+
+        // A suffixed BARE major still declares no minor: refused with the
+        // retag remedy naming its actual major, not a "no version can be
+        // read" dead end.
+        let blockers = rules.blockers(&target("redis:7-bookworm", false));
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("declares only a major"));
+        assert!(blockers[0].contains("\":7.2\""));
+    }
+
+    #[test]
     fn mysql_ha_conversion_declares_its_own_majors() {
         let rules = rules_from_template(&json!({
             "services": {

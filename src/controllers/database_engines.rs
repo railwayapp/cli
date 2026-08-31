@@ -228,11 +228,21 @@ pub struct ImageTagVersion {
 
 pub fn image_tag_version(image: Option<&str>) -> Option<ImageTagVersion> {
     let tag = parse_image_ref(image?)?.tag?;
-    let mut parts = tag.split('.');
-    let major: i64 = parts.next()?.parse().ok()?;
-    // Only a purely numeric second component is a minor: `8.2` is, the `2-alpine`
-    // of `8.2-alpine` is not.
-    let minor = parts.next().and_then(|part| part.parse::<i64>().ok());
+    // Mirror the platform's own parse (`extractImageTagVersion`, regex
+    // `^(\d+)(?:\.(\d+))?`): the LEADING `major` or `major.minor` run of the
+    // tag, ignoring whatever follows it -- `8.2-alpine` declares minor 2, and
+    // `7-bookworm` declares major 7. These checks pre-flight the server-side
+    // gate, so reading a suffixed tag more strictly than the gate does turns
+    // the pre-flight into a false blocker for images the platform accepts.
+    fn leading_number(s: &str) -> Option<(i64, &str)> {
+        let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        s[..end].parse::<i64>().ok().map(|n| (n, &s[end..]))
+    }
+    let (major, rest) = leading_number(&tag)?;
+    let minor = rest
+        .strip_prefix('.')
+        .and_then(leading_number)
+        .map(|(minor, _)| minor);
     Some(ImageTagVersion { major, minor })
 }
 
@@ -286,12 +296,30 @@ mod tests {
         assert_eq!(v.major, 16);
         assert_eq!(v.minor, None);
 
-        // A suffixed tag carries a major but no readable minor.
+        // Suffixed tags declare exactly what their leading digits say, the
+        // way the platform's own gate parses them: `8.2-alpine` IS pinned to
+        // 8.2, `7-bookworm` declares major 7 and no minor, `7.2.4-debian`
+        // declares 7.2. Reading these more strictly than the server-side
+        // gate turned the pre-flight into a false blocker (a `redis:8.2-alpine`
+        // conversion was refused for "declaring only a major").
         let v = image_tag_version(Some("redis:8.2-alpine")).unwrap();
+        assert_eq!(v.major, 8);
+        assert_eq!(v.minor, Some(2));
+        let v = image_tag_version(Some("redis:7-bookworm")).unwrap();
+        assert_eq!(v.major, 7);
+        assert_eq!(v.minor, None);
+        let v = image_tag_version(Some("bitnami/redis:7.2.4-debian")).unwrap();
+        assert_eq!(v.major, 7);
+        assert_eq!(v.minor, Some(2));
+        // A trailing dot with no digits after it is a bare major, not a
+        // parse error.
+        let v = image_tag_version(Some("redis:8.")).unwrap();
         assert_eq!(v.major, 8);
         assert_eq!(v.minor, None);
 
         assert!(image_tag_version(Some("ghcr.io/x/y:latest")).is_none());
+        // A non-digit LEAD is not a version at all, mirroring the platform.
+        assert!(image_tag_version(Some("ghcr.io/x/y:v8")).is_none());
         assert!(image_tag_version(Some("ghcr.io/x/y")).is_none());
         // A digest is not a version: `sha256:23a8...` must never read as 23.
         assert!(image_tag_version(Some("ghcr.io/x/y@sha256:23a8ff")).is_none());
