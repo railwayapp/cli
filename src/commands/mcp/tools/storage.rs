@@ -209,7 +209,7 @@ impl RailwayMcp {
         let vars = mutations::volume_create::Variables {
             project_id: ctx.project_id,
             environment_id: Some(ctx.environment_id),
-            service_id: ctx.service_id,
+            service_id: Some(ctx.service_id),
             mount_path: params.mount_path,
         };
 

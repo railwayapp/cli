@@ -173,7 +173,7 @@ impl RailwayMcp {
         let vars = mutations::service_create::Variables {
             name: params.name,
             project_id: ctx.project_id,
-            environment_id: ctx.environment_id,
+            environment_id: Some(ctx.environment_id),
             source,
             branch,
             variables: None,
