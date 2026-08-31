@@ -1,5 +1,5 @@
-//! Template apply/revert controller shared by `railway postgres
-//! {pitr,ha,pgbouncer} {enable,disable,convert,revert,add,remove}`.
+//! Template apply/revert controller shared by the managed-database verbs
+//! (`{enable,disable,convert,revert,add,remove}`) across every engine.
 //!
 //! Ports the reference logic in the frontend's
 //! `src/hooks/useApplyComposableTemplate.tsx` (roughly lines 174-499 and
@@ -12,7 +12,7 @@
 //!
 //! Skipping the count/variable adjustment step would silently deploy the
 //! template's authored default topology instead of what the user asked for
-//! (e.g. `railway postgres ha convert --replicas 3` would ignore `--replicas`
+//! (e.g. `ha convert --replicas 3` would ignore `--replicas`
 //! entirely), so every `apply_composable_template` caller that cares about
 //! topology must pass the relevant `Some(count)`.
 
@@ -24,15 +24,13 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     client::post_graphql,
-    controllers::{config::EnvironmentConfig, project::ServiceContext},
+    controllers::{
+        adoption_eligibility::{self, AdoptionRules},
+        config::EnvironmentConfig,
+        project::ServiceContext,
+    },
     gql::{mutations, queries},
 };
-
-/// Built-in Railway template codes the three `railway postgres` features
-/// deploy/revert.
-pub const PITR_TEMPLATE_CODE: &str = "postgres-pitr";
-pub const HA_TEMPLATE_CODE: &str = "postgres-ha";
-pub const PGBOUNCER_TEMPLATE_CODE: &str = "postgres-with-pgbouncer";
 
 /// Distinguishes a true cluster conversion (HA) from a config-only overlay
 /// (PITR: env vars + a bucket, no new services) and an additive edge stack
@@ -101,7 +99,7 @@ pub(crate) fn staged_patch_is_nonempty(patch: &Value) -> bool {
     }
 }
 
-/// Every mutating `railway postgres` action ends by committing the
+/// Every mutating managed-database action ends by committing the
 /// environment's WHOLE staged patch (same semantics as the dashboard's
 /// "Apply" button) -- so changes someone staged earlier (dashboard, another
 /// CLI session) get committed and deployed together with this one. This
@@ -126,6 +124,37 @@ pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
             ctx.environment_name
         );
     }
+}
+
+/// The adoption rules a template declares for taking over an existing service
+/// -- which image repositories carry the capability, whether a floating major
+/// tag or the image's own entrypoint is required, and (for HA companions)
+/// which image majors it publishes nodes for.
+///
+/// Used to pre-flight `enable`/`convert` so a refusal arrives before the
+/// confirmation prompt with the remedy attached. `templateDeployV2` enforces
+/// the same declarations server-side from the template RECORD, which is the
+/// actual boundary; this is only the fast local echo of it.
+pub async fn fetch_adoption_rules(
+    ctx: &ServiceContext,
+    template_code: &str,
+) -> Result<AdoptionRules> {
+    let detail = post_graphql::<queries::TemplateDetail, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::template_detail::Variables {
+            code: template_code.to_string(),
+        },
+    )
+    .await
+    .with_context(|| format!("Failed to fetch template \"{template_code}\""))?;
+
+    Ok(detail
+        .template
+        .serialized_config
+        .as_ref()
+        .map(adoption_eligibility::rules_from_template)
+        .unwrap_or_default())
 }
 
 /// Fetches a template by code, adjusts its `serializedConfig` for the
@@ -343,6 +372,8 @@ struct ClusterWiring {
     data_nodes_variable: Option<String>,
     data_nodes_entry_format: Option<String>,
     quorum_variable: Option<String>,
+    peer_hosts_variable: Option<String>,
+    peer_hosts_entry_format: Option<String>,
 }
 
 fn services_obj(config: &Value) -> Option<&Map<String, Value>> {
@@ -462,6 +493,14 @@ fn resolve_cluster_wiring(root: &Value) -> Option<ClusterWiring> {
                 .get("quorumVariable")
                 .and_then(Value::as_str)
                 .map(String::from),
+            peer_hosts_variable: wiring
+                .get("peerHostsVariable")
+                .and_then(Value::as_str)
+                .map(String::from),
+            peer_hosts_entry_format: wiring
+                .get("peerHostsEntryFormat")
+                .and_then(Value::as_str)
+                .map(String::from),
         });
     }
 
@@ -481,6 +520,8 @@ fn resolve_cluster_wiring(root: &Value) -> Option<ClusterWiring> {
         data_nodes_variable: Some("POSTGRES_NODES".to_string()),
         data_nodes_entry_format: Some("{host}:${{{rootName}.PGPORT}}:8008".to_string()),
         quorum_variable: None,
+        peer_hosts_variable: None,
+        peer_hosts_entry_format: None,
     })
 }
 
@@ -607,6 +648,37 @@ fn restamp_after_replica_adjust(config: &mut Value) {
                 .join(",");
             if let Some(edge) = services_mut.get_mut(&edge_id) {
                 set_template_var(edge, data_var, nodes_list);
+            }
+        }
+    }
+
+    // Topologies whose coordinator is colocated on the data nodes (Sentinel,
+    // Group Replication) boot each node against a declared peer list rather
+    // than a separate coordinator service. Every node in a freshly authored
+    // template config is new, so all of them are stamped here -- unlike LIVE
+    // scaling, which stamps only the joining node (see `cluster_scale`).
+    if let (Some(peer_var), Some(entry_format)) =
+        (&wiring.peer_hosts_variable, &wiring.peer_hosts_entry_format)
+    {
+        let mut peer_names: Vec<String> = services_mut
+            .iter()
+            .filter(|(_, s)| matches!(role_of(s), Some("root") | Some("replica")))
+            .map(|(_, s)| name_of(s).unwrap_or_default().to_string())
+            .collect();
+        peer_names.sort();
+        let peer_list = peer_names
+            .iter()
+            .map(|name| format_data_node_entry(entry_format, name, &root_name))
+            .collect::<Vec<_>>()
+            .join(",");
+        let ids: Vec<String> = services_mut
+            .iter()
+            .filter(|(_, s)| matches!(role_of(s), Some("root") | Some("replica")))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in ids {
+            if let Some(svc) = services_mut.get_mut(&id) {
+                set_template_var(svc, peer_var, peer_list.clone());
             }
         }
     }
@@ -1093,5 +1165,69 @@ mod tests {
     fn resolve_cluster_wiring_none_without_wiring_or_patroni() {
         let root = json!({ "clusterRole": "root", "name": "pg" });
         assert!(resolve_cluster_wiring(&root).is_none());
+    }
+
+    #[test]
+    fn adjust_replica_count_stamps_the_declared_peer_list_on_every_data_node() {
+        // A colocated-coordinator topology (Sentinel, Group Replication) has
+        // no internal role: each data node boots against the peer list
+        // instead, so a node brought up without it knows no cluster at all.
+        let mut root = service("root", "redis-1");
+        root["clusterWiring"] = json!({
+            "peerHostsVariable": "SENTINEL_HOSTS",
+            "peerHostsEntryFormat": "{host}:26379",
+            "quorumVariable": "SENTINEL_QUORUM"
+        });
+        let mut config = config_with(vec![
+            ("root", root),
+            ("replica", service("replica", "redis-replica")),
+        ]);
+
+        adjust_replica_count(&mut config, 2);
+
+        let services = services_obj(&config).unwrap();
+        let peers = services["root"]["variables"]["SENTINEL_HOSTS"]["defaultValue"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Root plus both replicas, each through the declared entry format.
+        assert_eq!(peers.split(',').count(), 3);
+        assert!(peers.contains("${{redis-1.RAILWAY_PRIVATE_DOMAIN}}:26379"));
+
+        // Every data node gets the same list -- a node that knew only a
+        // subset would form its own view of the cluster's membership.
+        for (_, svc) in services
+            .iter()
+            .filter(|(_, s)| matches!(role_of(s), Some("root") | Some("replica")))
+        {
+            assert_eq!(
+                svc["variables"]["SENTINEL_HOSTS"]["defaultValue"]
+                    .as_str()
+                    .unwrap(),
+                peers
+            );
+        }
+    }
+
+    #[test]
+    fn no_peer_list_is_invented_when_the_template_declares_none() {
+        // Postgres coordinates through etcd, so there is no peer list here
+        // and nothing should be stamped.
+        let mut root = service("root", "postgres-1");
+        root["variables"] = json!({ "PATRONI_ENABLED": { "defaultValue": "true" } });
+        let mut config = config_with(vec![
+            ("root", root),
+            ("replica", service("replica", "postgres-replica")),
+        ]);
+
+        adjust_replica_count(&mut config, 2);
+
+        let services = services_obj(&config).unwrap();
+        assert!(
+            services["root"]["variables"]
+                .get("SENTINEL_HOSTS")
+                .is_none()
+        );
+        assert!(services["root"]["variables"].get("GR_SEEDS").is_none());
     }
 }

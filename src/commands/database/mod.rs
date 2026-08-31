@@ -1,24 +1,30 @@
-//! `railway postgres {pitr,ha,pgbouncer}` -- CLI parity for the three biggest
-//! Postgres-plugin features (continuous backups/point-in-time recovery, high
-//! availability clustering, and PgBouncer connection pooling). Nested under a
-//! single `postgres` command (rather than three flat top-level commands) to
-//! match how customers think about these features and mirror existing
-//! nesting precedent (`railway service source connect/disconnect`, `railway
-//! service files ...`).
+//! The shared implementation behind `railway postgres`, `railway mysql` and
+//! `railway redis` -- the managed database features (point-in-time recovery,
+//! high-availability clustering, connection pooling) that compose on top of an
+//! existing database service.
+//!
+//! Each engine gets its own top-level command rather than a single
+//! `railway database` with an `--engine` flag: the features an engine actually
+//! has differ (Redis ships no archiver, only Postgres ships a pooler), and a
+//! per-engine command is the only way `--help` can tell the truth about that.
+//! The subcommand bodies live here, once, and take the engine as a parameter;
+//! the per-engine files (`commands/{postgres,mysql,redis}.rs`) are just the
+//! capability declarations wired to them.
 //!
 //! Every environment-config fetch in this module tree uses
 //! `decryptVariables: true`: the non-decrypted config masks EVERY variable
-//! value as null in production (confirmed live 2026-08-07), and the
-//! enabled-state detection here depends on values -- `PATRONI_ENABLED ==
-//! "true"`, a non-empty `WAL_ARCHIVE_BUCKET`, PgBouncer's pool knobs. The
-//! caller's own access already gates decryption server-side.
+//! value as null in production, and the enabled-state detection here depends
+//! on values -- the HA-active variable reading "true", a non-empty archive
+//! bucket, the pooler's knobs. The caller's own access already gates
+//! decryption server-side.
 
 use std::collections::BTreeMap;
 
 use is_terminal::IsTerminal;
 use serde::Serialize;
 
-use crate::controllers::{config::EnvironmentConfig, postgres_plugins, project::ServiceContext};
+use crate::controllers::database_engines::DatabaseEngine;
+use crate::controllers::{config::EnvironmentConfig, database_plugins, project::ServiceContext};
 use crate::util::prompt::prompt_confirm_with_default;
 
 use super::*;
@@ -26,95 +32,82 @@ use super::*;
 /// Shared `{id, name}` output shape for the service/environment being acted on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ResourceRef {
+pub(crate) struct ResourceRef {
     pub id: String,
     pub name: String,
 }
 
 pub mod ha;
 pub mod ops_log;
-pub mod pgbouncer;
 pub mod pitr;
+pub mod pool;
 
-/// Manage Postgres plugin features: point-in-time recovery, high availability, and connection pooling
-#[derive(Parser)]
-#[clap(
-    after_help = "Examples:\n\n  railway postgres pitr status --service postgres\n  railway postgres pitr enable --service postgres\n  railway postgres ha status --service postgres\n  railway postgres ha convert --service postgres --replicas 2\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway postgres`.\n  Actions that change config (enable/disable/convert/revert/add/remove/configure/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy)."
-)]
-pub struct Args {
-    #[clap(subcommand)]
-    command: Commands,
-
+/// The selectors and output mode every managed-database subcommand accepts.
+/// Declared once and flattened into each engine's `Args` so the flags, their
+/// shorthands and their help text cannot drift between engines.
+#[derive(Parser, Clone, Default)]
+pub struct Selectors {
     /// Service name or ID (defaults to linked service)
     #[clap(short, long, global = true)]
-    service: Option<String>,
+    pub service: Option<String>,
 
     /// Environment to use (defaults to linked environment)
     #[clap(short, long, global = true)]
-    environment: Option<String>,
+    pub environment: Option<String>,
 
     /// Project ID to use (defaults to linked project)
     #[clap(short = 'p', long, value_name = "PROJECT_ID", global = true)]
-    project: Option<String>,
+    pub project: Option<String>,
 
     /// Output in JSON format
     #[clap(long, global = true)]
-    json: bool,
+    pub json: bool,
 }
 
-#[derive(Parser)]
-enum Commands {
-    /// Manage point-in-time recovery (continuous backups)
-    Pitr(pitr::Args),
-
-    /// Manage high-availability clustering
+/// A subcommand from any engine's command tree, after that tree has already
+/// established the engine actually has the capability.
+pub enum Action {
     Ha(ha::Args),
-
-    /// Manage PgBouncer connection pooling
-    Pgbouncer(pgbouncer::Args),
-
-    /// Show the local audit trail of postgres operations
+    Pitr(pitr::Args),
+    Pooling(pool::Args),
     History(HistoryArgs),
 }
 
 #[derive(Parser)]
-struct HistoryArgs {
+pub struct HistoryArgs {
     /// Maximum entries to show (newest last)
     #[clap(long, default_value_t = 50, value_parser = clap::value_parser!(usize))]
-    limit: usize,
+    pub limit: usize,
 }
 
-pub async fn command(args: Args) -> Result<()> {
-    let Args {
-        command,
+/// The one entry point every engine's command routes through: sets the output
+/// mode, runs the action, translates API-mismatch errors, and records the
+/// local audit trail.
+pub async fn dispatch(
+    engine: &'static DatabaseEngine,
+    selectors: Selectors,
+    action: Action,
+) -> Result<()> {
+    let Selectors {
         service,
         environment,
         project,
         json,
-    } = args;
+    } = selectors;
 
     crate::util::reporter::set_mode(json);
 
-    // `history` only reads the local trail -- it neither needs resolution
-    // nor should it append to the very log it displays.
-    if let Commands::History(history_args) = &command {
-        return history(history_args, json);
+    // `history` only reads the local trail -- it neither needs resolution nor
+    // should it append to the very log it displays.
+    if let Action::History(history_args) = &action {
+        return history(engine, history_args, json);
     }
 
     let started = std::time::Instant::now();
-    let result = match command {
-        Commands::Pitr(sub) => {
-            pitr::command(
-                sub,
-                project.clone(),
-                service.clone(),
-                environment.clone(),
-                json,
-            )
-            .await
-        }
-        Commands::Ha(sub) => {
+    let result = match action {
+        Action::Ha(sub) => {
             ha::command(
+                engine,
                 sub,
                 project.clone(),
                 service.clone(),
@@ -123,8 +116,9 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await
         }
-        Commands::Pgbouncer(sub) => {
-            pgbouncer::command(
+        Action::Pitr(sub) => {
+            pitr::command(
+                engine,
                 sub,
                 project.clone(),
                 service.clone(),
@@ -133,40 +127,54 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await
         }
-        Commands::History(_) => unreachable!("handled above"),
+        Action::Pooling(sub) => {
+            pool::command(
+                engine,
+                sub,
+                project.clone(),
+                service.clone(),
+                environment.clone(),
+                json,
+            )
+            .await
+        }
+        Action::History(_) => unreachable!("handled above"),
     };
     let result = result.map_err(add_api_mismatch_guidance);
 
-    // Best-effort persistent audit trail (see ops_log): PITR/HA/PgBouncer
+    // Best-effort persistent audit trail (see ops_log): PITR, HA and pooling
     // compose, and reconstructing WHICH sequence of operations produced a
-    // misconfigured Postgres needs more than server-side command counters.
+    // misconfigured database needs more than server-side command counters.
     let (project, environment, service) =
         resolved_selectors_for_log(project, service, environment).await;
-    ops_log::record(&ops_log::OpsLogEntry {
-        timestamp: chrono::Utc::now(),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
-        args: std::env::args().skip(1).collect(),
-        project,
-        environment,
-        service,
-        success: result.is_ok(),
-        error: result.as_ref().err().map(|e| {
-            let message = format!("{e:#}");
-            if message.len() > 512 {
-                message[..512].to_string()
-            } else {
-                message
-            }
-        }),
-        duration_ms: started.elapsed().as_millis() as u64,
-    });
+    ops_log::record(
+        engine,
+        &ops_log::OpsLogEntry {
+            timestamp: chrono::Utc::now(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
+            args: std::env::args().skip(1).collect(),
+            project,
+            environment,
+            service,
+            success: result.is_ok(),
+            error: result.as_ref().err().map(|e| {
+                let message = format!("{e:#}");
+                if message.len() > 512 {
+                    message[..512].to_string()
+                } else {
+                    message
+                }
+            }),
+            duration_ms: started.elapsed().as_millis() as u64,
+        },
+    );
 
     result
 }
 
 /// The selectors that actually applied: explicit flags win; otherwise the
-/// linked project's ids (config-file read, no network). Best-effort -- the
-/// log entry still lands with whatever could be resolved.
+/// linked project's ids (config-file read, no network). Best-effort -- the log
+/// entry still lands with whatever could be resolved.
 async fn resolved_selectors_for_log(
     project: Option<String>,
     service: Option<String>,
@@ -186,8 +194,8 @@ async fn resolved_selectors_for_log(
     )
 }
 
-fn history(args: &HistoryArgs, json: bool) -> Result<()> {
-    let entries = ops_log::read_entries();
+fn history(engine: &DatabaseEngine, args: &HistoryArgs, json: bool) -> Result<()> {
+    let entries = ops_log::read_entries(engine);
     let start = entries.len().saturating_sub(args.limit);
     let window = &entries[start..];
 
@@ -198,10 +206,11 @@ fn history(args: &HistoryArgs, json: bool) -> Result<()> {
 
     if window.is_empty() {
         println!(
-            "No postgres operations recorded yet (the trail lives at {}).",
-            ops_log::log_path()
+            "No {} operations recorded yet (the trail lives at {}).",
+            engine.key,
+            ops_log::log_path(engine)
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "~/.railway/postgres-ops.jsonl".to_string())
+                .unwrap_or_else(|| format!("~/.railway/{}-ops.jsonl", engine.key)),
         );
         return Ok(());
     }
@@ -241,10 +250,10 @@ fn history(args: &HistoryArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Marker phrases the backend uses (or may use in the future) in a
-/// `UserError` when an operation this CLI build depends on has been
-/// removed or changed and the fix is a newer CLI. Matched
-/// case-insensitively against the whole error chain.
+/// Marker phrases the backend uses (or may use in the future) in a `UserError`
+/// when an operation this CLI build depends on has been removed or changed and
+/// the fix is a newer CLI. Matched case-insensitively against the whole error
+/// chain.
 const UPGRADE_REQUIRED_MARKERS: &[&str] = &[
     "update your railway cli",
     "upgrade your railway cli",
@@ -254,10 +263,10 @@ const UPGRADE_REQUIRED_MARKERS: &[&str] = &[
     "railway cli is out of date",
 ];
 
-/// GraphQL validation messages that mean the running binary was built
-/// against a different API schema than the server is exposing -- an
-/// operation or field this command depends on no longer exists (removed,
-/// renamed, or re-internalized server-side).
+/// GraphQL validation messages that mean the running binary was built against
+/// a different API schema than the server is exposing -- an operation or field
+/// this command depends on no longer exists (removed, renamed, or
+/// re-internalized server-side).
 fn is_schema_mismatch_message(lower_chain: &str) -> bool {
     lower_chain.contains("cannot query field")
         || lower_chain.contains("is not defined by type")
@@ -265,13 +274,12 @@ fn is_schema_mismatch_message(lower_chain: &str) -> bool {
         || lower_chain.contains("unknown field")
 }
 
-/// `railway postgres` drives API operations that the backend reserves the
-/// right to evolve (they were exposed on the public subgraph specifically
-/// for this CLI). When one disappears or the backend explicitly asks for a
-/// newer CLI, translate the raw GraphQL error into actionable guidance
-/// instead of a cryptic validation dump. Every other error passes through
-/// untouched.
-pub(super) fn add_api_mismatch_guidance(err: anyhow::Error) -> anyhow::Error {
+/// These commands drive API operations the backend reserves the right to
+/// evolve (they were exposed on the public subgraph specifically for this
+/// CLI). When one disappears or the backend explicitly asks for a newer CLI,
+/// translate the raw GraphQL error into actionable guidance instead of a
+/// cryptic validation dump. Every other error passes through untouched.
+pub(crate) fn add_api_mismatch_guidance(err: anyhow::Error) -> anyhow::Error {
     let lower_chain = format!("{err:#}").to_ascii_lowercase();
 
     if UPGRADE_REQUIRED_MARKERS
@@ -295,7 +303,7 @@ pub(super) fn add_api_mismatch_guidance(err: anyhow::Error) -> anyhow::Error {
 /// Shared confirm-before-mutating helper: `--yes` bypasses the prompt; a
 /// non-TTY session without `--yes` fails loudly instead of hanging, matching
 /// `tcp_proxy.rs delete`'s convention.
-pub(super) fn confirm_or_bail(message: &str, yes: bool) -> Result<bool> {
+pub(crate) fn confirm_or_bail(message: &str, yes: bool) -> Result<bool> {
     if yes {
         return Ok(true);
     }
@@ -308,9 +316,9 @@ pub(super) fn confirm_or_bail(message: &str, yes: bool) -> Result<bool> {
     }
 }
 
-/// Service id -> name lookup, used to label HA cluster members (which are
-/// only identified by id in `environment.config`).
-pub(super) fn service_name_map(ctx: &ServiceContext) -> BTreeMap<String, String> {
+/// Service id -> name lookup, used to label cluster members (which are only
+/// identified by id in `environment.config`).
+pub(crate) fn service_name_map(ctx: &ServiceContext) -> BTreeMap<String, String> {
     ctx.project
         .services
         .edges
@@ -320,23 +328,22 @@ pub(super) fn service_name_map(ctx: &ServiceContext) -> BTreeMap<String, String>
 }
 
 /// The resolved cluster/standalone root for `ctx.service_id` -- if the
-/// resolved service is a PgBouncer/HAProxy edge child, this follows
-/// `parentServiceId` back to the actual database root (mirrors
-/// `PgBouncerSection.tsx`'s `templateRootServiceId`).
-pub(super) struct RootContext {
+/// resolved service is an edge child (a pooler or the cluster's router), this
+/// follows `parentServiceId` back to the actual database root.
+pub(crate) struct RootContext {
     pub root_id: String,
     pub root_name: String,
 }
 
-pub(super) const FIELD_LABEL_WIDTH: usize = 20;
+pub(crate) const FIELD_LABEL_WIDTH: usize = 20;
 
 /// Fixed-width field printer, matching `cdn.rs`'s status output convention.
-pub(super) fn print_field(label: &str, value: &dyn std::fmt::Display) {
+pub(crate) fn print_field(label: &str, value: &dyn std::fmt::Display) {
     let padded = format!("{label:<FIELD_LABEL_WIDTH$}");
     println!("{} {value}", padded.dimmed());
 }
 
-pub(super) fn status_label(enabled: bool) -> colored::ColoredString {
+pub(crate) fn status_label(enabled: bool) -> colored::ColoredString {
     if enabled {
         "enabled".green().bold()
     } else {
@@ -344,12 +351,12 @@ pub(super) fn status_label(enabled: bool) -> colored::ColoredString {
     }
 }
 
-pub(super) fn yes_no(value: bool) -> &'static str {
+pub(crate) fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-pub(super) fn resolve_root(ctx: &ServiceContext, config: &EnvironmentConfig) -> RootContext {
-    let root_id = postgres_plugins::resolve_root_service_id(config, &ctx.service_id);
+pub(crate) fn resolve_root(ctx: &ServiceContext, config: &EnvironmentConfig) -> RootContext {
+    let root_id = database_plugins::resolve_root_service_id(config, &ctx.service_id);
     let root_name = if root_id == ctx.service_id {
         ctx.service_name.clone()
     } else {
@@ -364,37 +371,6 @@ pub(super) fn resolve_root(ctx: &ServiceContext, config: &EnvironmentConfig) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn parses_feature_subcommands() {
-        assert!(matches!(
-            Args::parse_from(["postgres", "pitr", "status"]).command,
-            Commands::Pitr(_)
-        ));
-        assert!(matches!(
-            Args::parse_from(["postgres", "ha", "status"]).command,
-            Commands::Ha(_)
-        ));
-        assert!(matches!(
-            Args::parse_from(["postgres", "pgbouncer", "status"]).command,
-            Commands::Pgbouncer(_)
-        ));
-    }
-
-    #[test]
-    fn parses_history_with_limit() {
-        let args = Args::parse_from(["postgres", "history"]);
-        assert!(matches!(
-            args.command,
-            Commands::History(HistoryArgs { limit: 50 })
-        ));
-        let args = Args::parse_from(["postgres", "history", "--limit", "5"]);
-        assert!(matches!(
-            args.command,
-            Commands::History(HistoryArgs { limit: 5 })
-        ));
-    }
 
     #[test]
     fn api_mismatch_guidance_translates_missing_field_validation_errors() {
@@ -417,9 +393,6 @@ mod tests {
 
     #[test]
     fn api_mismatch_guidance_surfaces_explicit_upgrade_user_errors() {
-        // If the backend ever retires one of these routes it throws a
-        // UserError telling the caller to update -- the CLI must lead with
-        // actionable guidance, not a bare GraphQL error.
         let err = anyhow::anyhow!(
             "This operation has moved. Please update your Railway CLI to continue managing PITR."
         )
@@ -442,29 +415,5 @@ mod tests {
         let err = anyhow::anyhow!("connection reset by peer");
         let after = format!("{:#}", add_api_mismatch_guidance(err));
         assert_eq!(after, "connection reset by peer");
-    }
-
-    #[test]
-    fn global_selectors_are_accepted_before_and_after_the_subcommand() {
-        let args = Args::parse_from([
-            "postgres",
-            "--project",
-            "project-id",
-            "--environment",
-            "production",
-            "--service",
-            "web",
-            "--json",
-            "pitr",
-            "status",
-        ]);
-        assert_eq!(args.project.as_deref(), Some("project-id"));
-        assert_eq!(args.environment.as_deref(), Some("production"));
-        assert_eq!(args.service.as_deref(), Some("web"));
-        assert!(args.json);
-
-        let args = Args::parse_from(["postgres", "ha", "status", "--service", "web", "--json"]);
-        assert_eq!(args.service.as_deref(), Some("web"));
-        assert!(args.json);
     }
 }

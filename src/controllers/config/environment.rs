@@ -50,12 +50,96 @@ pub struct ServiceInstance {
     /// Canvas group id, used to keep live-scaled replica/internal nodes
     /// visually grouped with their cluster root (`groupSet`).
     pub group_id: Option<String>,
+    /// Template code of the HA companion to deploy when converting this
+    /// standalone service, declared by its origin template. `None` for
+    /// services provisioned before templates carried the field, and for
+    /// legacy deploys with no template link at all -- those fall back to the
+    /// engine registry's companion (see
+    /// `database_engines::DatabaseEngine::ha_template_code_for`).
+    pub ha_template_code: Option<String>,
+    /// The inverse of `ha_template_code`: the standalone template the root
+    /// falls back to when the cluster is reverted. Set on a cluster root.
+    pub reverts_to_template_code: Option<String>,
+    /// Name of the variable the HA agent sets to "true" when the cluster is
+    /// active (e.g. `PATRONI_ENABLED`, `SENTINEL_ENABLED`, `GR_ENABLED`). This
+    /// is what makes "is this actually a cluster?" a declared question rather
+    /// than a per-engine hardcode.
+    pub ha_active_variable: Option<String>,
+    /// Template-authored bounds for the HA conversion flow -- which roles the
+    /// engine's cluster even has, the counts each accepts, and the image
+    /// majors its companion publishes data-node images for.
+    pub ha_conversion_config: Option<HaConversionConfig>,
     /// Template-declared coordination-variable wiring for HA scale helpers,
     /// stamped on the root service at conversion time. `None` for legacy
     /// (pre-`clusterWiring`) Patroni clusters -- callers fall back to the
     /// historical hardcoded Patroni wiring in that case (see
     /// `cluster_scale::resolve_cluster_wiring`).
     pub cluster_wiring: Option<ClusterWiring>,
+}
+
+/// Template-authored configuration for the HA conversion flow, mirroring
+/// `haConversionConfigSchema` in
+/// `common/javascript/models/src/environment/schema.ts`.
+///
+/// The CLI reads this rather than hardcoding per-engine topology: a cluster
+/// whose template declares no `internal` selector has no coordinator nodes at
+/// all (Redis colocates Sentinel, MySQL's Group Replication is built in), so
+/// `--coordinators` is refused for it, and `supportedImageMajorVersions` is
+/// what the conversion gate accepts -- shipping a new major stays a template
+/// update rather than a CLI release.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HaConversionConfig {
+    pub description: Option<String>,
+    pub replica: Option<HaConversionRoleSelector>,
+    pub internal: Option<HaConversionRoleSelector>,
+    pub edge: Option<HaConversionRoleSelector>,
+    /// Image majors the HA companion publishes data-node images for.
+    pub supported_image_major_versions: Option<Vec<i64>>,
+    /// Pin conversion to the source's exact `major.minor` rather than the bare
+    /// major. Declared where the HA repo publishes minor alias tags and the
+    /// engine's replication is not minor-agnostic.
+    pub pin_to_minor_version: Option<bool>,
+}
+
+/// One role's selector in the conversion flow: what to call it, and which
+/// counts it accepts.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HaConversionRoleSelector {
+    pub label: Option<String>,
+    pub description: Option<String>,
+    /// Singular display noun for a node of this role (e.g. "Redis", "etcd").
+    pub node_label: Option<String>,
+    /// The counts the template allows for this role. Empty/absent means the
+    /// template declares no bound and any non-negative count is accepted.
+    pub options: Option<Vec<i64>>,
+    pub default_value: Option<i64>,
+}
+
+/// Coordinates of a declared HTTP probe against a node's own private address:
+/// `GET <path>` on `<port>`, any 2xx meaning healthy. The platform carries no
+/// knowledge of what is listening -- it probes what the template points it at.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HttpEndpoint {
+    pub port: Option<i64>,
+    pub path: Option<String>,
+}
+
+/// A rich member-status API the data nodes expose, when the topology has one.
+/// Unlike the plain HTTP probes, speaking it needs a protocol client, so the
+/// CLI acts on this only when `protocol` names one it implements -- an unknown
+/// protocol is treated exactly like no declaration at all.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MemberStatusApi {
+    pub protocol: Option<String>,
+    pub port: Option<i64>,
 }
 
 /// Template-declared wiring map for HA scale helpers, mirroring
@@ -91,6 +175,42 @@ pub struct ClusterWiring {
     /// Variable on root + replica services holding the consensus quorum.
     /// Restamped to a majority (`floor(dataNodes / 2) + 1`) on replica scale.
     pub quorum_variable: Option<String>,
+    /// The data nodes host their own consensus voters but expose no quorum
+    /// variable to restamp -- the coordinator derives its majority from live
+    /// membership (MySQL Group Replication). Drives the same
+    /// odd-count-of-at-least-three fence `quorum_variable` does, with no
+    /// stamping. Declaring `quorum_variable` already implies this.
+    pub data_nodes_are_quorum_voters: Option<bool>,
+    /// Variable on root + replica services holding the comma-separated peer
+    /// list each node's own colocated coordinator boots against (e.g.
+    /// `SENTINEL_HOSTS`, `GR_SEEDS`). Unlike `data_nodes_variable` this lands
+    /// on the data nodes rather than the edge, and scale stamps it on newly
+    /// added nodes ONLY: a node that joins later must know the real membership
+    /// at first boot, while an existing node already read its own copy and
+    /// restamping it would only mark the whole fleet stale.
+    pub peer_hosts_variable: Option<String>,
+    /// Format for each peer entry (e.g. `{host}:26379`). `{host}`/`{rootName}`
+    /// are substituted as described above; the rest is literal.
+    pub peer_hosts_entry_format: Option<String>,
+    /// Health probe against the cluster's routing edge node.
+    pub edge_health_check: Option<HttpEndpoint>,
+    /// Health probe against each data (root/replica) node -- the generic
+    /// equivalent of a coordinator API for topologies that expose none.
+    pub data_node_health_check: Option<HttpEndpoint>,
+    /// Health probe against each internal (coordinator) node.
+    pub internal_node_health_check: Option<HttpEndpoint>,
+    /// Role probe against each data node: 200 = this node is the one its own
+    /// coordinator currently treats as primary, 503 = it is not, anything else
+    /// = unknown.
+    pub data_node_role_check: Option<HttpEndpoint>,
+    /// Rich member-status API the data nodes expose, when the topology has one
+    /// (e.g. Patroni's REST API).
+    pub member_status_api: Option<MemberStatusApi>,
+    /// Same transport as `data_node_role_check`, but an ACTION: POST against a
+    /// data node asks that node's own colocated coordinator to make THAT node
+    /// the primary. 2xx means the handoff was accepted -- confirmation comes
+    /// from `data_node_role_check` flipping, never from this response.
+    pub data_node_switchover: Option<HttpEndpoint>,
 }
 
 #[skip_serializing_none]

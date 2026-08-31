@@ -1,4 +1,4 @@
-//! Live-scaling controller for `railway postgres ha scale` -- mutates an
+//! Live-scaling controller for the managed-database `ha scale` verb -- mutates an
 //! **already-converted** HA cluster's live topology by creating/deleting
 //! whole replica/coordinator services (each is its own Railway service+volume
 //! in this architecture) and restamping the cluster's declared wiring on
@@ -13,9 +13,9 @@
 //!   - Scaling up clones an EXISTING live sibling replica/coordinator's own
 //!     shape (source image, variables, volume mount path) rather than
 //!     re-fetching the original template. Scaling up from zero members of a
-//!     role isn't supported (there's nothing to clone) -- `railway postgres
-//!     ha convert --replicas/--coordinators N` is the way to add the first
-//!     member of a role; it already owns the template-fetch/adjust path.
+//!     role isn't supported (there's nothing to clone) -- `ha convert
+//!     --replicas/--coordinators N` is the way to add the first member of a
+//!     role; it already owns the template-fetch/adjust path.
 //!   - Because the clone source is a LIVE, already-deployed sibling (not a
 //!     raw template), its variable VALUES are already fully-resolved real
 //!     references rather than template-relative ones -- so unlike the
@@ -23,10 +23,10 @@
 //!     needed. Only the node's own identity variable (from `ClusterWiring`)
 //!     gets overwritten, exactly mirroring what
 //!     `template_apply::restamp_after_replica_adjust` already does for the
-//!     initial-conversion case. This also means `WAL_ARCHIVE_*` variables
-//!     (stamped when PITR is enabled after the initial HA conversion) carry
-//!     over automatically with the rest of the clone, with no special-case
-//!     handling required.
+//!     initial-conversion case. This also means the engine's archive
+//!     variables (stamped when PITR is enabled after the initial HA
+//!     conversion) carry over automatically with the rest of the clone, with
+//!     no special-case handling required.
 
 use std::collections::BTreeMap;
 
@@ -50,7 +50,7 @@ use crate::{
 
 const PATRONI_ENABLED_VAR: &str = "PATRONI_ENABLED";
 
-/// Requested target counts for one `railway postgres ha scale` invocation.
+/// Requested target counts for one `ha scale` invocation.
 /// Any combination of the three may be `Some` at once (clap's `ArgGroup`
 /// only requires at least one).
 pub struct ScaleClusterParams {
@@ -96,6 +96,42 @@ pub fn validate_odd_coordinator_count(target: i64) -> Result<()> {
     Ok(())
 }
 
+/// In a topology with no separate coordinator tier, the DATA nodes are the
+/// voters: the cluster needs an odd number of at least three of them, or it
+/// cannot elect a primary after losing one. The fence applies exactly where
+/// the template says the data nodes carry the vote -- either by declaring the
+/// quorum variable to restamp, or by declaring that its coordinator derives
+/// its own majority from live membership.
+///
+/// `--replicas` counts nodes BESIDE the root, so an even replica count is
+/// what makes the total odd. Rejected up front rather than rounded: a
+/// silently adjusted cluster size is exactly the kind of surprise that shows
+/// up as a failed failover months later.
+pub fn validate_data_node_quorum(wiring: &ClusterWiring, replicas_target: i64) -> Result<()> {
+    let votes_with_data_nodes =
+        wiring.quorum_variable.is_some() || wiring.data_nodes_are_quorum_voters.unwrap_or(false);
+    if !votes_with_data_nodes {
+        return Ok(());
+    }
+
+    let data_nodes = replicas_target + 1;
+    if data_nodes < 3 {
+        bail!(
+            "This cluster's data nodes carry the failover vote, so it needs at least 3 of them: \
+             use --replicas 2 or more (got {replicas_target}, for {data_nodes} data node(s))."
+        );
+    }
+    if data_nodes % 2 == 0 {
+        bail!(
+            "This cluster's data nodes carry the failover vote, so their total must be odd -- \
+             an even cluster cannot elect a primary after losing a node. --replicas counts nodes \
+             beside the primary, so pass an even number (got {replicas_target}, for {data_nodes} \
+             data nodes)."
+        );
+    }
+    Ok(())
+}
+
 /// Scales an already-converted HA cluster's replica/coordinator/edge counts
 /// per `params`, creating/deleting whole services as needed and restamping
 /// the cluster's declared wiring on survivors. `names` is a service id ->
@@ -122,6 +158,15 @@ pub async fn scale_cluster(
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
         .await?
         .config;
+
+    if let Some(target) = params.replicas
+        && let Some(wiring) = config
+            .services
+            .get(root_id)
+            .and_then(resolve_cluster_wiring)
+    {
+        validate_data_node_quorum(&wiring, target)?;
+    }
 
     let mut patch: BTreeMap<String, ServiceInstance> = BTreeMap::new();
     let mut replicas_summary = None;
@@ -255,8 +300,7 @@ async fn scale_replicas(
 
     let wiring = resolve_cluster_wiring(root).with_context(|| {
         "Could not resolve this cluster's scale wiring -- scaling would leave the connection \
-         routing list stale. The root service is missing both `clusterWiring` and the legacy \
-         `PATRONI_ENABLED` variable."
+         routing list stale. The root service declares no `clusterWiring`."
             .to_string()
     })?;
     let routing_edge_id = find_routing_edge_id(config, root_id);
@@ -265,8 +309,7 @@ async fn scale_replicas(
         let Some((source_id, source_name)) = existing.first().cloned() else {
             bail!(
                 "Cannot scale up replicas on {root_name}: there is no existing replica to clone \
-                 from. Use `railway postgres ha convert --replicas {target_count}` to add the \
-                 first replica."
+                 from. Re-run `ha convert --replicas {target_count}` to add the first replica."
             );
         };
         let source = config
@@ -290,6 +333,7 @@ async fn scale_replicas(
 
         let to_add = target_count - current_count;
         let mut added = Vec::with_capacity(to_add as usize);
+        let mut added_ids = Vec::with_capacity(to_add as usize);
         for next_number in start_number..start_number + to_add {
             let node_name = format!("{base_name}-{next_number}");
             let node = create_clone_service(ctx, &node_name, &source_image).await?;
@@ -316,14 +360,18 @@ async fn scale_replicas(
                 },
             );
 
+            added_ids.push(node.id.clone());
             existing.push((node.id.clone(), node.name.clone()));
             added.push(node.name.clone());
         }
 
-        ScaleDimensionSummary {
-            added,
-            removed: Vec::new(),
-        }
+        (
+            ScaleDimensionSummary {
+                added,
+                removed: Vec::new(),
+            },
+            added_ids,
+        )
     } else {
         let to_remove = current_count - target_count;
         let base_name = existing
@@ -347,12 +395,16 @@ async fn scale_replicas(
         let removed: Vec<String> = to_delete.iter().map(|(_, name)| name.clone()).collect();
         existing.retain(|(id, _)| !to_delete.iter().any(|(rid, _)| rid == id));
 
-        ScaleDimensionSummary {
-            added: Vec::new(),
-            removed,
-        }
+        (
+            ScaleDimensionSummary {
+                added: Vec::new(),
+                removed,
+            },
+            Vec::new(),
+        )
     };
 
+    let (summary, added_ids) = summary;
     restamp_replica_wiring(
         patch,
         &wiring,
@@ -360,6 +412,7 @@ async fn scale_replicas(
         root_name,
         routing_edge_id.as_deref(),
         &existing,
+        &added_ids,
     );
 
     Ok((summary, existing))
@@ -417,7 +470,7 @@ async fn scale_internal(
         let Some((source_id, source_name)) = existing.first().cloned() else {
             bail!(
                 "Cannot scale up coordinators on {root_name}: there is no existing coordinator \
-                 node to clone from. Use `railway postgres ha convert --coordinators \
+                 node to clone from. Re-run `ha convert --coordinators \
                  {target_count}` to add the first one."
             );
         };
@@ -603,10 +656,11 @@ fn set_patch_var(
 }
 
 /// Restamps the root's declared wiring after a replica scale up/down: each
-/// replica's own identity variable, the routing edge's data-node list, and
-/// consensus quorum on root + replicas. Mirrors
-/// `useScaleHACluster.tsx`'s `scaleReplicaNodes` restamp step /
-/// `template_apply::restamp_after_replica_adjust`, against `EnvironmentConfig`.
+/// replica's own identity variable, the routing edge's data-node list, the
+/// peer list joining nodes boot against, and consensus quorum on root +
+/// replicas. Mirrors `useScaleHACluster.tsx`'s `scaleReplicaNodes` restamp
+/// step / `template_apply::restamp_after_replica_adjust`, against
+/// `EnvironmentConfig`.
 fn restamp_replica_wiring(
     patch: &mut BTreeMap<String, ServiceInstance>,
     wiring: &ClusterWiring,
@@ -614,10 +668,34 @@ fn restamp_replica_wiring(
     root_name: &str,
     routing_edge_id: Option<&str>,
     replicas_after: &[(String, String)],
+    newly_added_ids: &[String],
 ) {
     if let Some(var_name) = &wiring.replica_node_name_variable {
         for (id, name) in replicas_after {
             set_patch_var(patch, id, var_name, name.to_ascii_lowercase());
+        }
+    }
+
+    // Topologies whose coordinator is colocated on the data nodes boot each
+    // node against a declared peer list. It is stamped on JOINING nodes only:
+    // a node coming up now has to know the real membership at first boot,
+    // while every existing node already read its own copy -- rewriting theirs
+    // would mark the whole cluster stale for a change none of them needs.
+    if let (Some(peer_var), Some(entry_format)) =
+        (&wiring.peer_hosts_variable, &wiring.peer_hosts_entry_format)
+        && !newly_added_ids.is_empty()
+    {
+        let mut peer_names: Vec<&str> = std::iter::once(root_name)
+            .chain(replicas_after.iter().map(|(_, name)| name.as_str()))
+            .collect();
+        peer_names.sort_unstable();
+        let peer_list = peer_names
+            .iter()
+            .map(|name| format_data_node_entry(entry_format, name, root_name))
+            .collect::<Vec<_>>()
+            .join(",");
+        for id in newly_added_ids {
+            set_patch_var(patch, id, peer_var, peer_list.clone());
         }
     }
 
@@ -706,7 +784,7 @@ fn resolve_cluster_wiring(root: &ServiceInstance) -> Option<ClusterWiring> {
         replica_node_name_variable: Some("PATRONI_NAME".to_string()),
         data_nodes_variable: Some("POSTGRES_NODES".to_string()),
         data_nodes_entry_format: Some("{host}:${{{rootName}.PGPORT}}:8008".to_string()),
-        quorum_variable: None,
+        ..ClusterWiring::default()
     })
 }
 
@@ -1169,6 +1247,7 @@ mod tests {
             "db-prod",
             Some("edge"),
             &replicas,
+            &[],
         );
 
         assert_eq!(
@@ -1399,7 +1478,114 @@ mod tests {
             "db",
             Some("edge"),
             &[("r1".to_string(), "replica-1".to_string())],
+            &["r1".to_string()],
         );
         assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn peer_list_is_stamped_on_joining_nodes_only() {
+        let wiring = ClusterWiring {
+            peer_hosts_variable: Some("SENTINEL_HOSTS".to_string()),
+            peer_hosts_entry_format: Some("{host}:26379".to_string()),
+            ..ClusterWiring::default()
+        };
+        let replicas = vec![
+            ("r1".to_string(), "Redis-2".to_string()),
+            ("r2".to_string(), "Redis-3".to_string()),
+        ];
+        let mut patch = BTreeMap::new();
+
+        restamp_replica_wiring(
+            &mut patch,
+            &wiring,
+            "root",
+            "Redis-1",
+            None,
+            &replicas,
+            &["r2".to_string()],
+        );
+
+        // The joining node learns the full membership at first boot...
+        let peers = patch["r2"].variables["SENTINEL_HOSTS"]
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap();
+        assert_eq!(peers.split(',').count(), 3);
+        assert!(peers.contains("${{Redis-1.RAILWAY_PRIVATE_DOMAIN}}:26379"));
+
+        // ...while the nodes already running are left alone: they read their
+        // own copy at their own first boot, and restamping would only mark
+        // them stale for a change they do not need to see.
+        assert!(
+            patch
+                .get("r1")
+                .is_none_or(|p| !p.variables.contains_key("SENTINEL_HOSTS"))
+        );
+        assert!(
+            patch
+                .get("root")
+                .is_none_or(|p| !p.variables.contains_key("SENTINEL_HOSTS"))
+        );
+    }
+
+    #[test]
+    fn scale_down_stamps_no_peer_list_at_all() {
+        let wiring = ClusterWiring {
+            peer_hosts_variable: Some("GR_SEEDS".to_string()),
+            peer_hosts_entry_format: Some("{host}:3306".to_string()),
+            ..ClusterWiring::default()
+        };
+        let mut patch = BTreeMap::new();
+        restamp_replica_wiring(
+            &mut patch,
+            &wiring,
+            "root",
+            "MySQL-1",
+            None,
+            &[("r1".to_string(), "MySQL-2".to_string())],
+            &[],
+        );
+        assert!(patch.is_empty());
+    }
+
+    #[test]
+    fn data_node_quorum_fence_applies_only_where_the_data_nodes_vote() {
+        // Declaring the quorum variable to restamp means the data nodes vote.
+        let sentinel = ClusterWiring {
+            quorum_variable: Some("SENTINEL_QUORUM".to_string()),
+            ..ClusterWiring::default()
+        };
+        // So does declaring that the coordinator derives its own majority.
+        let group_replication = ClusterWiring {
+            data_nodes_are_quorum_voters: Some(true),
+            ..ClusterWiring::default()
+        };
+
+        for wiring in [&sentinel, &group_replication] {
+            // --replicas counts nodes beside the primary, so even is what
+            // makes the cluster odd.
+            assert!(validate_data_node_quorum(wiring, 2).is_ok());
+            assert!(validate_data_node_quorum(wiring, 4).is_ok());
+
+            // An odd replica count leaves an even cluster, which cannot
+            // elect a primary after losing a node.
+            assert!(validate_data_node_quorum(wiring, 3).is_err());
+            // Two data nodes cannot hold a majority either.
+            assert!(validate_data_node_quorum(wiring, 1).is_err());
+            assert!(validate_data_node_quorum(wiring, 0).is_err());
+        }
+
+        // A cluster with a separate coordinator tier (etcd) carries its
+        // quorum there, so its replica count is unconstrained.
+        let external_coordinator = ClusterWiring {
+            coordinator_hosts_variable: Some("PATRONI_ETCD3_HOSTS".to_string()),
+            ..ClusterWiring::default()
+        };
+        for replicas in [0, 1, 2, 3] {
+            assert!(validate_data_node_quorum(&external_coordinator, replicas).is_ok());
+        }
     }
 }
