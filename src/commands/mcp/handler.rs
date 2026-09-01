@@ -19,7 +19,7 @@ use crate::{
         project::{get_environment_instances, get_project, get_service_ids_in_env},
         upload::{create_deploy_tarball, upload_deploy_tarball},
         user::get_user,
-        variables::get_service_variables,
+        variables::get_service_variables_including_sealed,
     },
     gql::{mutations, queries},
     telemetry,
@@ -859,7 +859,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "List all environment variables for a service. Returns KEY=VALUE pairs. If no IDs are provided, uses the currently linked project/service/environment."
+        description = "List all environment variables for a service. Returns KEY=VALUE pairs. Sealed variables are listed by name only, in a trailing 'Sealed' section: they are already set on the service and their value cannot be read back by anyone, so treat them as present and never recreate them. If no IDs are provided, uses the currently linked project/service/environment."
     )]
     async fn list_variables(
         &self,
@@ -869,7 +869,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
 
-        let variables = get_service_variables(
+        let variables = get_service_variables_including_sealed(
             &self.client(),
             &self.configs,
             ctx.project_id,
@@ -885,11 +885,28 @@ impl RailwayMcp {
             )]));
         }
 
-        let output: String = variables
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Sealed variables have no readable value, but the agent still needs to
+        // know they exist — dropping them made it recreate variables that were
+        // already set, or wait for ones that were never missing.
+        let mut readable: Vec<String> = Vec::new();
+        let mut sealed: Vec<String> = Vec::new();
+        for (key, value) in &variables {
+            match value {
+                Some(value) => readable.push(format!("{key}={value}")),
+                None => sealed.push(format!("- {key}")),
+            }
+        }
+
+        let mut output = readable.join("\n");
+        if !sealed.is_empty() {
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            output.push_str(
+                "Sealed (set on this service, but the value cannot be read back by anyone - treat these as present and do not recreate them):\n",
+            );
+            output.push_str(&sealed.join("\n"));
+        }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
