@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     controllers::{
         project::resolve_service_context,
-        variables::{Variable, get_service_variables},
+        variables::{Variable, get_service_variables, get_service_variables_including_sealed},
     },
     table::Table,
     util::progress::create_spinner_if,
@@ -10,10 +10,13 @@ use crate::{
 use anyhow::bail;
 use std::io::{IsTerminal, Read};
 
+/// Stand-in shown in the variables table for a sealed variable's value.
+const SEALED_PLACEHOLDER: &str = "<sealed>";
+
 /// Manage environment variables for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it."
+    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it.\n  Sealed variables are listed by name with no value (null in JSON, <sealed> in the table). They are already set and nobody can read them back - do not recreate them."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -192,7 +195,10 @@ pub async fn command(args: Args) -> Result<()> {
 async fn list_variables(args: ListArgs) -> Result<()> {
     let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
 
-    let variables = get_service_variables(
+    // Sealed variables are listed by name with no value. Hiding them entirely
+    // made them look unset, so agents and scripts would recreate a variable
+    // that was already there, or stall waiting for one that already existed.
+    let variables = get_service_variables_including_sealed(
         &ctx.client,
         &ctx.configs,
         ctx.project.id.clone(),
@@ -202,13 +208,19 @@ async fn list_variables(args: ListArgs) -> Result<()> {
     .await?;
 
     if args.kv {
-        for (key, value) in variables {
-            println!("{key}={value}");
+        for (key, value) in &variables {
+            match value {
+                Some(value) => println!("{key}={value}"),
+                // A comment, not `KEY=`: this output is meant to be sourced,
+                // and an empty string is not what the variable is set to.
+                None => println!("# {key} is sealed; its value cannot be read"),
+            }
         }
         return Ok(());
     }
 
     if args.json {
+        // Sealed variables serialize as `null`, matching the API.
         println!("{}", serde_json::to_string_pretty(&variables)?);
         return Ok(());
     }
@@ -218,7 +230,12 @@ async fn list_variables(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let table = Table::new(ctx.service_name, variables);
+    let rows = variables
+        .into_iter()
+        .map(|(key, value)| (key, value.unwrap_or_else(|| SEALED_PLACEHOLDER.to_string())))
+        .collect();
+
+    let table = Table::new(ctx.service_name, rows);
     table.print()?;
 
     Ok(())
@@ -261,7 +278,8 @@ async fn set_variable(args: SetArgs) -> Result<()> {
 async fn delete_variable(args: DeleteArgs) -> Result<()> {
     let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
 
-    let variables = get_service_variables(
+    // Including sealed: a sealed variable is deletable, it just cannot be read.
+    let variables = get_service_variables_including_sealed(
         &ctx.client,
         &ctx.configs,
         ctx.project_id.clone(),
