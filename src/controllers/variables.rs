@@ -2,7 +2,7 @@ use crate::{
     client::post_graphql,
     commands::{Configs, queries},
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use reqwest::Client;
 use std::fmt::Display;
 use std::{collections::BTreeMap, str::FromStr};
@@ -58,6 +58,114 @@ pub async fn get_service_variables(
     .collect();
 
     Ok(variables)
+}
+
+/// Stands in for a sealed variable's value, which nobody can read back.
+///
+/// `variable list` prints it in place of the value; `variable edit` round-trips it,
+/// so leaving the line alone keeps the variable sealed and untouched. Both spell it
+/// the same way on purpose — the editor's placeholder is what the table showed.
+pub const SEALED_TOKEN: &str = "<sealed>";
+
+/// One user-owned variable entry for the bulk editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditVariableEntry {
+    /// Plaintext, empty string, or [`SEALED_TOKEN`].
+    pub value: String,
+    pub is_sealed: bool,
+}
+
+/// Snapshot used by `variable edit`: editable user vars plus read-only Railway-provided vars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditSnapshot {
+    pub editable: BTreeMap<String, EditVariableEntry>,
+    pub read_only: BTreeMap<String, String>,
+}
+
+/// Keys reserved for Railway-provided variables. User upserts/deletes are rejected client-side.
+pub fn is_railway_reserved_key(key: &str) -> bool {
+    key.starts_with("RAILWAY_")
+}
+
+pub async fn get_service_variables_for_edit(
+    client: &Client,
+    configs: &Configs,
+    project_id: String,
+    environment_id: String,
+    service_id: String,
+) -> Result<EditSnapshot> {
+    let vars = queries::service_variables_for_edit::Variables {
+        project_id: project_id.clone(),
+        environment_id: environment_id.clone(),
+        service_id: service_id.clone(),
+    };
+    let response =
+        post_graphql::<queries::ServiceVariablesForEdit, _>(client, configs.get_backboard(), vars)
+            .await?;
+
+    let sealed_by_name: BTreeMap<String, bool> = response
+        .environment
+        .variables
+        .edges
+        .into_iter()
+        .filter_map(|edge| {
+            let node = edge.node;
+            if node.service_id.as_deref() != Some(service_id.as_str()) {
+                return None;
+            }
+            Some((node.name, node.is_sealed))
+        })
+        .collect();
+
+    let mut editable = BTreeMap::new();
+    for (name, value) in response.user_variables {
+        if is_railway_reserved_key(&name) {
+            continue;
+        }
+        let is_sealed = sealed_by_name.get(&name).copied().unwrap_or(false);
+        let entry_value = match value {
+            Some(v) => v,
+            None if is_sealed => SEALED_TOKEN.to_string(),
+            None => continue,
+        };
+        editable.insert(
+            name,
+            EditVariableEntry {
+                value: entry_value,
+                is_sealed,
+            },
+        );
+    }
+
+    let mut read_only = BTreeMap::new();
+    for (name, value) in response.deployment_variables {
+        if !is_railway_reserved_key(&name) {
+            continue;
+        }
+        if let Some(value) = value {
+            read_only.insert(name, value);
+        }
+    }
+
+    Ok(EditSnapshot {
+        editable,
+        read_only,
+    })
+}
+
+/// Reject apply attempts that touch Railway-reserved keys.
+pub fn reject_reserved_keys(
+    changes: &[crate::controllers::variable_edit::VarChange],
+) -> Result<()> {
+    for change in changes {
+        if is_railway_reserved_key(&change.key) {
+            bail!(
+                "Cannot modify Railway-provided variable `{}`. Remove it from the editable section — Railway-provided variables are shown read-only.",
+                change.key
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]

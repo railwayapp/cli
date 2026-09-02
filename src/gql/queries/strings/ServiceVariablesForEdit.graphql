@@ -1,0 +1,28 @@
+query ServiceVariablesForEdit(
+	$projectId: String!
+	$environmentId: String!
+	$serviceId: String!
+) {
+	userVariables: variables(
+		projectId: $projectId
+		environmentId: $environmentId
+		serviceId: $serviceId
+		unrendered: true
+	)
+	deploymentVariables: variablesForServiceDeployment(
+		projectId: $projectId
+		environmentId: $environmentId
+		serviceId: $serviceId
+	)
+	environment(id: $environmentId, projectId: $projectId) {
+		variables(first: 10000) {
+			edges {
+				node {
+					name
+					serviceId
+					isSealed
+				}
+			}
+		}
+	}
+}

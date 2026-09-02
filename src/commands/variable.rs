@@ -2,21 +2,28 @@ use super::*;
 use crate::{
     controllers::{
         project::resolve_service_context,
-        variables::{Variable, get_service_variables, get_service_variables_including_sealed},
+        variable_edit::{
+            VarChange, applyable_changes, demo_snapshot, diff_edit_snapshot, open_in_editor,
+            parse_edit_document, print_variable_plan, temp_edit_path, write_edit_document,
+        },
+        variables::{
+            EditSnapshot, SEALED_TOKEN, Variable, get_service_variables,
+            get_service_variables_for_edit, get_service_variables_including_sealed,
+            reject_reserved_keys,
+        },
     },
     table::Table,
-    util::progress::create_spinner_if,
+    util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
-use anyhow::bail;
+use anyhow::{Context, bail};
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::{IsTerminal, Read};
-
-/// Stand-in shown in the variables table for a sealed variable's value.
-const SEALED_PLACEHOLDER: &str = "<sealed>";
 
 /// Manage environment variables for a service
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it.\n  Sealed variables are listed by name with no value (null in JSON, <sealed> in the table). They are already set and nobody can read them back - do not recreate them."
+    after_help = "Examples:\n\n  railway variable list --service api --json\n  railway variable list --service api --kv\n  railway variable set API_URL=https://example.com --skip-deploys --json\n  echo \"secret\" | railway variable set API_KEY --stdin --skip-deploys --json\n  railway variable delete API_KEY --service api --json\n  railway variable edit\n  railway variable edit --demo\n\nAutomation notes:\n  JSON and KV output include raw variable values. Avoid sharing command output from secret-bearing variable commands.\n  For idempotent deletes, list variables first, check whether the key exists, then delete it.\n  Sealed variables are listed by name with no value (null in JSON, <sealed> in the table). They are already set and nobody can read them back - do not recreate them.\n  `variable edit` opens $EDITOR, then shows an IaC-style diff and asks for confirmation before applying."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -68,6 +75,9 @@ enum Commands {
     /// Delete a variable
     #[clap(visible_alias = "rm", visible_alias = "remove")]
     Delete(DeleteArgs),
+
+    /// Bulk-edit variables in $EDITOR, then confirm an IaC-style diff
+    Edit(EditArgs),
 }
 
 #[derive(Parser)]
@@ -146,12 +156,48 @@ struct DeleteArgs {
     json: bool,
 }
 
+#[derive(Parser)]
+struct EditArgs {
+    /// The service to edit variables for
+    #[clap(short, long)]
+    service: Option<String>,
+
+    /// The environment to edit variables in
+    #[clap(short, long)]
+    environment: Option<String>,
+
+    /// Project ID to use (defaults to linked project)
+    #[clap(short = 'p', long, value_name = "PROJECT_ID")]
+    project: Option<String>,
+
+    /// Skip the confirmation prompt and apply the diff
+    #[clap(short = 'y', long)]
+    yes: bool,
+
+    /// Skip triggering deploys when applying variable changes
+    #[clap(long)]
+    skip_deploys: bool,
+
+    /// Show plaintext values in the diff instead of redacting them
+    #[clap(long)]
+    reveal: bool,
+
+    /// Offline prototype: edit fixture variables and print the would-be apply (no API)
+    #[clap(long)]
+    demo: bool,
+
+    /// Allow destructive deletes in non-interactive or agent sessions
+    #[clap(long)]
+    confirm_destructive: bool,
+}
+
 pub async fn command(args: Args) -> Result<()> {
     if let Some(cmd) = args.command {
         return match cmd {
             Commands::List(list_args) => list_variables(list_args).await,
             Commands::Set(set_args) => set_variable(set_args).await,
             Commands::Delete(delete_args) => delete_variable(delete_args).await,
+            Commands::Edit(edit_args) => edit_variables(edit_args).await,
         };
     }
 
@@ -232,7 +278,7 @@ async fn list_variables(args: ListArgs) -> Result<()> {
 
     let rows = variables
         .into_iter()
-        .map(|(key, value)| (key, value.unwrap_or_else(|| SEALED_PLACEHOLDER.to_string())))
+        .map(|(key, value)| (key, value.unwrap_or_else(|| SEALED_TOKEN.to_string())))
         .collect();
 
     let table = Table::new(ctx.service_name, rows);
@@ -375,6 +421,273 @@ async fn set_variables_internal(
         }
     } else {
         println!("{}", serde_json::json!({"keys": keys, "set": true}));
+    }
+
+    Ok(())
+}
+
+async fn edit_variables(args: EditArgs) -> Result<()> {
+    if args.demo {
+        return edit_variables_demo(args).await;
+    }
+
+    let yes = args.yes;
+    let reveal = args.reveal;
+    let skip_deploys = args.skip_deploys;
+    let confirm_destructive = args.confirm_destructive;
+
+    let ctx = resolve_service_context(args.project, args.service, args.environment).await?;
+    let before = get_service_variables_for_edit(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project.id.clone(),
+        ctx.environment_id.clone(),
+        ctx.service_id.clone(),
+    )
+    .await?;
+
+    let scope = format!(
+        "project={}  environment={}  service={}",
+        ctx.project.name, ctx.environment_name, ctx.service_name
+    );
+    let after = run_editor_loop(
+        &before,
+        &ctx.service_name,
+        &[
+            "railway variable edit",
+            scope.as_str(),
+            "Save and quit to review a diff. Abort the editor (non-zero exit) to cancel.",
+            "Delete a line to remove a variable. Leave sealed variables as <sealed> unless rotating.",
+            "Railway-provided variables are listed as comments and cannot be edited.",
+        ],
+    )?;
+
+    let changes = diff_edit_snapshot(&before, &after);
+    if changes.is_empty() {
+        print_variable_plan(&ctx.service_name, &changes, reveal);
+        return Ok(());
+    }
+
+    // Reject unapplyable edits before showing a plan the user cannot act on.
+    reject_reserved_keys(&changes)?;
+    let (upserts, deletes) = applyable_changes(&before, &changes)?;
+
+    print_variable_plan(&ctx.service_name, &changes, reveal);
+    guard_destructive_apply(yes, confirm_destructive, &changes)?;
+
+    let apply_args = EditApplyArgs { yes, skip_deploys };
+    if !confirm_variable_plan(&changes, &apply_args)? {
+        bail!("No changes applied.");
+    }
+
+    apply_variable_changes(&ctx, upserts, deletes, changes.len(), skip_deploys, false).await?;
+
+    Ok(())
+}
+
+async fn edit_variables_demo(args: EditArgs) -> Result<()> {
+    let service = args.service.as_deref().unwrap_or("api");
+    let yes = args.yes;
+    let reveal = args.reveal;
+    let skip_deploys = args.skip_deploys;
+    let confirm_destructive = args.confirm_destructive;
+    let before = demo_snapshot();
+
+    eprintln!(
+        "{}",
+        "Demo mode — offline fixture, nothing will be written to Railway.".dimmed()
+    );
+
+    let after = run_editor_loop(
+        &before,
+        service,
+        &[
+            "railway variable edit --demo",
+            "project=demo  environment=production  service=api",
+            "Save and quit to review a diff. Abort the editor (non-zero exit) to cancel.",
+            "Try: change LOG_LEVEL, add FEATURE_NEW=1, delete FEATURE_OLD, rotate STRIPE_SECRET_KEY",
+        ],
+    )?;
+
+    let changes = diff_edit_snapshot(&before, &after);
+    if changes.is_empty() {
+        print_variable_plan(service, &changes, reveal);
+        return Ok(());
+    }
+
+    reject_reserved_keys(&changes)?;
+    let (upserts, deletes) = applyable_changes(&before, &changes)?;
+
+    print_variable_plan(service, &changes, reveal);
+    guard_destructive_apply(yes, confirm_destructive, &changes)?;
+
+    let apply_args = EditApplyArgs { yes, skip_deploys };
+    if !confirm_variable_plan(&changes, &apply_args)? {
+        bail!("No changes applied.");
+    }
+
+    println!();
+    println!("{}", "Would apply (demo — skipped):".bold());
+    for key in upserts.keys() {
+        println!("  • set {}", key.cyan());
+    }
+    for key in &deletes {
+        println!("  • delete {}", key.cyan());
+    }
+    if skip_deploys {
+        println!("{}", "  (deploys would be skipped)".dimmed());
+    } else {
+        println!("{}", "  (would trigger a redeploy)".dimmed());
+    }
+
+    Ok(())
+}
+
+fn run_editor_loop(
+    before: &EditSnapshot,
+    service: &str,
+    header_lines: &[&str],
+) -> Result<BTreeMap<String, crate::controllers::variables::EditVariableEntry>> {
+    if !std::io::stdin().is_terminal()
+        && std::env::var_os("EDITOR").is_none()
+        && std::env::var_os("VISUAL").is_none()
+    {
+        bail!(
+            "variable edit requires a TTY (or set $EDITOR). For an offline taste:\n  EDITOR=vim railway variable edit --demo"
+        );
+    }
+
+    let path = temp_edit_path(service);
+    write_edit_document(&path, before, header_lines)?;
+
+    eprintln!(
+        "{} {}",
+        "Editing".dimmed(),
+        path.display().to_string().cyan()
+    );
+    eprintln!(
+        "{}",
+        "Opening $EDITOR — save and quit to continue, abort to cancel.".dimmed()
+    );
+
+    let edit_result = open_in_editor(&path);
+    let contents = fs::read_to_string(&path).ok();
+    let _ = fs::remove_file(&path);
+    edit_result?;
+
+    let contents = contents.context("Failed to read edited variables file")?;
+    parse_edit_document(&contents)
+}
+
+struct EditApplyArgs {
+    yes: bool,
+    skip_deploys: bool,
+}
+
+fn guard_destructive_apply(
+    yes: bool,
+    confirm_destructive: bool,
+    changes: &[VarChange],
+) -> Result<()> {
+    let destructive = changes.iter().any(|c| c.is_destructive());
+    if !destructive || confirm_destructive {
+        return Ok(());
+    }
+
+    if yes || !std::io::stdout().is_terminal() || crate::telemetry::is_agent() {
+        bail!(
+            "Destructive variable deletes require explicit confirmation. Review the plan, then re-run with `--confirm-destructive` if the removals are expected."
+        );
+    }
+
+    Ok(())
+}
+
+fn confirm_variable_plan(changes: &[VarChange], args: &EditApplyArgs) -> Result<bool> {
+    if args.yes {
+        return Ok(true);
+    }
+
+    if !std::io::stdout().is_terminal() {
+        bail!(
+            "Cannot prompt for confirmation in non-interactive mode. Re-run with --yes after reviewing the plan."
+        );
+    }
+
+    println!();
+    let destructive = changes.iter().any(|c| c.is_destructive());
+    let prompt = if destructive {
+        if args.skip_deploys {
+            "Apply these changes? This will remove variables."
+        } else {
+            "Apply these changes? This will remove variables and may redeploy."
+        }
+    } else if args.skip_deploys {
+        "Apply these variable changes?"
+    } else {
+        "Apply these variable changes? This may redeploy the service."
+    };
+
+    // Default No — :wq alone is not enough.
+    prompt_confirm_with_default(prompt, false)
+}
+
+async fn apply_variable_changes(
+    ctx: &crate::controllers::project::ServiceContext,
+    upserts: BTreeMap<String, String>,
+    deletes: Vec<String>,
+    change_count: usize,
+    skip_deploys: bool,
+    json: bool,
+) -> Result<()> {
+    let touched_keys: Vec<String> = upserts.keys().cloned().chain(deletes.clone()).collect();
+
+    let spinner = create_spinner_if(!json, "Applying variable changes...".to_string());
+
+    if !upserts.is_empty() {
+        let vars = mutations::variable_collection_upsert::Variables {
+            project_id: ctx.project_id.clone(),
+            environment_id: ctx.environment_id.clone(),
+            service_id: ctx.service_id.clone(),
+            variables: upserts,
+            skip_deploys: skip_deploys.then_some(true),
+        };
+        post_graphql::<mutations::VariableCollectionUpsert, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            vars,
+        )
+        .await?;
+    }
+
+    for key in &deletes {
+        let vars = mutations::variable_delete::Variables {
+            project_id: ctx.project_id.clone(),
+            environment_id: ctx.environment_id.clone(),
+            name: key.clone(),
+            service_id: Some(ctx.service_id.clone()),
+        };
+        post_graphql::<mutations::VariableDelete, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            vars,
+        )
+        .await?;
+    }
+
+    if let Some(sp) = spinner {
+        sp.finish_with_message(format!(
+            "Applied {} variable change(s)",
+            change_count.to_string().bold()
+        ));
+    } else {
+        println!(
+            "{}",
+            serde_json::json!({
+                "applied": change_count,
+                "keys": touched_keys,
+            })
+        );
     }
 
     Ok(())
