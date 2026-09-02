@@ -30,6 +30,7 @@ pub mod tcp_proxy;
 pub mod template_apply;
 pub mod upload;
 pub mod user;
+pub mod variable_edit;
 pub mod variables;
 pub mod volume_browser;
 pub mod workflow;

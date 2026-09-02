@@ -87,6 +87,15 @@ pub struct VariablesForServiceDeployment;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceVariablesForEdit.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceVariablesForEdit;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Deployments.graphql",
     response_derives = "Debug, Serialize, Clone, PartialEq"
 )]
