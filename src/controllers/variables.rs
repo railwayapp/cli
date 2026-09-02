@@ -1,6 +1,6 @@
 use crate::{
     client::post_graphql,
-    commands::{Configs, queries},
+    commands::{Configs, mutations, queries},
 };
 use anyhow::{Result, bail};
 use reqwest::Client;
@@ -153,6 +153,47 @@ pub async fn get_service_variables_for_edit(
     })
 }
 
+/// Upsert and/or delete user variables. Callers must have already filtered
+/// Railway-reserved keys and skipped sealed tokens that should be preserved.
+pub async fn apply_service_variable_changes(
+    client: &Client,
+    configs: &Configs,
+    project_id: String,
+    environment_id: String,
+    service_id: String,
+    upserts: BTreeMap<String, String>,
+    deletes: Vec<String>,
+    skip_deploys: bool,
+) -> Result<()> {
+    if !upserts.is_empty() {
+        let vars = mutations::variable_collection_upsert::Variables {
+            project_id: project_id.clone(),
+            environment_id: environment_id.clone(),
+            service_id: service_id.clone(),
+            variables: upserts,
+            skip_deploys: skip_deploys.then_some(true),
+        };
+        post_graphql::<mutations::VariableCollectionUpsert, _>(
+            client,
+            configs.get_backboard(),
+            vars,
+        )
+        .await?;
+    }
+
+    for name in deletes {
+        let vars = mutations::variable_delete::Variables {
+            project_id: project_id.clone(),
+            environment_id: environment_id.clone(),
+            name,
+            service_id: Some(service_id.clone()),
+        };
+        post_graphql::<mutations::VariableDelete, _>(client, configs.get_backboard(), vars).await?;
+    }
+
+    Ok(())
+}
+
 /// Reject apply attempts that touch Railway-reserved keys.
 pub fn reject_reserved_keys(
     changes: &[crate::controllers::variable_edit::VarChange],
@@ -299,5 +340,175 @@ mod sealed_variable_tests {
                 "postgres://user:pw@host:5432/db".to_string()
             )])
         );
+    }
+}
+
+#[cfg(test)]
+mod edit_snapshot_tests {
+    use super::*;
+    use crate::controllers::variable_edit::VarChange;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    fn edit_query_payload() -> serde_json::Value {
+        json!({
+            "userVariables": {
+                "DATABASE_URL": "postgres://user:pw@host:5432/db",
+                "LOG_LEVEL": "info",
+                "STRIPE_SECRET_KEY": null,
+                "RAILWAY_SERVICE_NAME": "api",
+            },
+            "deploymentVariables": {
+                "DATABASE_URL": "postgres://user:pw@host:5432/db",
+                "LOG_LEVEL": "info",
+                "STRIPE_SECRET_KEY": null,
+                "RAILWAY_SERVICE_NAME": "api",
+                "RAILWAY_PROJECT_NAME": "demo",
+            },
+            "environment": {
+                "variables": {
+                    "edges": [
+                        {
+                            "node": {
+                                "name": "DATABASE_URL",
+                                "serviceId": "svc-1",
+                                "isSealed": false
+                            }
+                        },
+                        {
+                            "node": {
+                                "name": "LOG_LEVEL",
+                                "serviceId": "svc-1",
+                                "isSealed": false
+                            }
+                        },
+                        {
+                            "node": {
+                                "name": "STRIPE_SECRET_KEY",
+                                "serviceId": "svc-1",
+                                "isSealed": true
+                            }
+                        },
+                        {
+                            "node": {
+                                "name": "SHARED_SECRET",
+                                "serviceId": null,
+                                "isSealed": true
+                            }
+                        },
+                        {
+                            "node": {
+                                "name": "OTHER_SERVICE",
+                                "serviceId": "svc-other",
+                                "isSealed": true
+                            }
+                        }
+                    ]
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn fetch_maps_unrendered_user_vars_and_hides_railway_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub("ServiceVariablesForEdit", edit_query_payload());
+
+        let snapshot = get_service_variables_for_edit(
+            &reqwest::Client::new(),
+            &server.configs(&dir),
+            "proj-1".to_string(),
+            "env-1".to_string(),
+            "svc-1".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot
+                .editable
+                .get("DATABASE_URL")
+                .map(|e| e.value.as_str()),
+            Some("postgres://user:pw@host:5432/db")
+        );
+        assert!(!snapshot.editable["DATABASE_URL"].is_sealed);
+        assert_eq!(
+            snapshot
+                .editable
+                .get("STRIPE_SECRET_KEY")
+                .map(|e| e.value.as_str()),
+            Some(SEALED_TOKEN)
+        );
+        assert!(snapshot.editable["STRIPE_SECRET_KEY"].is_sealed);
+        assert!(!snapshot.editable.contains_key("RAILWAY_SERVICE_NAME"));
+        assert!(!snapshot.editable.contains_key("SHARED_SECRET"));
+        assert!(!snapshot.editable.contains_key("OTHER_SERVICE"));
+
+        assert_eq!(
+            snapshot
+                .read_only
+                .get("RAILWAY_SERVICE_NAME")
+                .map(String::as_str),
+            Some("api")
+        );
+        assert_eq!(
+            snapshot
+                .read_only
+                .get("RAILWAY_PROJECT_NAME")
+                .map(String::as_str),
+            Some("demo")
+        );
+        assert!(!snapshot.read_only.contains_key("DATABASE_URL"));
+        assert!(!snapshot.read_only.contains_key("STRIPE_SECRET_KEY"));
+    }
+
+    #[tokio::test]
+    async fn apply_sends_upsert_and_delete_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub(
+            "VariableCollectionUpsert",
+            json!({ "variableCollectionUpsert": true }),
+        );
+        server.stub("VariableDelete", json!({ "variableDelete": true }));
+
+        apply_service_variable_changes(
+            &reqwest::Client::new(),
+            &server.configs(&dir),
+            "proj-1".to_string(),
+            "env-1".to_string(),
+            "svc-1".to_string(),
+            BTreeMap::from([("LOG_LEVEL".into(), "debug".into())]),
+            vec!["FEATURE_OLD".into()],
+            true,
+        )
+        .await
+        .unwrap();
+
+        let upserts = server.variables_for("VariableCollectionUpsert");
+        assert_eq!(upserts.len(), 1);
+        assert_eq!(upserts[0]["projectId"], "proj-1");
+        assert_eq!(upserts[0]["environmentId"], "env-1");
+        assert_eq!(upserts[0]["serviceId"], "svc-1");
+        assert_eq!(upserts[0]["variables"]["LOG_LEVEL"], "debug");
+        assert_eq!(upserts[0]["skipDeploys"], true);
+
+        let deletes = server.variables_for("VariableDelete");
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0]["name"], "FEATURE_OLD");
+        assert_eq!(deletes[0]["serviceId"], "svc-1");
+    }
+
+    #[test]
+    fn reject_reserved_keys_blocks_railway_prefix() {
+        let err = reject_reserved_keys(&[VarChange {
+            kind: crate::controllers::variable_edit::VarChangeKind::Set,
+            key: "RAILWAY_SERVICE_NAME".into(),
+            before: None,
+            after: Some("hacked".into()),
+        }])
+        .unwrap_err();
+        assert!(err.to_string().contains("RAILWAY_SERVICE_NAME"));
     }
 }

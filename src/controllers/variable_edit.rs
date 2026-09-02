@@ -411,6 +411,34 @@ pub fn open_in_editor(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Open `path` in the editor, always delete it afterwards, and return the
+/// contents if the editor exited 0. A non-zero editor exit still removes the
+/// file so plaintext values do not linger in `/tmp`.
+pub fn edit_file_and_cleanup(path: &Path) -> Result<String> {
+    let edit_result = open_in_editor(path);
+    let contents = fs::read_to_string(path).ok();
+    let _ = fs::remove_file(path);
+    edit_result?;
+    contents.context("Failed to read edited variables file")
+}
+
+/// Destructive deletes in `--yes` / non-interactive / agent sessions need an
+/// extra `--confirm-destructive`, matching `config apply`.
+pub fn require_confirm_destructive(
+    confirm_destructive: bool,
+    must_be_explicit: bool,
+    changes: &[VarChange],
+) -> Result<()> {
+    let destructive = changes.iter().any(|c| c.is_destructive());
+    if !destructive || confirm_destructive || !must_be_explicit {
+        return Ok(());
+    }
+
+    bail!(
+        "Destructive variable deletes require explicit confirmation. Review the plan, then re-run with `--confirm-destructive` if the removals are expected."
+    )
+}
+
 pub fn temp_edit_path(service: &str) -> PathBuf {
     let safe: String = service
         .chars()
@@ -676,6 +704,40 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_sealed_variable_emits_delete() {
+        let before = demo_snapshot();
+        let mut after = before.editable.clone();
+        after.remove("STRIPE_SECRET_KEY");
+        let changes = diff_edit_snapshot(&before, &after);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, VarChangeKind::Delete);
+        let (upserts, deletes) = applyable_changes(&before, &changes).unwrap();
+        assert!(upserts.is_empty());
+        assert_eq!(deletes, vec!["STRIPE_SECRET_KEY".to_string()]);
+    }
+
+    #[test]
+    fn confirm_destructive_is_required_when_nobody_can_answer() {
+        let changes = vec![VarChange {
+            kind: VarChangeKind::Delete,
+            key: "FEATURE_OLD".into(),
+            before: Some("1".into()),
+            after: None,
+        }];
+        let err = require_confirm_destructive(false, true, &changes).unwrap_err();
+        assert!(err.to_string().contains("--confirm-destructive"));
+        assert!(require_confirm_destructive(true, true, &changes).is_ok());
+        assert!(require_confirm_destructive(false, false, &changes).is_ok());
+        let non_destructive = vec![VarChange {
+            kind: VarChangeKind::Update,
+            key: "LOG_LEVEL".into(),
+            before: Some("info".into()),
+            after: Some("debug".into()),
+        }];
+        assert!(require_confirm_destructive(false, true, &non_destructive).is_ok());
+    }
+
+    #[test]
     fn diff_ignores_railway_reserved_keys() {
         let before = BTreeMap::from([("RAILWAY_FOO".into(), "a".into())]);
         let after = BTreeMap::from([("RAILWAY_FOO".into(), "b".into())]);
@@ -712,5 +774,54 @@ mod tests {
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = fs::remove_file(&path);
         assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    fn with_editor<R>(editor: &str, f: impl FnOnce() -> R) -> R {
+        use std::sync::Mutex;
+        static EDITOR_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = EDITOR_LOCK.lock().unwrap();
+        let previous_editor = std::env::var("EDITOR").ok();
+        let previous_visual = std::env::var("VISUAL").ok();
+        // SAFETY: serialized under EDITOR_LOCK and restored before release.
+        unsafe {
+            std::env::set_var("EDITOR", editor);
+            std::env::remove_var("VISUAL");
+        }
+        let result = f();
+        unsafe {
+            match previous_editor {
+                Some(value) => std::env::set_var("EDITOR", value),
+                None => std::env::remove_var("EDITOR"),
+            }
+            match previous_visual {
+                Some(value) => std::env::set_var("VISUAL", value),
+                None => std::env::remove_var("VISUAL"),
+            }
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_abort_deletes_the_temp_file() {
+        let path = temp_edit_path("abort");
+        write_edit_document(&path, &demo_snapshot(), &["abort"]).unwrap();
+        assert!(path.exists());
+        let err = with_editor("false", || edit_file_and_cleanup(&path)).unwrap_err();
+        assert!(err.to_string().contains("no changes applied"));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editor_success_returns_contents_and_deletes_the_temp_file() {
+        let path = temp_edit_path("ok");
+        write_edit_document(&path, &demo_snapshot(), &["ok"]).unwrap();
+        let contents = with_editor("true", || edit_file_and_cleanup(&path)).unwrap();
+        assert!(contents.contains("LOG_LEVEL=info"));
+        assert!(contents.contains(&format!("STRIPE_SECRET_KEY={SEALED_TOKEN}")));
+        assert!(contents.contains("# RAILWAY_SERVICE_NAME=api"));
+        assert!(!path.exists());
     }
 }

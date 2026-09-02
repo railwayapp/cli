@@ -3,21 +3,21 @@ use crate::{
     controllers::{
         project::resolve_service_context,
         variable_edit::{
-            VarChange, applyable_changes, demo_snapshot, diff_edit_snapshot, open_in_editor,
-            parse_edit_document, print_variable_plan, temp_edit_path, write_edit_document,
+            VarChange, applyable_changes, demo_snapshot, diff_edit_snapshot, edit_file_and_cleanup,
+            parse_edit_document, print_variable_plan, require_confirm_destructive, temp_edit_path,
+            write_edit_document,
         },
         variables::{
-            EditSnapshot, SEALED_TOKEN, Variable, get_service_variables,
-            get_service_variables_for_edit, get_service_variables_including_sealed,
-            reject_reserved_keys,
+            EditSnapshot, SEALED_TOKEN, Variable, apply_service_variable_changes,
+            get_service_variables, get_service_variables_for_edit,
+            get_service_variables_including_sealed, reject_reserved_keys,
         },
     },
     table::Table,
     util::{progress::create_spinner_if, prompt::prompt_confirm_with_default},
 };
-use anyhow::{Context, bail};
+use anyhow::bail;
 use std::collections::BTreeMap;
-use std::fs;
 use std::io::{IsTerminal, Read};
 
 /// Manage environment variables for a service
@@ -570,13 +570,7 @@ fn run_editor_loop(
         "Opening $EDITOR — save and quit to continue, abort to cancel.".dimmed()
     );
 
-    let edit_result = open_in_editor(&path);
-    let contents = fs::read_to_string(&path).ok();
-    let _ = fs::remove_file(&path);
-    edit_result?;
-
-    let contents = contents.context("Failed to read edited variables file")?;
-    parse_edit_document(&contents)
+    parse_edit_document(&edit_file_and_cleanup(&path)?)
 }
 
 struct EditApplyArgs {
@@ -589,18 +583,11 @@ fn guard_destructive_apply(
     confirm_destructive: bool,
     changes: &[VarChange],
 ) -> Result<()> {
-    let destructive = changes.iter().any(|c| c.is_destructive());
-    if !destructive || confirm_destructive {
-        return Ok(());
-    }
-
-    if yes || !std::io::stdout().is_terminal() || crate::telemetry::is_agent() {
-        bail!(
-            "Destructive variable deletes require explicit confirmation. Review the plan, then re-run with `--confirm-destructive` if the removals are expected."
-        );
-    }
-
-    Ok(())
+    require_confirm_destructive(
+        confirm_destructive,
+        yes || !std::io::stdout().is_terminal() || crate::telemetry::is_agent(),
+        changes,
+    )
 }
 
 fn confirm_variable_plan(changes: &[VarChange], args: &EditApplyArgs) -> Result<bool> {
@@ -644,36 +631,17 @@ async fn apply_variable_changes(
 
     let spinner = create_spinner_if(!json, "Applying variable changes...".to_string());
 
-    if !upserts.is_empty() {
-        let vars = mutations::variable_collection_upsert::Variables {
-            project_id: ctx.project_id.clone(),
-            environment_id: ctx.environment_id.clone(),
-            service_id: ctx.service_id.clone(),
-            variables: upserts,
-            skip_deploys: skip_deploys.then_some(true),
-        };
-        post_graphql::<mutations::VariableCollectionUpsert, _>(
-            &ctx.client,
-            ctx.configs.get_backboard(),
-            vars,
-        )
-        .await?;
-    }
-
-    for key in &deletes {
-        let vars = mutations::variable_delete::Variables {
-            project_id: ctx.project_id.clone(),
-            environment_id: ctx.environment_id.clone(),
-            name: key.clone(),
-            service_id: Some(ctx.service_id.clone()),
-        };
-        post_graphql::<mutations::VariableDelete, _>(
-            &ctx.client,
-            ctx.configs.get_backboard(),
-            vars,
-        )
-        .await?;
-    }
+    apply_service_variable_changes(
+        &ctx.client,
+        &ctx.configs,
+        ctx.project_id.clone(),
+        ctx.environment_id.clone(),
+        ctx.service_id.clone(),
+        upserts,
+        deletes,
+        skip_deploys,
+    )
+    .await?;
 
     if let Some(sp) = spinner {
         sp.finish_with_message(format!(
