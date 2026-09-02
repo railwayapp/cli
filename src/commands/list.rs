@@ -47,21 +47,29 @@ pub async fn command(args: Args) -> Result<()> {
             println!();
             println!("{}", workspace.name().bold());
 
-            for (project, is_favorite) in workspace.projects_ranked(workspace_favorites) {
+            let ranked = workspace.projects_ranked(workspace_favorites);
+            // Only reserve the marker's width once this workspace actually has
+            // a favorite to show. With none — the degraded case for the tokens
+            // the favorites field refuses, and for an account that has starred
+            // nothing — every line stays byte-for-byte what it was before
+            // favorites existed.
+            let reserve_marker_width = ranked.iter().any(|(_, is_favorite)| *is_favorite);
+
+            for (project, is_favorite) in ranked {
                 let project_name =
                     if Some(project.id()) == linked_project.as_ref().map(|p| p.project.as_str()) {
                         project.name().purple().bold()
                     } else {
                         project.name().white()
                     };
-                // Non-favorites are padded to the marker's width so both kinds
-                // of row share one left edge.
-                let marker = if is_favorite {
-                    FAVORITE_MARKER.yellow()
+                if is_favorite {
+                    println!("  {}{project_name}", FAVORITE_MARKER.yellow());
+                } else if reserve_marker_width {
+                    let pad = " ".repeat(FAVORITE_MARKER.chars().count());
+                    println!("  {pad}{project_name}");
                 } else {
-                    " ".repeat(FAVORITE_MARKER.chars().count()).normal()
-                };
-                println!("  {marker}{project_name}");
+                    println!("  {project_name}");
+                }
             }
         }
 

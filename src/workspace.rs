@@ -357,7 +357,9 @@ mod tests {
             "projects": { "edges": edges },
         });
 
-        Workspace::Member(serde_json::from_value(raw).expect("workspace fixture should deserialize"))
+        Workspace::Member(
+            serde_json::from_value(raw).expect("workspace fixture should deserialize"),
+        )
     }
 
     /// The fixture used by most cases: three projects, oldest to newest, so the
