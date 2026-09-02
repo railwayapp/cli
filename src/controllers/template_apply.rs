@@ -265,8 +265,13 @@ pub async fn apply_composable_template(
     .with_context(|| format!("Failed to deploy template \"{}\"", params.template_code))?;
 
     if let Some(workflow_id) = response.template_deploy_v2.workflow_id.clone() {
-        crate::controllers::workflow::wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
-            .await?;
+        wait_for_cluster_workflow(ctx, workflow_id, |minutes| {
+            format!(
+                "Template \"{}\" is still being staged server-side after {minutes} minutes. When staging finishes it appears as staged changes on the environment -- apply them to finish, or discard them to start over. Until then a retry of this command is refused as a cluster change still in flight.",
+                params.template_code
+            )
+        })
+        .await?;
     }
 
     let deployed = commit_staged_patch(ctx, params.auto_deploy).await?;
@@ -304,8 +309,13 @@ pub async fn revert_template(
     .with_context(|| format!("Failed to revert template \"{}\"", params.template_code))?;
 
     if let Some(workflow_id) = response.template_revert.workflow_id.clone() {
-        crate::controllers::workflow::wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
-            .await?;
+        wait_for_cluster_workflow(ctx, workflow_id, |minutes| {
+            format!(
+                "The revert of template \"{}\" is still being staged server-side after {minutes} minutes. When staging finishes it appears as staged changes on the environment -- apply them to finish the revert, or discard them to keep the cluster. Until then a retry of this command is refused as a cluster change still in flight.",
+                params.template_code
+            )
+        })
+        .await?;
     }
 
     let deployed = commit_staged_patch(ctx, params.auto_deploy).await?;
@@ -375,14 +385,56 @@ pub(crate) async fn commit_staged_patch(ctx: &ServiceContext, auto_deploy: bool)
     // the same services: whichever loses hits `NotFoundError("Service")` and
     // the command exits 1. Wait for it, exactly like the
     // `templateDeployV2`/`templateRevert` commits above do.
-    crate::controllers::workflow::wait_for_workflow(
-        &ctx.client,
-        &ctx.configs,
-        response.environment_patch_commit_staged,
-    )
+    wait_for_cluster_workflow(ctx, response.environment_patch_commit_staged, |minutes| {
+        format!(
+            "The staged changes were committed, but applying them is still running server-side after {minutes} minutes. Nothing else is needed: the environment shows the change as applying until it lands."
+        )
+    })
     .await?;
 
     Ok(auto_deploy)
+}
+
+/// One-second polls a stage or commit workflow gets before the CLI gives up
+/// on it. `wait_for_workflow`'s default budget (~2 minutes) is sized for a
+/// deploy trigger; the workflows here create and delete every member service
+/// of a cluster, so their duration scales with the topology asked for and
+/// with Temporal's queue latency. Live evidence from the postgres-cli e2e
+/// harness: `postgres ha convert --replicas 2 --coordinators 3 --edge 2`
+/// finished inside the budget at 2026-09-01 17:12Z (cluster members visible
+/// 90s after the command started) and exceeded it at 23:14Z the same day,
+/// exiting 1 with "Failed to convert to HA / workflow timed out" -- for a
+/// conversion that was committed and applying. A retry was then refused by
+/// backboard ("A cluster change for this service is still being applied"),
+/// so the user was told the conversion failed, saw a retry refused, and was
+/// given nothing to do. Waiting longer, and saying what state the
+/// environment is in when the wait still runs out, is the fix.
+const CLUSTER_WORKFLOW_WAIT_ATTEMPTS: u32 = 600;
+
+/// [`wait_for_workflow_up_to`](crate::controllers::workflow::wait_for_workflow_up_to)
+/// with the cluster budget, and a timeout message that says what state the
+/// environment is in and what, if anything, the user still has to do --
+/// "workflow timed out" alone reads as a failed conversion when the stage is
+/// simply still running.
+async fn wait_for_cluster_workflow(
+    ctx: &ServiceContext,
+    workflow_id: String,
+    on_timeout: impl FnOnce(u32) -> String,
+) -> Result<()> {
+    use crate::controllers::workflow::{WorkflowError, wait_for_workflow_up_to};
+    wait_for_workflow_up_to(
+        &ctx.client,
+        &ctx.configs,
+        workflow_id,
+        CLUSTER_WORKFLOW_WAIT_ATTEMPTS,
+    )
+    .await
+    .map_err(|err| match err {
+        WorkflowError::Timeout => {
+            anyhow::anyhow!("{}", on_timeout(CLUSTER_WORKFLOW_WAIT_ATTEMPTS / 60))
+        }
+        other => other.into(),
+    })
 }
 
 // --- serializedConfig JSON manipulation -------------------------------------
