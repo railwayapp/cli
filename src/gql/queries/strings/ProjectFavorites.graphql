@@ -1,0 +1,3 @@
+query ProjectFavorites($workspaceId: String!) {
+  projectFavorites(workspaceId: $workspaceId)
+}

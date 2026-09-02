@@ -75,6 +75,20 @@ pub struct TwoFactorInfo;
 )]
 pub struct UserProjects;
 
+/// The favorited project ids for one workspace, for `railway list`.
+///
+/// Its own query rather than a field on `UserProjects`: favorites hang off
+/// `Query`, not off a workspace, so they cannot be selected inside that
+/// document — and they are optional decoration, which lets the caller drop
+/// them when the API refuses without losing the project list itself.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ProjectFavorites.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ProjectFavorites;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
