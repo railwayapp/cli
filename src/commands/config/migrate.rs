@@ -613,6 +613,16 @@ fn emit_service_fields(cac: &CacFile) -> Vec<String> {
     } else if let Some(region) = &cac.deploy.region {
         fields.push(format!("    replicas: {{ {}: 1 }},", js_string(region)));
     }
+    if let Some(pre) = &cac.deploy.pre_deploy_command {
+        let rendered = match pre {
+            JsonValue::Array(items) if items.len() == 1 && items[0].is_string() => {
+                js_string(items[0].as_str().unwrap_or_default())
+            }
+            JsonValue::String(cmd) => js_string(cmd),
+            other => json_to_ts(other),
+        };
+        fields.push(format!("    preDeploy: {rendered},"));
+    }
     if let Some(dockerfile) = &cac.build.dockerfile_path {
         fields.push(format!(
             "    // dockerfilePath from CaC: {}",
@@ -624,12 +634,6 @@ fn emit_service_fields(cac: &CacFile) -> Vec<String> {
     }
     if let Some(cron) = &cac.deploy.cron_schedule {
         fields.push(format!("    // cronSchedule from CaC: {}", js_string(cron)));
-    }
-    if let Some(pre) = &cac.deploy.pre_deploy_command {
-        fields.push(format!(
-            "    // preDeployCommand from CaC: {}",
-            json_to_ts(pre)
-        ));
     }
     if let Some(watch) = &cac.build.watch_patterns {
         let arr = watch
@@ -845,6 +849,22 @@ mod tests {
         assert!(go.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(go.contains("railway.ServiceNamed"));
         assert!(go.contains("const Partial = \"api\""));
+    }
+
+    #[test]
+    fn emits_pre_deploy_as_a_real_field() {
+        let cac = CacFile {
+            deploy: CacDeploy {
+                start_command: Some("node index.js".into()),
+                pre_deploy_command: Some(serde_json::json!(["npx prisma migrate deploy"])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let services = [svc("api", cac)];
+        let out = emit_railway_ts("api", &services, true);
+        assert!(out.contains("preDeploy: \"npx prisma migrate deploy\""));
+        assert!(!out.contains("// preDeployCommand from CaC"));
     }
 
     #[test]
