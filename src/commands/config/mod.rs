@@ -1307,6 +1307,18 @@ fn render_deploy(
     if let Some(timeout) = remaining.remove("healthcheckTimeout") {
         lines.push(lang.config_field("healthcheckTimeout", &code_value(&timeout, lang)));
     }
+    if let Some(pre) = remaining.remove("preDeployCommand") {
+        if !pre.is_null() {
+            let rendered = match &pre {
+                serde_json::Value::Array(items) if items.len() == 1 && items[0].is_string() => {
+                    format!("{:?}", items[0].as_str().unwrap_or_default())
+                }
+                serde_json::Value::String(command) => format!("{:?}", command),
+                other => code_value(other, lang),
+            };
+            lines.push(lang.config_field("preDeploy", &rendered));
+        }
+    }
     if let Some(regions) = remaining.remove("multiRegionConfig") {
         lines.push(lang.config_field("replicas", &render_replicas(&regions, lang)));
     }
