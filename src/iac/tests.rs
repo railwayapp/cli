@@ -397,11 +397,29 @@ fn unauthored_database_networking_is_not_drift() {
 }
 
 #[test]
-fn private_database_declaration_plans_removing_a_public_proxy() {
+fn empty_tcp_proxies_warn_instead_of_planning_a_removal_the_apply_skips() {
     let current = imported_postgres(Some(json!({ "tcpProxies": { "5432": {} } })));
     let desired = graph_from(vec![with_networking(
         postgres("postgres", None),
         json!({ "tcpProxies": {} }),
+    )]);
+    let change_set = diff(&current, &desired);
+    assert!(change_set.changes.is_empty());
+    let warning = &change_set.diagnostics[0];
+    assert_eq!(warning.severity, "warning");
+    assert_eq!(
+        warning.path,
+        "resources.database.postgres.networking.tcpProxies"
+    );
+    assert!(warning.message.contains(r#"{ "5432": null }"#));
+}
+
+#[test]
+fn a_null_tcp_proxy_entry_plans_the_removal_and_converges() {
+    let current = imported_postgres(Some(json!({ "tcpProxies": { "5432": {} } })));
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": { "5432": null } }),
     )]);
     let change_set = diff(&current, &desired);
     assert_eq!(kinds(&change_set), vec!["resource.update"]);
@@ -409,7 +427,61 @@ fn private_database_declaration_plans_removing_a_public_proxy() {
     assert_eq!(change["field"], "networking");
     assert_eq!(change["summary"], "Update postgres networking");
     assert_eq!(change["before"], json!({ "tcpProxies": { "5432": {} } }));
-    assert!(change["after"].is_null());
+    // The apply is sent the block as written, so the `null` entry survives to
+    // the server — that entry is what deletes the proxy.
+    assert_eq!(change["after"], json!({ "tcpProxies": { "5432": null } }));
+    assert!(change_set.diagnostics.is_empty());
+
+    // The proxy is gone; the same file has nothing left to do.
+    let current = imported_postgres(None);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn omitted_networking_keys_keep_what_railway_has() {
+    let current = imported_postgres(Some(json!({
+        "privateNetworkEndpoint": "postgres",
+        "tcpProxies": { "5432": {} }
+    })));
+    // tcpProxies left out: the apply never touches the proxy.
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "privateNetworkEndpoint": "postgres" }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+    // privateNetworkEndpoint left out: the apply never touches the endpoint.
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": { "5432": {} } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn service_tcp_empty_warns_about_a_proxy_it_cannot_remove() {
+    let current = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1.2.3" },
+                "networking": { "tcpProxies": { "8080": {} } }
+            }
+        }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1.2.3"),
+            "networking": { "tcpProxies": {} }
+        }),
+    )]);
+    let change_set = diff(&current, &desired);
+    assert!(change_set.changes.is_empty());
+    assert_eq!(change_set.diagnostics[0].severity, "warning");
+    assert!(
+        change_set.diagnostics[0]
+            .message
+            .contains(r#"{ "8080": null }"#)
+    );
 }
 
 #[test]
