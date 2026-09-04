@@ -337,6 +337,12 @@ fn diff_networking(
 ) {
     let before = previous.get("networking");
     let after = resource.get("networking");
+    // The database helpers take no networking, and pulled files only author it
+    // when a proxy exists, so a database node without a networking block keeps
+    // whatever exposure it has.
+    if resource_type(resource) == "database" && after.is_none() {
+        return;
+    }
     let before_domains = before.and_then(|n| n.get("customDomains"));
     diagnose_unsupported_custom_domains(resource, diagnostics, before_domains);
     let mut before_copy = before.cloned().unwrap_or(json!({}));
@@ -349,9 +355,18 @@ fn diff_networking(
         obj.remove("customDomains");
         obj.remove("serviceDomains");
     }
+    diagnose_unremovable_tcp_proxies(resource, diagnostics, &before_copy, &after_copy);
     let normalized_before = normalize_for_diff("networking", &before_copy);
     let normalized_after = normalize_for_diff("networking", &after_copy);
-    if stable_stringify(&normalized_before) != stable_stringify(&normalized_after) {
+    // Plan the change only when applying the authored block moves something.
+    // The block is a sparse patch, so what the plan promises is its effect,
+    // while the change set still carries the block as written: that is the
+    // payload the apply sends, and a `null` entry is how a proxy is deleted.
+    let applied = normalize_for_diff(
+        "networking",
+        &networking_after_apply(&before_copy, &after_copy),
+    );
+    if stable_stringify(&normalized_before) != stable_stringify(&applied) {
         changes.push(update(
             &resource_addr(resource),
             "networking",
@@ -362,6 +377,85 @@ fn diff_networking(
             "safe",
         ));
     }
+}
+
+/// What `networking` looks like once Railway has applied the authored block.
+///
+/// `environmentApplyChangeSet` reads the block as a sparse patch: a key the
+/// author leaves out stays as Railway has it, and inside `tcpProxies` an entry
+/// keeps or creates a proxy, a `null` entry deletes one, and an unmentioned port
+/// is left alone — so an empty map changes nothing. The plan diffs against that
+/// same effect, because a plan that plans anything else promises work the apply
+/// will not do and then plans it again after every apply.
+fn networking_after_apply(before: &Value, after: &Value) -> Value {
+    let mut effective = before.as_object().cloned().unwrap_or_default();
+    let Some(authored) = after.as_object() else {
+        return Value::Object(effective);
+    };
+    for (key, value) in authored {
+        if key != "tcpProxies" {
+            effective.insert(key.clone(), value.clone());
+            continue;
+        }
+        let mut proxies = before
+            .get("tcpProxies")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (port, entry) in value.as_object().into_iter().flatten() {
+            if entry.is_null() {
+                proxies.remove(port);
+            } else {
+                proxies.entry(port.clone()).or_insert_with(|| entry.clone());
+            }
+        }
+        effective.insert(key.clone(), Value::Object(proxies));
+    }
+    Value::Object(effective)
+}
+
+/// An empty `tcpProxies` map — what `tcp: []` compiles to — cannot take a proxy
+/// away, because the apply leaves every port the block does not mention alone.
+/// Say that out loud instead of leaving the author with a file that reads
+/// "private" next to a proxy that is still serving traffic.
+fn diagnose_unremovable_tcp_proxies(
+    resource: &Value,
+    diagnostics: &mut Vec<Diagnostic>,
+    before: &Value,
+    after: &Value,
+) {
+    let authored_empty = after
+        .get("tcpProxies")
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty);
+    if !authored_empty {
+        return;
+    }
+    let live = before.get("tcpProxies").and_then(Value::as_object);
+    let Some(live) = live.filter(|proxies| !proxies.is_empty()) else {
+        return;
+    };
+    let ports = live
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let removals = live
+        .keys()
+        .map(|port| format!("\"{port}\": null"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    diagnostics.push(Diagnostic {
+        severity: "warning".into(),
+        path: format!(
+            "resources.{}.networking.tcpProxies",
+            resource_addr(resource)
+        ),
+        message: format!(
+            "{} has a public TCP proxy on port {ports}, and an empty tcpProxies map does not remove it. Author networking.tcpProxies = {{ {removals} }} to remove the proxy, or remove it from the dashboard.",
+            resource_name(resource)
+        ),
+    });
 }
 
 fn diagnose_unsupported_custom_domains(
@@ -1099,6 +1193,11 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
             copy.remove("dockerfilePath");
         }
+    }
+    if field_name == "networking" {
+        // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service
+        // with no proxy as no `tcpProxies` at all. Both mean the same thing.
+        copy.retain(|_, child| !child.is_null() && !child.as_object().is_some_and(Map::is_empty));
     }
     if field_name == "deploy" {
         if copy.get("useLegacyStacker") == Some(&json!(false)) {

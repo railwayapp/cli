@@ -656,6 +656,11 @@ pub fn environment_config_to_graph(
                     "deploy": service.get("deploy").cloned().unwrap_or(Value::Null),
                     "volumeMounts": service.get("volumeMounts").cloned().unwrap_or(Value::Null),
                 }));
+                if let Some(networking) =
+                    networking_from_environment_config(service, service_id, options)
+                {
+                    node["networking"] = networking;
+                }
                 if let Some(group_id) = field_str(service, "groupId") {
                     node["groupId"] = json!(
                         group_names_by_id
@@ -710,20 +715,8 @@ pub fn environment_config_to_graph(
             if let Some(variables) = service.get("variables") {
                 node["variables"] = variables_from_environment_config(variables);
             }
-            let mut networking = service.get("networking").cloned().unwrap_or(json!({}));
-            if let Some(domains) = options.custom_domains_by_service_id.get(service_id) {
-                networking["customDomains"] = domains.clone();
-            } else if let Some(existing) = service
-                .get("networking")
-                .and_then(|n| n.get("customDomains"))
-            {
-                networking["customDomains"] = existing.clone();
-            }
-            let networking = prune_empty(networking);
-            if networking.as_object().is_some_and(|obj| !obj.is_empty())
-                || options
-                    .custom_domains_by_service_id
-                    .contains_key(service_id)
+            if let Some(networking) =
+                networking_from_environment_config(service, service_id, options)
             {
                 node["networking"] = networking;
             }
@@ -818,6 +811,32 @@ pub fn environment_config_to_graph(
         "name": options.project_name.clone().unwrap_or_else(|| "imported-project".to_string()),
         "resources": resources,
     }))
+}
+
+/// Import a service's live networking (TCP proxies, domains) as graph state.
+///
+/// Databases go through this too: a public TCP proxy on a database is exposure
+/// the plan has to be able to see, and the imported graph is what
+/// `railway config pull` renders.
+fn networking_from_environment_config(
+    service: &Value,
+    service_id: &str,
+    options: &EnvironmentConfigToGraphOptions,
+) -> Option<Value> {
+    let mut networking = service.get("networking").cloned().unwrap_or(json!({}));
+    if let Some(domains) = options.custom_domains_by_service_id.get(service_id) {
+        networking["customDomains"] = domains.clone();
+    }
+    let networking = prune_empty(networking);
+    if networking.as_object().is_some_and(|obj| !obj.is_empty())
+        || options
+            .custom_domains_by_service_id
+            .contains_key(service_id)
+    {
+        Some(networking)
+    } else {
+        None
+    }
 }
 
 fn variables_from_environment_config(variables: &Value) -> Value {
