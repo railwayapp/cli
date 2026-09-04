@@ -2,11 +2,11 @@ lockfileVersion: 5.4
 
 specifiers:
   node-fetch: ^3.1.0
-  tar: ^6.1.11
+  tar: ^7.5.21
 
 dependencies:
   node-fetch: 3.3.0
-  tar: 6.1.13
+  tar: 7.5.21
 
 packages:
 
@@ -21,8 +21,8 @@ packages:
     dev: false
 
   /fetch-blob/3.2.0:
-    resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqjhM4DnfbMvdX6otXq83soQQ==}
-    engines: {node: ^12.20 || >= 14.13}
+    resolution: {integrity: sha512-7yAQpD2UMJzLi1Dqv7qFYnPbaPx7ZfFK6PiIxQ4PfkGPyNyl2Ugx+a/umUonmKqJhM4DnfbMvdX6otXq83soQQ==}
+    engines: {node: '^12.20 || >= 14.13'}
     dependencies:
       node-domexception: 1.0.0
       web-streams-polyfill: 3.2.1
@@ -75,7 +75,7 @@ packages:
 
   /node-fetch/3.3.0:
     resolution: {integrity: sha512-BKwRP/O0UvoMKp7GNdwPlObhYGB5DQqwhEDQlNKuoqwVYSxkSZCSbHjnFFmUEtwSKRPU4kNK8PbDYYitwaE3QA==}
-    engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+    engines: {node: '^12.20.0 || ^14.13.1 || >=16.0.0'}
     dependencies:
       data-uri-to-buffer: 4.0.1
       fetch-blob: 3.2.0
