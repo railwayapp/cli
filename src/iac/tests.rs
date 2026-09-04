@@ -318,6 +318,130 @@ fn existing_custom_domains_are_plan_clean() {
     assert!(result.diagnostics.is_empty());
 }
 
+fn imported_postgres(networking: Option<Value>) -> super::graph::RailwayGraph {
+    let mut service = json!({
+        "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:18" },
+        "deploy": {
+            "multiRegionConfig": { "us-east4-eqdc4a": { "numReplicas": 1 } },
+            "requiredMountPath": "/var/lib/postgresql/data"
+        },
+        "volumeMounts": { "vol-id": { "mountPath": "/var/lib/postgresql/data" } }
+    });
+    if let Some(networking) = networking {
+        service["networking"] = networking;
+    }
+    environment_config_to_graph(
+        &json!({ "services": { "db-id": service } }),
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            service_names_by_id: super::compiler::map_from_str(&[("db-id", "postgres")]),
+            ..Default::default()
+        },
+    )
+}
+
+fn with_networking(mut node: Value, networking: Value) -> Value {
+    node["networking"] = networking;
+    node
+}
+
+#[test]
+fn empty_database_tcp_proxies_converge_when_no_proxy_exists() {
+    let current = imported_postgres(None);
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": {} }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    let current = env_config(json!({
+        "services": {
+            "cache": {
+                "source": { "image": "railwayapp/redis:8.2" },
+                "deploy": { "requiredMountPath": "/bitnami" }
+            }
+        }
+    }));
+    let desired = graph_from(vec![with_networking(
+        redis("cache"),
+        json!({ "tcpProxies": {} }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn imported_database_keeps_its_tcp_proxy() {
+    let current = imported_postgres(Some(json!({ "tcpProxies": { "5432": {} } })));
+    let database = current
+        .resources
+        .iter()
+        .find(|resource| resource["address"] == "database.postgres")
+        .unwrap();
+    assert_eq!(
+        database["networking"],
+        json!({ "tcpProxies": { "5432": {} } })
+    );
+
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": { "5432": {} } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn unauthored_database_networking_is_not_drift() {
+    let current = imported_postgres(Some(json!({ "tcpProxies": { "5432": {} } })));
+    let desired = graph_from(vec![postgres("postgres", None)]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn private_database_declaration_plans_removing_a_public_proxy() {
+    let current = imported_postgres(Some(json!({ "tcpProxies": { "5432": {} } })));
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": {} }),
+    )]);
+    let change_set = diff(&current, &desired);
+    assert_eq!(kinds(&change_set), vec!["resource.update"]);
+    let change = &change_set.changes[0];
+    assert_eq!(change["field"], "networking");
+    assert_eq!(change["summary"], "Update postgres networking");
+    assert_eq!(change["before"], json!({ "tcpProxies": { "5432": {} } }));
+    assert!(change["after"].is_null());
+}
+
+#[test]
+fn public_database_declaration_plans_the_proxy() {
+    let current = imported_postgres(None);
+    let desired = graph_from(vec![with_networking(
+        postgres("postgres", None),
+        json!({ "tcpProxies": { "5432": {} } }),
+    )]);
+    let change_set = diff(&current, &desired);
+    assert_eq!(kinds(&change_set), vec!["resource.update"]);
+    assert_eq!(
+        change_set.changes[0]["after"],
+        json!({ "tcpProxies": { "5432": {} } })
+    );
+}
+
+#[test]
+fn empty_service_tcp_proxies_converge_when_no_proxy_exists() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1.2.3" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1.2.3"),
+            "networking": { "tcpProxies": {} }
+        }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
 #[test]
 fn round_tripped_config_plans_no_changes() {
     let desired = graph_from(vec![

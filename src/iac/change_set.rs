@@ -337,6 +337,13 @@ fn diff_networking(
 ) {
     let before = previous.get("networking");
     let after = resource.get("networking");
+    // The database helpers take no networking, and pulled files only author it
+    // when a proxy exists, so a database node without a networking block keeps
+    // whatever exposure it has. An authored block is compared as written: an
+    // empty `tcpProxies` means "no public proxy" and plans the removal of one.
+    if resource_type(resource) == "database" && after.is_none() {
+        return;
+    }
     let before_domains = before.and_then(|n| n.get("customDomains"));
     diagnose_unsupported_custom_domains(resource, diagnostics, before_domains);
     let mut before_copy = before.cloned().unwrap_or(json!({}));
@@ -1099,6 +1106,11 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
             copy.remove("dockerfilePath");
         }
+    }
+    if field_name == "networking" {
+        // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service
+        // with no proxy as no `tcpProxies` at all. Both mean the same thing.
+        copy.retain(|_, child| !child.is_null() && !child.as_object().is_some_and(Map::is_empty));
     }
     if field_name == "deploy" {
         if copy.get("useLegacyStacker") == Some(&json!(false)) {
