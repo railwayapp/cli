@@ -4,7 +4,9 @@ use reqwest::Client;
 use crate::commands::queries::RailwayProject;
 use crate::config::Configs;
 use crate::controllers::{
-    environment::get_matched_environment, project::get_project, service::get_or_prompt_service,
+    environment::get_matched_environment,
+    project::{get_project, resolve_project_id_or_name},
+    service::get_or_prompt_service,
 };
 
 use super::Args;
@@ -40,8 +42,7 @@ pub async fn get_ssh_connect_params(
     configs: &Configs,
     client: &Client,
 ) -> Result<SshConnectParams> {
-    let needs_linked_project =
-        args.project.is_none() || args.environment.is_none() || args.service.is_none();
+    let needs_linked_project = args.project.is_none() || args.environment.is_none();
 
     let linked_project = if needs_linked_project {
         Some(configs.get_linked_project().await?)
@@ -49,8 +50,8 @@ pub async fn get_ssh_connect_params(
         None
     };
 
-    let project_id = if let Some(id) = args.project {
-        id
+    let project_id = if let Some(project) = args.project {
+        resolve_project_id_or_name(client, configs, &project).await?
     } else {
         linked_project.as_ref().unwrap().project.clone()
     };
@@ -69,6 +70,8 @@ pub async fn get_ssh_connect_params(
 
     let (service_id, service_name) = if let Some(service_id_or_name) = args.service {
         find_service_by_name(&project, &service_id_or_name)?
+    } else if let [service] = project.services.edges.as_slice() {
+        (service.node.id.clone(), service.node.name.clone())
     } else {
         let service_id = get_or_prompt_service(linked_project.clone(), project.clone(), None)
             .await?
@@ -90,4 +93,104 @@ pub async fn get_ssh_connect_params(
         service_id,
         service_name,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn resolves_explicit_project_name_without_a_link_or_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub_graphql_error("Project", "Project not found");
+        server.stub(
+            "UserProjects",
+            json!({
+                "externalWorkspaces": [],
+                "me": {
+                    "workspaces": [{
+                        "id": "workspace-id",
+                        "name": "Workspace",
+                        "team": { "id": "team-id" },
+                        "projects": {
+                            "edges": [{
+                                "node": {
+                                    "id": "project-id",
+                                    "name": "preview-environments",
+                                    "createdAt": "2026-01-01T00:00:00Z",
+                                    "updatedAt": "2026-01-01T00:00:00Z",
+                                    "deletedAt": null,
+                                    "environments": { "edges": [] },
+                                    "services": { "edges": [] }
+                                }
+                            }]
+                        }
+                    }]
+                }
+            }),
+        );
+        server.stub(
+            "Project",
+            json!({
+                "project": {
+                    "id": "project-id",
+                    "name": "preview-environments",
+                    "workspaceId": "workspace-id",
+                    "deletedAt": null,
+                    "workspace": { "name": "Workspace" },
+                    "buckets": { "edges": [] },
+                    "environments": {
+                        "edges": [{
+                            "node": {
+                                "id": "environment-id",
+                                "name": "production",
+                                "canAccess": true,
+                                "deletedAt": null,
+                                "unmergedChangesCount": 0
+                            }
+                        }]
+                    },
+                    "services": {
+                        "edges": [{
+                            "node": { "id": "service-id", "name": "api" }
+                        }]
+                    }
+                }
+            }),
+        );
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        let params = get_ssh_connect_params(
+            Args {
+                subcommand: None,
+                project: Some("preview-environments".to_string()),
+                service: None,
+                environment: Some("production".to_string()),
+                deployment_instance: None,
+                session: None,
+                native: false,
+                identity_file: None,
+                command: Vec::new(),
+            },
+            &configs,
+            &client,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(params.project_id, "project-id");
+        assert_eq!(params.environment_id, "environment-id");
+        assert_eq!(params.service_id, "service-id");
+        assert_eq!(
+            server.variables_for("Project"),
+            vec![
+                json!({ "id": "preview-environments" }),
+                json!({ "id": "project-id" })
+            ]
+        );
+    }
 }
