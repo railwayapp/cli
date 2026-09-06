@@ -19,7 +19,7 @@ use super::*;
 /// Add, list, inspect, update, or delete domains for a service.
 ///
 /// Running without a subcommand preserves the original create behavior:
-/// - `railway domain` generates a Railway-provided service domain
+/// - `railway domain` confirms before generating a Railway-provided service domain
 /// - `railway domain example.com` creates a custom domain
 #[derive(Parser)]
 #[clap(
@@ -50,6 +50,10 @@ pub struct Args {
     /// Specifying a custom domain will also return the required DNS records
     /// to add to your DNS settings.
     domain: Option<String>,
+
+    /// Skip confirmation when creating a Railway-provided domain
+    #[clap(short = 'y', long = "yes")]
+    yes: bool,
 
     /// Output in JSON format
     #[clap(long, global = true)]
@@ -122,6 +126,7 @@ pub async fn command(args: Args) -> Result<()> {
         environment,
         project,
         domain,
+        yes,
         json,
     } = args;
 
@@ -158,7 +163,7 @@ pub async fn command(args: Args) -> Result<()> {
             if let Some(domain) = domain {
                 create_custom_domain(domain, port, project, service, environment, json).await?;
             } else {
-                create_service_domain(project, service, environment, port, json).await?;
+                create_service_domain(project, service, environment, port, yes, json).await?;
             }
         }
     }
@@ -250,7 +255,7 @@ async fn delete_domain(
     let ctx = resolve_service_context(project, service_name, environment).await?;
     let domain = resolve_domain(&ctx, &identifier).await?;
 
-    let confirmed = confirm_delete(yes, std::io::stdout().is_terminal(), || {
+    let confirmed = confirm_action(yes, std::io::stdout().is_terminal(), || {
         prompt_confirm_with_default(
             &format!(
                 "Delete {} domain {}? This action cannot be undone.",
@@ -449,6 +454,7 @@ async fn create_service_domain(
     service_name: Option<String>,
     environment: Option<String>,
     port: Option<u16>,
+    yes: bool,
     json: bool,
 ) -> Result<()> {
     let ctx = resolve_service_context(project, service_name, environment).await?;
@@ -458,6 +464,31 @@ async fn create_service_domain(
     let domain_count = domains.service_domains.len() + domains.custom_domains.len();
     if domain_count > 0 {
         return print_existing_domains(&domains, json);
+    }
+
+    let confirmed = confirm_action(yes, std::io::stdout().is_terminal(), || {
+        prompt_confirm_with_default(
+            &format!(
+                "Create a public domain for service {} in environment {}?",
+                ctx.service_name, ctx.environment_name
+            ),
+            false,
+        )
+    })?;
+
+    if !confirmed {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "created": false,
+                    "message": "Domain creation cancelled",
+                }))?
+            );
+        } else {
+            println!("Domain creation cancelled.");
+        }
+        return Ok(());
     }
 
     let spinner = (std::io::stdout().is_terminal() && !json)
@@ -1150,7 +1181,7 @@ fn verification_txt_value(token: &str) -> String {
     format!("railway-verify={token}")
 }
 
-fn confirm_delete<F>(yes: bool, is_terminal: bool, prompt: F) -> Result<bool>
+fn confirm_action<F>(yes: bool, is_terminal: bool, prompt: F) -> Result<bool>
 where
     F: FnOnce() -> Result<bool>,
 {
@@ -1328,6 +1359,11 @@ mod tests {
         assert!(args.command.is_none());
         assert_eq!(args.domain.as_deref(), Some("example.com"));
         assert_eq!(args.port, Some(3000));
+        assert!(!args.yes);
+
+        let args = Args::parse_from(["domain", "--yes"]);
+        assert!(args.command.is_none());
+        assert!(args.yes);
 
         let args = Args::parse_from(["domain", "list", "--service", "api", "--json"]);
         assert!(matches!(args.command, Some(Commands::List)));
@@ -1368,6 +1404,24 @@ mod tests {
         assert!(parse_port("0").is_err());
         assert!(parse_port("65536").is_err());
         assert!(Args::try_parse_from(["domain", "update", "example.com", "--port", "0"]).is_err());
+    }
+
+    #[test]
+    fn domain_creation_confirmation_is_required_non_interactively() {
+        let error = confirm_action(false, false, || Ok(true)).unwrap_err();
+        assert!(error.to_string().contains("Use --yes"));
+
+        let mut prompted = false;
+        assert!(
+            confirm_action(true, false, || {
+                prompted = true;
+                Ok(false)
+            })
+            .unwrap()
+        );
+        assert!(!prompted);
+
+        assert!(!confirm_action(false, true, || Ok(false)).unwrap());
     }
 
     #[test]
