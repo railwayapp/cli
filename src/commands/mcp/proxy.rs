@@ -53,6 +53,8 @@ struct ProxyState {
     url: String,
     configs: Mutex<Configs>,
     session: Mutex<SessionMeta>,
+    /// Serialize recovery without holding session metadata across HTTP awaits.
+    recovery: Mutex<()>,
     /// Resolved once at startup: the proxy's working directory is fixed for
     /// the life of the process, so the link cannot change under it.
     link: LinkContext,
@@ -61,6 +63,8 @@ struct ProxyState {
 #[derive(Default)]
 struct SessionMeta {
     id: Option<String>,
+    /// Advances after recovery, including when the upstream is stateless.
+    generation: u64,
     /// The harness's `initialize` request, kept so the proxy can re-establish
     /// an upstream session (expiry, or a degraded logged-out start) without
     /// involving the harness.
@@ -164,6 +168,7 @@ pub async fn serve_proxy() -> Result<()> {
         url,
         configs: Mutex::new(configs),
         session: Mutex::new(SessionMeta::default()),
+        recovery: Mutex::new(()),
         link,
     });
 
@@ -475,7 +480,21 @@ fn respond_unauthenticated(msg: &JsonValue, ids: &[JsonValue], out: &Out) {
 
 async fn forward(state: &ProxyState, msg: &JsonValue, token: &str, out: &Out) -> Result<()> {
     let is_initialize = method_of(msg) == Some("initialize");
-    let session_id = state.session.lock().await.id.clone();
+    let (session_id, generation, can_reinit, metadata) = {
+        let mut session = state.session.lock().await;
+        let injected = ids_of(msg)
+            .iter()
+            .any(|id| session.injected_ids.remove(&id.to_string()));
+        (
+            session.id.clone(),
+            session.generation,
+            session.init_request.is_some(),
+            RequestMetadata {
+                client_name: session.client_name.clone(),
+                injected,
+            },
+        )
+    };
 
     let resp = post_message(
         state,
@@ -486,6 +505,7 @@ async fn forward(state: &ProxyState, msg: &JsonValue, token: &str, out: &Out) ->
         } else {
             session_id.as_deref()
         },
+        &metadata,
     )
     .await?;
 
@@ -493,16 +513,21 @@ async fn forward(state: &ProxyState, msg: &JsonValue, token: &str, out: &Out) ->
     // proxy started degraded while logged out): re-initialize with the
     // captured initialize request and retry once.
     let status = resp.status();
-    let can_reinit = { state.session.lock().await.init_request.is_some() };
     if !is_initialize && (status == 404 || status == 400) && can_reinit {
-        let _ = resp.bytes().await;
-        reinitialize(state, token).await?;
+        drop(resp);
+        reinitialize(state, token, generation).await?;
         let session_id = state.session.lock().await.id.clone();
-        let resp = post_message(state, msg, token, session_id.as_deref()).await?;
+        let resp = post_message(state, msg, token, session_id.as_deref(), &metadata).await?;
         return consume_response(state, resp, msg, is_initialize, out).await;
     }
 
     consume_response(state, resp, msg, is_initialize, out).await
+}
+
+/// Keep per-request telemetry intact when retrying a rejected request.
+struct RequestMetadata {
+    client_name: Option<String>,
+    injected: bool,
 }
 
 async fn post_message(
@@ -510,14 +535,8 @@ async fn post_message(
     msg: &JsonValue,
     token: &str,
     session_id: Option<&str>,
+    metadata: &RequestMetadata,
 ) -> Result<reqwest::Response> {
-    let (client_name, injected) = {
-        let mut session = state.session.lock().await;
-        let injected = ids_of(msg)
-            .iter()
-            .any(|id| session.injected_ids.remove(&id.to_string()));
-        (session.client_name.clone(), injected)
-    };
     let mut req = state
         .http
         .post(&state.url)
@@ -525,10 +544,10 @@ async fn post_message(
         .header("accept", "application/json, text/event-stream")
         .header("x-source", consts::get_user_agent())
         .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE);
-    if let Some(client) = client_name.as_deref() {
+    if let Some(client) = metadata.client_name.as_deref() {
         req = req.header(MCP_CLIENT_HEADER, client);
     }
-    if injected {
+    if metadata.injected {
         req = req.header(MCP_INJECTED_HEADER, "projectId");
     }
     if let Some(sid) = session_id {
@@ -570,33 +589,54 @@ fn extract_mcp_client_header(msg: &JsonValue) -> Option<String> {
 
 /// Re-run the MCP handshake upstream using the harness's captured `initialize`
 /// request, discarding the result (the harness already completed its own
-/// handshake). Serialized behind the session lock so concurrent failures
-/// don't stampede.
-async fn reinitialize(state: &ProxyState, token: &str) -> Result<()> {
-    let mut session = state.session.lock().await;
-    let init = session
-        .init_request
-        .clone()
-        .context("no initialize request captured yet")?;
+/// handshake). A separate lock serializes recovery; session metadata is only
+/// locked for snapshots and publication, never while awaiting HTTP.
+async fn reinitialize(state: &ProxyState, token: &str, failed_generation: u64) -> Result<()> {
+    let _recovery = state.recovery.lock().await;
+    let (init, metadata) = {
+        let session = state.session.lock().await;
+        // Another request already recovered the session this request used.
+        // Compare generations because a stateless server never issues an id.
+        if session.generation != failed_generation {
+            return Ok(());
+        }
+        (
+            session
+                .init_request
+                .clone()
+                .context("no initialize request captured yet")?,
+            RequestMetadata {
+                client_name: session.client_name.clone(),
+                injected: false,
+            },
+        )
+    };
 
-    let resp = post_message(state, &init, token, None).await?;
+    let resp = post_message(state, &init, token, None, &metadata).await?;
     anyhow::ensure!(
         resp.status().is_success(),
         "re-initialize failed with HTTP {}",
         resp.status()
     );
-    session.id = resp
+    let session_id = resp
         .headers()
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let _ = resp.bytes().await;
-    let session_id = session.id.clone();
-    drop(session);
+    read_body_capped(resp).await?;
 
     let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-    let resp = post_message(state, &initialized, token, session_id.as_deref()).await?;
-    let _ = resp.bytes().await;
+    let resp = post_message(state, &initialized, token, session_id.as_deref(), &metadata).await?;
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "re-initialize notification failed with HTTP {}",
+        resp.status()
+    );
+    read_body_capped(resp).await?;
+
+    let mut session = state.session.lock().await;
+    session.id = session_id;
+    session.generation += 1;
     Ok(())
 }
 
@@ -1241,5 +1281,289 @@ mod link_context_tests {
         let mut session = SessionMeta::default();
         record_tool_params(&mut session, &json!({ "result": { "content": [] } }));
         assert!(session.tool_params.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Barrier, Notify, Semaphore};
+
+    struct Fixture {
+        url: String,
+        initialize_count: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+        initialize_started: Arc<Notify>,
+        initialize_gate: Arc<Semaphore>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl Fixture {
+        async fn start(
+            rejection: u16,
+            callers: usize,
+            stateful: bool,
+            retry_fails: bool,
+            handshake_failure: Option<&'static str>,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let initialize_count = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let initial_calls = Arc::new(Barrier::new(callers));
+            let initialized = Arc::new(AtomicUsize::new(0));
+            let initialize_started = Arc::new(Notify::new());
+            let initialize_gate = Arc::new(Semaphore::new(1));
+            let server = tokio::spawn({
+                let initialize_started = initialize_started.clone();
+                let initialize_gate = initialize_gate.clone();
+                let initialize_count = initialize_count.clone();
+                let calls = calls.clone();
+                async move {
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let initialize_count = initialize_count.clone();
+                        let calls = calls.clone();
+                        let initial_calls = initial_calls.clone();
+                        let initialized = initialized.clone();
+                        let initialize_started = initialize_started.clone();
+                        let initialize_gate = initialize_gate.clone();
+                        tokio::spawn(async move {
+                            let mut socket = BufReader::new(socket);
+                            let mut headers = HashMap::new();
+                            let mut line = String::new();
+                            socket.read_line(&mut line).await.unwrap();
+                            assert!(line.starts_with("POST "));
+                            loop {
+                                line.clear();
+                                socket.read_line(&mut line).await.unwrap();
+                                if line == "\r\n" {
+                                    break;
+                                }
+                                let (name, value) = line.trim().split_once(':').unwrap();
+                                headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
+                            }
+                            let len: usize = headers["content-length"].parse().unwrap();
+                            let mut body = vec![0; len];
+                            socket.read_exact(&mut body).await.unwrap();
+                            let msg: JsonValue = serde_json::from_slice(&body).unwrap();
+                            let method = method_of(&msg).unwrap();
+                            assert_eq!(headers["authorization"], "Bearer test-token");
+                            assert_eq!(headers[MCP_METHOD_HEADER], method);
+                            assert_eq!(headers[MCP_CLIENT_HEADER], "claude_code");
+                            assert_eq!(headers[MCP_TRANSPORT_HEADER], MCP_TRANSPORT_VALUE);
+                            let (status, session_header) = match method {
+                                "initialize" => {
+                                    initialize_count.fetch_add(1, Ordering::SeqCst);
+                                    initialize_started.notify_one();
+                                    let _permit = initialize_gate.acquire().await.unwrap();
+                                    assert!(!headers.contains_key("mcp-session-id"));
+                                    (
+                                        if handshake_failure == Some(method) {
+                                            500
+                                        } else {
+                                            200
+                                        },
+                                        if stateful {
+                                            "mcp-session-id: fresh\r\n"
+                                        } else {
+                                            ""
+                                        },
+                                    )
+                                }
+                                "notifications/initialized" => {
+                                    assert_eq!(
+                                        headers.get("mcp-session-id").map(String::as_str),
+                                        stateful.then_some("fresh")
+                                    );
+                                    initialized.fetch_add(1, Ordering::SeqCst);
+                                    (
+                                        if handshake_failure == Some(method) {
+                                            500
+                                        } else {
+                                            202
+                                        },
+                                        "",
+                                    )
+                                }
+                                "tools/call" => {
+                                    assert_eq!(headers[MCP_NAME_HEADER], "test-tool");
+                                    assert_eq!(headers[MCP_INJECTED_HEADER], "projectId");
+                                    assert_eq!(
+                                        msg.pointer("/params/arguments/projectId"),
+                                        Some(&json!("project"))
+                                    );
+                                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                                    if attempt < callers {
+                                        assert_eq!(
+                                            headers.get("mcp-session-id").map(String::as_str),
+                                            stateful.then_some("expired")
+                                        );
+                                        // Every caller has sent using the old generation before
+                                        // any rejection starts recovery.
+                                        initial_calls.wait().await;
+                                        (rejection, "")
+                                    } else {
+                                        assert_eq!(initialized.load(Ordering::SeqCst), 1);
+                                        assert_eq!(
+                                            headers.get("mcp-session-id").map(String::as_str),
+                                            stateful.then_some("fresh")
+                                        );
+                                        (if retry_fails { rejection } else { 200 }, "")
+                                    }
+                                }
+                                _ => panic!("unexpected method {method}"),
+                            };
+                            let body = if status == 202 {
+                                String::new()
+                            } else {
+                                json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": true}})
+                                    .to_string()
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{session_header}connection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            socket.write_all(response.as_bytes()).await.unwrap();
+                        });
+                    }
+                }
+            });
+            Self {
+                url,
+                initialize_count,
+                calls,
+                server,
+                initialize_started,
+                initialize_gate,
+            }
+        }
+    }
+
+    async fn exercise_recovery(
+        rejection: u16,
+        callers: usize,
+        stateful: bool,
+        retry_fails: bool,
+        handshake_failure: Option<&'static str>,
+    ) {
+        let fixture =
+            Fixture::start(rejection, callers, stateful, retry_fails, handshake_failure).await;
+        let config_dir = tempfile::tempdir().unwrap();
+        let state = ProxyState {
+            http: reqwest::Client::new(),
+            url: fixture.url.clone(),
+            configs: Mutex::new(Configs::for_test(config_dir.path().join("config.json"))),
+            session: Mutex::new(SessionMeta {
+                id: stateful.then(|| "expired".to_string()),
+                init_request: Some(
+                    json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}}),
+                ),
+                client_name: Some("claude_code".to_string()),
+                injected_ids: (1..=callers).map(|id| id.to_string()).collect(),
+                ..SessionMeta::default()
+            }),
+            recovery: Mutex::new(()),
+            link: LinkContext::default(),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let requests = (1..=callers).map(|id| {
+            let state = &state;
+            let tx = &tx;
+            async move {
+                let msg = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "test-tool", "arguments": {"projectId": "project"}}});
+                forward(state, &msg, "test-token", tx).await
+            }
+        });
+        // Hold the upstream initialize response so metadata access is checked
+        // while recovery is awaiting network I/O, not just after it returns.
+        let initialize_permit = fixture.initialize_gate.acquire().await.unwrap();
+        let check_metadata_access = async {
+            fixture.initialize_started.notified().await;
+            let session = state.session.lock().await;
+            assert_eq!(session.generation, 0);
+            assert_eq!(session.id.as_deref(), stateful.then_some("expired"));
+            drop(session);
+            drop(initialize_permit);
+        };
+        let work = async {
+            let (results, ()) =
+                tokio::join!(futures::future::join_all(requests), check_metadata_access);
+            results
+        };
+        let results = tokio::time::timeout(Duration::from_secs(5), work)
+            .await
+            .expect("recovery deadlocked");
+        for result in results {
+            if let Some(method) = handshake_failure {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("500"), "{method}: {error}");
+            } else if retry_fails {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains(&rejection.to_string()), "{error}");
+            } else {
+                result.unwrap();
+            }
+        }
+        assert_eq!(fixture.initialize_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.calls.load(Ordering::SeqCst),
+            callers * if handshake_failure.is_some() { 1 } else { 2 }
+        );
+        let session = state.session.lock().await;
+        assert_eq!(session.generation, u64::from(handshake_failure.is_none()));
+        if !retry_fails && handshake_failure.is_none() {
+            let mut ids = HashSet::new();
+            while let Ok(line) = rx.try_recv() {
+                let response: JsonValue = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["result"]["ok"], true);
+                ids.insert(response["id"].as_u64().unwrap());
+            }
+            assert_eq!(ids, (1..=callers as u64).collect());
+        } else {
+            assert!(
+                rx.try_recv().is_err(),
+                "internal handshake leaked a response"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovers_from_http_400_and_404() {
+        for status in [400, 404] {
+            exercise_recovery(status, 1, true, false, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_http_400_and_404_only_once() {
+        for status in [400, 404] {
+            exercise_recovery(status, 1, false, true, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_returns_error_without_retrying() {
+        for method in ["initialize", "notifications/initialized"] {
+            exercise_recovery(404, 1, true, false, Some(method)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_calls_share_recovery_with_and_without_session_ids() {
+        for status in [400, 404] {
+            for stateful in [true, false] {
+                exercise_recovery(status, 2, stateful, false, None).await;
+            }
+        }
     }
 }
