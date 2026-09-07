@@ -87,15 +87,45 @@ pub async fn probe_any(
     Err(failures)
 }
 
+/// Resolves the member's Patroni REST credential from its OWN environment
+/// and leaves `$@` holding curl's `-u user:pass` -- empty when the member
+/// carries no password.
+///
+/// The `postgres-ha` image authenticates Patroni's MUTATING endpoints
+/// (`POST /switchover`, `/failover`, `/restart`, `/reinitialize`,
+/// `PATCH /config`) once the member carries a password, and the production
+/// template sets `PATRONI_RESTAPI_PASSWORD` on every member -- so a bare
+/// POST is answered `401 no auth header received` and the switchover never
+/// happens. Reads (`GET /cluster` above) stay open, so they stay bare.
+///
+/// The precedence mirrors the image's own resolution (the dedicated REST
+/// secret, else the superuser's), and the credential is read INSIDE the
+/// container: nothing secret enters the exec payload, this process, or a
+/// log line. A member with no password cannot be enforcing either, so the
+/// call goes out bare and Patroni's answer is the truthful outcome -- one
+/// command spans a fleet mid-rollout.
+const RESTAPI_AUTH_PRELUDE: &str = concat!(
+    r#"PATRONI_REST_PW="${PATRONI_RESTAPI_PASSWORD:-${PATRONI_SUPERUSER_PASSWORD:-${PGPASSWORD:-${POSTGRES_PASSWORD:-}}}}"; "#,
+    r#"PATRONI_REST_USER="${PATRONI_RESTAPI_USERNAME:-${PATRONI_SUPERUSER_USERNAME:-${PGUSER:-${POSTGRES_USER:-postgres}}}}"; "#,
+    r#"if [ -n "$PATRONI_REST_PW" ]; then set -- -u "$PATRONI_REST_USER:$PATRONI_REST_PW"; else set --; fi; "#,
+);
+
+/// The exact shell text the switchover runs, so a test can pin both halves:
+/// the credential resolution and the request itself.
+fn switchover_command(body: &str) -> String {
+    format!(
+        "{prelude}curl -s --max-time 8 -w '\\nHTTP_STATUS:%{{http_code}}' \"$@\" -X POST localhost:8008/switchover -H 'Content-Type: application/json' -d '{body}'",
+        prelude = RESTAPI_AUTH_PRELUDE,
+    )
+}
+
 /// `POST localhost:8008/switchover` against `instance_id`'s container,
 /// asking Patroni to promote `candidate` off of `leader`. Patroni performs
 /// the actual failover; this call just issues the request and surfaces a
 /// non-2xx/timeout as an error.
 pub async fn switchover(instance_id: &str, leader: &str, candidate: &str) -> Result<String> {
     let body = serde_json::json!({ "leader": leader, "candidate": candidate }).to_string();
-    let command = format!(
-        "curl -s --max-time 8 -w '\\nHTTP_STATUS:%{{http_code}}' -X POST localhost:8008/switchover -H 'Content-Type: application/json' -d '{body}'"
-    );
+    let command = switchover_command(&body);
 
     let output = tokio::time::timeout(
         Duration::from_secs(10),
@@ -213,6 +243,150 @@ pub async fn probe_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the emitted switchover text through a real `sh`, with a `curl`
+    /// shim on PATH that records the argv it was handed. Substring checks
+    /// cannot catch a quoting slip; executing it can.
+    ///
+    /// Unix-only: it needs a POSIX shell on the HOST. The text itself only
+    /// ever runs inside the member's Linux container
+    /// (`exec_in_container` pipes it to `ssh … sh -s`), so a Windows host
+    /// has no shell to check it against --
+    /// `switchover_command_reads_the_credential_by_name` covers what can
+    /// be asserted everywhere.
+    #[cfg(unix)]
+    fn curl_argv_for(env: &[(&str, &str)]) -> Vec<String> {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "cli-patroni-auth-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("curl");
+        std::fs::write(&shim, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-s")
+            // The shim must WIN over a real curl, but `sh` itself still has to
+            // be findable — replacing PATH outright makes the spawn fail.
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env_remove("PATRONI_RESTAPI_PASSWORD")
+            .env_remove("PATRONI_SUPERUSER_PASSWORD")
+            .env_remove("PGPASSWORD")
+            .env_remove("POSTGRES_PASSWORD")
+            .env_remove("PATRONI_RESTAPI_USERNAME")
+            .env_remove("PATRONI_SUPERUSER_USERNAME")
+            .env_remove("PGUSER")
+            .env_remove("POSTGRES_USER")
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                switchover_command(r#"{"leader":"postgres-1","candidate":"postgres-2"}"#)
+                    .as_bytes(),
+            )
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "shell rejected the switchover text: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The credential is READ from the member's environment by name, never
+    /// interpolated into the command -- so no secret can reach the exec
+    /// payload, this process, or a log line. Host-agnostic.
+    #[test]
+    fn switchover_command_reads_the_credential_by_name() {
+        let cmd = switchover_command(r#"{"leader":"postgres-1","candidate":"postgres-2"}"#);
+        assert!(cmd.contains("${PATRONI_RESTAPI_PASSWORD:-${PATRONI_SUPERUSER_PASSWORD:-"));
+        assert!(cmd.contains(r#"set -- -u "$PATRONI_REST_USER:$PATRONI_REST_PW""#));
+        // No password in the container => no -u at all; `-u "user:"` would
+        // turn a non-enforcing cluster into a 401.
+        assert!(cmd.contains("else set --; fi"));
+        // curl carries whatever the prelude decided, ahead of the request.
+        let at = cmd
+            .find(r#""$@""#)
+            .expect("curl carries the resolved credential");
+        let post = cmd.find("-X POST").expect("the POST survives");
+        assert!(at < post, "the credential must precede the request");
+    }
+
+    /// An enforcing member gets HTTP Basic auth built from its own env, with
+    /// the REST secret winning over the superuser's, and the request itself
+    /// still intact behind it.
+    #[cfg(unix)]
+    #[test]
+    fn switchover_authenticates_from_the_members_own_env() {
+        let argv = curl_argv_for(&[
+            ("PATRONI_RESTAPI_PASSWORD", "rest-pw"),
+            ("PATRONI_SUPERUSER_PASSWORD", "super-pw"),
+            ("POSTGRES_USER", "rw"),
+        ]);
+        let u = argv
+            .iter()
+            .position(|a| a == "-u")
+            .expect("credential passed to curl");
+        assert_eq!(argv[u + 1], "rw:rest-pw");
+        assert!(argv.iter().any(|a| a == "localhost:8008/switchover"));
+        assert!(
+            argv.iter()
+                .any(|a| a == r#"{"leader":"postgres-1","candidate":"postgres-2"}"#)
+        );
+    }
+
+    /// The superuser's password is the fallback, and `postgres` the default
+    /// username -- the same precedence the image resolves.
+    #[cfg(unix)]
+    #[test]
+    fn switchover_falls_back_to_the_superuser_credential() {
+        let argv = curl_argv_for(&[("PATRONI_SUPERUSER_PASSWORD", "super-pw")]);
+        let u = argv
+            .iter()
+            .position(|a| a == "-u")
+            .expect("credential passed to curl");
+        assert_eq!(argv[u + 1], "postgres:super-pw");
+    }
+
+    /// A member with no password at all cannot be enforcing, so the POST
+    /// goes out bare -- `-u ""` would turn a working cluster into a 401.
+    #[cfg(unix)]
+    #[test]
+    fn switchover_stays_bare_when_the_member_has_no_password() {
+        let argv = curl_argv_for(&[]);
+        assert!(
+            !argv.iter().any(|a| a == "-u"),
+            "bare POST expected, got {argv:?}"
+        );
+        assert!(argv.iter().any(|a| a == "localhost:8008/switchover"));
+    }
 
     #[test]
     fn parses_cluster_response_with_partial_fields() {
