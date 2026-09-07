@@ -412,9 +412,10 @@ mod tests {
         assert!(POSTGRES.ha.is_some());
         assert!(MYSQL.ha.is_some());
         assert!(REDIS.ha.is_some());
-        // MySQL's archiver only runs standalone, which is what removes the
-        // rolling HA workflow verbs for it.
+        // Both shipped engines roll their clusters through the platform's
+        // rolling HA enable/disable workflow -- MySQL's archiver runs off
+        // whichever member is the writable primary, the same as Postgres.
         assert!(POSTGRES.pitr.unwrap().supports_ha);
-        assert!(!MYSQL.pitr.unwrap().supports_ha);
+        assert!(MYSQL.pitr.unwrap().supports_ha);
     }
 }

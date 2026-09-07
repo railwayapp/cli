@@ -4,10 +4,11 @@
 //!
 //! Only the capability set lives here; every subcommand body is the shared
 //! implementation in [`crate::commands::database`]. There is no pooling
-//! subcommand because no MySQL pooler companion ships, and MySQL's PITR is
-//! standalone-only -- its archiver refuses to run while the cluster's seed
-//! list is set -- which the shared PITR tree enforces from the engine's own
-//! declaration rather than from anything stated here.
+//! subcommand because no MySQL pooler companion ships. MySQL's PITR rolls HA
+//! clusters the same way Postgres's does -- enable/disable on a cluster root,
+//! and progress/cancel/clear, drive backboard's rolling workflow -- which the
+//! shared PITR tree reads from the engine's own declaration rather than from
+//! anything stated here.
 
 use crate::controllers::database_engines::MYSQL;
 
@@ -17,7 +18,7 @@ use super::*;
 /// Manage MySQL features: high availability and point-in-time recovery
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway mysql ha status --service mysql\n  railway mysql ha convert --service mysql --replicas 2\n  railway mysql ha switchover --service mysql --to MySQL-2\n  railway mysql pitr enable --service mysql\n  railway mysql pitr restore --service mysql --at 2026-07-20T12:00:00Z\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway mysql`.\n  Actions that change config (enable/disable/convert/revert/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy).\n  MySQL clusters carry the failover vote on the data nodes themselves, so their total must be odd and at least three -- pass an even --replicas.\n  Point-in-time recovery is standalone-only on MySQL: it cannot be enabled on an HA cluster."
+    after_help = "Examples:\n\n  railway mysql ha status --service mysql\n  railway mysql ha convert --service mysql --replicas 2\n  railway mysql ha switchover --service mysql --to MySQL-2\n  railway mysql pitr enable --service mysql\n  railway mysql pitr restore --service mysql --at 2026-07-20T12:00:00Z\n\nAutomation notes:\n  --service/--environment/--project/--json apply to every subcommand below `railway mysql`.\n  Actions that change config (enable/disable/convert/revert/scale) commit and deploy by default; pass --no-deploy to commit the config change without triggering deploys (it then applies on each affected service's next deploy).\n  MySQL clusters carry the failover vote on the data nodes themselves, so their total must be odd and at least three -- pass an even --replicas.\n  Point-in-time recovery can be enabled on an HA cluster: enable/disable roll the cluster, and progress/cancel/clear manage that rolling workflow."
 )]
 pub struct Args {
     #[clap(subcommand)]
