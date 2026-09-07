@@ -74,10 +74,11 @@ pub struct PitrSpec {
     /// Live coverage probe backing `pitr status`, when one exists for this
     /// engine's archiver.
     pub probe_kind: Option<PitrProbeKind>,
-    /// Whether PITR is supported on an HA cluster of this engine. MySQL's
-    /// archiver refuses to run whenever the Group Replication seed list is
-    /// set, so its PITR is standalone-only and the HA progress/cancel
-    /// subcommands have nothing to drive.
+    /// Whether the platform's rolling HA enable/disable workflow exists for
+    /// this engine's clusters (backboard's `enable-pitr-ha`, dispatched on
+    /// the registry's `haRolloutKind`). An engine without one refuses the
+    /// HA paths up front instead of surfacing a server error from a workflow
+    /// that was never going to start.
     pub supports_ha: bool,
 }
 
@@ -145,9 +146,12 @@ pub const MYSQL: DatabaseEngine = DatabaseEngine {
         template_code: "mysql-pitr",
         archive_var_prefix: "BINLOG_ARCHIVE_",
         probe_kind: None,
-        // The image's restore-on-boot runs in standalone mode only -- it is
-        // refused outright whenever the cluster's seed list is set.
-        supports_ha: false,
+        // mysql-ha archives from whichever member is the writable primary and
+        // the platform rolls Group Replication clusters the same way it rolls
+        // Patroni (replicas first, a controlled switchover, the former primary
+        // last) -- `enable`/`disable` on a cluster root, and
+        // `progress`/`cancel`/`clear`, drive that workflow.
+        supports_ha: true,
     }),
     pooling: None,
 };

@@ -4,9 +4,10 @@
 //! The engine declaration decides three things here: which composable
 //! template the enable overlay deploys (`PitrSpec::template_code`), whether
 //! the rolling HA enable/disable workflow exists at all (`supports_ha` --
-//! MySQL's archiver only runs standalone, so its HA path is a refusal, not a
-//! workflow), and which live coverage probe backs `status` (`probe_kind` --
-//! only pgBackRest ships one). Which images may adopt the overlay is not
+//! Postgres and MySQL both roll their clusters; an engine that declares
+//! neither gets a refusal, not a workflow), and which live coverage probe
+//! backs `status` (`probe_kind` -- only pgBackRest ships one, so MySQL's
+//! `status` has no coverage section). Which images may adopt the overlay is not
 //! decided here at all: that rule ships with the enable template
 //! (`adoptionImageEligibility`) and is read off the fetched record, so
 //! widening it is a template update rather than a CLI release. Backups,
@@ -2586,17 +2587,27 @@ mod tests {
     }
 
     // The gate in front of every HA-workflow path (enable/disable's cluster
-    // branches, progress/cancel/clear): an engine whose archiver is
-    // standalone-only must be refused with the reason, never routed into the
-    // rolling workflow's GraphQL operations.
+    // branches, progress/cancel/clear) follows the declaration: both shipped
+    // engines roll their clusters, and an engine that declares no rolling
+    // workflow is refused with the reason, never routed into the workflow's
+    // GraphQL operations.
     #[test]
-    fn ha_workflow_gate_refuses_standalone_only_engines() {
-        use crate::controllers::database_engines::{MYSQL, POSTGRES};
+    fn ha_workflow_gate_follows_the_engine_declaration() {
+        use crate::controllers::database_engines::{DatabaseEngine, MYSQL, POSTGRES, PitrSpec};
 
         assert!(ha_pitr_unsupported_reason(&POSTGRES, &POSTGRES.pitr.unwrap()).is_none());
+        assert!(ha_pitr_unsupported_reason(&MYSQL, &MYSQL.pitr.unwrap()).is_none());
 
-        let reason = ha_pitr_unsupported_reason(&MYSQL, &MYSQL.pitr.unwrap()).unwrap();
-        assert!(reason.contains("MySQL"));
+        let standalone_only = PitrSpec {
+            supports_ha: false,
+            ..MYSQL.pitr.unwrap()
+        };
+        let engine = DatabaseEngine {
+            display_name: "Widget",
+            ..MYSQL
+        };
+        let reason = ha_pitr_unsupported_reason(&engine, &standalone_only).unwrap();
+        assert!(reason.contains("Widget"));
         assert!(reason.contains("standalone-only"));
     }
 
