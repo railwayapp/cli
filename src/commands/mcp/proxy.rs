@@ -127,6 +127,16 @@ const MCP_CLIENT_HEADER: &str = "x-railway-mcp-client";
 /// project".
 const MCP_INJECTED_HEADER: &str = "x-railway-mcp-injected";
 
+/// SEP-2243 transport headers. The modern (2026-07-28) lifecycle restates a
+/// request's method — and, for a tool call, the target name — in headers the
+/// streamable-HTTP transport requires; the server rejects a modern body whose
+/// `Mcp-Method` header is absent. A native HTTP client sets these itself, but
+/// the harness reaches us over stdio, which carries neither, so we derive them
+/// from the body being forwarded. The server ignores them on a request it
+/// classifies as legacy.
+const MCP_METHOD_HEADER: &str = "mcp-method";
+const MCP_NAME_HEADER: &str = "mcp-name";
+
 type Out = mpsc::UnboundedSender<String>;
 
 pub async fn serve_proxy() -> Result<()> {
@@ -524,10 +534,30 @@ async fn post_message(
     if let Some(sid) = session_id {
         req = req.header("mcp-session-id", sid);
     }
+    // SEP-2243: derive the modern transport headers from the body. A value a
+    // header cannot legally carry is left off rather than sent malformed — the
+    // server then classifies the request as legacy, which is the same outcome
+    // as before this was added.
+    if let Some(method) = method_of(msg) {
+        if header_safe(method) {
+            req = req.header(MCP_METHOD_HEADER, method);
+        }
+        if let Some(name) = msg.pointer("/params/name").and_then(JsonValue::as_str)
+            && header_safe(name)
+        {
+            req = req.header(MCP_NAME_HEADER, name);
+        }
+    }
     req.json(msg)
         .send()
         .await
         .context("failed to reach the remote MCP server")
+}
+
+/// A header may only carry visible ASCII; a value that cannot restate the body
+/// in a header is left off rather than sent malformed.
+fn header_safe(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
 /// Pull a telemetry-safe client identity out of an MCP `initialize` request.
@@ -814,6 +844,17 @@ mod tests {
             validate_mcp_override("http://localhost:8080", true).unwrap(),
             Some("http://localhost:8080".to_string()),
         );
+    }
+
+    #[test]
+    fn header_safe_accepts_wire_methods_and_rejects_unsendable_values() {
+        assert!(header_safe("server/discover"));
+        assert!(header_safe("tools/call"));
+        assert!(header_safe("get-service-config"));
+        // A blank value, control chars, or non-ASCII can't restate the body.
+        assert!(!header_safe(""));
+        assert!(!header_safe("tools/call\n"));
+        assert!(!header_safe("naïve"));
     }
 
     #[test]
