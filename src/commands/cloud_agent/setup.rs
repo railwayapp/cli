@@ -75,6 +75,12 @@ const HARNESSES: &[Harness] = &[
         config_dir: ".grok",
         bin: "grok",
     },
+    Harness {
+        slug: "opencode",
+        name: "OpenCode",
+        config_dir: ".config/opencode",
+        bin: "opencode",
+    },
 ];
 
 #[derive(Clone)]
@@ -680,7 +686,10 @@ mod tests {
             .iter()
             .map(|c| c.slug)
             .collect();
-        assert_eq!(slugs, vec!["railway", "claude", "codex", "grok"]);
+        assert_eq!(
+            slugs,
+            vec!["railway", "claude", "codex", "grok", "opencode"]
+        );
     }
 
     #[test]

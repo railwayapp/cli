@@ -25,7 +25,7 @@ use super::theme::Theme;
 /// carry-a-local-sign-in step, just the VM's own integrated Railway
 /// credentials. `shell` closes it: not a harness at all, just the VM's login
 /// shell, so it takes no prompt and sits after every real agent.
-pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok", "shell"];
+pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok", "opencode", "shell"];
 
 /// The slice of [`HARNESSES`] that can be saved as the default agent —
 /// everything but `shell`, which starts no harness and so makes no sense as
@@ -7180,6 +7180,8 @@ mod tests {
         assert_eq!(a.harness_name(), "codex");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "grok");
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "opencode");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "shell", "shell closes the cycle");
         a.on_key(key(KeyCode::BackTab));

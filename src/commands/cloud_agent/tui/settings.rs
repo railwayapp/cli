@@ -451,7 +451,7 @@ mod tests {
 
         // And it wraps in both directions.
         assert_eq!(saved(s.left()).agent, "railway");
-        assert_eq!(saved(s.left()).agent, "grok");
+        assert_eq!(saved(s.left()).agent, "opencode");
     }
 
     /// Enter on a cycling row steps it forward — a row that says "change me"
