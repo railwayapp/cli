@@ -13,7 +13,6 @@ use crate::commands::cloud_agent::{
 };
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
-use crate::util::shell::shell_join;
 
 pub(super) async fn pin_agent(args: &mut LaunchArgs) -> Result<()> {
     if let Some(selector) = args.remote_agent.take() {
@@ -51,13 +50,13 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         println!("The first start downloads the latest Beta and can take several minutes.");
     }
     let connection = opencode::start_prepared(&prepared, &directory, &password, beta).await?;
-    show_connection(&connection, beta, &prepared.agent_name)?;
+    opencode::show_connection(&connection, beta, &prepared.agent_name)?;
     if interactive() && local::confirm(&format!("Launch your local {} client now?", edition(beta)))?
     {
         launch(&connection, beta, &prepared.agent_name).await?;
     } else if interactive() {
         println!("\nThe server is still running. Save these details to connect later:");
-        show_connection(&connection, beta, &prepared.agent_name)?;
+        opencode::show_connection(&connection, beta, &prepared.agent_name)?;
     }
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
     Ok(())
@@ -71,45 +70,17 @@ fn edition(beta: bool) -> &'static str {
     if beta { "OpenCode2 [Beta]" } else { "OpenCode" }
 }
 
-fn show_connection(connection: &Connection, beta: bool, name: &str) -> Result<()> {
-    println!("\n{} server on {name}", edition(beta));
-    println!(
-        "Add a server in {} Desktop with these settings:",
-        edition(beta)
-    );
-    println!("  Name:      {name}");
-    println!("  Server:    {}", connection.url);
-    println!("  Username:  {}", connection.username);
-    println!("  Password:  {}", connection.password);
-    println!("  Directory: {}", connection.directory);
-    println!("\nConnect from your computer:");
-    println!("  {}", opencode::attach_command(connection, beta)?);
-    println!("\nOr reconnect with Railway:");
-    println!(
-        "  {}",
-        shell_join(&[
-            "railway".into(),
-            "code".into(),
-            if beta { "--opencode2" } else { "--opencode" }.into(),
-            "connect".into(),
-            name.into()
-        ])
-    );
-    println!("\nThe client runs locally; tools and project files stay on the cloud agent.");
-    Ok(())
-}
-
 async fn launch(connection: &Connection, beta: bool, name: &str) -> Result<()> {
     // The install prompt is deliberately after Enter/selection, and only for
     // the missing edition. Esc/Ctrl+C must never install or stop the server.
     let Some(binary) = local::ensure_client(beta).await? else {
         println!("\nInstallation canceled. The server is still running:");
-        return show_connection(connection, beta, name);
+        return opencode::show_connection(connection, beta, name);
     };
     println!("Launching local {}…", edition(beta));
     let result = local::run_client(&binary, connection, beta);
     println!("\nThe server on {name} is still running.");
-    show_connection(connection, beta, name)?;
+    opencode::show_connection(connection, beta, name)?;
     let status = result?;
     if !status.success() {
         bail!("The local {} client exited with {status}.", edition(beta));
@@ -301,7 +272,7 @@ pub(super) async fn connect(
     let connection = opencode::reconnect(&relay_info(&selected, &relay), beta)
         .await
         .with_context(|| format!("Connecting to {} ({})", selected.name, edition(beta)))?;
-    show_connection(&connection, beta, &selected.name)?;
+    opencode::show_connection(&connection, beta, &selected.name)?;
     if interactive() {
         launch(&connection, beta, &selected.name).await?;
     }

@@ -334,10 +334,7 @@ pub async fn command(args: Args) -> Result<()> {
             }
             .bold()
         );
-        println!("  Server:     {}", connection.url.cyan());
-        println!("  Username:   {}", connection.username);
-        println!("  Password:   {}", connection.password);
-        println!("  Directory:  {}", connection.directory);
+        opencode::show_connection(&connection, args.opencode2, &prepared.agent_name)?;
         opencode_config::configure(args.opencode2, &connection, &prepared.agent_id, &prepared.agent_name)
             .await
             .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;

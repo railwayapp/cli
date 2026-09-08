@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use colored::Colorize;
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +28,40 @@ pub(crate) struct Connection {
     pub password: String,
     pub directory: String,
     pub reused: bool,
+}
+
+/// Shared connection details for Desktop setup and local-client commands.
+/// Keep commands free of border prefixes so they can be copied directly.
+pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -> Result<()> {
+    let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
+    let command = attach_command(connection, beta)?;
+    let divider = "─".repeat(64).cyan();
+    println!("\n{divider}");
+    println!("{}", format!("{edition} server on {name}").cyan().bold());
+    println!(
+        "\n{}",
+        format!("Add a server in {edition} Desktop with these settings:").bold()
+    );
+    println!("  {}      {name}", "Name:".bold());
+    println!("  {}    {}", "Server:".bold(), connection.url);
+    println!("  {}  {}", "Username:".bold(), connection.username);
+    println!("  {}  {}", "Password:".bold(), connection.password);
+    println!("  {} {}", "Directory:".bold(), connection.directory);
+    println!("\n{}", "Connect from your computer:".bold());
+    println!("  {command}");
+    println!("\n{}", "Or reconnect with Railway:".bold());
+    println!(
+        "  {}",
+        shell_join(&[
+            "railway".into(),
+            "code".into(),
+            if beta { "--opencode2" } else { "--opencode" }.into(),
+            "connect".into(),
+            name.into()
+        ])
+    );
+    println!("{divider}\n");
+    Ok(())
 }
 
 pub(crate) fn generate_password() -> String {
