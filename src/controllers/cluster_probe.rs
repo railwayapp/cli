@@ -266,9 +266,13 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     /// Runs the emitted switchover text through a real `sh`, with a `curl`
     /// shim that prints its argv one per line, so the assertions are about
-    /// what curl is actually handed rather than about string shapes.
+    /// what curl is actually handed rather than about string shapes. The
+    /// command only ever runs inside a Linux container, and Windows has no
+    /// shell to check it against -- `switchover_command_resolves_the_credential_inside_the_container`
+    /// covers what can be asserted everywhere.
     fn curl_argv_for(env: &[(&str, &str)]) -> Vec<String> {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!(
@@ -336,6 +340,7 @@ mod tests {
         assert!(cmd.ends_with(r#""$@" -X POST localhost:8080/switchover"#));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_open_node_gets_no_credential_flag_at_all() {
         let argv = curl_argv_for(&[]);
@@ -345,6 +350,7 @@ mod tests {
         assert_eq!(argv.last().unwrap(), "localhost:8080/switchover");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_password_alone_authenticates_as_the_default_user() {
         let argv = curl_argv_for(&[("HEALTH_API_PASSWORD", "s3cret")]);
@@ -357,6 +363,7 @@ mod tests {
         assert!(argv.iter().position(|a| a == "-X").unwrap() > at);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_explicit_username_wins_over_the_default() {
         let argv = curl_argv_for(&[
