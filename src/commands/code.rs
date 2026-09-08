@@ -567,9 +567,10 @@ impl Agent {
         match self {
             Agent::Codex => CODEX_SEED,
             Agent::OpenCode => OPENCODE_SEED,
+            Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::auth::SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
-            Agent::OpenCode2 | Agent::Railway | Agent::Shell => "",
+            Agent::Railway | Agent::Shell => "",
         }
     }
 
@@ -588,7 +589,8 @@ impl Agent {
                 format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
             }
             Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
-            Agent::OpenCode2 | Agent::Railway | Agent::Shell => "true".to_string(),
+            Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::auth::seed_framed(len),
+            Agent::Railway | Agent::Shell => "true".to_string(),
         }
     }
 
@@ -1138,6 +1140,27 @@ fn terminal_reset_printf() -> String {
 /// worked.
 fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
     let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    if agent == Agent::OpenCode2 {
+        let database = std::env::var("OPENCODE_DB").ok();
+        return Ok(
+            match crate::commands::cloud_agent::opencode2::auth::read(
+                home,
+                xdg_data_home.as_deref(),
+                database.as_deref(),
+            )? {
+                Some((line, source)) => PendingAuth::Ready {
+                    line,
+                    source: source.display().to_string(),
+                },
+                None => PendingAuth::SignInOnAgent {
+                    note: format!(
+                        "No OpenCode2 provider sign-in to copy from this machine; {}.",
+                        agent.sign_in_on_agent_hint()
+                    ),
+                },
+            },
+        );
+    }
     let auth_path = agent.local_signin_path(home, xdg_data_home.as_deref());
     read_local_signin(agent, auth_path.as_deref())
 }
@@ -2883,10 +2906,7 @@ async fn prepare_inner(
     // know whether the agent already holds a credential from a previous run —
     // see `PendingAuth`.
     let pending = match agent {
-        Agent::OpenCode2 => PendingAuth::SignInOnAgent {
-            note: "OpenCode2 [Beta] downloads its latest runtime at startup. Connect a provider in Beta Desktop or run `opencode2 auth login` on the agent.".into(),
-        },
-        Agent::Codex | Agent::Grok | Agent::OpenCode => {
+        Agent::Codex | Agent::Grok | Agent::OpenCode | Agent::OpenCode2 => {
             ssh_tel::timed_for("cloud_agent_launch", "credential", async {
                 local_signin(agent, home)
             })

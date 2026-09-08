@@ -12,6 +12,10 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
+import sqlite3
+import subprocess
+import time
 import sys
 import tarfile
 import tempfile
@@ -143,11 +147,128 @@ def ensure_runtime():
         return install(root, latest_release(), platform.machine())
 
 
+def credential_database():
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode"
+    database = os.environ.get("OPENCODE_DB", "opencode.db")
+    if database == ":memory:":
+        raise InstallError("OpenCode2 provider credentials require a persistent database.")
+    return data / database
+
+
+def initialize_credentials(binary, database):
+    if database.is_file():
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'").fetchone():
+                return
+    # Let the installed Beta perform its own migrations. A private server exits
+    # with the API client; it never joins an existing background service.
+    environment = dict(os.environ, OPENCODE_DISABLE_MODELS_FETCH="1")
+    process = subprocess.Popen(
+        [str(binary), "api", "--standalone", "GET", "/api/health"],
+        env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True,
+    )
+    try:
+        process.communicate(timeout=30)
+        if process.returncode:
+            raise InstallError("Could not initialize OpenCode2 provider storage; credentials were not imported.")
+    except subprocess.TimeoutExpired:
+        raise InstallError("Initializing OpenCode2 provider storage timed out; retry setup.") from None
+    finally:
+        # Also clean up a private child server if its client failed or timed out.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+def validate_credentials(payload):
+    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("credentials"), list):
+        raise InstallError("Unsupported OpenCode2 provider credential payload.")
+    seen = set()
+    for item in payload["credentials"]:
+        if not isinstance(item, dict):
+            raise InstallError("Invalid OpenCode2 provider credential.")
+        provider, value = item.get("integrationID"), item.get("value")
+        if (not isinstance(provider, str) or not provider or provider.startswith("mcp_")
+                or provider in seen or not isinstance(item.get("id"), str)
+                or not item["id"].startswith("cred_") or not isinstance(item.get("label"), str)
+                or not isinstance(value, dict)):
+            raise InstallError("Invalid OpenCode2 provider credential.")
+        seen.add(provider)
+        metadata = value.get("metadata", {})
+        valid = isinstance(metadata, dict) and all(isinstance(v, str) for v in metadata.values())
+        if value.get("type") == "key":
+            valid = valid and isinstance(value.get("key"), str)
+        elif value.get("type") == "oauth":
+            valid = (valid and all(isinstance(value.get(k), str) for k in ("methodID", "access", "refresh"))
+                     and type(value.get("expires")) is int and value["expires"] >= 0)
+        else:
+            valid = False
+        if not valid:
+            raise InstallError("Unsupported OpenCode2 provider credential format.")
+    return payload["credentials"]
+
+
+def import_credentials(binary, pending, database=None):
+    database = (database or credential_database()).resolve()
+    # Serialize repeated setup attempts; never print the credential payload or
+    # errors from Beta's private server, which may contain credentials.
+    with pending.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not pending.exists():
+            return
+        try:
+            credentials = validate_credentials(json.loads(pending.read_text()))
+        except (ValueError, TypeError):
+            raise InstallError("Invalid OpenCode2 provider credential payload.") from None
+        initialize_credentials(binary, database)
+        for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
+            if path.exists():
+                path.chmod(0o600)
+        try:
+            with sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5) as db:
+                columns = {row[1] for row in db.execute("PRAGMA table_info(credential)")}
+                required = {"id", "integration_id", "label", "value", "time_created", "time_updated"}
+                if not required <= columns:
+                    raise InstallError("Unsupported OpenCode2 provider database; credentials were not imported.")
+                db.execute("BEGIN IMMEDIATE")
+                for item in credentials:
+                    # Preserve provider accounts already configured remotely,
+                    # including refreshed OAuth tokens. Repeating setup is safe.
+                    if db.execute("SELECT 1 FROM credential WHERE integration_id=?", (item["integrationID"],)).fetchone():
+                        continue
+                    now = int(time.time() * 1000)
+                    fields = ["id", "integration_id", "label", "value", "time_created", "time_updated"]
+                    values = [item["id"], item["integrationID"], item["label"], json.dumps(item["value"]), now, now]
+                    if "active" in columns:
+                        fields.append("active")
+                        values.append(1)
+                    db.execute(f"INSERT INTO credential ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})", values)
+                db.commit()
+        except sqlite3.Error:
+            raise InstallError("Could not save OpenCode2 provider credentials; retry setup.") from None
+        # Remove the transferred copy only after the transaction commits.
+        pending.unlink()
+
+
 if __name__ == "__main__":
     try:
+        import_only = sys.argv[1:] == ["--railway-import-auth"]
+        pending = Path.home() / ".railway/runtimes/opencode2/credentials.json"
+        if import_only and not pending.exists():
+            sys.exit(0)
         binary = ensure_runtime()
+        if import_only:
+            import_credentials(binary, pending)
+            sys.exit(0)
         # Do not read stdin: terminal input and piped prompts belong to OpenCode.
         os.execv(str(binary), [str(binary), *sys.argv[1:]])
-    except (InstallError, OSError, ValueError, KeyError, tarfile.TarError) as error:
+    except (InstallError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as error:
         print(f"OpenCode2 [Beta] could not start: {error}", file=sys.stderr)
         sys.exit(1)

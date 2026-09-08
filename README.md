@@ -178,8 +178,11 @@ Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, find
 `Railway: <agent-name>` and `/app` (or your `--dir`), then use that project's
 menu → New session. Setting a default server
 does not move existing chats. Standard OpenCode provider sign-ins from `auth.json` are copied
-when available. Beta uses its own sign-in store; connect providers there. OpenCode's newer chat mode uses a separate credential store;
-if your provider is missing there, connect it in the remote server's settings.
+when available. OpenCode2 imports the active account for each provider from your local
+Beta credential database, preserving accounts already configured on the cloud agent.
+Legacy `auth.json` is used only when no Beta credential store exists. Credentials are
+sent over SSH and the temporary transfer file is removed after import. If there is
+no local sign-in to copy, connect the provider in the remote server's settings.
 
 OpenCode uses the agent's public app port (8080). Setup refuses to take over
 an occupied port; stop the other process or use `--new` for a fresh agent.
