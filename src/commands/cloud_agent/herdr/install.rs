@@ -15,8 +15,8 @@ use super::herdr_cli::Herdr;
 
 pub const MANIFEST_FILE: &str = "herdr-plugin.toml";
 
-// prefix+shift+a / prefix+shift+c are unbound in herdr's defaults; the
-// descriptions are what `prefix+?` lists under "custom".
+// Two keys, unbound in herdr's defaults: the picker (which also offers new
+// agent and sync now) and wake. The descriptions are what `prefix+?` lists.
 const KEYBINDING: &str = r#"[[keys.command]]
 key = "prefix+shift+a"
 type = "plugin_action"
@@ -24,22 +24,10 @@ command = "railway.ca.agents"
 description = "railway agents"
 
 [[keys.command]]
-key = "prefix+shift+c"
-type = "plugin_action"
-command = "railway.ca.new"
-description = "railway new agent"
-
-[[keys.command]]
 key = "prefix+shift+s"
 type = "plugin_action"
 command = "railway.ca.wake"
 description = "railway wake agent"
-
-[[keys.command]]
-key = "prefix+shift+y"
-type = "plugin_action"
-command = "railway.ca.sync"
-description = "railway sync agents"
 "#;
 
 /// On a VM the same keys mean: the picker in remote mode, and sleep THIS agent.
@@ -146,11 +134,9 @@ pub async fn command(args: Args) -> Result<()> {
     let config = herdr_config_path()?;
     if ensure_keybindings(&config)? {
         println!(
-            "✓ Bound {} agents, {} new, {} wake, {} sync in {}",
+            "✓ Bound {} agents (new agent and sync live in the picker), {} wake in {}",
             "prefix+shift+a".cyan(),
-            "prefix+shift+c".cyan(),
             "prefix+shift+s".cyan(),
-            "prefix+shift+y".cyan(),
             config.display()
         );
         if herdr.server_reload_config().is_err() {
@@ -621,7 +607,7 @@ mod tests {
         assert!(!ensure_keybindings(&path).unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("railway.ca.agents").count(), 1, "{text}");
-        assert!(text.contains("railway.ca.new"), "{text}");
+        assert!(text.contains("railway.ca.wake"), "{text}");
         assert!(text.contains("lazygit"), "{text}");
         assert!(remove_keybindings(&path).unwrap());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
@@ -658,7 +644,7 @@ mod tests {
         assert!(ensure_keybindings(&path).unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("x = 1\n\n"), "{text}");
-        assert_eq!(text.matches("[[keys.command]]").count(), 4, "{text}");
+        assert_eq!(text.matches("[[keys.command]]").count(), 2, "{text}");
         assert!(text.contains("railway.ca.wake"), "{text}");
         assert!(!ensure_keybindings(&path).unwrap());
 

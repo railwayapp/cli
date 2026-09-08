@@ -75,6 +75,23 @@ impl fmt::Display for Row {
     }
 }
 
+/// The list mixes the two things that are not about one agent with the agents.
+enum Item {
+    New,
+    Sync,
+    Agent(Row),
+}
+
+impl fmt::Display for Item {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Item::New => f.write_str("+ new agent"),
+            Item::Sync => f.write_str("↻ sync now"),
+            Item::Agent(row) => row.fmt(f),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Connect,
@@ -195,7 +212,7 @@ pub async fn command(args: Args) -> Result<()> {
                 }
                 1 => {
                     picker.wake(&rows[0]).await?;
-                    picker.resync().await
+                    picker.resync().await.map(drop)
                 }
                 _ => match inquire::Select::new("Wake", rows)
                     .with_render_config(Configs::get_render_config())
@@ -205,20 +222,40 @@ pub async fn command(args: Args) -> Result<()> {
                 {
                     Some(row) => {
                         picker.wake(&row).await?;
-                        picker.resync().await
+                        picker.resync().await.map(drop)
                     }
                     None => Ok(()),
                 },
             };
         }
 
-        let Some(row) = inquire::Select::new("Agent", rows)
+        let mut items = Vec::with_capacity(rows.len() + 2);
+        if !args.remote {
+            items.push(Item::New);
+        }
+        items.push(Item::Sync);
+        items.extend(rows.into_iter().map(Item::Agent));
+        let Some(item) = inquire::Select::new("Agent", items)
             .with_render_config(Configs::get_render_config())
-            .with_page_size(15)
+            .with_page_size(17)
             .with_help_message("↑↓ move, type to filter, enter picks, esc quits")
             .prompt_skippable()?
         else {
             return Ok(());
+        };
+        let row = match item {
+            Item::New => return super::new::command(super::new::Args::interactive()).await,
+            Item::Sync => {
+                match picker.resync().await {
+                    Ok(applied) if applied.is_empty() => {
+                        println!("✓ herdr machines match your agents.")
+                    }
+                    Ok(applied) => println!("✓ herdr sync: {}", applied.join(", ")),
+                    Err(e) => eprintln!("{} {e:#}", "✗".red()),
+                }
+                continue;
+            }
+            Item::Agent(row) => row,
         };
         let actions = if args.remote {
             Action::REMOTE.to_vec()
@@ -235,7 +272,10 @@ pub async fn command(args: Args) -> Result<()> {
         // behind them; the rest stay on the list.
         let result = match action {
             Action::Connect => return picker.connect(&row).await,
-            Action::Sleep => picker.sleep(&row).await.and(picker.resync().await),
+            Action::Sleep => picker
+                .sleep(&row)
+                .await
+                .and(picker.resync().await.map(drop)),
             Action::Wake => match picker.wake(&row).await {
                 Ok(()) => {
                     picker.resync().await?;
@@ -243,7 +283,10 @@ pub async fn command(args: Args) -> Result<()> {
                 }
                 Err(e) => Err(e),
             },
-            Action::Delete => picker.delete(&row).await.and(picker.resync().await),
+            Action::Delete => picker
+                .delete(&row)
+                .await
+                .and(picker.resync().await.map(drop)),
             Action::New => return super::new::command(super::new::Args::interactive()).await,
             Action::Quit => return Ok(()),
         };
@@ -431,13 +474,13 @@ impl Picker {
         result
     }
 
-    async fn resync(&mut self) -> Result<()> {
+    async fn resync(&mut self) -> Result<Vec<String>> {
         if self.remote {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        sync::resync(&self.client, &self.backboard, &self.herdr).await?;
+        let applied = sync::resync(&self.client, &self.backboard, &self.herdr).await?;
         self.state = State::load().unwrap_or_default();
-        Ok(())
+        Ok(applied)
     }
 
     /// Reloads first: the watcher may have written state since the picker opened.

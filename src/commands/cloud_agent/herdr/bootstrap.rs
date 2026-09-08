@@ -230,7 +230,20 @@ fi
 
 /// The plugin the VM's herdr server publishes, so the same keys work while
 /// this machine is selected. `cfg` is the config path BODY established.
-const REMOTE_SEGMENT: &str = r##"pdir="$HOME/.config/railway-ca-herdr-plugin"
+const REMOTE_SEGMENT: &str = r##"want="@CLI_VERSION@"
+have="$(railway --version 2>/dev/null | awk '{print $2}')"
+if [ -z "$have" ]; then
+  echo "railway cli: not installed on the VM"
+elif [ "$have" != "$want" ] && [ "$(printf '%s\n%s\n' "$have" "$want" | sort -V | head -1)" = "$have" ]; then
+  if curl -fsSL https://railway.com/install.sh | bash -s -- -y --bin-dir "$(dirname "$(command -v railway)")" >/dev/null 2>&1; then
+    echo "railway cli: $have → $(railway --version 2>/dev/null | awk '{print $2}')"
+  else
+    echo "railway cli: upgrade from $have failed (kept it)"
+  fi
+else
+  echo "railway cli: $have"
+fi
+pdir="$HOME/.config/railway-ca-herdr-plugin"
 mkdir -p "$pdir"
 cat > "$pdir/herdr-plugin.toml" <<'RAILWAY_CA_MANIFEST'
 @MANIFEST@
@@ -289,8 +302,8 @@ fi
 if railway ca herdr --help >/dev/null 2>&1; then
   exec railway ca herdr agents --remote
 fi
-echo "railway on this VM ($(railway --version 2>/dev/null)) predates 'railway ca herdr'."
-echo "Select Local and press the same key for the full picker, or upgrade railway here."
+echo "railway $(railway --version 2>/dev/null | awk '{print $2}') on this VM has no 'ca herdr' yet."
+echo "Bootstrap upgrades it once a release ships it. Until then select Local and press the same key."
 sleep 6"##;
 
 const SLEEP_SH: &str = r##"#!/bin/sh
@@ -327,6 +340,7 @@ impl Remote {
                 "@SLEEP_SH@",
                 &SLEEP_SH.replace("@BACKBOARD@", &self.backboard),
             )
+            .replace("@CLI_VERSION@", env!("CARGO_PKG_VERSION"))
             .replace("@KEYS_MARKER@", super::install::KEYS_MARKER)
             .replace("@KEYS@", super::install::REMOTE_KEYBINDING.trim_end())
     }
@@ -502,6 +516,7 @@ mod tests {
                 "{calls:?}"
             );
             assert!(out.contains("remote plugin: linked (new)"), "{out}");
+            assert!(out.contains("railway cli: not installed"), "{out}");
             assert!(out.contains("keys: added"), "{out}");
             let pdir = vm.home.path().join(".config/railway-ca-herdr-plugin");
             let manifest = std::fs::read_to_string(pdir.join("herdr-plugin.toml")).unwrap();
