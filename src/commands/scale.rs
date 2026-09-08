@@ -13,10 +13,14 @@ use crate::{
     util::progress::create_spinner_if,
 };
 use anyhow::{Context as _, bail};
-use clap::{Command, Parser};
+use clap::{Command, CommandFactory, Parser};
 use is_terminal::IsTerminal;
 use serde_json::{Map, Value};
-use std::{collections::HashMap, ffi::OsString};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    sync::OnceLock,
+};
 
 use super::*;
 
@@ -365,7 +369,7 @@ fn normalize_scale_args_tail(args: &[OsString], normalized: &mut Vec<OsString>) 
             }
         }
 
-        if matches!(current_str, "-s" | "-e") {
+        if scale_short_flag_takes_value(current_str) {
             normalized.push(current.clone());
             idx += 1;
             if idx < args.len() {
@@ -380,12 +384,68 @@ fn normalize_scale_args_tail(args: &[OsString], normalized: &mut Vec<OsString>) 
     }
 }
 
+/// `scale`'s own options, read out of clap rather than restated here.
+///
+/// The normalizer has to recognize these *before* clap parses, and a hand-kept
+/// second copy is what broke `--project`: an option the normalizer does not know is
+/// not merely passed through, it is rewritten into a `REGION=REPLICAS` assignment by
+/// the fallback in `normalize_scale_args_tail`. Deriving the set means a new option
+/// on `Args` cannot reintroduce that. `railway service scale` reuses this same
+/// `Args` type, so both entry forms share one source of truth.
+struct ScaleOptions {
+    long_known: HashSet<String>,
+    long_takes_value: HashSet<String>,
+    short_takes_value: HashSet<char>,
+}
+
+fn scale_options() -> &'static ScaleOptions {
+    static OPTIONS: OnceLock<ScaleOptions> = OnceLock::new();
+    OPTIONS.get_or_init(|| {
+        let mut command = Args::command();
+        // Materializes clap's own `--help`. `--version` is propagated from the root
+        // command rather than declared on `Args`, so it stays explicit here.
+        command.build();
+
+        let mut options = ScaleOptions {
+            long_known: HashSet::from([String::from("version")]),
+            long_takes_value: HashSet::new(),
+            short_takes_value: HashSet::new(),
+        };
+        for arg in command.get_arguments() {
+            let takes_value = arg.get_action().takes_values();
+            if let Some(long) = arg.get_long() {
+                options.long_known.insert(long.to_string());
+                if takes_value {
+                    options.long_takes_value.insert(long.to_string());
+                }
+            }
+            if let (Some(short), true) = (arg.get_short(), takes_value) {
+                options.short_takes_value.insert(short);
+            }
+        }
+        options
+    })
+}
+
 fn scale_long_flag_takes_value(flag: &str) -> bool {
-    matches!(flag, "service" | "environment")
+    scale_options().long_takes_value.contains(flag)
 }
 
 fn scale_long_flag_is_known(flag: &str) -> bool {
-    matches!(flag, "json" | "help" | "version") || scale_long_flag_takes_value(flag)
+    scale_options().long_known.contains(flag)
+}
+
+/// Whether `arg` is a single short option that consumes the next token, so its
+/// value is never mistaken for a region assignment.
+fn scale_short_flag_takes_value(arg: &str) -> bool {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    match (chars.next(), chars.next()) {
+        (Some(short), None) => scale_options().short_takes_value.contains(&short),
+        _ => false,
+    }
 }
 
 fn os_eq(value: &OsString, expected: &str) -> bool {
@@ -448,6 +508,89 @@ mod tests {
                 "eu-west=2",
             ]
         );
+    }
+
+    /// `--project` used to be normalized into the positional assignment
+    /// `project=<id>`, so scale rejected it as an invalid replica count while the
+    /// `-p` spelling worked.
+    #[test]
+    fn project_option_is_preserved_in_both_spellings() {
+        let expected = vec![
+            "railway",
+            "scale",
+            "--project",
+            "proj_123",
+            "--environment",
+            "production",
+            "--service",
+            "svc_456",
+            "us-west=0",
+        ];
+        assert_eq!(
+            normalize(&[
+                "railway",
+                "scale",
+                "--project",
+                "proj_123",
+                "--environment",
+                "production",
+                "--service",
+                "svc_456",
+                "us-west=0",
+            ]),
+            expected
+        );
+        assert_eq!(
+            normalize(&["railway", "scale", "--project=proj_123", "us-west=0"]),
+            vec!["railway", "scale", "--project=proj_123", "us-west=0"]
+        );
+        assert_eq!(
+            normalize(&["railway", "scale", "-p", "proj_123", "us-west=0"]),
+            vec!["railway", "scale", "-p", "proj_123", "us-west=0"]
+        );
+    }
+
+    /// The option set is derived from clap, so this pins what that derivation
+    /// produces — including `--help`, which only exists after `Command::build`, and
+    /// `--version`, which is propagated from the root command and so is added by
+    /// hand. A clap upgrade that changed either would surface here.
+    #[test]
+    fn options_are_derived_from_clap() {
+        for flag in ["service", "environment", "project"] {
+            assert!(
+                scale_long_flag_takes_value(flag),
+                "--{flag} takes a value on Args but was not derived as value-taking; \
+                 its value would be swallowed"
+            );
+        }
+        for flag in [
+            "service",
+            "environment",
+            "project",
+            "json",
+            "help",
+            "version",
+        ] {
+            assert!(
+                scale_long_flag_is_known(flag),
+                "--{flag} must be recognized or it is rewritten into an assignment"
+            );
+        }
+        assert!(
+            !scale_long_flag_takes_value("json"),
+            "--json is a flag, not a value-taking option"
+        );
+        assert!(!scale_long_flag_is_known("eu-west"));
+
+        for arg in ["-s", "-e", "-p"] {
+            assert!(scale_short_flag_takes_value(arg), "{arg} takes a value");
+        }
+        for arg in ["-x", "--project", "-", "-sp", "us-west=1"] {
+            assert!(
+                !scale_short_flag_takes_value(arg),
+                "{arg} is not a single value-taking short option"
+            );
+        }
     }
 
     #[test]
