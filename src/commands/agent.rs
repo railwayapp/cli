@@ -31,6 +31,7 @@ use crate::{
         project::get_project,
         service::get_or_prompt_service,
     },
+    errors::RailwayError,
     interact_or,
     util::progress::create_spinner,
 };
@@ -144,12 +145,24 @@ pub async fn command(args: Args) -> Result<()> {
         let history = match args.thread_id.as_deref() {
             Some(tid) => {
                 let messages_url = get_thread_messages_url(&configs, tid);
-                get_thread_messages(&chat_client, &messages_url, Some(10))
-                    .await
-                    .unwrap_or_else(|e| {
+                match get_thread_messages(&chat_client, &messages_url, Some(10)).await {
+                    Ok(messages) => messages,
+                    Err(e) => {
+                        if let Some(railway_err) = e.downcast_ref::<RailwayError>()
+                            && matches!(
+                                railway_err,
+                                RailwayError::Unauthorized
+                                    | RailwayError::UnauthorizedToken(_)
+                                    | RailwayError::UnauthorizedLogin
+                                    | RailwayError::InvalidRailwayToken(_)
+                            )
+                        {
+                            return Err(e);
+                        }
                         eprintln!("{}", format!("Could not load thread history: {e}").dimmed());
                         Vec::new()
-                    })
+                    }
+                }
             }
             None => Vec::new(),
         };
@@ -166,6 +179,17 @@ pub async fn command(args: Args) -> Result<()> {
             is_tty,
         )
         .await
+    }
+}
+
+fn render_text_block(text: &str, is_assistant: bool, skin: &termimad::MadSkin) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if is_assistant {
+        skin.print_text(text);
+    } else {
+        println!("{}", text);
     }
 }
 
@@ -187,47 +211,37 @@ fn render_history(messages: &[ChatMessage], thread_id: Option<&str>) {
         };
         println!("{}", role_label);
 
-        let text_parts: Vec<&str> = message
-            .parts
-            .iter()
-            .filter_map(|part| match part {
-                ChatMessagePart::Text { content } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect();
-
-        let text = if text_parts.is_empty() {
-            message.content.clone()
+        if message.parts.is_empty() {
+            render_text_block(&message.content, is_assistant, &skin);
         } else {
-            text_parts.join("")
-        };
-        if !text.trim().is_empty() {
-            if is_assistant {
-                skin.print_text(&text);
-            } else {
-                println!("{}", text);
-            }
-        }
-
-        for part in &message.parts {
-            match part {
-                ChatMessagePart::Tool {
-                    tool_name,
-                    is_error,
-                    ..
-                } => {
-                    let label = if *is_error {
-                        format!("[tool failed: {tool_name}]")
-                    } else {
-                        format!("[used tool: {tool_name}]")
-                    };
-                    println!("{}", label.dimmed().italic());
+            let mut text_buf = String::new();
+            for part in &message.parts {
+                match part {
+                    ChatMessagePart::Text { content } => {
+                        text_buf.push_str(content);
+                    }
+                    ChatMessagePart::Tool {
+                        tool_name,
+                        is_error,
+                        ..
+                    } => {
+                        render_text_block(&text_buf, is_assistant, &skin);
+                        text_buf.clear();
+                        let label = if *is_error {
+                            format!("[tool failed: {tool_name}]")
+                        } else {
+                            format!("[used tool: {tool_name}]")
+                        };
+                        println!("{}", label.dimmed().italic());
+                    }
+                    ChatMessagePart::Attachment { name, .. } => {
+                        render_text_block(&text_buf, is_assistant, &skin);
+                        text_buf.clear();
+                        println!("{}", format!("[attachment: {name}]").dimmed().italic());
+                    }
                 }
-                ChatMessagePart::Attachment { name, .. } => {
-                    println!("{}", format!("[attachment: {name}]").dimmed().italic());
-                }
-                ChatMessagePart::Text { .. } => {}
             }
+            render_text_block(&text_buf, is_assistant, &skin);
         }
 
         println!();
