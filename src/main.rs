@@ -106,7 +106,6 @@ commands!(
 /// a background update.
 struct UpdateContext {
     known_version: Option<String>,
-    auto_update_enabled: bool,
     skipped_version: Option<String>,
     check_gate_armed: bool,
     check_skills: bool,
@@ -136,7 +135,7 @@ fn spawn_update_task(
 
         // Safe to eagerly dispatch from cache: the gate means no API call
         // will race with a newer version during this invocation.
-        if ctx.auto_update_enabled && ctx.check_gate_armed {
+        if ctx.check_gate_armed {
             if let Some(ref version) = ctx.known_version {
                 try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
             }
@@ -146,38 +145,28 @@ fn spawn_update_task(
         // — run them concurrently so a slow API call on one doesn't starve the
         // other within the short window handle_update_task() waits.
         let cli_check = async {
-            // Skip the network check entirely when auto-update is disabled
-            // and there is no TTY to show a banner on (e.g. CI / scripts).
-            let (from_cache, latest_version) = if !ctx.auto_update_enabled
-                && !std::io::stdout().is_terminal()
-            {
-                (ctx.known_version.is_some(), ctx.known_version.clone())
-            } else {
-                match util::check_update::check_update(false).await {
-                    Ok(Some(v)) => (false, Some(v)),
-                    Ok(None) | Err(_) => (ctx.known_version.is_some(), ctx.known_version.clone()),
-                }
+            let (from_cache, latest_version) = match util::check_update::check_update(false).await {
+                Ok(Some(v)) => (false, Some(v)),
+                Ok(None) | Err(_) => (ctx.known_version.is_some(), ctx.known_version.clone()),
             };
 
             if let Some(ref version) = latest_version {
-                if ctx.auto_update_enabled && !from_cache {
+                if !from_cache {
                     try_dispatch_update(version, ctx.skipped_version.as_deref(), &method);
                 }
             }
             latest_version
         };
 
-        // Skills auto-update mirrors the binary self-updater: refresh the cached
-        // upstream SHA (skipping the network only when auto-update is off and
-        // there's no TTY to ever banner on), then — when auto-update is enabled —
-        // spawn a detached process to apply it. Unmodified skills update
-        // silently; user-modified ones are skipped and left to the TTY banner.
+        // Dispatch cached updates and post-CLI-upgrade syncs before any network
+        // work so short-lived commands can't starve them. Otherwise check for
+        // skill releases independently of CLI releases, on the hourly gate.
         let skills_check = async {
             if ctx.check_skills {
-                if ctx.auto_update_enabled || std::io::stdout().is_terminal() {
+                if !commands::skills::cached_skill_auto_apply_due() {
                     commands::skills::refresh_skill_update_state().await;
                 }
-                if ctx.auto_update_enabled && commands::skills::cached_skill_auto_apply_due() {
+                if commands::skills::cached_skill_auto_apply_due() {
                     commands::skills::spawn_background_skill_update();
                 }
             }
@@ -317,15 +306,13 @@ async fn main() -> Result<()> {
     // state in the background, but they should not receive human-facing
     // upgrade prompts in command output.
     //
-    // When auto-update is disabled via preference, we still show the banner
-    // to cautious interactive users who want release visibility. Suppress it
-    // when disabled via env var or CI, where extra output is noise.
-    let env_or_ci_suppressed = telemetry::is_auto_update_disabled_by_env() || Configs::env_is_ci();
+    // The persisted preference, environment override, and CI all suppress
+    // unsolicited update notices as well as automatic installs.
     // The installer's embedded agent setup renders one cohesive flow; the
     // version/skills update banners are noise mid-install (the user just
     // configured skills), so suppress them in that context.
     let embedded_setup = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
-    if is_tty && !env_or_ci_suppressed && !embedded_setup {
+    if is_tty && auto_update_enabled && !embedded_setup {
         if let Some(ref latest_version) = known_pending {
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
             if !is_skipped
@@ -344,13 +331,16 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Mirror the CLI banner for skills: a prior background check found a
-        // newer railway-skills commit than what we last installed.
-        if commands::skills::cached_skill_update_available() {
+        // Clean skills update silently. Only ask for intervention after an
+        // automatic attempt left locally modified skills behind.
+        if commands::skills::cached_skill_update_requires_attention() {
             eprintln!(
-                "{} run {} to update",
-                "Railway skills update available:".green().bold(),
+                "{} run {} to review ({} overwrites local changes)",
+                "Railway skills update skipped due to local changes:"
+                    .yellow()
+                    .bold(),
                 "railway skills update".cyan(),
+                "--force".cyan(),
             );
         }
 
@@ -367,7 +357,7 @@ async fn main() -> Result<()> {
                 "--force".cyan(),
             );
         }
-    } else if !env_or_ci_suppressed && !is_help_or_error && !embedded_setup {
+    } else if auto_update_enabled && !is_help_or_error && !embedded_setup {
         // Non-TTY counterpart of the banner above, for agent callers only.
         // Staged-binary apply is TTY-gated (see auto_update_applied), so a
         // machine whose railway usage is entirely agent-driven would
@@ -384,24 +374,21 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    // Spawn the background version check for all invocations (including
-    // non-TTY) so the version cache stays fresh for both humans and coding
-    // agents. Non-TTY callers are a first-class auto-update path: they may
-    // trigger background downloads/package-manager installs, but staged-binary
-    // apply and user-facing banners remain TTY-only.
-    let check_updates_handle = if is_update_management_cmd || is_read_only_invocation {
-        None
-    } else {
-        Some(spawn_update_task(UpdateContext {
-            known_version: known_pending,
-            auto_update_enabled,
-            skipped_version,
-            check_gate_armed,
-            // `skills`/`setup` write the manifest themselves; don't have the
-            // background check race their write.
-            check_skills: !matches!(raw_subcommand.as_deref(), Some("skills" | "setup")),
-        }))
-    };
+    // Automatic checks and installs share the same opt-out, including non-TTY
+    // callers. Explicit update-management commands handle their own checks.
+    let check_updates_handle =
+        if !auto_update_enabled || is_update_management_cmd || is_read_only_invocation {
+            None
+        } else {
+            Some(spawn_update_task(UpdateContext {
+                known_version: known_pending,
+                skipped_version,
+                check_gate_armed,
+                // `skills`/`setup` write the manifest themselves; don't have the
+                // background check race their write.
+                check_skills: !matches!(raw_subcommand.as_deref(), Some("skills" | "setup")),
+            }))
+        };
 
     // https://github.com/clap-rs/clap/blob/cb2352f84a7663f32a89e70f01ad24446d5fa1e2/clap_builder/src/error/mod.rs#L210-L215
     let cli = match args {

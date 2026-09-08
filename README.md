@@ -70,6 +70,17 @@ railway mcp install --agent cursor
 railway skills --agent claude-code
 ```
 
+With automatic updates enabled, CLI-managed skills update silently in the background,
+including on the first normal command after a CLI version change (whether upgraded
+with `railway upgrade` or a package manager). Locally modified or deleted skills are
+skipped, and user-added files are preserved. Restart your coding tool to load updated
+skills. Use `railway skills update` to review skipped updates, or add `--force` to
+overwrite local changes explicitly.
+
+`railway autoupdate disable` (or `RAILWAY_NO_AUTO_UPDATE=1`) disables automatic CLI
+and skill updates and their update notices. Explicit `railway upgrade`,
+`railway check-updates`, and `railway skills update` commands remain available.
+
 Opt into the local GraphQL-backed MCP server instead:
 
 ```bash
