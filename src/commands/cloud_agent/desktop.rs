@@ -1,6 +1,6 @@
 //! `railway ca desktop` — hand a cloud agent to a desktop coding app.
 //!
-//! The Claude Code and Codex desktop apps both drive a remote machine over
+//! Claude Code and Codex drive a remote machine over
 //! ordinary SSH, and the relay already is one: `agent:<env>:<name>@ssh.railway.com`
 //! is a complete destination, resolved by name so it survives a recreated VM.
 //! So this command writes config rather than building a transport — an OpenSSH
@@ -9,14 +9,17 @@
 //!
 //! What it does beyond writing files is provision: the app expects to arrive at
 //! a machine where its harness is already signed in, so this runs the same
-//! credential and skills pipeline as `railway code` and then stops, without
-//! opening a session. That pass also marks the agent `app_mode`, which is what
+//! credential and skills pipeline as `railway code`. That pass also marks the
+//! agent `app_mode`, which is what
 //! keeps the `~/.profile` autostart from putting a harness where the app expects
 //! a login shell.
 //!
-//! Waking is deliberately not handled here: a sleeping agent refuses the
-//! connection at the relay and a GUI has no hook to wake it, so the summary says
-//! so and names the command. Auto-wake is its own change.
+//! OpenCode uses an HTTP server: this command starts `opencode serve`
+//! in the background and saves the agent's public HTTPS connection and project
+//! in OpenCode Desktop. See the `opencode` and `opencode_config` submodules.
+//!
+//! The shared launch pipeline wakes a reused agent. OpenCode's server and
+//! public endpoint are checked before setup exits.
 
 use std::path::{Path, PathBuf};
 
@@ -30,11 +33,15 @@ use crate::commands::code::{self, LaunchArgs, Progress as _};
 use crate::commands::ssh::config as ssh_config;
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
+use crate::util::shell::shell_join;
+
+use super::opencode;
+mod opencode_config;
 
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude              # Claude Code Desktop\n  railway ca desktop --codex               # the Codex app\n  railway ca desktop --claude --codex      # both, on one agent\n\n  railway ca desktop --claude --agent my-box   # an agent you already have\n  railway ca desktop --claude --dir /app/api   # where sessions open\n  railway ca desktop --claude --dry-run        # print the changes, write nothing\n  railway ca desktop --claude --remove         # undo them\n\nWrites an OpenSSH block for the agent (both apps), and for Claude an entry in\n~/.claude/settings.json pointing at that block. Restart the app afterwards.\n\nThe agent must be awake when the app connects — the relay refuses a sleeping\none and a desktop app has no way to wake it. `railway ca wake <name>` does."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nOn macOS, running editions are gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -45,10 +52,22 @@ pub struct Args {
     #[clap(long)]
     codex: bool,
 
+    /// Start OpenCode on the agent and configure its Desktop app connection
+    #[clap(long)]
+    opencode: bool,
+
+    /// Download the latest OpenCode2 Beta on the agent and configure Beta Desktop
+    #[clap(long, conflicts_with = "opencode")]
+    opencode2: bool,
+
     /// Agent to point the app at, by name or id (defaults to this
     /// environment's, creating one if there is none)
     #[clap(long, value_name = "NAME_OR_ID")]
     agent: Option<String>,
+
+    /// Always create a fresh agent instead of reusing this environment's
+    #[clap(long, conflicts_with_all = ["agent", "remove"])]
+    new: bool,
 
     /// Directory sessions open in on the agent
     #[clap(long, default_value = "/app", value_name = "PATH")]
@@ -70,7 +89,7 @@ pub struct Args {
     #[clap(long, conflicts_with_all = ["dry_run", "dir"])]
     remove: bool,
 
-    /// Skip the connection check after writing
+    /// Skip SSH probes (OpenCode HTTPS authentication is always checked)
     #[clap(long)]
     no_verify: bool,
 
@@ -84,19 +103,27 @@ pub struct Args {
 }
 
 /// A desktop app this command knows how to configure.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum App {
     Claude,
     Codex,
+    OpenCode,
+    OpenCode2,
 }
 
 impl App {
+    fn is_opencode(self) -> bool {
+        matches!(self, Self::OpenCode | Self::OpenCode2)
+    }
+
     /// The harness slug `railway code` uses, so provisioning seeds the
     /// credential this app's remote half will look for.
     fn harness(self) -> &'static str {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
+            App::OpenCode => "opencode",
+            App::OpenCode2 => "opencode2",
         }
     }
 
@@ -104,6 +131,8 @@ impl App {
         match self {
             App::Claude => "Claude Code Desktop",
             App::Codex => "Codex",
+            App::OpenCode => "OpenCode Desktop",
+            App::OpenCode2 => "OpenCode2 [Beta] Desktop",
         }
     }
 
@@ -112,6 +141,8 @@ impl App {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
+            App::OpenCode => "opencode",
+            App::OpenCode2 => "opencode2",
         }
     }
 
@@ -120,14 +151,20 @@ impl App {
         match self {
             App::Claude => "the environment dropdown, under the name below",
             App::Codex => "the SSH host list — Codex reads ~/.ssh/config itself",
+            App::OpenCode | App::OpenCode2 => "the server picker",
         }
     }
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let apps = selected_apps(&args)?;
+    if let Some(alias) = &args.alias
+        && !ssh_config::is_valid_agent_name(alias)
+    {
+        bail!("--alias must be a single SSH host name (letters, digits, '.', '_' or '-').");
+    }
     let home = dirs::home_dir().context("Unable to get home directory")?;
-    let ssh_config_path = ssh_config::expand_tilde(&args.ssh_config)?;
+    let ssh_config_path = std::path::absolute(ssh_config::expand_tilde(&args.ssh_config)?)?;
 
     if args.remove {
         return remove(&args, &apps, &home, &ssh_config_path).await;
@@ -135,6 +172,13 @@ pub async fn command(args: Args) -> Result<()> {
     if args.dry_run {
         return dry_run(&args, &apps, &home, &ssh_config_path).await;
     }
+    if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::preflight(args.opencode2)?;
+    }
+    let opencode_password = apps
+        .iter()
+        .any(|app| app.is_opencode())
+        .then(opencode::generate_password);
 
     // Same preflight as a launch, and for the same reason: without the flag the
     // create at the end of provisioning is refused, after a credential has
@@ -149,24 +193,46 @@ pub async fn command(args: Args) -> Result<()> {
     // it; later passes are pinned to that id, so `--claude --codex` seeds two
     // credentials on one machine rather than spending two VMs.
     let pinned = args.pinned_agent().await?;
+    // Resolve once, then carry both IDs through every app's provisioning pass.
+    // An environment alone still triggers the project picker in an unlinked
+    // directory, even when --agent already identifies the whole target.
+    let (project_id, environment_id, local_name_project) = if let Some(agent) = &pinned {
+        (agent.project_id.clone(), agent.environment_id.clone(), None)
+    } else {
+        let mut configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        let target = code::resolve_launch(
+            &args.launch_args(apps[0], None, None),
+            &mut configs,
+            &client,
+        )
+        .await?;
+        (
+            target.project_id,
+            target.environment_id,
+            target.local_name_project,
+        )
+    };
     let mut prepared: Option<code::Prepared> = None;
     for app in &apps {
         let progress = code::CliProgress::default();
-        let mut launch = LaunchArgs::for_app_mode(
-            app.harness(),
-            args.project.clone(),
-            // A named agent carries its own environment. Without this the launch
-            // pipeline resolves the *linked* one, fails to find the agent there,
-            // and creates a second VM instead of using the one that was named.
-            pinned
+        let mut launch = args.launch_args(
+            *app,
+            prepared
                 .as_ref()
-                .map(|a| a.environment_id.clone())
-                .or_else(|| args.environment.clone()),
+                .map(|p| p.agent_id.clone())
+                .or_else(|| pinned.as_ref().map(|a| a.id.clone())),
+            Some((&project_id, &environment_id)),
         );
-        launch.agent_id = prepared
-            .as_ref()
-            .map(|p| p.agent_id.clone())
-            .or_else(|| pinned.as_ref().map(|a| a.id.clone()));
+        launch.local_name_project = local_name_project.clone();
+        if let Some(password) = &opencode_password {
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        }
         // Desktop never opens the session it provisions — FullTerminal is the
         // non-pane style; the remote command is unused after prepare returns.
         let result = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await;
@@ -203,9 +269,18 @@ pub async fn command(args: Args) -> Result<()> {
     let checks = if args.no_verify {
         Vec::new()
     } else {
-        verify(&alias, &apps, &ssh_config_path).await
+        let ssh_apps = apps
+            .iter()
+            .copied()
+            .filter(|app| !app.is_opencode())
+            .collect::<Vec<_>>();
+        if ssh_apps.is_empty() {
+            Vec::new()
+        } else {
+            verify(&alias, &ssh_apps, &ssh_config_path).await
+        }
     };
-    if custom_config {
+    if custom_config && apps.iter().any(|app| !app.is_opencode()) {
         println!(
             "\n{} {} is not where the apps look. Make sure {} pulls it in:\n    {}",
             "!".yellow().bold(),
@@ -215,11 +290,33 @@ pub async fn command(args: Args) -> Result<()> {
         );
     }
 
+    let connection = if let Some(password) = &opencode_password {
+        if args.opencode2 {
+            println!(
+                "\nStarting OpenCode2 [Beta] and checking its HTTPS connection. The first startup downloads the latest Beta and may take several minutes..."
+            );
+        } else {
+            println!("\nStarting OpenCode and checking its HTTPS connection...");
+        }
+        Some(
+            opencode::start(
+                &alias,
+                &args.dir,
+                &ssh_config_path,
+                password,
+                args.opencode2,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+
     summarize(
         &prepared,
         &apps,
         &alias,
-        &args.dir,
+        &args,
         &ssh_config_path,
         &home,
         &checks,
@@ -232,10 +329,50 @@ pub async fn command(args: Args) -> Result<()> {
             .join(","),
     )
     .await;
+    if let Some(connection) = connection {
+        println!(
+            "\n{}",
+            if connection.reused {
+                "OpenCode is already running"
+            } else {
+                "OpenCode is ready"
+            }
+            .bold()
+        );
+        opencode::show_connection(&connection, args.opencode2, &prepared.agent_name)?;
+        opencode_config::configure(args.opencode2, &connection, &prepared.agent_id, &prepared.agent_name)
+            .await
+            .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
+        println!(
+            "You can close this terminal. Rerun this command after sleeping or restarting the agent."
+        );
+    }
+
     Ok(())
 }
 
 impl Args {
+    fn launch_args(
+        &self,
+        app: App,
+        agent_id: Option<String>,
+        target: Option<(&str, &str)>,
+    ) -> LaunchArgs {
+        let mut launch = LaunchArgs::for_app_mode(
+            app.harness(),
+            target
+                .map(|(project, _)| project.to_owned())
+                .or_else(|| self.project.clone()),
+            target
+                .map(|(_, environment)| environment.to_owned())
+                .or_else(|| self.environment.clone()),
+        );
+        // Only the first app creates. All later apps seed the same agent.
+        launch.new = self.new && agent_id.is_none();
+        launch.agent_id = agent_id;
+        launch
+    }
+
     /// Resolve `--agent` before any provisioning, so a name that does not exist
     /// fails before a VM is created rather than after.
     async fn pinned_agent(&self) -> Result<Option<ca::Agent>> {
@@ -289,31 +426,47 @@ fn render_block(
 ///
 /// Deliberately not the write path with the writes skipped: provisioning would
 /// still create or wake a VM, and a flag documented as "write nothing" that
-/// quietly bills for a machine is worse than no flag. So this reads an agent
-/// that already exists — it will not create one — and reads the local key
-/// without registering it. The trade is that the identity shown is a best guess
+/// quietly bills for a machine is worse than no flag. Read an existing agent,
+/// or show placeholders for --new, and read the local key without registering
+/// it. The trade is that the identity shown is a best guess
 /// at what a real run would register, which is why it is labelled.
 async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
+    let (agent_id, agent_name, environment_id) = if args.new {
+        println!(
+            "Would create a fresh cloud agent (--new). Agent and environment IDs below are placeholders."
+        );
+        println!(
+            "Target: project {}, environment {}",
+            args.project
+                .as_deref()
+                .unwrap_or("linked or configured default"),
+            args.environment
+                .as_deref()
+                .unwrap_or("linked or configured default")
+        );
+        (
+            "NEW_AGENT_ID".into(),
+            "new-agent".into(),
+            "ENVIRONMENT_ID".into(),
+        )
+    } else {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
+        (agent.id, agent.name, agent.environment_id)
+    };
 
     let identity = preferred_local_key().await;
     let alias = args
         .alias
         .clone()
-        .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
-    let block = render_block(
-        &agent.name,
-        &agent.environment_id,
-        &alias,
-        identity.as_deref(),
-    )?;
+        .unwrap_or_else(|| ssh_config::agent_alias(&agent_name));
+    let block = render_block(&agent_name, &environment_id, &alias, identity.as_deref())?;
 
     println!("\n{}", ssh_config_path.display().to_string().cyan());
     print!("{block}");
     if apps.contains(&App::Claude) {
-        let entry = claude_ssh_entry(&agent.id, &agent.name, &alias, &args.dir);
+        let entry = claude_ssh_entry(&agent_id, &agent_name, &alias, &args.dir);
         println!(
             "\n{}",
             claude_settings_path(home).display().to_string().cyan()
@@ -321,6 +474,26 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({ "sshConfigs": [entry] }))?
+        );
+    }
+    if apps.iter().any(|app| app.is_opencode()) {
+        println!("\nWould generate credentials for a new agent, or reuse its saved credentials.");
+        println!(
+            "Would start password-protected OpenCode in the background on port 8080 from {}.",
+            args.dir
+        );
+        println!(
+            "Would verify the agent's existing HTTPS address and print its connection details."
+        );
+        for target in opencode_config::targets(args.opencode2)? {
+            println!(
+                "Would save the authenticated server, default server, and project in {} ({}).",
+                target.name(),
+                target.root.display()
+            );
+        }
+        println!(
+            "Would gracefully restart OpenCode Desktop if running on macOS (quit it first on Windows/Linux)."
         );
     }
     if identity.is_none() {
@@ -332,7 +505,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
     }
     println!(
         "\n{}",
-        "Nothing written, and no agent created or woken (--dry-run).".dimmed()
+        "Nothing written, no agent created or woken, and no process started (--dry-run).".dimmed()
     );
     Ok(())
 }
@@ -365,8 +538,16 @@ fn selected_apps(args: &Args) -> Result<Vec<App>> {
     if args.codex {
         apps.push(App::Codex);
     }
+    if args.opencode {
+        apps.push(App::OpenCode);
+    }
+    if args.opencode2 {
+        apps.push(App::OpenCode2);
+    }
     if apps.is_empty() {
-        bail!("Name an app: --claude, --codex, or both.");
+        bail!(
+            "Name an app: --claude, --codex, --opencode, or --opencode2. OpenCode editions must be configured separately."
+        );
     }
     Ok(apps)
 }
@@ -379,6 +560,20 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     // `--agent` is how that is cleaned up.
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
 
+    let removed_opencode = if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::remove(&agent.id, args.opencode2).await?
+    } else {
+        false
+    };
+    let stopped_opencode =
+        apps.iter().any(|app| app.is_opencode()) && agent.status == ca::Status::Running;
+    if stopped_opencode {
+        let alias = args
+            .alias
+            .clone()
+            .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
+        opencode::stop(&alias, ssh_config_path, args.opencode2).await?;
+    }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
     let removed_block = ssh_config::remove_marked_block(ssh_config_path, &marker)?;
     let removed_entry = if apps.contains(&App::Claude) {
@@ -386,9 +581,13 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     } else {
         false
     };
-
-    match (removed_block, removed_entry) {
-        (false, false) => println!(
+    match (
+        removed_block,
+        removed_entry,
+        stopped_opencode,
+        removed_opencode,
+    ) {
+        (false, false, false, false) => println!(
             "No `railway ca desktop` config found for agent {}.",
             agent.name.cyan()
         ),
@@ -405,6 +604,15 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
                     "{} Removed the connection from {}",
                     "✓".green(),
                     claude_settings_path(home).display()
+                );
+            }
+            if stopped_opencode {
+                println!("{} Stopped the managed OpenCode server.", "✓".green());
+            }
+            if removed_opencode {
+                println!(
+                    "{} Removed the managed OpenCode Desktop connection and project.",
+                    "✓".green()
                 );
             }
             println!(
@@ -553,6 +761,19 @@ async fn verify(alias: &str, apps: &[App], ssh_config_path: &Path) -> Vec<Check>
             ok: probe.is_ok(),
             detail: probe.err().map(|e| format!("{e:#}")),
         });
+        if app.is_opencode() {
+            let probe = ssh_alias(
+                alias,
+                &["bash", "-lc", "opencode serve --help"],
+                ssh_config_path,
+            )
+            .await;
+            checks.push(Check {
+                label: "opencode serve available".into(),
+                ok: probe.is_ok(),
+                detail: probe.err().map(|e| format!("{e:#}")),
+            });
+        }
     }
     checks
 }
@@ -571,8 +792,13 @@ async fn ssh_alias(alias: &str, command: &[&str], ssh_config_path: &Path) -> Res
         .arg("-o")
         .arg("ConnectTimeout=20")
         .arg("-T")
+        .arg("--")
         .arg(alias)
-        .args(command)
+        // OpenSSH joins argv with spaces before invoking the remote shell.
+        // Quote the whole command so `bash -lc` receives one script argument.
+        .arg(shell_join(
+            &command.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        ))
         .stdin(std::process::Stdio::null());
     let out = cmd.output().await.context("Failed to run `ssh`")?;
     if out.status.success() {
@@ -594,11 +820,12 @@ fn summarize(
     prepared: &code::Prepared,
     apps: &[App],
     alias: &str,
-    dir: &str,
+    args: &Args,
     ssh_config_path: &Path,
     home: &Path,
     checks: &[Check],
 ) {
+    let dir = &args.dir;
     println!("\n{}", "Cloud agent ready for your desktop app".bold());
     println!("  {}  {}", "Agent  ".dimmed(), prepared.agent_name.bold());
     println!("  {}  {}", "Host   ".dimmed(), alias.bold());
@@ -615,7 +842,6 @@ fn summarize(
             claude_settings_path(home).display().to_string().bold()
         );
     }
-
     if !checks.is_empty() {
         println!();
         for check in checks {
@@ -627,21 +853,26 @@ fn summarize(
         }
     }
 
-    println!("\n{}", "Next:".bold());
+    if apps.iter().any(|app| !app.is_opencode()) {
+        println!("\n{}", "Next:".bold());
+    }
     for app in apps {
+        if app.is_opencode() {
+            continue;
+        }
         println!(
             "  {} — restart it, then find the agent in {}",
             app.name(),
             app.where_it_appears()
         );
     }
-    // The one thing that will bite a user who does everything right: an agent
-    // asleep by the time they open the app.
-    println!(
-        "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
-        "!".yellow().bold(),
-        format!("railway ca wake {}", prepared.agent_name).cyan()
-    );
+    if !apps.iter().any(|app| app.is_opencode()) {
+        println!(
+            "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
+            "!".yellow().bold(),
+            format!("railway ca wake {}", prepared.agent_name).cyan()
+        );
+    }
     println!(
         "{} stops the compute bill when you're done.",
         format!("railway ca sleep {}", prepared.agent_name).cyan()
@@ -666,6 +897,82 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn opencode_editions_are_explicit_and_mutually_exclusive() {
+        assert_eq!(
+            selected_apps(&args_for(&["--opencode2"])).unwrap(),
+            vec![App::OpenCode2]
+        );
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--opencode2"]).is_err());
+        assert!(Args::try_parse_from(["desktop", "--opencode2", "--new"]).is_ok());
+    }
+
+    #[test]
+    fn opencode_can_be_configured_alone_or_with_other_apps() {
+        assert_eq!(
+            selected_apps(&args_for(&["--opencode"])).unwrap(),
+            vec![App::OpenCode]
+        );
+        assert_eq!(
+            selected_apps(&args_for(&["--claude", "--codex", "--opencode"])).unwrap(),
+            vec![App::Claude, App::Codex, App::OpenCode]
+        );
+        for flag in ["--dry-run", "--remove", "--no-verify"] {
+            assert!(Args::try_parse_from(["desktop", "--opencode", flag]).is_ok());
+        }
+        for flag in ["--port", "--remote-port"] {
+            assert!(Args::try_parse_from(["desktop", "--opencode", flag, "4096"]).is_err());
+        }
+    }
+
+    #[test]
+    fn new_creates_once_and_later_apps_reuse_the_created_agent() {
+        let args = args_for(&[
+            "--claude",
+            "--codex",
+            "--opencode",
+            "--new",
+            "-e",
+            "production",
+        ]);
+        let first = args.launch_args(App::Claude, None, None);
+        assert!(first.new);
+        assert!(first.agent_id.is_none());
+        assert_eq!(first.environment.as_deref(), Some("production"));
+        for app in [App::Codex, App::OpenCode] {
+            let next = args.launch_args(
+                app,
+                Some("created-agent".into()),
+                Some(("created-project", "created-env")),
+            );
+            assert!(!next.new);
+            assert_eq!(next.agent_id.as_deref(), Some("created-agent"));
+            assert_eq!(next.environment.as_deref(), Some("created-env"));
+            assert_eq!(next.project.as_deref(), Some("created-project"));
+        }
+    }
+
+    #[test]
+    fn desktop_reuses_by_default_and_new_conflicts_with_existing_agent_actions() {
+        let args = args_for(&["--opencode"]);
+        assert!(!args.launch_args(App::OpenCode, None, None).new);
+        let pinned = args.launch_args(
+            App::OpenCode,
+            Some("existing-agent".into()),
+            Some(("other-project", "other-env")),
+        );
+        assert!(!pinned.new);
+        assert_eq!(pinned.agent_id.as_deref(), Some("existing-agent"));
+        assert_eq!(pinned.environment.as_deref(), Some("other-env"));
+        assert_eq!(pinned.project.as_deref(), Some("other-project"));
+        assert!(
+            Args::try_parse_from(["desktop", "--opencode", "--new", "--agent", "existing"])
+                .is_err()
+        );
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--remove"]).is_err());
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--dry-run"]).is_ok());
     }
 
     #[test]

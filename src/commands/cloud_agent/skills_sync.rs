@@ -79,6 +79,11 @@ pub const SKILL_SOURCES: &[SkillSource] = &[
         label: "Universal (.agents)",
         dir: &[".agents", "skills"],
     },
+    SkillSource {
+        slug: "opencode",
+        label: "OpenCode",
+        dir: &[".config", "opencode", "skills"],
+    },
 ];
 
 impl SkillSource {

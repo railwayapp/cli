@@ -12,6 +12,8 @@ pub mod access;
 pub mod desktop;
 pub mod lifecycle;
 pub mod mcp_sync;
+pub(crate) mod opencode;
+pub(crate) mod opencode2;
 pub mod prefs;
 pub mod setup;
 pub mod skills_sync;
@@ -37,7 +39,7 @@ use tui::{App, Outcome};
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher pointed straight at a session — same flags,\nsame preferences, no browsing: it opens the manage screen with the tree collapsed\nand your default harness already starting (⌥f brings the tree back). `railway\nca start` skips the TUI altogether.\n\nPreferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca desktop --opencode     # …or from OpenCode Desktop\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher pointed straight at a session — same flags,\nsame preferences, no browsing: it opens the manage screen with the tree collapsed\nand your default harness already starting (⌥f brings the tree back). `railway\nca start` skips the TUI altogether.\n\nPreferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -127,7 +129,7 @@ pub async fn command(args: Args) -> Result<()> {
         // which means the pane on a terminal and a plain ssh session off one.
         // A TUI in a pipe would be gibberish, and erroring instead would break
         // scripted callers that reasonably expect the launcher.
-        None => crate::commands::code::command(args.launch).await,
+        None => crate::commands::code::launch_in_cloud(args.launch).await,
     }
 }
 
@@ -243,14 +245,14 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
             }
         }
     };
+    let mut args = args;
+    args.local_name_project = resolved.local_name_project;
     let launch = tui::LaunchRequest {
         project_id: resolved.project_id,
         environment_id: resolved.environment_id,
-        // Which agent in that environment is the pipeline's call: it reuses
-        // this environment's remembered one, adopts the caller's only one, and
-        // creates one when there is neither — the same answer `railway code`
-        // has always given, now drawn in a pane.
-        agent_id: None,
+        // An explicit --agent wins. Otherwise the pipeline reuses the
+        // environment's remembered agent, adopts its only one, or creates one.
+        agent_id: args.agent_id.clone(),
         session_name: None,
         force_new: args.new,
         new_session: false,

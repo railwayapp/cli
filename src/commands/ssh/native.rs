@@ -674,8 +674,6 @@ pub fn run_native_ssh_captured(
     stdin_payload: Option<&[u8]>,
     extra_opts: &[String],
 ) -> Result<(i32, Vec<u8>, Vec<u8>)> {
-    use std::io::Write;
-
     let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
     for opt in extra_opts {
         ssh_cmd.arg(opt);
@@ -690,6 +688,15 @@ pub fn run_native_ssh_captured(
     ssh_cmd.arg("-T");
     ssh_cmd.arg(&target);
     ssh_cmd.arg(command);
+    capture_command(ssh_cmd, stdin_payload)
+}
+
+fn capture_command(
+    mut ssh_cmd: Command,
+    stdin_payload: Option<&[u8]>,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use std::io::Write;
+
     ssh_cmd.stdin(if stdin_payload.is_some() {
         Stdio::piped()
     } else {
@@ -699,17 +706,49 @@ pub fn run_native_ssh_captured(
     ssh_cmd.stderr(Stdio::piped());
 
     let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
-    if let Some(payload) = stdin_payload {
+    let input_result = if let Some(payload) = stdin_payload {
         let mut stdin = child.stdin.take().expect("stdin was piped");
-        stdin.write_all(payload)?;
         // Drop closes the pipe so the remote `cat` sees EOF.
-    }
+        stdin.write_all(payload)
+    } else {
+        Ok(())
+    };
     let output = child.wait_with_output()?;
+    // A refused connection can close stdin before the script/payload fits in
+    // the pipe. Preserve SSH's status and diagnostic so callers can retry the
+    // transport failure, instead of masking it with a local BrokenPipe error.
+    // Always reap the child, including when writing stdin failed.
+    if output.status.success() {
+        input_result.context("Failed to send SSH input")?;
+    }
     Ok((
         output.status.code().unwrap_or(1),
         output.stdout,
         output.stderr,
     ))
+}
+
+#[cfg(all(test, unix))]
+mod captured_command_tests {
+    use super::*;
+
+    #[test]
+    fn early_connection_failure_preserves_status_and_diagnostic() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'connection refused' >&2; exit 255"]);
+        let (status, stdout, stderr) = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap();
+        assert_eq!(status, 255);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"connection refused");
+    }
+
+    #[test]
+    fn successful_exit_cannot_hide_incomplete_input() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let error = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap_err();
+        assert!(error.to_string().contains("Failed to send SSH input"));
+    }
 }
 
 #[cfg(test)]
