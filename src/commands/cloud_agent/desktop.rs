@@ -41,7 +41,7 @@ mod opencode_config;
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in Desktop.\nOn macOS, a running Desktop app is gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in detected\nstandard OpenCode and OpenCode 2 Beta installations. No extra flag is needed.\nOn macOS, running editions are gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -463,10 +463,13 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         println!(
             "Would verify the agent's existing HTTPS address and print its connection details."
         );
-        println!(
-            "Would save the authenticated server, default server, and project in {}.",
-            opencode_config::config_dir()?.display()
-        );
+        for target in opencode_config::targets()? {
+            println!(
+                "Would save the authenticated server, default server, and project in {} ({}).",
+                target.name(),
+                target.root.display()
+            );
+        }
         println!(
             "Would gracefully restart OpenCode Desktop if running on macOS (quit it first on Windows/Linux)."
         );

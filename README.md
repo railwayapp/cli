@@ -101,10 +101,21 @@ OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
 in the background on port 8080, checks its public endpoint, and saves the URL,
 username, password, default server, and remote project in Desktop's settings.
-It also prints the connection details. On macOS, setup gracefully restarts a
-running OpenCode Desktop to apply the settings. Quit the app before setup on
-Windows/Linux. Existing settings are preserved with private `.railway-backup`
-files alongside the stores in the `ai.opencode.desktop` configuration directory.
+It configures detected standard OpenCode and [OpenCode 2 Beta](https://github.com/anomalyco/opencode-beta)
+installations with the same connection; no extra flag is needed. Standard uses
+`ai.opencode.desktop`, and Beta uses `ai.opencode.desktop.beta`. Both JSON stores
+and newer `drafts.sqlite` renderer stores are supported; existing drafts and
+other settings are preserved. On Windows/Linux, launch each edition once so
+its configuration directory can be detected.
+
+Beta `0.0.0-beta-19289` requires a newer server API than stable OpenCode 1.18.29.
+Saving Desktop settings does not upgrade the remote binary; the CLI reports
+when the server is incompatible with Beta. A matching OpenCode 2 server is
+required to use that connection in Beta.
+
+Setup also prints the connection details. On macOS, it gracefully restarts each
+running edition to apply the settings. Quit the apps before setup on Windows/Linux.
+Private `.railway-backup` files preserve the previous settings and server state.
 You can close the terminal after setup; there is no local tunnel to keep running.
 
 Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, find
