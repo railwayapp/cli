@@ -23,8 +23,9 @@ spec.loader.exec_module(m)
 if sys.platform == 'darwin':
     def process_start(pid):
         result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=', '-o', 'lstart='], capture_output=True, text=True)
-        line = result.stdout.strip()
-        return line if result.returncode == 0 and line and not line.startswith('Z') else None
+        fields = result.stdout.strip().split(None, 1)
+        # Process status changes between probes; only start time identifies it.
+        return fields[1] if result.returncode == 0 and len(fields) == 2 and not fields[0].startswith('Z') else None
     m.process_start = process_start
 try:
     print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]), int(sys.argv[3]))))
@@ -33,8 +34,11 @@ except Exception as error:
     sys.exit(1)
 '''
 FAKE = '''
-import base64,json,os,sys
+import base64,json,os,socket,sys
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+# HTTPServer.server_bind does reverse DNS, which can stall on macOS CI.
+# The fake server must use loopback only, including hostname resolution.
+socket.getfqdn = lambda host: 'localhost'
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         expected = 'Basic ' + base64.b64encode((os.environ['OPENCODE_SERVER_USERNAME'] + ':' + os.environ['OPENCODE_SERVER_PASSWORD']).encode()).decode()

@@ -99,13 +99,17 @@ flags are combined. It cannot be combined with `--agent` or `--remove`.
 
 OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
-in the background on port 8080, checks its public endpoint, and prints the URL,
-username, password, and working directory. Add these in Settings → Servers.
+in the background on port 8080, checks its public endpoint, and saves the URL,
+username, password, default server, and remote project in Desktop's settings.
+It also prints the connection details. On macOS, setup gracefully restarts a
+running OpenCode Desktop to apply the settings. Quit the app before setup on
+Windows/Linux. Existing settings are preserved with private `.railway-backup`
+files alongside the stores in the `ai.opencode.desktop` configuration directory.
 You can close the terminal after setup; there is no local tunnel to keep running.
 
-Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, hover over
-the added server and choose Add project. Select `/app` (or your `--dir`) on the
-agent, then use that project's menu → New session. Setting a default server
+Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, find
+`Railway: <agent-name>` and `/app` (or your `--dir`), then use that project's
+menu → New session. Setting a default server
 does not move existing chats. Provider sign-ins from `auth.json` are copied
 when available. OpenCode's newer chat mode uses a separate credential store;
 if your provider is missing there, connect it in the remote server's settings.
@@ -118,8 +122,8 @@ The remote credential and process state are stored privately under
 `~/.railway/desktop/opencode/`; startup logs are in `server.log` there.
 
 `railway ca desktop --opencode --agent my-box --remove` stops the managed
-OpenCode process on a running agent and removes the shared SSH block. It does
-not wake a sleeping agent. Remove the saved URL in OpenCode separately.
+OpenCode process on a running agent and removes the shared SSH block and the
+Desktop connection/project saved by setup. It does not wake a sleeping agent.
 The agent remains; `railway ca sleep my-box` stops its compute bill.
 
 ## Contributing
