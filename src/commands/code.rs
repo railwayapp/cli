@@ -86,6 +86,7 @@ use crate::util::shell::shell_join;
 /// session has the whole window and the rest of the tool is one key away;
 /// everywhere else it hands the terminal straight to ssh.
 mod opencode;
+mod plumbing;
 
 pub type Args = LaunchArgs;
 
@@ -1726,11 +1727,12 @@ fn ssh_plumbing(
     // stretching this on a hunch.
     const BACKOFF_SECS: [u64; 5] = [2, 3, 5, 5, 5];
     let attempts = BACKOFF_SECS.len() + 1;
+    let (command, payload) = plumbing::script_input(command, stdin_payload);
 
     let mut last: (i32, String) = (1, String::new());
     for attempt in 1..=attempts {
         let (code, out, err) =
-            run_native_ssh_captured(target, command, identity, stdin_payload, &relay.opts)?;
+            run_native_ssh_captured(target, &command, identity, Some(&payload), &relay.opts)?;
         if code == 0 {
             return Ok(out);
         }
