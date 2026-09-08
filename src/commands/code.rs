@@ -539,7 +539,7 @@ cat > ~/.grok/auth.json"#;
 /// Deliberately not `. ~/.profile`: that sources `.bashrc`, whose starship/mise/
 /// zoxide init writes to stdout and would corrupt the AGENT-READY marker this
 /// command parses. Mirrors the image's own export line instead.
-const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+pub(crate) const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
 
 /// Agent-independent seeds, all idempotent:
 /// - COLORTERM: the relay forwards TERM but not COLORTERM; without it TUIs

@@ -1,0 +1,525 @@
+//! Reconcile herdr's saved machines with the cloud agents you own.
+//!
+//! Runs as herdr's startup hook as well as an action, so it never prompts and
+//! says one line when nothing is wrong. Machines are matched to agents on the
+//! ssh target only; labels are display text and anyone can edit them.
+
+use std::collections::BTreeMap;
+
+use anyhow::{Result, bail};
+use chrono::Utc;
+use clap::Parser;
+use colored::Colorize;
+
+use super::herdr_cli::{Herdr, Machine};
+use super::state::State;
+use super::target;
+use crate::client::GQLClient;
+use crate::config::Configs;
+use crate::controllers::cloud_agent as ca;
+
+#[derive(Parser)]
+pub struct Args {
+    /// Print what would change and change nothing
+    #[clap(long)]
+    dry_run: bool,
+
+    /// Output as JSON
+    #[clap(long)]
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum Op {
+    /// A machine pointing at an agent that no longer exists.
+    Remove(String),
+    /// An enabled machine whose agent is not awake.
+    Disable(String),
+    /// A disabled machine whose agent is running.
+    Enable(String),
+    /// An agent with no machine. Adding one is interactive, so only reported.
+    Missing(ca::Agent),
+}
+
+impl Op {
+    fn profile_id(&self) -> Option<&str> {
+        match self {
+            Op::Remove(id) | Op::Disable(id) | Op::Enable(id) => Some(id),
+            Op::Missing(_) => None,
+        }
+    }
+
+    fn verb(&self) -> &'static str {
+        match self {
+            Op::Remove(_) => "remove",
+            Op::Disable(_) => "disable",
+            Op::Enable(_) => "enable",
+            Op::Missing(_) => "missing",
+        }
+    }
+
+    fn describe(&self, machines: &[Machine]) -> String {
+        match self {
+            Op::Missing(agent) => format!(
+                "missing  agent {} ({}) has no herdr machine",
+                agent.name,
+                agent.status.label()
+            ),
+            op => {
+                let id = op.profile_id().unwrap_or_default();
+                let label = machines
+                    .iter()
+                    .find(|m| m.id == id)
+                    .map(|m| m.label.as_str())
+                    .unwrap_or(id);
+                format!("{:<8} machine {label} ({id})", op.verb())
+            }
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Op::Missing(agent) => serde_json::json!({
+                "op": "missing",
+                "agent": { "id": agent.id, "name": agent.name, "status": agent.status.label() },
+            }),
+            op => serde_json::json!({ "op": op.verb(), "profile": op.profile_id() }),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Plan {
+    pub ops: Vec<Op>,
+    /// agent id → herdr profile id, for every agent that has a machine
+    pub matches: BTreeMap<String, String>,
+}
+
+pub(super) fn is_machine_for(agent: &ca::Agent, machine: &Machine) -> bool {
+    machine.target == target::target(agent)
+        || target::agent_id_of(&machine.target).as_deref() == Some(agent.id.as_str())
+}
+
+pub(super) fn machine_for<'a>(agent: &ca::Agent, machines: &'a [Machine]) -> Option<&'a Machine> {
+    machines.iter().find(|m| is_machine_for(agent, m))
+}
+
+pub(super) fn reconcile(agents: &[ca::Agent], machines: &[Machine]) -> Plan {
+    let mut plan = Plan::default();
+    for machine in machines {
+        if target::agent_id_of(&machine.target).is_none() {
+            continue;
+        }
+        let Some(agent) = agents.iter().find(|a| is_machine_for(a, machine)) else {
+            plan.ops.push(Op::Remove(machine.id.clone()));
+            continue;
+        };
+        plan.matches.insert(agent.id.clone(), machine.id.clone());
+        let awake = matches!(agent.status, ca::Status::Running | ca::Status::Starting);
+        if machine.enabled && !awake {
+            plan.ops.push(Op::Disable(machine.id.clone()));
+        } else if !machine.enabled && agent.status == ca::Status::Running {
+            plan.ops.push(Op::Enable(machine.id.clone()));
+        }
+    }
+    for agent in agents {
+        if agent.status.is_live() && !plan.matches.contains_key(&agent.id) {
+            plan.ops.push(Op::Missing(agent.clone()));
+        }
+    }
+    plan
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Outcome {
+    pub applied: Vec<Op>,
+    pub failed: Vec<(Op, String)>,
+}
+
+pub(super) fn apply(herdr: &Herdr, plan: &Plan) -> Outcome {
+    let mut outcome = Outcome::default();
+    for op in &plan.ops {
+        let result = match op {
+            Op::Remove(id) => herdr.machine_remove(id),
+            Op::Disable(id) => herdr.machine_disable(id),
+            Op::Enable(id) => herdr.machine_enable(id),
+            Op::Missing(_) => continue,
+        };
+        match result {
+            Ok(()) => outcome.applied.push(op.clone()),
+            Err(e) => outcome.failed.push((op.clone(), format!("{e:#}"))),
+        }
+    }
+    outcome
+}
+
+pub async fn command(args: Args) -> Result<()> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let backboard = configs.get_backboard();
+    let herdr = Herdr::from_env();
+
+    let agents = ca::list_mine(&client, &backboard).await?;
+    let machines = herdr.machines()?;
+    let plan = reconcile(&agents, &machines);
+
+    let outcome = if args.dry_run {
+        Outcome::default()
+    } else {
+        let outcome = apply(&herdr, &plan);
+        let mut state = State::load().unwrap_or_default();
+        state.machines = plan.matches.clone();
+        state.last_sync = Some(Utc::now().to_rfc3339());
+        state.save()?;
+        outcome
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dryRun": args.dry_run,
+                "plan": plan.ops.iter().map(Op::to_json).collect::<Vec<_>>(),
+                "applied": outcome.applied.iter().map(Op::to_json).collect::<Vec<_>>(),
+                "failed": outcome
+                    .failed
+                    .iter()
+                    .map(|(op, err)| {
+                        let mut v = op.to_json();
+                        v["error"] = serde_json::Value::String(err.clone());
+                        v
+                    })
+                    .collect::<Vec<_>>(),
+                "machines": plan.matches,
+            }))?
+        );
+    } else if args.dry_run {
+        if plan.ops.is_empty() {
+            println!(
+                "herdr machines match your {} agent{}; nothing to do.",
+                agents.len(),
+                plural(agents.len())
+            );
+        }
+        for op in &plan.ops {
+            println!("would {}", op.describe(&machines));
+        }
+    } else {
+        println!("{}", summary(&plan, &outcome, agents.len()));
+    }
+
+    if !outcome.failed.is_empty() {
+        bail!(
+            "{} herdr change{} failed:\n{}",
+            outcome.failed.len(),
+            plural(outcome.failed.len()),
+            outcome
+                .failed
+                .iter()
+                .map(|(op, err)| format!("  {}: {err}", op.describe(&machines)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    Ok(())
+}
+
+fn summary(plan: &Plan, outcome: &Outcome, agent_count: usize) -> String {
+    let count = |verb: &str| {
+        outcome
+            .applied
+            .iter()
+            .filter(|op| op.verb() == verb)
+            .count()
+    };
+    let mut parts = Vec::new();
+    for verb in ["enable", "disable", "remove"] {
+        let n = count(verb);
+        if n > 0 {
+            parts.push(format!("{verb}d {n}"));
+        }
+    }
+    let missing: Vec<&str> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Missing(agent) => Some(agent.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut line = if parts.is_empty() {
+        format!(
+            "✓ herdr machines match your {agent_count} agent{}.",
+            plural(agent_count)
+        )
+    } else {
+        format!("✓ herdr sync: {}.", parts.join(", "))
+    };
+    if !missing.is_empty() {
+        line.push_str(
+            &format!(
+                " {} agent{} without a machine: {} ({} adds one)",
+                missing.len(),
+                plural(missing.len()),
+                missing.join(", "),
+                "railway ca herdr agents".cyan()
+            )
+            .dimmed()
+            .to_string(),
+        );
+    }
+    line
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::controllers::cloud_agent::Status;
+
+    fn agent(id: &str, status: Status) -> ca::Agent {
+        ca::Agent {
+            id: id.into(),
+            name: format!("name-{id}"),
+            status,
+            project_id: "project".into(),
+            environment_id: "env".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn machine(id: &str, target: &str, enabled: bool) -> Machine {
+        Machine {
+            id: id.into(),
+            label: format!("label-{id}"),
+            target: target.into(),
+            session: "default".into(),
+            enabled,
+            selected: false,
+        }
+    }
+
+    fn ours(id: &str, agent_id: &str, enabled: bool) -> Machine {
+        machine(id, &target::target_for("env", agent_id), enabled)
+    }
+
+    fn ops_of(plan: &Plan) -> Vec<String> {
+        plan.ops
+            .iter()
+            .map(|op| match op {
+                Op::Missing(agent) => format!("missing {}", agent.id),
+                op => format!("{} {}", op.verb(), op.profile_id().unwrap()),
+            })
+            .collect()
+    }
+
+    fn after(machines: &[Machine], plan: &Plan) -> Vec<Machine> {
+        machines
+            .iter()
+            .filter(|m| {
+                !plan
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, Op::Remove(id) if id == &m.id))
+            })
+            .map(|m| {
+                let mut m = m.clone();
+                for op in &plan.ops {
+                    match op {
+                        Op::Disable(id) if id == &m.id => m.enabled = false,
+                        Op::Enable(id) if id == &m.id => m.enabled = true,
+                        _ => {}
+                    }
+                }
+                m
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reconcile_cases() {
+        let cases: Vec<(&str, Vec<ca::Agent>, Vec<Machine>, Vec<&str>)> = vec![
+            (
+                "running agent with enabled machine",
+                vec![agent("a1", Status::Running)],
+                vec![ours("p1", "a1", true)],
+                vec![],
+            ),
+            (
+                "sleeping agent with enabled machine",
+                vec![agent("a1", Status::Sleeping)],
+                vec![ours("p1", "a1", true)],
+                vec!["disable p1"],
+            ),
+            (
+                "crashed agent with enabled machine",
+                vec![agent("a1", Status::Crashed)],
+                vec![ours("p1", "a1", true)],
+                vec!["disable p1"],
+            ),
+            (
+                "running agent with disabled machine",
+                vec![agent("a1", Status::Running)],
+                vec![ours("p1", "a1", false)],
+                vec!["enable p1"],
+            ),
+            (
+                "starting agent with disabled machine waits",
+                vec![agent("a1", Status::Starting)],
+                vec![ours("p1", "a1", false)],
+                vec![],
+            ),
+            (
+                "our machine with no agent",
+                vec![],
+                vec![ours("p1", "gone", true)],
+                vec!["remove p1"],
+            ),
+            (
+                "agent with no machine",
+                vec![agent("a1", Status::Running)],
+                vec![],
+                vec!["missing a1"],
+            ),
+            (
+                "deleting agent with no machine is not missing",
+                vec![agent("a1", Status::Deleting)],
+                vec![],
+                vec![],
+            ),
+            (
+                "foreign machines are never touched",
+                vec![agent("a1", Status::Sleeping)],
+                vec![
+                    machine("w", "workbox", true),
+                    machine("m", "me@workbox", true),
+                    ours("p1", "a1", true),
+                ],
+                vec!["disable p1"],
+            ),
+            (
+                "match on agent id inside a target from another relay host",
+                vec![agent("a1", Status::Sleeping)],
+                vec![machine("p1", "agent:env:a1@ssh.elsewhere.example", true)],
+                vec!["disable p1"],
+            ),
+            (
+                "labels do not match",
+                vec![agent("a1", Status::Running)],
+                vec![machine("p1", "workbox", true)],
+                vec!["missing a1"],
+            ),
+        ];
+        for (name, agents, machines, expected) in cases {
+            let plan = reconcile(&agents, &machines);
+            assert_eq!(ops_of(&plan), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn matches_map_every_matched_agent_to_its_profile() {
+        let agents = vec![agent("a1", Status::Running), agent("a2", Status::Sleeping)];
+        let machines = vec![
+            ours("p1", "a1", true),
+            ours("p2", "a2", true),
+            ours("p3", "gone", true),
+            machine("w", "workbox", true),
+        ];
+        let plan = reconcile(&agents, &machines);
+        assert_eq!(
+            plan.matches,
+            BTreeMap::from([
+                ("a1".to_string(), "p1".to_string()),
+                ("a2".to_string(), "p2".to_string())
+            ])
+        );
+    }
+
+    #[test]
+    fn second_run_over_the_result_is_a_no_op() {
+        let agents = vec![
+            agent("a1", Status::Running),
+            agent("a2", Status::Sleeping),
+            agent("a3", Status::Running),
+        ];
+        let machines = vec![
+            ours("p1", "a1", false),
+            ours("p2", "a2", true),
+            ours("p3", "gone", true),
+            machine("w", "workbox", true),
+        ];
+        let plan = reconcile(&agents, &machines);
+        assert_eq!(
+            ops_of(&plan),
+            vec!["enable p1", "disable p2", "remove p3", "missing a3"]
+        );
+
+        let machines = after(&machines, &plan);
+        assert_eq!(machines.len(), 3);
+        let again = reconcile(&agents, &machines);
+        assert_eq!(ops_of(&again), vec!["missing a3"]);
+        assert_eq!(again.matches, plan.matches);
+    }
+
+    #[test]
+    fn apply_runs_exactly_the_planned_herdr_commands() {
+        let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines(&format!(
+            r#"[
+                {{"id":"p1","label":"proj/one","target":"{}","enabled":true}},
+                {{"id":"p2","label":"proj/two","target":"{}","enabled":false}},
+                {{"id":"p3","label":"proj/gone","target":"{}","enabled":true}},
+                {{"id":"w","label":"workbox","target":"workbox","enabled":true}}
+            ]"#,
+            target::target_for("env", "a1"),
+            target::target_for("env", "a2"),
+            target::target_for("env", "gone"),
+        ));
+        let herdr = fake.herdr();
+        let agents = vec![
+            agent("a1", Status::Sleeping),
+            agent("a2", Status::Running),
+            agent("a3", Status::Running),
+        ];
+        let machines = herdr.machines().unwrap();
+        let plan = reconcile(&agents, &machines);
+        let outcome = apply(&herdr, &plan);
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(outcome.applied.len(), 3);
+        assert_eq!(
+            fake.calls(),
+            vec![
+                "machine list --json".to_string(),
+                "machine disable p1".to_string(),
+                "machine enable p2".to_string(),
+                "machine remove p3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_collects_failures_instead_of_stopping() {
+        let herdr = Herdr::at("/nonexistent/herdr");
+        let plan = Plan {
+            ops: vec![Op::Disable("p1".into()), Op::Remove("p2".into())],
+            matches: BTreeMap::new(),
+        };
+        let outcome = apply(&herdr, &plan);
+        assert!(outcome.applied.is_empty());
+        assert_eq!(outcome.failed.len(), 2);
+        assert!(matches!(outcome.failed[0].0, Op::Disable(_)));
+        assert!(matches!(outcome.failed[1].0, Op::Remove(_)));
+    }
+
+    #[test]
+    fn dry_run_lines_name_the_machine() {
+        let machines = vec![ours("p1", "a1", true)];
+        let plan = reconcile(&[agent("a1", Status::Sleeping)], &machines);
+        assert_eq!(
+            plan.ops[0].describe(&machines),
+            "disable  machine label-p1 (p1)"
+        );
+    }
+}

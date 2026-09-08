@@ -860,7 +860,10 @@ fn describe_sessions(sessions: &[ca::ConsoleSession]) -> String {
 ///
 /// Best-effort: the workspace listing is a second request, and a list that
 /// prints ids because it failed is better than a list that errors.
-async fn place_names(client: &reqwest::Client, configs: &Configs) -> HashMap<String, String> {
+pub(crate) async fn place_names(
+    client: &reqwest::Client,
+    configs: &Configs,
+) -> HashMap<String, String> {
     let mut names = HashMap::new();
     let Ok(workspaces) = crate::workspace::workspaces_with_client(client, configs).await else {
         return names;
