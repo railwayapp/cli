@@ -10,7 +10,9 @@
 //!
 //! Transport is the same one [`super::patroni`] uses: the endpoints listen on
 //! localhost inside each member's own container, so an SSH exec into the
-//! container reaches them with no port-forwarding.
+//! container reaches them with no port-forwarding. The mutating endpoint is
+//! gated by the node's own `HEALTH_API_PASSWORD`, resolved inside that same
+//! container -- see [`HEALTH_API_AUTH_PRELUDE`].
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -130,16 +132,37 @@ pub async fn probe_nodes(
         .collect()
 }
 
+/// Credential for the node's health server, resolved INSIDE the container the
+/// way the image resolves it: `HEALTH_API_PASSWORD` gates the mutating routes
+/// (blank = open) and `HEALTH_API_USERNAME` defaults to `railway`. Leaves `$@`
+/// holding curl's `-u user:pass`, or nothing when the node carries no password
+/// -- an open node ignores the header and an enforcing one requires it, so one
+/// command spans a cluster mid-rollout, and no secret enters the exec payload,
+/// this process, or a log line.
+const HEALTH_API_AUTH_PRELUDE: &str = concat!(
+    r#"HEALTH_API_PW="${HEALTH_API_PASSWORD:-}"; "#,
+    r#"HEALTH_API_USER="${HEALTH_API_USERNAME:-railway}"; "#,
+    r#"if [ -n "$HEALTH_API_PW" ]; then set -- -u "$HEALTH_API_USER:$HEALTH_API_PW"; else set --; fi; "#,
+);
+
+/// The exact shell text the switchover runs, so a test can pin both halves:
+/// the credential resolution and the request itself.
+fn switchover_command(endpoint: &ResolvedEndpoint) -> String {
+    format!(
+        "{prelude}curl -s --max-time 8 -w '\\nHTTP_STATUS:%{{http_code}}' \"$@\" -X POST localhost:{port}{path}",
+        prelude = HEALTH_API_AUTH_PRELUDE,
+        port = endpoint.port,
+        path = endpoint.path,
+    )
+}
+
 /// Asks `instance_id`'s own colocated coordinator to make THAT node the
 /// primary. A 2xx means the handoff was accepted -- never that it completed;
 /// confirmation comes from the role endpoint flipping, which is the same
 /// signal everything else reads. Anything else is the coordinator's own
 /// refusal, surfaced with its body as the reason.
 pub async fn request_switchover(instance_id: &str, endpoint: &ResolvedEndpoint) -> Result<String> {
-    let command = format!(
-        "curl -s --max-time 8 -w '\\nHTTP_STATUS:%{{http_code}}' -X POST localhost:{}{}",
-        endpoint.port, endpoint.path
-    );
+    let command = switchover_command(endpoint);
 
     let output = tokio::time::timeout(
         Duration::from_secs(10),
@@ -234,5 +257,116 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unexpected response"));
+    }
+    fn endpoint() -> ResolvedEndpoint {
+        resolve(Some(&HttpEndpoint {
+            port: Some(8080),
+            path: Some("/switchover".to_string()),
+        }))
+        .unwrap()
+    }
+
+    /// Runs the emitted switchover text through a real `sh`, with a `curl`
+    /// shim that prints its argv one per line, so the assertions are about
+    /// what curl is actually handed rather than about string shapes.
+    fn curl_argv_for(env: &[(&str, &str)]) -> Vec<String> {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "cli-health-api-auth-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("curl");
+        std::fs::write(&shim, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let mut child = std::process::Command::new("sh")
+            .arg("-s")
+            // The shim must WIN over a real curl, but `sh` itself still has to
+            // be findable -- replacing PATH outright makes the spawn fail.
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .env_remove("HEALTH_API_PASSWORD")
+            .env_remove("HEALTH_API_USERNAME")
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(switchover_command(&endpoint()).as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn switchover_command_resolves_the_credential_inside_the_container() {
+        let cmd = switchover_command(&endpoint());
+        assert!(cmd.starts_with(HEALTH_API_AUTH_PRELUDE));
+        assert!(cmd.contains("${HEALTH_API_PASSWORD:-}"));
+        assert!(cmd.contains("${HEALTH_API_USERNAME:-railway}"));
+        assert!(cmd.contains(r#"set -- -u "$HEALTH_API_USER:$HEALTH_API_PW""#));
+        assert!(cmd.ends_with(r#""$@" -X POST localhost:8080/switchover"#));
+    }
+
+    #[test]
+    fn an_open_node_gets_no_credential_flag_at_all() {
+        let argv = curl_argv_for(&[]);
+        // No password in the container => no `-u` at all; `-u "railway:"`
+        // would be a malformed credential rather than "none".
+        assert!(!argv.iter().any(|a| a == "-u"), "{argv:?}");
+        assert_eq!(argv.last().unwrap(), "localhost:8080/switchover");
+    }
+
+    #[test]
+    fn a_password_alone_authenticates_as_the_default_user() {
+        let argv = curl_argv_for(&[("HEALTH_API_PASSWORD", "s3cret")]);
+        let at = argv
+            .iter()
+            .position(|a| a == "-u")
+            .expect("credential passed to curl");
+        assert_eq!(argv[at + 1], "railway:s3cret");
+        // curl carries the credential ahead of the request itself.
+        assert!(argv.iter().position(|a| a == "-X").unwrap() > at);
+    }
+
+    #[test]
+    fn an_explicit_username_wins_over_the_default() {
+        let argv = curl_argv_for(&[
+            ("HEALTH_API_PASSWORD", "s3cret"),
+            ("HEALTH_API_USERNAME", "ops"),
+        ]);
+        let at = argv
+            .iter()
+            .position(|a| a == "-u")
+            .expect("credential passed to curl");
+        assert_eq!(argv[at + 1], "ops:s3cret");
     }
 }
