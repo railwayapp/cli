@@ -921,7 +921,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|r| ListItem::new(tree_line(theme, r, app.loading.tick)))
+        .map(|r| ListItem::new(tree_line(theme, r, app)))
         .collect();
     let mut state = ListState::default();
     state.select(if rows.is_empty() {
@@ -1929,7 +1929,8 @@ fn status_glyph(status: &str) -> &'static str {
     }
 }
 
-fn tree_line(theme: &Theme, row: &Row, tick: usize) -> Line<'static> {
+fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
+    let tick = app.loading.tick;
     let indent = "  ".repeat(row.depth);
     let mut spans = vec![Span::raw(indent)];
 
@@ -1943,11 +1944,22 @@ fn tree_line(theme: &Theme, row: &Row, tick: usize) -> Line<'static> {
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
-        (RowKind::Agent(..), _) => {
-            let status = row.status.clone().unwrap_or_default();
+        (RowKind::Agent(w, p, e, a), _) => {
+            let status = row.status.as_deref().unwrap_or_default();
+            let sessions = match &app.tree[*w].projects[*p].envs[*e].agents {
+                Load::Loaded(agents) => agents.get(*a).map(|agent| &agent.sessions),
+                _ => None,
+            };
+            // Session discovery lives on the orb, not in a placeholder child.
+            // Keep the agent's actual status intact for its details/actions.
+            let (glyph, color) = match sessions {
+                Some(LoadSessions::Loading) => (spinner_frame(tick).to_string(), theme.pending),
+                Some(LoadSessions::Failed(_)) => ("◌".into(), theme.pending),
+                _ => (status_glyph(status).into(), status_color(theme, status)),
+            };
             spans.push(Span::styled(
-                format!("{} ", status_glyph(&status)),
-                Style::default().fg(status_color(theme, &status)),
+                format!("{glyph} "),
+                Style::default().fg(color),
             ));
             spans.push(Span::styled(
                 row.label.clone(),
@@ -3215,6 +3227,40 @@ mod tests {
             out.contains("connect"),
             "the footer names the action:\n{out}"
         );
+    }
+
+    #[test]
+    fn session_discovery_animates_the_agent_orb_and_restores_its_status() {
+        let mut app = app_with_tree();
+        app.screen = Screen::Manage;
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        if let Load::Loaded(agents) = &mut app.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loading;
+        }
+        app.loading.tick = 0;
+        assert!(draw(&app, 100, 30).contains("⠋ nimble-otter"));
+        app.tick();
+        let out = draw(&app, 100, 30);
+        assert!(out.contains("⠙ nimble-otter"));
+        assert!(
+            out.contains("running"),
+            "the detail pane retains the VM status: {out}"
+        );
+
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("temporary failure".into()));
+        let out = draw(&app, 100, 30);
+        assert!(out.contains("◌ nimble-otter"));
+        assert!(
+            out.contains("couldn't load sessions"),
+            "failure details remain available: {out}"
+        );
+
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(Vec::new()));
+        assert!(draw(&app, 100, 30).contains("● nimble-otter"));
     }
 
     /// One pane below 70 columns: two would leave the tree unreadable.

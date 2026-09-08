@@ -1508,30 +1508,6 @@ impl App {
                     dimmed: false,
                 });
             }
-            // A list still on its way — or one that failed to come — says so
-            // where the rows would be: silence here is indistinguishable
-            // from "no sessions", which reads as work lost.
-            match &agent.sessions {
-                LoadSessions::Loading => rows.push(Row {
-                    depth: 1,
-                    kind: RowKind::Note(w, p, e),
-                    label: "loading sessions…".into(),
-                    note: String::new(),
-                    status: None,
-                    expanded: None,
-                    dimmed: true,
-                }),
-                LoadSessions::Failed(err) => rows.push(Row {
-                    depth: 1,
-                    kind: RowKind::Note(w, p, e),
-                    label: format!("couldn't load sessions — retrying ({err})"),
-                    note: String::new(),
-                    status: None,
-                    expanded: None,
-                    dimmed: true,
-                }),
-                _ => {}
-            }
         }
     }
 
@@ -9423,23 +9399,32 @@ mod tests {
         assert!(rows[agent].note.is_empty());
     }
 
-    /// Closing the last session leaves only the agent row, without an empty-list hint.
+    /// Loading, failure, and an empty result all keep a single agent row.
+    /// Only actual sessions become children; the orb/detail pane carry state.
     #[test]
-    fn an_emptied_agent_shows_only_its_agent_row() {
-        let mut a = loaded_app();
-        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
-            agents[0].sessions = LoadSessions::Loaded(vec![]);
+    fn agents_without_sessions_have_no_placeholder_rows() {
+        for sessions in [
+            LoadSessions::NotLoaded,
+            LoadSessions::Loading,
+            LoadSessions::Failed("temporary failure".into()),
+            LoadSessions::Loaded(vec![]),
+        ] {
+            let mut a = loaded_app();
+            if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+                agents[0].sessions = sessions;
+            }
+            let rows = a.rows();
+            let agent = rows
+                .iter()
+                .position(|r| r.label == "nimble-otter")
+                .expect("the agent keeps its row");
+            assert!(rows[agent].selectable());
+            assert_eq!(rows[agent].status.as_deref(), Some("running"));
+            assert!(
+                rows.get(agent + 1).is_none_or(|row| row.depth == 0),
+                "an agent without sessions has no child rows: {rows:#?}"
+            );
         }
-        let rows = a.rows();
-        let agent = rows
-            .iter()
-            .position(|r| r.label == "nimble-otter")
-            .expect("the agent keeps its row");
-        assert!(rows[agent].selectable());
-        assert!(
-            rows.get(agent + 1).is_none_or(|row| row.depth == 0),
-            "an empty agent has no child rows: {rows:#?}"
-        );
     }
 
     /// Counts appear without expanding every agent: running ones are
