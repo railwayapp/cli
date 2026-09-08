@@ -1461,7 +1461,6 @@ impl App {
             // The agent heads its threads: always on the list, so a sleeping
             // or freshly created agent is reachable too — and an emptied one
             // still says what it is once its last session closes.
-            let empty = matches!(&agent.sessions, LoadSessions::Loaded(_)) && live.is_empty();
             rows.push(Row {
                 depth: 0,
                 kind: RowKind::Agent(w, p, e, a),
@@ -1507,20 +1506,6 @@ impl App {
                     },
                     expanded: None,
                     dimmed: false,
-                });
-            }
-            // An agent whose listing came back empty says so where its
-            // threads would be — otherwise closing the last session leaves a
-            // bare name with nothing marking it as an agent.
-            if empty {
-                rows.push(Row {
-                    depth: 1,
-                    kind: RowKind::Note(w, p, e),
-                    label: "no sessions — n starts one".into(),
-                    note: String::new(),
-                    status: None,
-                    expanded: None,
-                    dimmed: true,
                 });
             }
             // A list still on its way — or one that failed to come — says so
@@ -9438,11 +9423,9 @@ mod tests {
         assert!(rows[agent].note.is_empty());
     }
 
-    /// An agent whose listing came back empty keeps its row and gains a
-    /// dimmed "no sessions" note, so closing the last session never leaves a
-    /// bare name with nothing marking it as an agent.
+    /// Closing the last session leaves only the agent row, without an empty-list hint.
     #[test]
-    fn an_emptied_agent_says_it_has_no_sessions() {
+    fn an_emptied_agent_shows_only_its_agent_row() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].sessions = LoadSessions::Loaded(vec![]);
@@ -9452,12 +9435,11 @@ mod tests {
             .iter()
             .position(|r| r.label == "nimble-otter")
             .expect("the agent keeps its row");
-        assert_eq!(
-            rows[agent + 1].label,
-            "no sessions — n starts one",
-            "{rows:#?}"
+        assert!(rows[agent].selectable());
+        assert!(
+            rows.get(agent + 1).is_none_or(|row| row.depth == 0),
+            "an empty agent has no child rows: {rows:#?}"
         );
-        assert!(!rows[agent + 1].selectable());
     }
 
     /// Counts appear without expanding every agent: running ones are
