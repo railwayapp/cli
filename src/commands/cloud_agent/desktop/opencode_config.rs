@@ -156,6 +156,13 @@ impl Stores {
             (MANAGED, serde_json::to_vec_pretty(&self.managed)?),
         ];
         fs::create_dir_all(root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Electron rewrites its stores with 0644 after launch. Keep the
+            // containing directory private so saved passwords stay protected.
+            fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+        }
         for (name, contents) in files {
             let path = root.join(name);
             if let Ok(previous) = fs::read(&path) {
@@ -330,6 +337,11 @@ mod tests {
     #[test]
     fn merges_credentials_default_and_project_without_losing_other_state() {
         let root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let original = json!({"server": json!({"list": [{"type":"http", "http":{"url":"https://other.example", "password":"other-secret"}}], "projects":{"local":[{"worktree":"/local"}]}, "custom":42}).to_string(), "model":"keep"});
         fs::write(root.path().join(GLOBAL), original.to_string()).unwrap();
         fs::write(
@@ -362,6 +374,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
             for name in [GLOBAL, SETTINGS, "opencode.global.dat.railway-backup"] {
                 assert_eq!(
                     fs::metadata(root.path().join(name))
