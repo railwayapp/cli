@@ -126,6 +126,10 @@ pub struct LaunchArgs {
     #[clap(long)]
     opencode: bool,
 
+    /// Launch the latest OpenCode2 Beta, downloaded onto the agent at startup
+    #[clap(long)]
+    opencode2: bool,
+
     /// Launch Claude Code — runs `claude setup-token` for you to mint a
     /// token for the VM (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
     /// variables skip that when set)
@@ -230,6 +234,7 @@ impl LaunchArgs {
     pub fn is_bare(&self) -> bool {
         !self.codex
             && !self.opencode
+            && !self.opencode2
             && !self.claude
             && !self.grok
             && !self.railway
@@ -277,6 +282,7 @@ impl LaunchArgs {
         self.claude = slug == "claude";
         self.codex = slug == "codex";
         self.opencode = slug == "opencode";
+        self.opencode2 = slug == "opencode2";
         self.grok = slug == "grok";
         self.railway = slug == "railway";
         self.shell = slug == "shell";
@@ -374,6 +380,7 @@ impl LaunchArgs {
 enum Agent {
     Codex,
     OpenCode,
+    OpenCode2,
     Claude,
     Grok,
     Railway,
@@ -391,6 +398,7 @@ impl Agent {
         match self {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
+            Agent::OpenCode2 => "opencode2",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway-agent-tui",
@@ -411,6 +419,7 @@ impl Agent {
         match self {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
+            Agent::OpenCode2 => "opencode2",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway",
@@ -423,6 +432,7 @@ impl Agent {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
             "opencode" => Some(Agent::OpenCode),
+            "opencode2" => Some(Agent::OpenCode2),
             "grok" => Some(Agent::Grok),
             "railway" => Some(Agent::Railway),
             "shell" => Some(Agent::Shell),
@@ -435,6 +445,7 @@ impl Agent {
         match self {
             Agent::Codex => "Codex",
             Agent::OpenCode => "OpenCode",
+            Agent::OpenCode2 => "OpenCode2 [Beta]",
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
             Agent::Railway => "Railway",
@@ -451,7 +462,7 @@ impl Agent {
             Agent::OpenCode => OPENCODE_SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
-            Agent::Railway | Agent::Shell => "",
+            Agent::OpenCode2 | Agent::Railway | Agent::Shell => "",
         }
     }
 
@@ -470,7 +481,7 @@ impl Agent {
                 format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
             }
             Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
-            Agent::Railway | Agent::Shell => "true".to_string(),
+            Agent::OpenCode2 | Agent::Railway | Agent::Shell => "true".to_string(),
         }
     }
 
@@ -491,7 +502,7 @@ impl Agent {
                     .unwrap_or_else(|| home.join(".local/share"))
                     .join("opencode/auth.json"),
             ),
-            Agent::Claude | Agent::Railway | Agent::Shell => None,
+            Agent::OpenCode2 | Agent::Claude | Agent::Railway | Agent::Shell => None,
         }
     }
 
@@ -507,6 +518,9 @@ impl Agent {
             Agent::Codex => "sign in there with `codex login --device-auth`",
             Agent::OpenCode => {
                 "connect a provider in OpenCode Desktop or run `opencode auth login` on the agent"
+            }
+            Agent::OpenCode2 => {
+                "connect a provider in OpenCode Beta or run `opencode2 auth login` on the agent"
             }
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
@@ -641,10 +655,8 @@ const CLAUDE_CREDENTIAL_PROBE: &str =
 /// stdout: without it a relay-level failure is indistinguishable from a VM
 /// that answered but couldn't run the script.
 ///
-/// There is no install path and no update path. `cloud-agent-base` bakes every
-/// harness and keeps them current, so a missing binary is an image problem the
-/// user cannot fix by waiting — hence AGENT-MISSING rather than an install
-/// attempt that would race the image's own copy.
+/// Standard harnesses are baked into `cloud-agent-base`. OpenCode2 is a
+/// separate shim which downloads the latest official Beta when launched.
 ///
 /// `write_credential` is false when the agent already holds a working credential
 /// and we are reusing it. The seed must then be omitted entirely rather than run
@@ -668,11 +680,17 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let mcp_marker = mcp_sync::REMOTE_HASH_MARKER;
     let mcp_file = mcp_sync::REMOTE_HASH_FILE;
     let mode_seed = mode_seed(agent, app_mode);
+    let runtime_seed = if agent == Agent::OpenCode2 {
+        crate::commands::cloud_agent::opencode2::seed_script()
+    } else {
+        "true".to_string()
+    };
     format!(
         r#"umask 077
 {HARNESS_PATH}
 {seed}
 {COMMON_SEED}
+{runtime_seed}
 {mode_seed}
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
 printf '{mcp_marker}%s\n' "$(cat "{mcp_file}" 2>/dev/null || true)"
@@ -698,6 +716,11 @@ fn provision_script_with_skills(
     };
     let name = agent.name();
     let mode_seed = mode_seed(agent, app_mode);
+    let runtime_seed = if agent == Agent::OpenCode2 {
+        crate::commands::cloud_agent::opencode2::seed_script()
+    } else {
+        "true".to_string()
+    };
     let sync = skills_sync::sync_body(skills_hash);
     format!(
         r#"umask 077
@@ -706,6 +729,7 @@ fn provision_script_with_skills(
 payload="$HOME/.railway-skills-payload.tgz"
 cat > "$payload"
 {COMMON_SEED}
+{runtime_seed}
 {mode_seed}
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi
 {sync}"#
@@ -790,6 +814,9 @@ fn remote_command(
     // conversation bug the flag exists to fix. The `-- args` exec form below
     // is left alone: its arguments are the caller's, flags included.
     let name = match agent {
+        // Beta and standard share a background-service discovery file.
+        // Each Beta terminal session must use its freshly selected runtime.
+        Agent::OpenCode2 => "opencode2 --standalone",
         Agent::Railway => {
             "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\""
         }
@@ -800,7 +827,7 @@ fn remote_command(
         SessionStyle::Pane => "",
     };
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(prompt) if agent == Agent::OpenCode => format!(
+        Some(prompt) if matches!(agent, Agent::OpenCode | Agent::OpenCode2) => format!(
             "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --prompt {}; {}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
             terminal_reset_printf()
@@ -2375,6 +2402,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
     let flagged: Vec<Agent> = [
         (args.codex, Agent::Codex),
         (args.opencode, Agent::OpenCode),
+        (args.opencode2, Agent::OpenCode2),
         (args.claude, Agent::Claude),
         (args.grok, Agent::Grok),
         (args.railway, Agent::Railway),
@@ -2386,7 +2414,9 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
     match flagged.as_slice() {
         [agent] => return Ok(*agent),
         [] => {}
-        _ => bail!("Pick one agent: --codex, --claude, --opencode, --grok, or --railway."),
+        _ => bail!(
+            "Pick one agent: --codex, --claude, --opencode, --opencode2, --grok, or --railway."
+        ),
     }
 
     if let Ok(slug) = std::env::var(AGENT_ENV_VAR) {
@@ -2394,7 +2424,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
                 anyhow!(
-                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, grok, railway, or shell)."
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, opencode2, grok, railway, or shell)."
                 )
             })?;
             return Ok(agent);
@@ -2746,6 +2776,9 @@ async fn prepare_inner(
     // know whether the agent already holds a credential from a previous run —
     // see `PendingAuth`.
     let pending = match agent {
+        Agent::OpenCode2 => PendingAuth::SignInOnAgent {
+            note: "OpenCode2 [Beta] downloads its latest runtime at startup. Connect a provider in Beta Desktop or run `opencode2 auth login` on the agent.".into(),
+        },
         Agent::Codex | Agent::Grok | Agent::OpenCode => {
             ssh_tel::timed_for("cloud_agent_launch", "credential", async {
                 local_signin(agent, home)
@@ -3025,7 +3058,7 @@ async fn prepare_inner(
                     Ok(())
                 } else if out.contains("AGENT-MISSING") {
                     bail!(
-                        "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
+                        "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). The harness could not be prepared; report this with the agent id.",
                         agent.name()
                     )
                 } else {
@@ -3533,6 +3566,27 @@ mod tests {
     }
 
     #[test]
+    fn opencode2_launch_seeds_the_shim_and_preserves_prompt_arguments() {
+        let args = LaunchArgs::for_app_mode("opencode2", None, None);
+        assert_eq!(
+            resolve_agent_choice(&args, &mut AgentPrefs::default(), Path::new("/tmp")).unwrap(),
+            Agent::OpenCode2
+        );
+        let script = provision_script(Agent::OpenCode2, false, true);
+        assert!(script.contains("~/.local/bin/opencode2"));
+        assert!(script.contains("command -v opencode2"));
+        assert!(!provision_script(Agent::OpenCode, false, true).contains("opencode-beta/releases"));
+        let command = remote_command(
+            Agent::OpenCode2,
+            "",
+            Some("explain this project"),
+            &[],
+            SessionStyle::Pane,
+        );
+        assert!(command.contains("opencode2 --standalone --prompt 'explain this project'"));
+    }
+
+    #[test]
     fn opencode_desktop_provisioning_overrides_a_saved_default() {
         let home = tempfile::tempdir().unwrap();
         let args = LaunchArgs::for_app_mode("opencode", None, None);
@@ -3873,6 +3927,7 @@ mod tests {
             Agent::Codex,
             Agent::Grok,
             Agent::OpenCode,
+            Agent::OpenCode2,
             Agent::Railway,
             Agent::Shell,
         ] {
@@ -3919,6 +3974,7 @@ mod tests {
             Agent::Claude,
             Agent::Grok,
             Agent::OpenCode,
+            Agent::OpenCode2,
             Agent::Railway,
             Agent::Shell,
         ] {

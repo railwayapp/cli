@@ -25,7 +25,46 @@ use super::theme::Theme;
 /// carry-a-local-sign-in step, just the VM's own integrated Railway
 /// credentials. `shell` closes it: not a harness at all, just the VM's login
 /// shell, so it takes no prompt and sits after every real agent.
-pub const HARNESSES: &[&str] = &["railway", "claude", "codex", "grok", "opencode", "shell"];
+pub const HARNESSES: &[&str] = &[
+    "railway",
+    "claude",
+    "codex",
+    "grok",
+    "opencode",
+    "opencode2",
+    "shell",
+];
+
+/// A single OpenCode row can switch editions without adding a second picker row.
+pub fn opencode_alternate(index: usize) -> Option<usize> {
+    let slug = match *HARNESSES.get(index)? {
+        "opencode" => "opencode2",
+        "opencode2" => "opencode",
+        _ => return None,
+    };
+    HARNESSES.iter().position(|candidate| *candidate == slug)
+}
+
+pub fn harness_picker_indices(cursor: usize) -> Vec<usize> {
+    let hidden = if HARNESSES.get(cursor) == Some(&"opencode2") {
+        "opencode"
+    } else {
+        "opencode2"
+    };
+    HARNESSES
+        .iter()
+        .enumerate()
+        .filter_map(|(i, slug)| (*slug != hidden).then_some(i))
+        .collect()
+}
+
+pub fn harness_label(slug: &str) -> &str {
+    match slug {
+        "opencode" => "OpenCode",
+        "opencode2" => "OpenCode2 [Beta]",
+        _ => slug,
+    }
+}
 
 /// The slice of [`HARNESSES`] that can be saved as the default agent —
 /// everything but `shell`, which starts no harness and so makes no sense as
@@ -4204,6 +4243,10 @@ impl App {
                 self.prompt_cursor = self.prompt.chars().count();
                 Ok(None)
             }
+            KeyCode::Tab if opencode_alternate(self.harness).is_some() => {
+                self.harness = opencode_alternate(self.harness).unwrap();
+                Ok(None)
+            }
             KeyCode::BackTab => {
                 self.harness = (self.harness + 1) % HARNESSES.len();
                 Ok(None)
@@ -4588,13 +4631,19 @@ impl App {
     /// session `n` would have made where the cursor points.
     fn on_key_harness_pick(&mut self, key: KeyEvent) -> Option<Effect> {
         let cursor = self.harness_pick?;
+        let visible = harness_picker_indices(cursor);
+        let row = visible.iter().position(|index| *index == cursor)?;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                self.harness_pick = Some(cursor.saturating_sub(1));
+                self.harness_pick = Some(visible[row.saturating_sub(1)]);
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.harness_pick = Some((cursor + 1).min(HARNESSES.len() - 1));
+                self.harness_pick = Some(visible[(row + 1).min(visible.len() - 1)]);
+                None
+            }
+            KeyCode::Tab => {
+                self.harness_pick = Some(opencode_alternate(cursor).unwrap_or(cursor));
                 None
             }
             KeyCode::Enter => {
@@ -4635,6 +4684,11 @@ impl App {
             }
             KeyCode::Backspace if !self.shell_selected() => {
                 draft.pop();
+                self.manage_prompt = Some(draft);
+                None
+            }
+            KeyCode::Tab if opencode_alternate(self.harness).is_some() => {
+                self.harness = opencode_alternate(self.harness).unwrap();
                 self.manage_prompt = Some(draft);
                 None
             }
@@ -7173,6 +7227,47 @@ mod tests {
     }
 
     #[test]
+    fn tab_switches_opencode_editions_and_keeps_the_prompt() {
+        let mut a = app();
+        a.set_harness(Some("opencode"));
+        a.prompt = "explain the code".into();
+        a.on_key(key(KeyCode::Tab));
+        assert_eq!(a.harness_name(), "opencode2");
+        assert_eq!(a.prompt, "explain the code");
+        a.on_key(key(KeyCode::Tab));
+        assert_eq!(a.harness_name(), "opencode");
+    }
+
+    #[test]
+    fn picker_has_one_opencode_row_and_launches_the_beta_choice() {
+        let mut a = app();
+        a.set_harness(Some("opencode"));
+        a.screen = Screen::HarnessPick;
+        a.harness_pick = Some(a.harness);
+        a.harness_pick_agent = Some("existing-agent".into());
+        a.target = Some(Target {
+            project_id: "p".into(),
+            project_name: "p".into(),
+            environment_id: "e".into(),
+            environment_name: "e".into(),
+        });
+        a.on_key(key(KeyCode::Tab));
+        let beta = a.harness_pick.unwrap();
+        assert_eq!(HARNESSES[beta], "opencode2");
+        assert_eq!(harness_picker_indices(beta).len(), HARNESSES.len() - 1);
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(HARNESSES[a.harness_pick.unwrap()], "shell");
+        a.on_key(key(KeyCode::Up));
+        assert_eq!(HARNESSES[a.harness_pick.unwrap()], "opencode");
+        a.on_key(key(KeyCode::Tab));
+        let Some(Effect::Launch(request)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected launch");
+        };
+        assert_eq!(request.harness, "opencode2");
+        assert_eq!(request.agent_id.as_deref(), Some("existing-agent"));
+    }
+
+    #[test]
     fn shift_tab_cycles_the_harness_on_the_prompt() {
         let mut a = app();
         assert_eq!(a.harness_name(), "claude");
@@ -7182,6 +7277,8 @@ mod tests {
         assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "opencode");
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "opencode2");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "shell", "shell closes the cycle");
         a.on_key(key(KeyCode::BackTab));

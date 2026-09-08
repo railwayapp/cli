@@ -87,6 +87,7 @@ railway ca desktop --claude
 railway ca desktop --codex
 railway ca desktop --opencode --agent my-box
 railway ca desktop --opencode --new
+railway ca desktop --opencode2 --new
 ```
 
 App flags can be combined to prepare the same agent for several apps. Setup
@@ -101,19 +102,24 @@ OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
 in the background on port 8080, checks its public endpoint, and saves the URL,
 username, password, default server, and remote project in Desktop's settings.
-It configures detected standard OpenCode and [OpenCode 2 Beta](https://github.com/anomalyco/opencode-beta)
-installations with the same connection; no extra flag is needed. Standard uses
-`ai.opencode.desktop`, and Beta uses `ai.opencode.desktop.beta`. Both JSON stores
-and newer `drafts.sqlite` renderer stores are supported; existing drafts and
-other settings are preserved. On Windows/Linux, launch each edition once so
-its configuration directory can be detected.
+`--opencode` configures only standard OpenCode (`ai.opencode.desktop`).
+`--opencode2` configures only [OpenCode2 Beta](https://github.com/anomalyco/opencode-beta)
+(`ai.opencode.desktop.beta`), using its compatible server runtime. These two
+flags cannot be combined. JSON server settings and SQLite renderer state are
+supported; a drafts-only database does not change where settings are saved.
 
-Beta `0.0.0-beta-19289` requires a newer server API than stable OpenCode 1.18.29.
-Saving Desktop settings does not upgrade the remote binary; the CLI reports
-when the server is incompatible with Beta. A matching OpenCode 2 server is
-required to use that connection in Beta.
+For Beta, the CLI seeds an `opencode2` shim on the agent. Each new process checks
+the latest official Beta release, downloads the Linux Desktop package for the
+agent's architecture, verifies its published SHA-256, and extracts just the CLI
+executable. The first start can take several minutes. A verified cached version
+is reused until the release changes; running sessions keep their executable.
+A failed update reports an error and preserves the previous runtime.
 
-Setup also prints the connection details. On macOS, it gracefully restarts each
+Use `railway ca --opencode2` for a terminal session. In the new-session picker,
+highlight OpenCode and press Tab to switch to **OpenCode2 [Beta]**. Tab also
+switches editions in the prompt footer; Shift+Tab cycles harnesses.
+
+Setup also prints the connection details. On macOS, it gracefully restarts the selected
 running edition to apply the settings. Quit the apps before setup on Windows/Linux.
 Private `.railway-backup` files preserve the previous settings and server state.
 You can close the terminal after setup; there is no local tunnel to keep running.
@@ -121,8 +127,8 @@ You can close the terminal after setup; there is no local tunnel to keep running
 Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, find
 `Railway: <agent-name>` and `/app` (or your `--dir`), then use that project's
 menu → New session. Setting a default server
-does not move existing chats. Provider sign-ins from `auth.json` are copied
-when available. OpenCode's newer chat mode uses a separate credential store;
+does not move existing chats. Standard OpenCode provider sign-ins from `auth.json` are copied
+when available. Beta uses its own sign-in store; connect providers there. OpenCode's newer chat mode uses a separate credential store;
 if your provider is missing there, connect it in the remote server's settings.
 
 OpenCode uses the agent's public app port (8080). Setup refuses to take over
@@ -132,7 +138,8 @@ server and its credentials, or starts it again after a sleep/wake or restart.
 The remote credential and process state are stored privately under
 `~/.railway/desktop/opencode/`; startup logs are in `server.log` there.
 
-`railway ca desktop --opencode --agent my-box --remove` stops the managed
+`railway ca desktop --opencode --agent my-box --remove` (or `--opencode2`
+for Beta) stops the managed
 OpenCode process on a running agent and removes the shared SSH block and the
 Desktop connection/project saved by setup. It does not wake a sleeping agent.
 The agent remains; `railway ca sleep my-box` stops its compute bill.

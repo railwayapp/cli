@@ -48,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd()}).encode())
+        self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': 'v0.0.0-beta-test'} if 'opencode2' in sys.argv[0] else {})}).encode())
     def log_message(self,*args): pass
 port = int(sys.argv[sys.argv.index('--port') + 1])
 ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
@@ -65,6 +65,11 @@ class BootstrapTests(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_text('#!' + sys.executable + '\n' + FAKE)
         binary.chmod(0o700)
+        beta = self.home / '.local/bin/opencode2'
+        beta.parent.mkdir(parents=True)
+        beta.write_text(binary.read_text())
+        beta.chmod(0o700)
+        self.harness = 'opencode'
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             self.port = sock.getsockname()[1]
@@ -73,9 +78,11 @@ class BootstrapTests(unittest.TestCase):
         self.state = self.home / '.railway/desktop/opencode/server.json'
 
     def run_bootstrap(self, request=None, check=True):
+        request = dict(request or {'directory': str(self.directory), 'password': 'test-password'})
+        request.setdefault('harness', self.harness)
         result = subprocess.run(
             [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port)],
-            input=json.dumps(request or {'directory': str(self.directory), 'password': 'test-password'}),
+            input=json.dumps(request),
             capture_output=True, text=True, timeout=15, env=self.env,
         )
         if check:
@@ -108,6 +115,21 @@ class BootstrapTests(unittest.TestCase):
         restarted = self.run_bootstrap({'directory': str(self.directory), 'password': 'different'})
         self.assertFalse(restarted['reused'])
         self.assertEqual(restarted['password'], first['password'])
+
+    def test_beta_starts_its_own_binary_and_rejects_cross_edition_reuse_or_stop(self):
+        self.harness = 'opencode2'
+        first = self.run_bootstrap()
+        self.assertFalse(first['reused'])
+        self.assertTrue(self.run_bootstrap()['reused'])
+        self.assertEqual(json.loads(self.state.read_text())['harness'], 'opencode2')
+        for request in [
+            {'harness': 'opencode', 'action': 'stop'},
+            {'harness': 'opencode', 'directory': str(self.directory), 'password': 'other'},
+        ]:
+            result = self.run_bootstrap(request, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('another OpenCode edition', result.stderr)
+        self.assertTrue(self.run_bootstrap()['reused'])
 
     def test_boot_credentials_take_precedence_over_candidate(self):
         self.env['OPENCODE_SERVER_USERNAME'] = 'boot-user'

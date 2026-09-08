@@ -707,12 +707,19 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
         ))
         .title_bottom(Line::from(vec![
             Span::styled(
-                format!(" {} ", app.harness_name()),
+                format!(" {} ", super::app::harness_label(app.harness_name())),
                 Style::default()
                     .fg(if focused { theme.accent } else { theme.fg })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("shift+tab ", Style::default().fg(theme.dim)),
+            Span::styled(
+                if super::app::opencode_alternate(app.harness).is_some() {
+                    "shift+tab · tab version "
+                } else {
+                    "shift+tab "
+                },
+                Style::default().fg(theme.dim),
+            ),
         ]))
         .title_bottom(
             Line::from(Span::styled(count, Style::default().fg(theme.dim))).right_aligned(),
@@ -1448,17 +1455,24 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
         return;
     };
     let theme = app.theme;
-    let rows: Vec<PanelRow> = crate::commands::cloud_agent::tui::app::HARNESSES
+    let indices = super::app::harness_picker_indices(cursor);
+    let rows: Vec<PanelRow> = indices
         .iter()
+        .map(|i| super::app::HARNESSES[*i])
         .map(|slug| PanelRow {
-            label: (*slug).to_string(),
+            label: super::app::harness_label(slug).to_string(),
             tag: String::new(),
             detail: super::wizard::harness_blurb(slug).to_string(),
         })
         .collect();
     let footer = Line::from(chord_spans(
         theme,
-        &[("↑↓", "choose"), ("enter", "new agent"), ("esc", "cancel")],
+        &[
+            ("↑↓", "choose"),
+            ("tab", "OpenCode version"),
+            ("enter", "new agent"),
+            ("esc", "cancel"),
+        ],
     ));
 
     render_panel(
@@ -1470,7 +1484,7 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
             heading: "Which agent should the new Cloud Agent run?",
             position: None,
             rows: &rows,
-            cursor,
+            cursor: indices.iter().position(|i| *i == cursor).unwrap_or(0),
             footer,
         },
     );
@@ -1499,12 +1513,19 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
         ))
         .title_bottom(Line::from(vec![
             Span::styled(
-                format!(" {} ", app.harness_name()),
+                format!(" {} ", super::app::harness_label(app.harness_name())),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("shift+tab ", Style::default().fg(theme.dim)),
+            Span::styled(
+                if super::app::opencode_alternate(app.harness).is_some() {
+                    "shift+tab · tab version "
+                } else {
+                    "shift+tab "
+                },
+                Style::default().fg(theme.dim),
+            ),
         ]))
         .title_bottom(
             Line::from(Span::styled(

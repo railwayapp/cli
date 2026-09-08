@@ -60,9 +60,16 @@ async fn bootstrap(alias: &str, ssh_config: &Path, request: serde_json::Value) -
     let mut stdin = child.stdin.take().context("SSH stdin unavailable")?;
     stdin.write_all(&payload).await?;
     drop(stdin);
-    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
-        .await
-        .context("OpenCode setup timed out. Rerun the command to check or finish setup.")??;
+    let output = tokio::time::timeout(
+        Duration::from_secs(if request["harness"] == "opencode2" {
+            660
+        } else {
+            90
+        }),
+        child.wait_with_output(),
+    )
+    .await
+    .context("OpenCode setup timed out. Rerun the command to check or finish setup.")??;
     if !output.status.success() {
         // Never echo stdout: it may contain the connection password if SSH
         // disconnects after the bootstrap has printed its result.
@@ -85,11 +92,12 @@ pub(super) async fn start(
     directory: &str,
     ssh_config: &Path,
     password: &str,
+    beta: bool,
 ) -> Result<Connection> {
     let response = bootstrap(
         alias,
         ssh_config,
-        json!({ "directory": directory, "password": password }),
+        json!({ "directory": directory, "password": password, "harness": if beta { "opencode2" } else { "opencode" } }),
     )
     .await?;
     let connection: Connection =
@@ -97,12 +105,17 @@ pub(super) async fn start(
     // A fresh client carries no Railway API credentials. Never follow a
     // redirect with OpenCode's password or accept a plaintext public URL.
     validate_url(&connection.url)?;
-    verify_connection(&connection).await?;
+    verify_connection(&connection, beta).await?;
     Ok(connection)
 }
 
-pub(super) async fn stop(alias: &str, ssh_config: &Path) -> Result<()> {
-    bootstrap(alias, ssh_config, json!({ "action": "stop" })).await?;
+pub(super) async fn stop(alias: &str, ssh_config: &Path, beta: bool) -> Result<()> {
+    bootstrap(
+        alias,
+        ssh_config,
+        json!({ "action": "stop", "harness": if beta { "opencode2" } else { "opencode" } }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -121,12 +134,13 @@ fn validate_url(value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-async fn verify_connection(connection: &Connection) -> Result<()> {
+async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()?;
-    let health = validate_url(&connection.url)?.join("global/health")?;
+    let health =
+        validate_url(&connection.url)?.join(if beta { "api/health" } else { "global/health" })?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let response = client
@@ -145,7 +159,9 @@ async fn verify_connection(connection: &Connection) -> Result<()> {
                     .json::<serde_json::Value>()
                     .await
                     .ok()
-                    .is_some_and(|body| body["healthy"] == true)
+                    .is_some_and(|body| {
+                        body["healthy"] == true && (!beta || body["version"].is_string())
+                    })
             {
                 let unauthenticated = client.get(health.clone()).send().await?;
                 if unauthenticated.status() != reqwest::StatusCode::UNAUTHORIZED {

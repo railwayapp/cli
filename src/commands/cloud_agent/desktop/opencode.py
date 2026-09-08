@@ -45,8 +45,9 @@ def owned_process(state):
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
 
 
-def health(port, credentials=None):
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/global/health")
+def health(port, credentials=None, harness="opencode"):
+    path = "api/health" if harness == "opencode2" else "global/health"
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/{path}")
     if credentials:
         token = base64.b64encode(
             f"{credentials['username']}:{credentials['password']}".encode()
@@ -56,7 +57,7 @@ def health(port, credentials=None):
         # Loopback probes must never pass credentials to an HTTP_PROXY.
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=1) as response:
             body = json.loads(response.read(65536))
-            return response.status, body.get("healthy") is True
+            return response.status, body.get("healthy") is True and (harness != "opencode2" or isinstance(body.get("version"), str))
     except urllib.error.HTTPError as error:
         return error.code, False
     except (OSError, ValueError):
@@ -74,6 +75,9 @@ def port_available(port):
 
 
 def setup(request, home, port=8080):
+    harness = request.get("harness", "opencode")
+    if harness not in ("opencode", "opencode2"):
+        raise SetupError("Unsupported OpenCode harness.")
     os.umask(0o077)
     root = Path(home) / ".railway" / "desktop" / "opencode"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -85,6 +89,8 @@ def setup(request, home, port=8080):
         except BlockingIOError:
             raise SetupError("Another OpenCode setup is running on this agent. Retry when it finishes.")
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if owned_process(state) and state.get("harness", "opencode") != harness:
+            raise SetupError("This agent is running another OpenCode edition. Use --new, or --remove with that edition's flag first.")
         if request.get("action") == "stop":
             if owned_process(state):
                 try:
@@ -120,7 +126,7 @@ def setup(request, home, port=8080):
 
         reused = False
         if not port_available(port):
-            if owned_process(state) and health(port, credentials) == (200, True) and health(port)[0] == 401:
+            if owned_process(state) and health(port, credentials, harness) == (200, True) and health(port, harness=harness)[0] == 401:
                 reused = True
             else:
                 raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
@@ -134,23 +140,23 @@ def setup(request, home, port=8080):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            state = dict(credentials)
+            state = dict(credentials, harness=harness)
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
-                    ["opencode", "serve", "--hostname", "0.0.0.0", "--port", str(port)],
+                    [harness, "serve", "--hostname", "0.0.0.0", "--port", str(port)],
                     cwd=directory, env=environment, stdin=subprocess.DEVNULL,
                     stdout=log, stderr=subprocess.STDOUT, close_fds=True,
                     start_new_session=True,
                 )
             state.update({"pid": child.pid, "start": process_start(child.pid)})
             save(state_path, state)
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + (600 if harness == "opencode2" else 60)
             while time.monotonic() < deadline:
                 if child.poll() is not None:
                     raise SetupError(f"OpenCode exited during startup. Check {root / 'server.log'} on the agent.")
-                if health(port, credentials) == (200, True):
-                    if health(port)[0] != 401:
+                if health(port, credentials, harness) == (200, True):
+                    if health(port, harness=harness)[0] != 401:
                         os.killpg(child.pid, signal.SIGTERM)
                         raise SetupError("OpenCode is not enforcing password authentication; stopped it.")
                     break

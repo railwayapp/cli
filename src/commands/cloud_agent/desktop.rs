@@ -41,7 +41,7 @@ mod opencode_config;
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in detected\nstandard OpenCode and OpenCode 2 Beta installations. No extra flag is needed.\nOn macOS, running editions are gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nOn macOS, running editions are gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -55,6 +55,10 @@ pub struct Args {
     /// Start OpenCode on the agent and configure its Desktop app connection
     #[clap(long)]
     opencode: bool,
+
+    /// Download the latest OpenCode2 Beta on the agent and configure Beta Desktop
+    #[clap(long, conflicts_with = "opencode")]
+    opencode2: bool,
 
     /// Agent to point the app at, by name or id (defaults to this
     /// environment's, creating one if there is none)
@@ -104,9 +108,14 @@ enum App {
     Claude,
     Codex,
     OpenCode,
+    OpenCode2,
 }
 
 impl App {
+    fn is_opencode(self) -> bool {
+        matches!(self, Self::OpenCode | Self::OpenCode2)
+    }
+
     /// The harness slug `railway code` uses, so provisioning seeds the
     /// credential this app's remote half will look for.
     fn harness(self) -> &'static str {
@@ -114,6 +123,7 @@ impl App {
             App::Claude => "claude",
             App::Codex => "codex",
             App::OpenCode => "opencode",
+            App::OpenCode2 => "opencode2",
         }
     }
 
@@ -122,6 +132,7 @@ impl App {
             App::Claude => "Claude Code Desktop",
             App::Codex => "Codex",
             App::OpenCode => "OpenCode Desktop",
+            App::OpenCode2 => "OpenCode2 [Beta] Desktop",
         }
     }
 
@@ -131,6 +142,7 @@ impl App {
             App::Claude => "claude",
             App::Codex => "codex",
             App::OpenCode => "opencode",
+            App::OpenCode2 => "opencode2",
         }
     }
 
@@ -139,7 +151,7 @@ impl App {
         match self {
             App::Claude => "the environment dropdown, under the name below",
             App::Codex => "the SSH host list — Codex reads ~/.ssh/config itself",
-            App::OpenCode => "the server picker",
+            App::OpenCode | App::OpenCode2 => "the server picker",
         }
     }
 }
@@ -160,11 +172,12 @@ pub async fn command(args: Args) -> Result<()> {
     if args.dry_run {
         return dry_run(&args, &apps, &home, &ssh_config_path).await;
     }
-    if apps.contains(&App::OpenCode) {
-        opencode_config::preflight()?;
+    if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::preflight(args.opencode2)?;
     }
     let opencode_password = apps
-        .contains(&App::OpenCode)
+        .iter()
+        .any(|app| app.is_opencode())
         .then(opencode::generate_password);
 
     // Same preflight as a launch, and for the same reason: without the flag the
@@ -254,7 +267,7 @@ pub async fn command(args: Args) -> Result<()> {
         let ssh_apps = apps
             .iter()
             .copied()
-            .filter(|app| *app != App::OpenCode)
+            .filter(|app| !app.is_opencode())
             .collect::<Vec<_>>();
         if ssh_apps.is_empty() {
             Vec::new()
@@ -262,7 +275,7 @@ pub async fn command(args: Args) -> Result<()> {
             verify(&alias, &ssh_apps, &ssh_config_path).await
         }
     };
-    if custom_config && apps.iter().any(|app| *app != App::OpenCode) {
+    if custom_config && apps.iter().any(|app| !app.is_opencode()) {
         println!(
             "\n{} {} is not where the apps look. Make sure {} pulls it in:\n    {}",
             "!".yellow().bold(),
@@ -273,8 +286,23 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     let connection = if let Some(password) = &opencode_password {
-        println!("\nStarting OpenCode and checking its HTTPS connection...");
-        Some(opencode::start(&alias, &args.dir, &ssh_config_path, password).await?)
+        if args.opencode2 {
+            println!(
+                "\nStarting OpenCode2 [Beta] and checking its HTTPS connection. The first startup downloads the latest Beta and may take several minutes..."
+            );
+        } else {
+            println!("\nStarting OpenCode and checking its HTTPS connection...");
+        }
+        Some(
+            opencode::start(
+                &alias,
+                &args.dir,
+                &ssh_config_path,
+                password,
+                args.opencode2,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -310,7 +338,7 @@ pub async fn command(args: Args) -> Result<()> {
         println!("  Username:   {}", connection.username);
         println!("  Password:   {}", connection.password);
         println!("  Directory:  {}", connection.directory);
-        opencode_config::configure(&connection, &prepared.agent_id, &prepared.agent_name)
+        opencode_config::configure(args.opencode2, &connection, &prepared.agent_id, &prepared.agent_name)
             .await
             .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
@@ -454,7 +482,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
             serde_json::to_string_pretty(&json!({ "sshConfigs": [entry] }))?
         );
     }
-    if apps.contains(&App::OpenCode) {
+    if apps.iter().any(|app| app.is_opencode()) {
         println!("\nWould generate credentials for a new agent, or reuse its saved credentials.");
         println!(
             "Would start password-protected OpenCode in the background on port 8080 from {}.",
@@ -463,7 +491,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         println!(
             "Would verify the agent's existing HTTPS address and print its connection details."
         );
-        for target in opencode_config::targets()? {
+        for target in opencode_config::targets(args.opencode2)? {
             println!(
                 "Would save the authenticated server, default server, and project in {} ({}).",
                 target.name(),
@@ -519,8 +547,13 @@ fn selected_apps(args: &Args) -> Result<Vec<App>> {
     if args.opencode {
         apps.push(App::OpenCode);
     }
+    if args.opencode2 {
+        apps.push(App::OpenCode2);
+    }
     if apps.is_empty() {
-        bail!("Name an app: --claude, --codex, --opencode, or any combination.");
+        bail!(
+            "Name an app: --claude, --codex, --opencode, or --opencode2. OpenCode editions must be configured separately."
+        );
     }
     Ok(apps)
 }
@@ -533,18 +566,19 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     // `--agent` is how that is cleaned up.
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
 
-    let removed_opencode = if apps.contains(&App::OpenCode) {
-        opencode_config::remove(&agent.id).await?
+    let removed_opencode = if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::remove(&agent.id, args.opencode2).await?
     } else {
         false
     };
-    let stopped_opencode = apps.contains(&App::OpenCode) && agent.status == ca::Status::Running;
+    let stopped_opencode =
+        apps.iter().any(|app| app.is_opencode()) && agent.status == ca::Status::Running;
     if stopped_opencode {
         let alias = args
             .alias
             .clone()
             .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
-        opencode::stop(&alias, ssh_config_path).await?;
+        opencode::stop(&alias, ssh_config_path, args.opencode2).await?;
     }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
     let removed_block = ssh_config::remove_marked_block(ssh_config_path, &marker)?;
@@ -733,7 +767,7 @@ async fn verify(alias: &str, apps: &[App], ssh_config_path: &Path) -> Vec<Check>
             ok: probe.is_ok(),
             detail: probe.err().map(|e| format!("{e:#}")),
         });
-        if *app == App::OpenCode {
+        if app.is_opencode() {
             let probe = ssh_alias(
                 alias,
                 &["bash", "-lc", "opencode serve --help"],
@@ -825,11 +859,11 @@ fn summarize(
         }
     }
 
-    if apps.iter().any(|app| *app != App::OpenCode) {
+    if apps.iter().any(|app| !app.is_opencode()) {
         println!("\n{}", "Next:".bold());
     }
     for app in apps {
-        if *app == App::OpenCode {
+        if app.is_opencode() {
             continue;
         }
         println!(
@@ -838,7 +872,7 @@ fn summarize(
             app.where_it_appears()
         );
     }
-    if !apps.contains(&App::OpenCode) {
+    if !apps.iter().any(|app| app.is_opencode()) {
         println!(
             "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
             "!".yellow().bold(),
@@ -869,6 +903,16 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn opencode_editions_are_explicit_and_mutually_exclusive() {
+        assert_eq!(
+            selected_apps(&args_for(&["--opencode2"])).unwrap(),
+            vec![App::OpenCode2]
+        );
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--opencode2"]).is_err());
+        assert!(Args::try_parse_from(["desktop", "--opencode2", "--new"]).is_ok());
     }
 
     #[test]

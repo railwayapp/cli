@@ -43,19 +43,6 @@ impl Channel {
             Self::Beta => "OpenCode Beta",
         }
     }
-
-    fn installed(self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            let app = format!("{}.app", self.name());
-            Path::new("/Applications").join(&app).is_dir()
-                || dirs::home_dir().is_some_and(|home| home.join("Applications").join(app).is_dir())
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
-    }
 }
 
 pub(super) struct Target {
@@ -69,30 +56,22 @@ impl Target {
     }
 }
 
-fn detected_targets(base: &Path, installed: impl Fn(Channel) -> bool) -> Vec<Target> {
-    let mut targets = [Channel::Standard, Channel::Beta]
-        .into_iter()
-        .filter(|channel| base.join(channel.id()).is_dir() || installed(*channel))
-        .map(|channel| Target {
-            channel,
-            root: base.join(channel.id()),
-        })
-        .collect::<Vec<_>>();
-    // Preserve setup before the first standard Desktop launch. A beta-only
-    // installation/configuration is targeted without creating standard stores.
-    if targets.is_empty() {
-        targets.push(Target {
-            channel: Channel::Standard,
-            root: base.join(Channel::Standard.id()),
-        });
+fn target_at(base: &Path, beta: bool) -> Target {
+    let channel = if beta {
+        Channel::Beta
+    } else {
+        Channel::Standard
+    };
+    Target {
+        channel,
+        root: base.join(channel.id()),
     }
-    targets
 }
 
-pub(super) fn targets() -> Result<Vec<Target>> {
+pub(super) fn targets(beta: bool) -> Result<Vec<Target>> {
     let base = dirs::config_dir()
         .context("Unable to locate OpenCode Desktop's configuration directory")?;
-    Ok(detected_targets(&base, Channel::installed))
+    Ok(vec![target_at(&base, beta)])
 }
 
 fn read_object(path: &Path) -> Result<Map<String, Value>> {
@@ -128,7 +107,15 @@ struct Stores {
 
 impl Stores {
     fn read(root: &Path) -> Result<Self> {
-        let sqlite = root.join(DATABASE).exists();
+        // Stable Desktop also has drafts.sqlite, containing only document/blob.
+        // Select SQLite only when the renderer state table actually exists.
+        let sqlite = if root.join(DATABASE).exists() {
+            let db =
+                Database::open_with_flags(root.join(DATABASE), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state')", [], |row| row.get::<_, bool>(0))?
+        } else {
+            false
+        };
         let global = if sqlite {
             let db =
                 Database::open_with_flags(root.join(DATABASE), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -363,8 +350,8 @@ fn is_running(target: &Target) -> Result<bool> {
 }
 
 /// Catch unsupported stores (or an open app on Windows/Linux) before provisioning.
-pub(super) fn preflight() -> Result<()> {
-    for target in targets()? {
+pub(super) fn preflight(beta: bool) -> Result<()> {
+    for target in targets(beta)? {
         Stores::read(&target.root)
             .with_context(|| format!("Reading {} settings", target.name()))?;
         #[cfg(not(target_os = "macos"))]
@@ -434,11 +421,12 @@ async fn resume(target: &Target, was_running: bool) -> Result<()> {
 }
 
 pub(super) async fn configure(
+    beta: bool,
     connection: &Connection,
     agent_id: &str,
     agent_name: &str,
 ) -> Result<()> {
-    for target in targets()? {
+    for target in targets(beta)? {
         configure_target(&target, connection, agent_id, agent_name)
             .await
             .with_context(|| format!("Configuring {}", target.name()))?;
@@ -447,41 +435,8 @@ pub(super) async fn configure(
             target.name(),
             target.root.display()
         );
-        if target.channel == Channel::Beta && !beta_compatible(connection).await {
-            eprintln!(
-                "OpenCode Beta settings were saved, but this server does not provide the versioned API required by Beta. Run a compatible OpenCode 2 server on the agent before using this connection in Beta."
-            );
-        }
     }
     Ok(())
-}
-
-async fn beta_compatible(connection: &Connection) -> bool {
-    // Beta 19289 explicitly marks unversioned /api/health responses (including
-    // stable 1.18.29) incompatible, even when the server reports healthy.
-    let Ok(client) = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    else {
-        return false;
-    };
-    let Ok(response) = client
-        .get(format!("{}/api/health", connection.url))
-        .basic_auth("opencode", Some(&connection.password))
-        .send()
-        .await
-    else {
-        return false;
-    };
-    if !response.status().is_success() {
-        return false;
-    }
-    response
-        .json::<Value>()
-        .await
-        .ok()
-        .is_some_and(|body| body["healthy"] == true && body["version"].is_string())
 }
 
 async fn configure_target(
@@ -503,9 +458,9 @@ async fn configure_target(
     restarted
 }
 
-pub(super) async fn remove(agent_id: &str) -> Result<bool> {
+pub(super) async fn remove(agent_id: &str, beta: bool) -> Result<bool> {
     let mut removed = false;
-    for target in targets()? {
+    for target in targets(beta)? {
         removed |= remove_target(&target, agent_id).await?;
     }
     Ok(removed)
@@ -632,31 +587,45 @@ mod tests {
     }
 
     #[test]
-    fn detects_standard_beta_and_both_without_creating_other_channels() {
+    fn standard_and_beta_target_only_the_requested_channel() {
         let base = tempfile::tempdir().unwrap();
-        let channels = |targets: Vec<Target>| {
-            targets
-                .into_iter()
-                .map(|target| target.channel)
-                .collect::<Vec<_>>()
-        };
+        for beta in [false, true] {
+            let target = target_at(base.path(), beta);
+            assert_eq!(
+                target.channel,
+                if beta {
+                    Channel::Beta
+                } else {
+                    Channel::Standard
+                }
+            );
+            assert_eq!(target.root, base.path().join(target.channel.id()));
+        }
+    }
+
+    #[test]
+    fn standard_drafts_database_keeps_server_settings_in_json() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Database::open(root.path().join(DATABASE)).unwrap();
+        db.execute_batch("CREATE TABLE document (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO document VALUES ('draft', 'keep'); CREATE TABLE blob (id TEXT PRIMARY KEY, data BLOB NOT NULL);").unwrap();
+        fs::write(
+            root.path().join(GLOBAL),
+            r#"{"other":"preserved","server":"{\"list\":[]}"}"#,
+        )
+        .unwrap();
+        let mut stores = Stores::read(root.path()).unwrap();
+        assert!(!stores.sqlite);
+        stores.upsert(&connection(), "agent", "box").unwrap();
+        stores.save(root.path()).unwrap();
+        let saved = Stores::read(root.path()).unwrap();
+        assert_eq!(saved.global["other"], "preserved");
+        assert_eq!(saved.server["list"].as_array().unwrap().len(), 1);
         assert_eq!(
-            channels(detected_targets(base.path(), |_| false)),
-            [Channel::Standard]
-        );
-        assert_eq!(
-            channels(detected_targets(base.path(), |channel| channel == Channel::Beta)),
-            [Channel::Beta]
-        );
-        fs::create_dir(base.path().join(Channel::Beta.id())).unwrap();
-        assert_eq!(
-            channels(detected_targets(base.path(), |_| false)),
-            [Channel::Beta]
-        );
-        fs::create_dir(base.path().join(Channel::Standard.id())).unwrap();
-        assert_eq!(
-            channels(detected_targets(base.path(), |_| false)),
-            [Channel::Standard, Channel::Beta]
+            db.query_row("SELECT value FROM document WHERE key='draft'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "keep"
         );
     }
 
@@ -748,11 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sqlite_schema_is_rejected_instead_of_falling_back_to_json() {
+    fn malformed_state_table_is_rejected_instead_of_falling_back_to_json() {
         let root = tempfile::tempdir().unwrap();
         let db = Database::open(root.path().join(DATABASE)).unwrap();
         db.execute_batch(
-            "CREATE TABLE document (value TEXT); INSERT INTO document VALUES ('keep');",
+            "CREATE TABLE state (wrong TEXT); CREATE TABLE document (value TEXT); INSERT INTO document VALUES ('keep');",
         )
         .unwrap();
         assert!(Stores::read(root.path()).is_err());
