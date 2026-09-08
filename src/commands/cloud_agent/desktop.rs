@@ -35,7 +35,7 @@ use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
 use crate::util::shell::shell_join;
 
-mod opencode;
+use super::opencode;
 mod opencode_config;
 
 /// Set up a desktop coding app to work on a cloud agent over SSH

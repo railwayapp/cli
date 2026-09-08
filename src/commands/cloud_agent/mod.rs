@@ -12,6 +12,7 @@ pub mod access;
 pub mod desktop;
 pub mod lifecycle;
 pub mod mcp_sync;
+pub(crate) mod opencode;
 pub(crate) mod opencode2;
 pub mod prefs;
 pub mod setup;

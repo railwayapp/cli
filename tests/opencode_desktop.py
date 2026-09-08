@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-BOOTSTRAP = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/desktop/opencode.py'
+BOOTSTRAP = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode.py'
 # Production uses /proc PID start times. macOS CI exercises the same lifecycle
 # using ps, keeping the production bootstrap Linux-specific.
 WRAPPER = '''

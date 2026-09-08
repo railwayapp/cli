@@ -78,6 +78,39 @@ railway setup agent -y --local
 railway mcp install --local --agent cursor
 ```
 
+## OpenCode clients and remote servers
+
+Start an interactive OpenCode session on a cloud agent:
+
+```bash
+railway code --opencode
+railway code --opencode2
+```
+
+To run the client on your computer, start its matching server on an agent:
+
+```bash
+railway code --opencode remote --new
+railway code --opencode2 remote --new
+railway code --opencode2 remote --agent my-box --dir /app
+```
+
+`remote` starts a detached server on the agent's authenticated HTTPS endpoint,
+then prints a command you can paste locally. Standard uses `opencode attach`;
+Beta uses `opencode2 --server` (or the installed Beta Desktop CLI on macOS).
+The command includes the server credentials. Your client runs locally while
+tools and project files stay on the agent. `--dir` selects the remote directory;
+Beta uses the server's startup directory, so switching it requires a fresh agent.
+
+Remote mode uses the same generated credentials, startup checks, provider
+sign-in behavior, skills, and MCP sync as Desktop setup. It leaves Desktop
+settings alone. A running server and its password are reused; you can close
+the Railway terminal. Rerun after sleeping or restarting the agent. `--new`
+creates a fresh VM. Use `railway ca sleep <name>` when finished.
+
+Put harness-specific arguments after `--`, for example:
+`railway code --opencode2 -- run --standalone "explain this project"`.
+
 ## Cloud agents in desktop apps
 
 Prepare a cloud agent for Claude Code Desktop, Codex, or OpenCode Desktop:
