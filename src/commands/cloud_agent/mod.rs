@@ -129,7 +129,7 @@ pub async fn command(args: Args) -> Result<()> {
         // which means the pane on a terminal and a plain ssh session off one.
         // A TUI in a pipe would be gibberish, and erroring instead would break
         // scripted callers that reasonably expect the launcher.
-        None => crate::commands::code::command(args.launch).await,
+        None => crate::commands::code::launch_in_cloud(args.launch).await,
     }
 }
 
@@ -248,11 +248,9 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
     let launch = tui::LaunchRequest {
         project_id: resolved.project_id,
         environment_id: resolved.environment_id,
-        // Which agent in that environment is the pipeline's call: it reuses
-        // this environment's remembered one, adopts the caller's only one, and
-        // creates one when there is neither — the same answer `railway code`
-        // has always given, now drawn in a pane.
-        agent_id: None,
+        // An explicit --agent wins. Otherwise the pipeline reuses the
+        // environment's remembered agent, adopts its only one, or creates one.
+        agent_id: args.agent_id.clone(),
         session_name: None,
         force_new: args.new,
         new_session: false,

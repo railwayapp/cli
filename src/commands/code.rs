@@ -85,12 +85,29 @@ use crate::util::shell::shell_join;
 /// it inside `railway ca`'s manage screen with the tree collapsed, so the
 /// session has the whole window and the rest of the tool is one key away;
 /// everywhere else it hands the terminal straight to ssh.
+mod opencode;
+
 pub type Args = LaunchArgs;
 
-pub async fn command(args: Args) -> Result<()> {
-    if let Some(beta) = args.remote_mode()? {
-        return launch_remote(args, beta).await;
+pub async fn command(mut args: Args) -> Result<()> {
+    if let Some(action) = args.opencode_action()? {
+        let beta = args.opencode2;
+        match action {
+            OpenCodeAction::Local => return opencode::start(args, beta).await,
+            OpenCodeAction::Connect(selector) => {
+                return opencode::connect(args, beta, selector).await;
+            }
+            OpenCodeAction::Remote => {
+                args.agent_args.clear();
+                opencode::pin_agent(&mut args).await?;
+            }
+        }
     }
+    launch_in_cloud(args).await
+}
+
+/// CA's launch flags and OpenCode's `remote` action keep the in-agent UI.
+pub(crate) async fn launch_in_cloud(args: Args) -> Result<()> {
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
     // never what someone typing it meant, and the failure is invisible — the
@@ -117,7 +134,7 @@ pub async fn command(args: Args) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --opencode           # interactive OpenCode on the agent\n  railway code --opencode2          # interactive OpenCode2 Beta on the agent\n  railway code --opencode remote    # authenticated server for a local client\n  railway code --opencode2 remote --new\n  railway code --opencode remote --agent my-box --dir /app\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --opencode           # prepare a server, offer to open your local client\n  railway code --opencode2          # same, with OpenCode2 Beta\n  railway code --opencode remote    # run client and server inside railway ca\n  railway code --opencode2 --new\n  railway code --opencode2 connect  # choose an existing server, connect locally\n  railway code --opencode connect my-box\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\n`--opencode` and `--opencode2` prepare a server and offer to open your local\nclient. Missing clients can be installed after confirmation. `connect [agent]`\nreconnects locally; `remote` runs the client inside Railway CA.\n\nSessions running inside `railway ca` open in its manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -199,14 +216,14 @@ pub struct LaunchArgs {
     #[clap(long, short)]
     pub project: Option<String>,
 
-    /// `remote` starts an OpenCode server; use `-- <args>` to pass harness arguments
+    /// OpenCode action: local client by default, `remote` for CA, or `connect [AGENT]`
     agent_args: Vec<String>,
 
     /// Remote project directory for OpenCode serve mode (default: /app)
     #[clap(long = "dir", value_name = "PATH")]
     remote_dir: Option<String>,
 
-    /// Existing cloud agent for OpenCode remote mode, by name or ID
+    /// Existing cloud agent for OpenCode, by name or ID
     #[clap(long = "agent", value_name = "NAME_OR_ID", conflicts_with = "new")]
     remote_agent: Option<String>,
 
@@ -238,30 +255,37 @@ pub struct LaunchArgs {
     pub app_mode: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum OpenCodeAction {
+    Local,
+    Remote,
+    Connect(Option<String>),
+}
+
 impl LaunchArgs {
-    /// Resolve the client/server action before entering the TUI or provisioning.
-    fn remote_mode(&self) -> Result<Option<bool>> {
-        if self.agent_args.first().is_none_or(|arg| arg != "remote") {
+    /// Dispatch only the public OpenCode client commands; explicit harness
+    /// arguments and CA's internal prepare/launch paths keep their VM semantics.
+    fn opencode_action(&self) -> Result<Option<OpenCodeAction>> {
+        let verb = self.agent_args.first().map(String::as_str);
+        let reserved = matches!(verb, Some("remote" | "connect"));
+        let selected = self.opencode || self.opencode2;
+        if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
             if self.remote_dir.is_some() || self.remote_agent.is_some() {
-                bail!(
-                    "--dir and --agent require OpenCode remote mode: railway code --opencode remote"
-                );
+                bail!("--dir and --agent require an OpenCode client command.");
             }
             return Ok(None);
         }
-        if self.agent_args.len() != 1 {
-            bail!(
-                "OpenCode remote mode does not accept harness arguments. Use --dir to select its project directory."
-            );
-        }
-        if self.rm || self.shell || self.initial_prompt.is_some() {
-            bail!(
-                "OpenCode remote mode cannot be combined with --rm, a shell, or an initial prompt."
-            );
-        }
-        if self.opencode == self.opencode2 || self.codex || self.claude || self.grok || self.railway
+        if self.opencode == self.opencode2
+            || self.codex
+            || self.claude
+            || self.grok
+            || self.railway
+            || self.shell
         {
-            bail!("Remote mode requires exactly one OpenCode edition: --opencode or --opencode2.");
+            bail!("Pick exactly one OpenCode edition: --opencode or --opencode2.");
+        }
+        if self.rm || self.initial_prompt.is_some() {
+            bail!("OpenCode client commands cannot be combined with --rm or an initial prompt.");
         }
         if self
             .remote_dir
@@ -270,7 +294,44 @@ impl LaunchArgs {
         {
             bail!("--dir must name a directory on the agent.");
         }
-        Ok(Some(self.opencode2))
+        match verb {
+            None => Ok(Some(OpenCodeAction::Local)),
+            Some("remote") => {
+                if self.agent_args.len() != 1 || self.remote_dir.is_some() {
+                    bail!(
+                        "Use railway code --opencode remote to open OpenCode inside the cloud agent; --dir is for local clients."
+                    );
+                }
+                Ok(Some(OpenCodeAction::Remote))
+            }
+            Some("connect") => {
+                if self.agent_args.len() > 2
+                    || self.new
+                    || self.name.is_some()
+                    || !self.variables.is_empty()
+                    || !self.env_files.is_empty()
+                    || self.refresh_auth
+                    || self.remote_dir.is_some()
+                {
+                    bail!(
+                        "connect uses an existing server. Use railway code --opencode [--new] to set one up."
+                    );
+                }
+                let positional = self.agent_args.get(1).cloned();
+                if positional.is_some() && self.remote_agent.is_some() {
+                    bail!("Name the agent after connect or with --agent, not both.");
+                }
+                let selector = positional.or_else(|| self.remote_agent.clone());
+                if selector
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    bail!("The cloud agent name cannot be empty.");
+                }
+                Ok(Some(OpenCodeAction::Connect(selector)))
+            }
+            _ => unreachable!("other harness arguments returned above"),
+        }
     }
 
     /// No flags, no arguments — the invocation that means "just open the
@@ -2615,72 +2676,7 @@ pub async fn resolve_launch(
     })
 }
 
-/// Provision through the normal harness pipeline, then detach a password-
-/// protected server for a local OpenCode client. No Desktop settings are read.
-async fn launch_remote(mut args: LaunchArgs, beta: bool) -> Result<()> {
-    use crate::commands::cloud_agent::{access, opencode};
-    use crate::controllers::cloud_agent as ca;
-
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    access::ensure_enabled(&client, &configs).await?;
-    if let Some(selector) = args.remote_agent.take() {
-        let (agent, _) = ca::resolve(&configs, &client, Some(&selector), None).await?;
-        args.agent_id = Some(agent.id);
-        args.project = Some(agent.project_id);
-        args.environment = Some(agent.environment_id);
-    }
-    let directory = args.remote_dir.take().unwrap_or_else(|| "/app".into());
-    args.agent_args.clear();
-    args.app_mode = true;
-    let password = opencode::generate_password();
-    args.boot_variables
-        .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
-    args.boot_variables
-        .insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
-    let progress = CliProgress::default();
-    let result = prepare(&args, &progress, SessionStyle::FullTerminal).await;
-    progress.finish();
-    let prepared = result?;
-    let name = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
-    println!(
-        "\nStarting {name} in the background and opening its authenticated HTTPS endpoint for connections..."
-    );
-    if beta {
-        println!("The first start downloads the latest Beta and can take several minutes.");
-    }
-    let connection = opencode::start_prepared(&prepared, &directory, &password, beta).await?;
-    println!(
-        "\n{name} is {} on {}.",
-        if connection.reused {
-            "already running"
-        } else {
-            "ready"
-        },
-        prepared.agent_name
-    );
-    println!("  Server:    {}", connection.url);
-    println!("  Username:  {}", connection.username);
-    println!("  Password:  {}", connection.password);
-    println!("  Directory: {}", connection.directory);
-    println!("\nRun this on your computer to connect:");
-    println!("  {}", opencode::attach_command(&connection, beta)?);
-    println!("\nThe client runs locally; commands and files stay on the cloud agent.");
-    println!(
-        "You can close this terminal. Rerun this command after sleeping or restarting the agent."
-    );
-    println!(
-        "railway ca sleep {} stops its compute bill.",
-        prepared.agent_name
-    );
-    ssh_tel::drain_detached(std::time::Duration::from_secs(2)).await;
-    Ok(())
-}
-
 pub async fn launch(args: LaunchArgs) -> Result<()> {
-    if let Some(beta) = args.remote_mode()? {
-        return launch_remote(args, beta).await;
-    }
     use colored::Colorize;
 
     // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
@@ -3677,47 +3673,76 @@ mod tests {
     }
 
     #[test]
-    fn opencode_remote_parses_flags_before_and_after_the_action() {
+    fn opencode_actions_separate_local_clients_from_cloud_terminal_sessions() {
         for flag in ["--opencode", "--opencode2"] {
+            let local =
+                LaunchArgs::try_parse_from(["code", flag, "--new", "--dir", "/app/project"])
+                    .unwrap();
+            assert_eq!(
+                local.opencode_action().unwrap(),
+                Some(OpenCodeAction::Local)
+            );
             for argv in [
-                vec!["code", flag, "--new", "remote", "--dir", "/app/project"],
-                vec!["code", flag, "remote", "--new", "--dir", "/app/project"],
+                vec!["code", flag, "remote", "--new"],
+                vec!["code", flag, "--new", "remote"],
             ] {
-                let args = LaunchArgs::try_parse_from(argv).unwrap();
-                assert_eq!(args.remote_mode().unwrap(), Some(flag == "--opencode2"));
-                assert!(args.new);
-                assert_eq!(args.remote_dir.as_deref(), Some("/app/project"));
-                assert!(!args.pane_shaped());
+                let mut remote = LaunchArgs::try_parse_from(argv).unwrap();
+                assert_eq!(
+                    remote.opencode_action().unwrap(),
+                    Some(OpenCodeAction::Remote)
+                );
+                remote.agent_args.clear();
+                assert!(remote.pane_shaped());
             }
-            let interactive = LaunchArgs::try_parse_from(["code", flag]).unwrap();
-            assert_eq!(interactive.remote_mode().unwrap(), None);
-            assert!(interactive.pane_shaped());
-            let remote =
-                LaunchArgs::try_parse_from(["code", flag, "remote", "--agent", "my-box"]).unwrap();
-            assert_eq!(remote.remote_agent.as_deref(), Some("my-box"));
+            for (extra, expected) in [
+                (vec!["connect"], None),
+                (vec!["connect", "my-box"], Some("my-box".to_string())),
+                (
+                    vec!["connect", "--agent", "my-box"],
+                    Some("my-box".to_string()),
+                ),
+            ] {
+                let args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                assert_eq!(
+                    args.opencode_action().unwrap(),
+                    Some(OpenCodeAction::Connect(expected))
+                );
+            }
         }
     }
 
     #[test]
-    fn remote_rejects_other_harnesses_and_conflicting_actions_before_provisioning() {
+    fn opencode_rejects_ambiguous_or_destructive_client_actions() {
         for argv in [
-            vec!["code", "--codex", "remote"],
+            vec!["code", "--codex", "connect"],
             vec!["code", "remote"],
-            vec!["code", "--opencode", "--opencode2", "remote"],
+            vec!["code", "--opencode", "--opencode2"],
             vec!["code", "--opencode", "remote", "extra"],
             vec!["code", "--opencode", "remote", "--rm"],
-            vec!["code", "--opencode", "--dir", "/app"],
+            vec!["code", "--opencode", "remote", "--dir", "/app"],
+            vec!["code", "--opencode", "connect", "--new"],
+            vec!["code", "--opencode", "connect", "box", "--agent", "other"],
+            vec!["code", "--opencode", "connect", "box", "extra"],
+            vec!["code", "--opencode", "connect", "--variable", "A=B"],
+            vec!["code", "--opencode", "--dir", " "],
         ] {
             assert!(
                 LaunchArgs::try_parse_from(argv)
                     .unwrap()
-                    .remote_mode()
+                    .opencode_action()
                     .is_err()
             );
         }
         assert!(
-            LaunchArgs::try_parse_from(["code", "--opencode", "remote", "--new", "--agent", "box"])
-                .is_err()
+            LaunchArgs::try_parse_from(["code", "--opencode", "--new", "--agent", "box"]).is_err()
+        );
+        assert_eq!(
+            LaunchArgs::try_parse_from(["code", "--opencode", "--rm"])
+                .unwrap()
+                .opencode_action()
+                .unwrap(),
+            None
         );
     }
 
@@ -3744,7 +3769,7 @@ mod tests {
                 "/project"
             ]
         );
-        assert_eq!(args.remote_mode().unwrap(), None);
+        assert_eq!(args.opencode_action().unwrap(), None);
         assert_eq!(args.remote_dir, None);
     }
 

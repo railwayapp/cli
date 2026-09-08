@@ -131,6 +131,35 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn('another OpenCode edition', result.stderr)
         self.assertTrue(self.run_bootstrap()['reused'])
 
+    def test_discovery_is_read_only_filters_editions_and_returns_no_password(self):
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+        self.assertFalse(self.state.parent.exists())
+        self.run_bootstrap()
+        before = self.state.read_bytes()
+        result = self.run_bootstrap({'action': 'inspect'})
+        self.assertEqual(result, {'directory': str(self.directory.resolve())})
+        self.assertEqual(before, self.state.read_bytes())
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect', 'harness': 'opencode2'}))
+        self.run_bootstrap({'action': 'stop'})
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+
+    def test_connect_reuses_or_restarts_only_a_saved_server(self):
+        missing = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertFalse(self.state.parent.exists())
+        first = self.run_bootstrap()
+        again = self.run_bootstrap({'action': 'connect'})
+        self.assertTrue(again['reused'])
+        self.assertEqual(again['password'], first['password'])
+        self.assertEqual(again['directory'], first['directory'])
+        self.run_bootstrap({'action': 'stop'})
+        wrong = self.run_bootstrap({'action': 'connect', 'harness': 'opencode2'}, check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        restarted = self.run_bootstrap({'action': 'connect'})
+        self.assertFalse(restarted['reused'])
+        self.assertEqual(restarted['password'], first['password'])
+        self.assertEqual(restarted['directory'], first['directory'])
+
     def test_boot_credentials_take_precedence_over_candidate(self):
         self.env['OPENCODE_SERVER_USERNAME'] = 'boot-user'
         self.env['OPENCODE_SERVER_PASSWORD'] = 'boot-password'

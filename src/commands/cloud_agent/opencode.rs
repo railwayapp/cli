@@ -14,6 +14,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::util::shell::shell_join;
 
+pub(crate) mod local;
+
 const BOOTSTRAP: &str = include_str!("opencode.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
 
@@ -63,7 +65,9 @@ async fn bootstrap(
     stdin.write_all(&payload).await?;
     drop(stdin);
     let output = tokio::time::timeout(
-        Duration::from_secs(if request["harness"] == "opencode2" {
+        Duration::from_secs(if request["action"] == "inspect" {
+            15
+        } else if request["harness"] == "opencode2" {
             660
         } else {
             90
@@ -116,18 +120,17 @@ pub(crate) async fn start_prepared(
     password: &str,
     beta: bool,
 ) -> Result<Connection> {
-    let mut options = prepared.relay_opts.clone();
-    if let Some(identity) = &prepared.identity {
-        options.push("-i".into());
-        options.push(identity.to_string_lossy().into_owned());
-    }
-    let connection = start_with(
-        ssh_command(&prepared.ssh_target, &options),
-        directory,
-        password,
-        beta,
-    )
-    .await?;
+    let info = crate::commands::code::ConnectInfo {
+        ssh_target: prepared.ssh_target.clone(),
+        identity: prepared.identity.clone(),
+        relay_opts: prepared.relay_opts.clone(),
+    };
+    let connection = start_with(relay_command(&info), directory, password, beta).await?;
+    verify_client_directory(&connection, beta).await?;
+    Ok(connection)
+}
+
+async fn verify_client_directory(connection: &Connection, beta: bool) -> Result<()> {
     if beta {
         // Beta's positional directory performs a local chdir, even with
         // --server. Its remote client uses the server's default location.
@@ -153,7 +156,7 @@ pub(crate) async fn start_prepared(
             );
         }
     }
-    Ok(connection)
+    Ok(())
 }
 
 async fn start_with(
@@ -202,23 +205,69 @@ pub(crate) fn attach_command(connection: &Connection, beta: bool) -> Result<Stri
 }
 
 fn local_client(beta: bool) -> String {
-    if !beta {
-        return "opencode".into();
+    local::find_client(beta)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| if beta { "opencode2" } else { "opencode" }.into())
+}
+
+/// Arguments shared by the printable command and the actual local child.
+pub(crate) fn attach_args(connection: &Connection, beta: bool) -> Vec<String> {
+    if beta {
+        vec!["--server".into(), connection.url.clone()]
+    } else {
+        vec![
+            "attach".into(),
+            connection.url.clone(),
+            "--dir".into(),
+            connection.directory.clone(),
+        ]
     }
-    #[cfg(target_os = "macos")]
-    if which::which("opencode2").is_err() {
-        let mut applications = vec![std::path::PathBuf::from("/Applications")];
-        if let Some(home) = dirs::home_dir() {
-            applications.push(home.join("Applications"));
-        }
-        for root in applications {
-            let binary = root.join("OpenCode Beta.app/Contents/Resources/opencode-cli");
-            if binary.is_file() {
-                return binary.to_string_lossy().into_owned();
-            }
-        }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ServerInfo {
+    pub directory: String,
+}
+
+fn relay_command(info: &crate::commands::code::ConnectInfo) -> tokio::process::Command {
+    let mut options = info.relay_opts.clone();
+    if let Some(identity) = &info.identity {
+        options.extend(["-i".into(), identity.to_string_lossy().into_owned()]);
     }
-    "opencode2".into()
+    options.extend(crate::commands::ssh::native::relay_port_args());
+    ssh_command(
+        &crate::commands::ssh::native::relay_destination(&info.ssh_target),
+        &options,
+    )
+}
+
+pub(crate) async fn inspect(
+    info: &crate::commands::code::ConnectInfo,
+    beta: bool,
+) -> Result<Option<ServerInfo>> {
+    let response = bootstrap(
+        relay_command(info),
+        json!({"action": "inspect", "harness": if beta {"opencode2"} else {"opencode"}}),
+    )
+    .await?;
+    serde_json::from_str(&response).context("Invalid OpenCode discovery result")
+}
+
+pub(crate) async fn reconnect(
+    info: &crate::commands::code::ConnectInfo,
+    beta: bool,
+) -> Result<Connection> {
+    let response = bootstrap(
+        relay_command(info),
+        json!({"action": "connect", "harness": if beta {"opencode2"} else {"opencode"}}),
+    )
+    .await?;
+    let connection: Connection =
+        serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
+    validate_url(&connection.url)?;
+    verify_connection(&connection, beta).await?;
+    verify_client_directory(&connection, beta).await?;
+    Ok(connection)
 }
 
 fn format_attach_command(
@@ -227,17 +276,8 @@ fn format_attach_command(
     client: &str,
     powershell: bool,
 ) -> String {
-    let args = if beta {
-        vec![client.into(), "--server".into(), connection.url.clone()]
-    } else {
-        vec![
-            client.into(),
-            "attach".into(),
-            connection.url.clone(),
-            "--dir".into(),
-            connection.directory.clone(),
-        ]
-    };
+    let mut args = vec![client.to_string()];
+    args.extend(attach_args(connection, beta));
     if powershell {
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
         return format!(
@@ -413,6 +453,24 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
         assert_ne!(first, generate_password());
+    }
+
+    #[test]
+    fn discovery_uses_the_relay_host_even_without_a_prepared_ssh_master() {
+        let info = crate::commands::code::ConnectInfo {
+            ssh_target: "agent:env:box".into(),
+            identity: None,
+            relay_opts: vec![],
+        };
+        let command = relay_command(&info);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let destination = crate::commands::ssh::native::relay_destination(&info.ssh_target);
+        assert!(args.contains(&destination));
+        assert!(!args.contains(&info.ssh_target));
     }
 
     #[test]

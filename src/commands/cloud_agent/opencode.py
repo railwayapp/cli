@@ -80,9 +80,20 @@ def setup(request, home, port=8080):
         raise SetupError("Unsupported OpenCode harness.")
     os.umask(0o077)
     root = Path(home) / ".railway" / "desktop" / "opencode"
+    state_path = root / "server.json"
+    if request.get("action") == "inspect":
+        # Discovery is read-only, returns no credentials, and must not seed
+        # directories or start a server on an unrelated cloud agent.
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if (state.get("harness", "opencode") == harness and owned_process(state)
+                and health(port, state, harness) == (200, True)
+                and health(port, harness=harness)[0] == 401):
+            return {"directory": state.get("directory") or str(Path(f"/proc/{state['pid']}/cwd").resolve())}
+        return None
+    if request.get("action") == "connect" and not state_path.exists():
+        raise SetupError("This agent has no managed OpenCode server. Set one up with railway code first.")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root, 0o700)
-    state_path = root / "server.json"
     with (root / "setup.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -111,6 +122,15 @@ def setup(request, home, port=8080):
                 save(state_path, state)
             return {"stopped": True}
 
+        if request.get("action") == "connect":
+            if state.get("harness", "opencode") != harness or not state.get("password") or not state.get("username"):
+                raise SetupError("This agent has no server for the selected OpenCode edition.")
+            directory = state.get("directory")
+            if not directory and owned_process(state):
+                directory = str(Path(f"/proc/{state['pid']}/cwd").resolve())
+            if not directory:
+                raise SetupError("The saved server has no project directory. Rerun railway code with --agent and --dir to reconnect.")
+            request = dict(request, directory=directory, password=state["password"])
         directory = str(Path(request["directory"]).resolve(strict=True))
         if not Path(directory).is_dir():
             raise SetupError("OpenCode's working directory must be a directory.")
@@ -140,7 +160,7 @@ def setup(request, home, port=8080):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            state = dict(credentials, harness=harness)
+            state = dict(credentials, harness=harness, directory=directory)
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
@@ -164,6 +184,11 @@ def setup(request, home, port=8080):
             else:
                 os.killpg(child.pid, signal.SIGTERM)
                 raise SetupError(f"OpenCode did not become healthy. Check {root / 'server.log'} on the agent.")
+        if reused and not state.get("directory"):
+            cwd = Path(f"/proc/{state['pid']}/cwd")
+            if cwd.exists():
+                state["directory"] = str(cwd.resolve())
+                save(state_path, state)
         return dict(credentials, url=f"https://{domain}", directory=directory, reused=reused)
 
 

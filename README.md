@@ -80,33 +80,50 @@ railway mcp install --local --agent cursor
 
 ## OpenCode clients and remote servers
 
-Start an interactive OpenCode session on a cloud agent:
+Prepare an authenticated server on a cloud agent and open your local client:
 
 ```bash
 railway code --opencode
 railway code --opencode2
+railway code --opencode2 --new
 ```
 
-To run the client on your computer, start its matching server on an agent:
+The CLI prints the server URL, username, password, and project directory for
+manual setup in OpenCode Desktop, plus a shell command to connect directly.
+Press Enter to launch the matching local terminal client. If that client is
+missing, Railway offers to install it first. Declining, Esc, or Ctrl+C at
+either prompt leaves the server running and prints the connection details.
+Standard and Beta clients are detected and installed separately.
+
+Reconnect to an existing server using your local client:
 
 ```bash
-railway code --opencode remote --new
-railway code --opencode2 remote --new
-railway code --opencode2 remote --agent my-box --dir /app
+railway code --opencode connect
+railway code --opencode2 connect my-box
 ```
 
-`remote` starts a detached server on the agent's authenticated HTTPS endpoint,
-then prints a command you can paste locally. Standard uses `opencode attach`;
-Beta uses `opencode2 --server` (or the installed Beta Desktop CLI on macOS).
-The command includes the server credentials. Your client runs locally while
-tools and project files stay on the agent. `--dir` selects the remote directory;
-Beta uses the server's startup directory, so switching it requires a fresh agent.
+`connect` discovers running servers of the selected edition on agents you own.
+One match connects directly; multiple matches show a `workspace/project/agent`
+picker. A name or ID targets an agent directly and can wake a saved server.
+Connecting never creates a new agent or installs a server on an unrelated box.
+In noninteractive terminals, the CLI prints connection details instead of
+prompting, installing software, or opening a client; multiple matches require
+a name or ID.
 
-Remote mode uses the same generated credentials, startup checks, provider
-sign-in behavior, skills, and MCP sync as Desktop setup. It leaves Desktop
-settings alone. A running server and its password are reused; you can close
-the Railway terminal. Rerun after sleeping or restarting the agent. `--new`
-creates a fresh VM. Use `railway ca sleep <name>` when finished.
+To run both client and server inside the cloud agent, in Railway CA:
+
+```bash
+railway code --opencode remote
+railway code --opencode2 remote --new
+```
+
+`--new` creates a fresh VM; `--agent <name-or-id>` targets an existing one.
+For the local-client setup, `--dir` selects the remote project directory
+(default `/app`). Beta uses its server's startup directory, so switching it
+requires a fresh agent. Setup uses the same generated credentials, HTTPS
+checks, provider sign-in behavior, skills, and MCP sync as Desktop. It prints
+Desktop settings for manual entry. A running server and its password are
+reused. Use `railway ca sleep <name>` when finished.
 
 Put harness-specific arguments after `--`, for example:
 `railway code --opencode2 -- run --standalone "explain this project"`.
