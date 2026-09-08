@@ -9,7 +9,6 @@
 //! command calls one of them.
 
 mod agents;
-mod attention;
 mod bootstrap;
 mod harness;
 mod herdr_cli;
@@ -20,6 +19,7 @@ mod relay;
 mod state;
 mod sync;
 mod target;
+mod watch;
 
 use anyhow::Result;
 use clap::Parser;
@@ -48,6 +48,9 @@ enum Command {
 
     /// Prepare an agent's VM for herdr: integrations, config, workspace
     Bootstrap(bootstrap::Args),
+
+    /// Follow cloud agent state and keep herdr's machines in step
+    Watch(watch::Args),
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -57,6 +60,7 @@ pub async fn command(args: Args) -> Result<()> {
         Command::Agents(a) => agents::command(a).await,
         Command::Sync(a) => sync::command(a).await,
         Command::Bootstrap(a) => bootstrap::command(a).await,
+        Command::Watch(a) => watch::command(a).await,
     }
 }
 

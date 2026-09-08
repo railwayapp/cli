@@ -34,6 +34,12 @@ key = "prefix+shift+s"
 type = "plugin_action"
 command = "railway.ca.wake"
 description = "railway wake agent"
+
+[[keys.command]]
+key = "prefix+shift+y"
+type = "plugin_action"
+command = "railway.ca.sync"
+description = "railway sync agents"
 "#;
 
 /// On a VM the same keys mean: the picker in remote mode, and sleep THIS agent.
@@ -108,12 +114,30 @@ pub async fn command(args: Args) -> Result<()> {
         );
         return Ok(());
     }
+    super::watch::spawn_detached();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    match super::watch::running() {
+        Some(pid) => println!(
+            "✓ Watching cloud agent state for this herdr session (pid {pid}, log in {})",
+            dir.join("watch*.log").display()
+        ),
+        None if std::env::var_os("HERDR_SOCKET_PATH").is_none() => println!(
+            "{}",
+            "Not inside herdr: the watcher starts with herdr's next launch.".dimmed()
+        ),
+        None => println!(
+            "{}",
+            "The watcher did not start; see the watch log.".yellow()
+        ),
+    }
     let config = herdr_config_path()?;
     if ensure_keybindings(&config)? {
         println!(
-            "✓ Bound {} (railway agents) and {} (railway new agent) in {}",
+            "✓ Bound {} agents, {} new, {} wake, {} sync in {}",
             "prefix+shift+a".cyan(),
             "prefix+shift+c".cyan(),
+            "prefix+shift+s".cyan(),
+            "prefix+shift+y".cyan(),
             config.display()
         );
         if herdr.server_reload_config().is_err() {
@@ -348,12 +372,13 @@ impl Manifest {
                 .into(),
             platforms: vec!["linux".into(), "macos".into()],
             startup: vec![Startup {
-                command: cmd(&["sync"]),
+                command: cmd(&["sync", "--spawn-watch"]),
             }],
-            // Coming back to a Local workspace is the moment a slept machine
-            // should already read "disabled"; 30 s keeps rapid switching cheap.
+            // Local agent activity is the one server-side event that fires
+            // often (workspace focus is client-local in herdr 0.9 and never
+            // reaches hooks); 30 s keeps a busy agent cheap.
             events: vec![Event {
-                on: "workspace.focused".into(),
+                on: "pane.agent_status_changed".into(),
                 command: cmd(&["sync", "--debounce", "30"]),
             }],
             actions: vec![
@@ -470,8 +495,15 @@ mod tests {
         );
         assert_eq!(
             parsed.startup[0].command,
-            ["/opt/homebrew/bin/railway", "ca", "herdr", "sync"]
+            [
+                "/opt/homebrew/bin/railway",
+                "ca",
+                "herdr",
+                "sync",
+                "--spawn-watch"
+            ]
         );
+        assert_eq!(parsed.events[0].on, "pane.agent_status_changed");
         assert_eq!(
             parsed.actions[1].command,
             [
@@ -593,7 +625,7 @@ mod tests {
         assert!(ensure_keybindings(&path).unwrap());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("x = 1\n\n"), "{text}");
-        assert_eq!(text.matches("[[keys.command]]").count(), 3, "{text}");
+        assert_eq!(text.matches("[[keys.command]]").count(), 4, "{text}");
         assert!(text.contains("railway.ca.wake"), "{text}");
         assert!(!ensure_keybindings(&path).unwrap());
 

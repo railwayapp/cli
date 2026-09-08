@@ -929,6 +929,8 @@ mod cli_tests {
             assert_parses(&["ca", "herdr", "agents", "--remote"]);
             assert_parses(&["ca", "herdr", "agents", "--wake", "--open"]);
             assert_parses(&["ca", "herdr", "sync", "--debounce", "30"]);
+            assert_parses(&["ca", "herdr", "sync", "--spawn-watch"]);
+            assert_parses(&["ca", "herdr", "watch", "--foreground"]);
             assert_parses(&["ca", "herdr", "bootstrap", "my-box", "--claude"]);
             assert_parses(&["ca", "herdr", "sync", "--dry-run", "--json"]);
         }

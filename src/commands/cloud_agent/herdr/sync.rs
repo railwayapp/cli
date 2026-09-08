@@ -31,6 +31,10 @@ pub struct Args {
     /// Do nothing when the last sync was this many seconds ago or less
     #[clap(long, value_name = "SECONDS")]
     debounce: Option<u64>,
+
+    /// Also make sure this session's watcher is running
+    #[clap(long)]
+    spawn_watch: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +125,6 @@ pub(super) fn reconcile(
     agents: &[ca::Agent],
     machines: &[Machine],
     previous: &BTreeMap<String, String>,
-    stuck: &std::collections::BTreeSet<String>,
 ) -> Plan {
     let mut plan = Plan::default();
     for agent in agents {
@@ -145,10 +148,7 @@ pub(super) fn reconcile(
         } else if !machine.enabled && agent.status == ca::Status::Running {
             plan.agents.insert(machine.id.clone(), agent.clone());
             plan.ops.push(Op::Enable(machine.id.clone()));
-        } else if machine.enabled
-            && agent.status == ca::Status::Running
-            && (!was_awake || stuck.contains(&machine.id))
-        {
+        } else if machine.enabled && agent.status == ca::Status::Running && !was_awake {
             plan.agents.insert(machine.id.clone(), agent.clone());
             plan.ops.push(Op::Kick(machine.id.clone()));
         }
@@ -198,6 +198,10 @@ pub(super) async fn apply(herdr: &Herdr, plan: &Plan, wait: bool) -> Outcome {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    if args.spawn_watch {
+        super::watch::spawn_detached();
+    }
+    super::watch::nudge();
     if let Some(secs) = args.debounce
         && let Ok(state) = State::load()
         && synced_within(&state, secs, Utc::now())
@@ -212,7 +216,7 @@ pub async fn command(args: Args) -> Result<()> {
     let agents = ca::list_mine(&client, &backboard).await?;
     let machines = herdr.machines()?;
     let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status, &stuck(&state));
+    let plan = reconcile(&agents, &machines, &state.agent_status);
 
     let outcome = if args.dry_run {
         Outcome::default()
@@ -241,6 +245,16 @@ pub async fn command(args: Args) -> Result<()> {
                 "machines": plan.matches,
             }))?
         );
+    } else if let Some(reason) = toast_reason(&outcome) {
+        // Started by herdr (a key or the focus hook), not a terminal: the
+        // summary goes to a toast. The hook stays quiet unless it changed something.
+        println!("{}", summary(&plan, &outcome, agents.len()));
+        if reason {
+            herdr.notify(
+                "Railway sync",
+                &plain(&summary(&plan, &outcome, agents.len())),
+            );
+        }
     } else if args.dry_run {
         if plan.ops.is_empty() {
             println!(
@@ -332,7 +346,7 @@ pub(super) async fn resync(client: &reqwest::Client, backboard: &str, herdr: &He
     let agents = ca::list_mine(client, backboard).await?;
     let machines = herdr.machines()?;
     let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status, &stuck(&state));
+    let plan = reconcile(&agents, &machines, &state.agent_status);
     let outcome = apply(herdr, &plan, true).await;
     remember(&mut state, &plan, &outcome)?;
     if let Some((op, err)) = outcome.failed.first() {
@@ -341,27 +355,25 @@ pub(super) async fn resync(client: &reqwest::Client, backboard: &str, herdr: &He
     Ok(())
 }
 
-fn stuck(state: &State) -> std::collections::BTreeSet<String> {
-    let Some(log) = super::attention::client_log_path() else {
-        return Default::default();
-    };
-    super::attention::stuck_profiles(
-        &super::attention::read_tail(&log),
-        &state.kicked_at,
-        Utc::now(),
-    )
+/// `Some(true)` when a toast is due, `Some(false)` for a quiet hook run,
+/// `None` when we are on a terminal and print as usual.
+fn toast_reason(outcome: &Outcome) -> Option<bool> {
+    let manual = std::env::var("HERDR_PLUGIN_ACTION_ID").is_ok();
+    let hook = std::env::var("HERDR_PLUGIN_EVENT").is_ok();
+    if !manual && !hook {
+        return None;
+    }
+    Some(manual || !outcome.applied.is_empty() || !outcome.failed.is_empty())
 }
 
-fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
+fn plain(s: &str) -> String {
+    s.trim_start_matches('✓').trim().to_string()
+}
+
+fn remember(state: &mut State, plan: &Plan, _outcome: &Outcome) -> Result<()> {
     state.machines = plan.matches.clone();
     state.agent_status = plan.statuses.clone();
-    for op in &outcome.applied {
-        if let Some(id) = op.profile_id() {
-            state.kicked_at.insert(id.to_string(), now.clone());
-        }
-    }
-    state.last_sync = Some(now);
+    state.last_sync = Some(Utc::now().to_rfc3339());
     state.save()
 }
 
@@ -513,7 +525,7 @@ mod tests {
             ),
         ];
         for (name, agents, machines, expected) in cases {
-            let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+            let plan = reconcile(&agents, &machines, &BTreeMap::new());
             assert_eq!(ops_of(&plan), expected, "{name}");
         }
     }
@@ -527,7 +539,7 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+        let plan = reconcile(&agents, &machines, &BTreeMap::new());
         assert_eq!(
             plan.matches,
             BTreeMap::from([
@@ -550,7 +562,7 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+        let plan = reconcile(&agents, &machines, &BTreeMap::new());
         assert_eq!(
             ops_of(&plan),
             vec!["enable p1", "disable p2", "remove p3", "missing a3"]
@@ -558,7 +570,7 @@ mod tests {
 
         let machines = after(&machines, &plan);
         assert_eq!(machines.len(), 3);
-        let again = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+        let again = reconcile(&agents, &machines, &BTreeMap::new());
         assert_eq!(ops_of(&again), vec!["missing a3"]);
         assert_eq!(again.matches, plan.matches);
     }
@@ -569,7 +581,7 @@ mod tests {
         let machines = [machine("p1", &target::target(&agents[0]), true)];
         let mut previous = BTreeMap::new();
         previous.insert("a1".to_string(), "sleeping".to_string());
-        let plan = reconcile(&agents, &machines, &previous, &Default::default());
+        let plan = reconcile(&agents, &machines, &previous);
         assert!(
             matches!(plan.ops.as_slice(), [Op::Kick(id)] if id == "p1"),
             "{:?}",
@@ -579,13 +591,9 @@ mod tests {
         assert!(plan.agents.contains_key("p1"));
 
         previous.insert("a1".to_string(), "running".to_string());
+        assert!(reconcile(&agents, &machines, &previous).ops.is_empty());
         assert!(
-            reconcile(&agents, &machines, &previous, &Default::default())
-                .ops
-                .is_empty()
-        );
-        assert!(
-            reconcile(&agents, &machines, &BTreeMap::new(), &Default::default())
+            reconcile(&agents, &machines, &BTreeMap::new())
                 .ops
                 .is_empty()
         );
@@ -611,7 +619,7 @@ mod tests {
             agent("a3", Status::Running),
         ];
         let machines = herdr.machines().unwrap();
-        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+        let plan = reconcile(&agents, &machines, &BTreeMap::new());
         let outcome = apply(&herdr, &plan, false).await;
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(outcome.applied.len(), 3);
@@ -647,7 +655,6 @@ mod tests {
             &[agent("a1", Status::Sleeping)],
             &machines,
             &BTreeMap::new(),
-            &Default::default(),
         );
         assert_eq!(
             plan.ops[0].describe(&machines),

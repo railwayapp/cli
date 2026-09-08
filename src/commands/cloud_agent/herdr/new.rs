@@ -113,6 +113,7 @@ pub async fn command(args: Args) -> Result<()> {
         .inspect_err(|_| spinner.finish_and_clear())?;
     spinner.finish_and_clear();
     println!("✓ Created agent {}", agent.name.cyan());
+    super::watch::nudge();
 
     let herdr = Herdr::from_env();
     let target = target::target(&agent);

@@ -22,10 +22,6 @@ pub struct State {
     /// noticed and its machine reconnected.
     #[serde(default)]
     pub agent_status: BTreeMap<String, String>,
-    /// profile id → when we last toggled it; Attention logged after that
-    /// means the machine is stuck again.
-    #[serde(default)]
-    pub kicked_at: BTreeMap<String, String>,
 }
 
 impl State {
