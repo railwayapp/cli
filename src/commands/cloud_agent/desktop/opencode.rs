@@ -1,115 +1,165 @@
-//! OpenCode Desktop connects to an HTTP server, not an OpenSSH host entry.
-//! Run the server and its loopback tunnel together in the foreground. Keep a
-//! reusable script as an optional shortcut, using the same SSH arguments.
-//! The server is added through OpenCode's server picker: `opencode.json` has
-//! no desktop connection setting, and its private app storage is not a config
-//! API. See https://opencode.ai/docs/server/ and /docs/windows-wsl/.
+//! OpenCode Desktop connects directly to the agent's existing HTTPS domain.
+//! SSH is used only to start a detached, password-protected server on port
+//! 8080. The VM keeps the credential and PID so reconnects are idempotent.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use rand::RngCore;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::io::AsyncWriteExt;
 
-use crate::util::shell::{shell_join, shell_quote};
+use crate::util::shell::shell_join;
 
-pub(super) fn script_path(home: &Path, agent_id: &str) -> PathBuf {
-    // IDs come from the server. Hash them so they cannot become path traversal,
-    // and so a rename or alias change still replaces the same agent's script.
-    let id = format!("{:x}", Sha256::digest(agent_id.as_bytes()));
-    home.join(".railway/desktop/opencode")
-        .join(format!("{id}.sh"))
+const BOOTSTRAP: &str = include_str!("opencode.py");
+const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
+
+// Deliberately no Debug: this value contains the server password.
+#[derive(Deserialize)]
+pub(super) struct Connection {
+    pub url: String,
+    pub username: String,
+    pub password: String,
+    pub directory: String,
+    pub reused: bool,
 }
 
-pub(super) fn check_local_port(port: u16) -> Result<()> {
-    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).with_context(|| {
-        format!("Cannot bind OpenCode's local port {port}. Stop the existing tunnel or choose another port with --port.")
-    })?;
-    Ok(())
+pub(super) fn generate_password() -> String {
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn ssh_args(alias: &str, dir: &str, ssh_config: &Path, port: u16, remote_port: u16) -> Vec<String> {
-    let server = format!(
-        "cd -- {} && exec opencode serve --hostname 127.0.0.1 --port {remote_port}",
-        shell_quote(dir)
-    );
-    let remote = shell_join(&["bash".into(), "-lc".into(), server]);
-    vec![
-        "-F".into(),
-        ssh_config.to_string_lossy().into_owned(),
-        // A remote PTY lets Ctrl-C reach the foreground server.
-        "-tt".into(),
-        "-o".into(),
-        "BatchMode=yes".into(),
-        "-o".into(),
-        "ConnectTimeout=20".into(),
-        "-o".into(),
-        "ExitOnForwardFailure=yes".into(),
-        "-L".into(),
-        format!("127.0.0.1:{port}:127.0.0.1:{remote_port}"),
-        "--".into(),
-        alias.into(),
-        remote,
-    ]
-}
-
-pub(super) fn connection_command(
-    alias: &str,
-    dir: &str,
-    ssh_config: &Path,
-    port: u16,
-    remote_port: u16,
-) -> std::process::Command {
-    let mut command = std::process::Command::new("ssh");
-    command.args(ssh_args(alias, dir, ssh_config, port, remote_port));
+fn ssh_command(alias: &str, ssh_config: &Path) -> tokio::process::Command {
+    let python = shell_join(&["python3".into(), "-c".into(), BOOTSTRAP.into()]);
+    let remote = shell_join(&["bash".into(), "-lc".into(), python]);
+    let mut command = tokio::process::Command::new("ssh");
+    command
+        .arg("-F")
+        .arg(ssh_config)
+        .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"])
+        .arg("--")
+        .arg(alias)
+        .arg(remote)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     command
 }
 
-/// Like the other foreground SSH commands, inherit the terminal and wait for
-/// the remote process. The PTY carries Ctrl-C to `opencode serve`.
-pub(super) fn run(mut command: std::process::Command) -> Result<()> {
-    let status = command
-        .status()
-        .context("Failed to start OpenCode's SSH connection")?;
-    if !status.success() {
-        bail!("OpenCode server or SSH tunnel exited with {status}");
+async fn bootstrap(alias: &str, ssh_config: &Path, request: serde_json::Value) -> Result<String> {
+    let payload = serde_json::to_vec(&request)?;
+    let mut child = ssh_command(alias, ssh_config)
+        .spawn()
+        .context("Failed to start OpenCode setup over SSH")?;
+    let mut stdin = child.stdin.take().context("SSH stdin unavailable")?;
+    stdin.write_all(&payload).await?;
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(90), child.wait_with_output())
+        .await
+        .context("OpenCode setup timed out. Rerun the command to check or finish setup.")??;
+    if !output.status.success() {
+        // Never echo stdout: it may contain the connection password if SSH
+        // disconnects after the bootstrap has printed its result.
+        let detail = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "OpenCode setup failed ({}): {}",
+            output.status,
+            detail.trim()
+        );
     }
-    Ok(())
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix(RESULT_PREFIX))
+        .map(str::to_owned)
+        .context("SSH returned no OpenCode setup result")
 }
 
-pub(super) fn render_script(
+pub(super) async fn start(
     alias: &str,
-    dir: &str,
+    directory: &str,
     ssh_config: &Path,
-    port: u16,
-    remote_port: u16,
-) -> String {
-    let mut args = vec!["ssh".into()];
-    args.extend(ssh_args(alias, dir, ssh_config, port, remote_port));
-    let ssh = shell_join(&args);
-    // Desktop 1.18.29 treats literal localhost/127.0.0.1 as local and selects
-    // the computer's own folders. The absolute localhost name selects its
-    // server-side picker while keeping loopback transport.
-    // https://github.com/anomalyco/opencode/blob/v1.18.29/packages/app/src/context/server.tsx
-    format!(
-        "#!/bin/sh\n# Written by railway ca desktop --opencode. Re-run setup to update.\nset -eu\nprintf '%s\\n' 'Starting OpenCode. Wait for its listening message, then connect Desktop to:' '  http://localhost.:{port}' 'The trailing dot enables the remote folder picker in OpenCode Desktop.' 'Keep this terminal open. Ctrl-C stops the server and SSH tunnel.'\nexec {ssh}\n"
+    password: &str,
+) -> Result<Connection> {
+    let response = bootstrap(
+        alias,
+        ssh_config,
+        json!({ "directory": directory, "password": password }),
     )
+    .await?;
+    let connection: Connection =
+        serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
+    // A fresh client carries no Railway API credentials. Never follow a
+    // redirect with OpenCode's password or accept a plaintext public URL.
+    validate_url(&connection.url)?;
+    verify_connection(&connection).await?;
+    Ok(connection)
 }
 
-pub(super) fn write_script(path: &Path, script: &str) -> Result<()> {
-    crate::util::write_atomic(path, script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    }
+pub(super) async fn stop(alias: &str, ssh_config: &Path) -> Result<()> {
+    bootstrap(alias, ssh_config, json!({ "action": "stop" })).await?;
     Ok(())
 }
 
-pub(super) fn remove_script(path: &Path) -> Result<bool> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e).with_context(|| format!("Failed to remove {}", path.display())),
+fn validate_url(value: &str) -> Result<url::Url> {
+    let url = url::Url::parse(value).context("Invalid OpenCode public URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("OpenCode's public address must be an HTTPS origin");
+    }
+    Ok(url)
+}
+
+async fn verify_connection(connection: &Connection) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let health = validate_url(&connection.url)?.join("global/health")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let response = client
+            .get(health.clone())
+            .basic_auth(&connection.username, Some(&connection.password))
+            .send()
+            .await;
+        if let Ok(response) = response {
+            if response.status().is_redirection() {
+                bail!(
+                    "OpenCode's HTTPS address redirected unexpectedly; credentials were not forwarded"
+                );
+            }
+            if response.status().is_success()
+                && response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .is_some_and(|body| body["healthy"] == true)
+            {
+                let unauthenticated = client.get(health.clone()).send().await?;
+                if unauthenticated.status() != reqwest::StatusCode::UNAUTHORIZED {
+                    bail!("OpenCode's public endpoint did not reject an unauthenticated request");
+                }
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "OpenCode started on the agent, but its HTTPS health check failed. Rerun setup to retry; check ~/.railway/desktop/opencode/server.log on the agent."
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -118,134 +168,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn occupied_local_port_is_reported_before_provisioning() {
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let error = check_local_port(port).unwrap_err().to_string();
-        assert!(error.contains(&port.to_string()));
-        assert!(error.contains("--port"));
-        // Ask the OS for a free port; the released port could be claimed by
-        // another test or process before a second bind.
-        check_local_port(0).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn connection_failures_are_returned_to_the_cli() {
-        let mut command = std::process::Command::new("/bin/sh");
-        command.args(["-c", "exit 23"]);
-        let error = run(command).unwrap_err().to_string();
-        assert!(error.contains("23"), "{error}");
+    fn public_urls_require_https_and_no_embedded_credentials_or_paths() {
+        for invalid in [
+            "http://agent.up.railway.app",
+            "https://user:password@agent.up.railway.app",
+            "https://agent.up.railway.app/other",
+            "https://agent.up.railway.app?token=secret",
+        ] {
+            assert!(validate_url(invalid).is_err());
+        }
+        assert!(validate_url("https://app-agent.up.railway.app").is_ok());
     }
 
     #[test]
-    fn script_replaces_only_the_same_agents_connection() {
-        let home = tempfile::tempdir().unwrap();
-        let path = script_path(home.path(), "../../outside");
-        assert_eq!(
-            path.parent().unwrap(),
-            home.path().join(".railway/desktop/opencode")
+    fn password_is_random_and_safe_as_a_boot_variable() {
+        let first = generate_password();
+        assert_eq!(first.len(), 43);
+        assert!(
+            first
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         );
-        let other = script_path(home.path(), "other");
-        write_script(&other, "other connection").unwrap();
-        write_script(&path, "first").unwrap();
-        write_script(&path, "updated").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-        }
-        assert!(remove_script(&path).unwrap());
-        assert!(!remove_script(&path).unwrap());
-        assert_eq!(std::fs::read_to_string(&other).unwrap(), "other connection");
+        assert_ne!(first, generate_password());
+    }
+
+    #[test]
+    fn ssh_bootstrap_passes_no_credentials_in_argv_and_does_not_allocate_a_tunnel() {
+        let command = ssh_command("railway-agent-box", Path::new("/tmp/ssh config"));
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(&args[..3], ["-F", "/tmp/ssh config", "-T"]);
+        assert!(!args.iter().any(|arg| arg == "-L" || arg == "-tt"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn direct_launch_and_script_preserve_arguments_through_both_shells() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("project ' with $(touch INJECTED)");
-        std::fs::create_dir(&dir).unwrap();
-        // Record the local SSH argv, then emulate OpenSSH's remote shell and
-        // bash's -lc boundary. A fake bash avoids loading the tester's profile.
-        for (bin, contents) in [
-            (
-                "ssh",
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$TEST_ARGS\"\nfor arg do remote=$arg; done\nexec /bin/sh -c \"$remote\"\n",
-            ),
-            ("bash", "#!/bin/sh\nexec /bin/sh -c \"$2\"\n"),
-            (
-                "opencode",
-                "#!/bin/sh\npwd > \"$TEST_CWD\"\nprintf '%s\\n' \"$@\" > \"$TEST_SERVER_ARGS\"\n",
-            ),
-        ] {
-            let path = tmp.path().join(bin);
-            std::fs::write(&path, contents).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let script = tmp.path().join("connect.sh");
-        let config = tmp.path().join("ssh ' config");
-        write_script(
-            &script,
-            &render_script(
-                "railway-agent-box",
-                dir.to_str().unwrap(),
-                &config,
-                15432,
-                4097,
-            ),
-        )
-        .unwrap();
-        let mut script_command = std::process::Command::new("/bin/sh");
-        script_command.arg(&script);
-        for mut command in [
-            script_command,
-            connection_command(
-                "railway-agent-box",
-                dir.to_str().unwrap(),
-                &config,
-                15432,
-                4097,
-            ),
-        ] {
-            command
-                .current_dir(tmp.path())
-                .env("PATH", format!("{}:/usr/bin:/bin", tmp.path().display()))
-                .env("TEST_ARGS", tmp.path().join("args"))
-                .env("TEST_CWD", tmp.path().join("cwd"))
-                .env("TEST_SERVER_ARGS", tmp.path().join("server-args"));
-            run(command).unwrap();
-            let args = std::fs::read_to_string(tmp.path().join("args")).unwrap();
-            assert!(
-                args.contains(&format!("-F\n{}\n", config.display())),
-                "{args}"
-            );
-            assert!(args.contains("-L\n127.0.0.1:15432:127.0.0.1:4097\n"));
-            assert!(args.contains("ExitOnForwardFailure=yes\n"));
-            assert_eq!(
-                Path::new(
-                    std::fs::read_to_string(tmp.path().join("cwd"))
-                        .unwrap()
-                        .trim()
-                )
-                .canonicalize()
-                .unwrap(),
-                dir.canonicalize().unwrap()
-            );
-            assert_eq!(
-                std::fs::read_to_string(tmp.path().join("server-args")).unwrap(),
-                "serve\n--hostname\n127.0.0.1\n--port\n4097\n"
-            );
-            assert!(!tmp.path().join("INJECTED").exists());
-            for name in ["args", "cwd", "server-args"] {
-                std::fs::remove_file(tmp.path().join(name)).unwrap();
-            }
-        }
+    fn remote_bootstrap_lifecycle() {
+        // Exercise the shipped Python bootstrap against a fake OpenCode HTTP
+        // server: detach, credential reuse, conflicts, auth, and PID ownership.
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/opencode_desktop.py"
+            ))
+            .output()
+            .expect("python3 is required for OpenCode bootstrap integration tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

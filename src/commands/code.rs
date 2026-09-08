@@ -174,6 +174,11 @@ pub struct LaunchArgs {
     #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
     variables: Vec<String>,
 
+    /// Internal create-time variables supplied by desktop setup. These are
+    /// ignored on reuse, where the desktop keeps its existing credentials.
+    #[clap(skip)]
+    pub(crate) boot_variables: std::collections::BTreeMap<String, String>,
+
     /// Load variables from a .env file (repeatable). `--variable` flags
     /// override file entries with the same key
     #[clap(long = "env-file", value_name = "PATH")]
@@ -2222,11 +2227,14 @@ async fn resolve_agent(
         configs.remove_code_agent(environment_id);
     }
 
-    let variables = crate::controllers::cloud_agent::with_default_variables(
-        variables_to_input(&args.env_files, &args.variables)?
-            .map(serde_json::to_value)
-            .transpose()?,
-    );
+    let mut variables = variables_to_input(&args.env_files, &args.variables)?
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
+    for (key, value) in &args.boot_variables {
+        variables[key] = serde_json::Value::String(value.clone());
+    }
+    let variables = crate::controllers::cloud_agent::with_default_variables(Some(variables));
     progress.step("Creating a cloud agent");
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(

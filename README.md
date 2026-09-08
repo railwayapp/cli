@@ -97,34 +97,30 @@ are reused and woken as needed; if none exists in the target environment, setup
 creates one. `--new` always creates a fresh agent, including when several app
 flags are combined. It cannot be combined with `--agent` or `--remove`.
 
-OpenCode Desktop connects to [`opencode serve`](https://opencode.ai/docs/server/)
-over HTTP. The CLI starts OpenCode on the agent and forwards it over SSH,
-binding both ends to loopback. Keep the command running while connected.
-Once the server reports it is listening, add
-`http://localhost.:14096` in Settings → Servers. The trailing dot is intentional:
-OpenCode Desktop 1.18.29 treats `localhost` and `127.0.0.1` as local machines
-and opens the computer's native folder picker, even for SSH tunnels. The dotted
-hostname still connects to loopback but lets OpenCode browse the agent's files.
+OpenCode Desktop connects directly to the agent's existing HTTPS address.
+The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
+in the background on port 8080, checks its public endpoint, and prints the URL,
+username, password, and working directory. Add these in Settings → Servers.
+You can close the terminal after setup; there is no local tunnel to keep running.
 
 Press Cmd+B (Ctrl+B on Windows/Linux) to open Home. Under Projects, hover over
 the added server and choose Add project. Select `/app` (or your `--dir`) on the
 agent, then use that project's menu → New session. Setting a default server
-does not move existing chats. If a chat immediately stops and the server logs
-show `ENOENT` for a local computer path, create a new session under the remote
-project. Connect a provider there if no local OpenCode sign-in was available.
+does not move existing chats. Provider sign-ins from `auth.json` are copied
+when available. OpenCode's newer chat mode uses a separate credential store;
+if your provider is missing there, connect it in the remote server's settings.
 
-Use `--port` for a different local port, including when connecting to multiple
-agents at once, and `--remote-port` if port 4096 is occupied on the agent.
-The connection honors `--ssh-config`. Ctrl-C stops the server and tunnel;
-rerun `railway ca desktop --opencode --agent my-box` to reconnect. The CLI also
-saves an optional reconnect script under `~/.railway/desktop/opencode/`.
-An occupied local port fails before provisioning; stop the previous connection
-or choose another `--port`.
+OpenCode uses the agent's public app port (8080). Setup refuses to take over
+an occupied port; stop the other process or use `--new` for a fresh agent.
+Rerunning `railway ca desktop --opencode --agent my-box` reuses the running
+server and its credentials, or starts it again after a sleep/wake or restart.
+The remote credential and process state are stored privately under
+`~/.railway/desktop/opencode/`; startup logs are in `server.log` there.
 
-`railway ca desktop --opencode --agent my-box --remove` removes the generated
-script and shared SSH block. Stop any running connection and remove the saved URL
-in OpenCode separately. The agent remains; `railway ca sleep my-box` stops its
-compute bill.
+`railway ca desktop --opencode --agent my-box --remove` stops the managed
+OpenCode process on a running agent and removes the shared SSH block. It does
+not wake a sleeping agent. Remove the saved URL in OpenCode separately.
+The agent remains; `railway ca sleep my-box` stops its compute bill.
 
 ## Contributing
 

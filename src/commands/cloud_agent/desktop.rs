@@ -15,11 +15,11 @@
 //! a login shell.
 //!
 //! OpenCode uses an HTTP server: this command starts `opencode serve`
-//! and forwards a loopback port over the same SSH block. The user adds the URL
+//! in the background and connects through the agent's public HTTPS address. The user adds the URL
 //! through OpenCode's server picker. See the `opencode` submodule.
 //!
 //! The shared launch pipeline wakes a reused agent. OpenCode's server and
-//! tunnel stay in the foreground; the other apps connect after setup exits.
+//! public endpoint are checked before setup exits.
 
 use std::path::{Path, PathBuf};
 
@@ -40,7 +40,7 @@ mod opencode;
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude              # Claude Code Desktop\n  railway ca desktop --codex               # the Codex app\n  railway ca desktop --opencode            # start OpenCode Desktop connection\n  railway ca desktop --opencode --new      # start on a fresh agent\n  railway ca desktop --claude --codex      # both, on one agent\n\n  railway ca desktop --claude --agent my-box   # an agent you already have\n  railway ca desktop --claude --dir /app/api   # where sessions open\n  railway ca desktop --claude --dry-run        # print the changes, write nothing\n  railway ca desktop --claude --remove         # undo them\n\nWrites an OpenSSH block for the agent, and for Claude an entry in\n~/.claude/settings.json pointing at that block. Restart Claude/Codex afterwards.\n\nOpenCode starts its remote server and SSH tunnel in this terminal. Reuses\nand wakes this environment's agent, creating one if needed; --agent selects\nan existing box and --new always creates a fresh one.\nAdd http://localhost.:14096 in\nSettings → Servers. The trailing dot enables the remote folder picker.\nOpen Home (Cmd+B / Ctrl+B), then Projects → your server → Add project.\nChoose /app (or --dir) on the agent and start a new session in that project.\nA default server does not move existing chats. Keep this command running;\nCtrl-C stops the server and tunnel. Run this command again to reconnect.\nUse --port for the local port, --remote-port for the port on the agent.\nAn optional reconnect script is saved under ~/.railway/desktop/opencode/.\n--remove deletes it; remove the saved URL in OpenCode itself.\n\nThe agent stays awake after disconnect. `railway ca sleep <name>` stops its\ncompute bill. Re-running setup wakes it again."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup prints an HTTPS URL, username, and password for Settings → Servers.\nOpen Home → Projects → this server → Add project, select /app (or --dir),\nand start a new session. Setting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration. Remove the saved server in OpenCode separately.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -51,17 +51,9 @@ pub struct Args {
     #[clap(long)]
     codex: bool,
 
-    /// Start OpenCode's server and SSH tunnel for OpenCode Desktop
+    /// Start OpenCode in the background and return its HTTPS connection details
     #[clap(long)]
     opencode: bool,
-
-    /// Local OpenCode tunnel port
-    #[clap(long, default_value = "14096", requires = "opencode", value_parser = clap::value_parser!(u16).range(1..))]
-    port: u16,
-
-    /// OpenCode server port on the agent
-    #[clap(long, default_value = "4096", requires = "opencode", value_parser = clap::value_parser!(u16).range(1..))]
-    remote_port: u16,
 
     /// Agent to point the app at, by name or id (defaults to this
     /// environment's, creating one if there is none)
@@ -92,7 +84,7 @@ pub struct Args {
     #[clap(long, conflicts_with_all = ["dry_run", "dir"])]
     remove: bool,
 
-    /// Skip the connection check after writing
+    /// Skip SSH probes (OpenCode HTTPS authentication is always checked)
     #[clap(long)]
     no_verify: bool,
 
@@ -159,7 +151,6 @@ pub async fn command(args: Args) -> Result<()> {
         bail!("--alias must be a single SSH host name (letters, digits, '.', '_' or '-').");
     }
     let home = dirs::home_dir().context("Unable to get home directory")?;
-    // A saved connection script may be run from a different directory later.
     let ssh_config_path = std::path::absolute(ssh_config::expand_tilde(&args.ssh_config)?)?;
 
     if args.remove {
@@ -168,11 +159,9 @@ pub async fn command(args: Args) -> Result<()> {
     if args.dry_run {
         return dry_run(&args, &apps, &home, &ssh_config_path).await;
     }
-    if apps.contains(&App::OpenCode) {
-        // Catch a previous tunnel before creating or provisioning a VM. SSH's
-        // ExitOnForwardFailure still handles a port taken after this check.
-        opencode::check_local_port(args.port)?;
-    }
+    let opencode_password = apps
+        .contains(&App::OpenCode)
+        .then(opencode::generate_password);
 
     // Same preflight as a launch, and for the same reason: without the flag the
     // create at the end of provisioning is refused, after a credential has
@@ -206,7 +195,7 @@ pub async fn command(args: Args) -> Result<()> {
     let mut prepared: Option<code::Prepared> = None;
     for app in &apps {
         let progress = code::CliProgress::default();
-        let launch = args.launch_args(
+        let mut launch = args.launch_args(
             *app,
             prepared
                 .as_ref()
@@ -214,6 +203,14 @@ pub async fn command(args: Args) -> Result<()> {
                 .or_else(|| pinned.as_ref().map(|a| a.id.clone())),
             Some((&project_id, &environment_id)),
         );
+        if let Some(password) = &opencode_password {
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        }
         // Desktop never opens the session it provisions — FullTerminal is the
         // non-pane style; the remote command is unused after prepare returns.
         let result = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await;
@@ -242,19 +239,6 @@ pub async fn command(args: Args) -> Result<()> {
     if let Some(entry) = claude_entry {
         upsert_claude_ssh_config(&home, entry)?;
     }
-    if apps.contains(&App::OpenCode) {
-        let path = opencode::script_path(&home, &prepared.agent_id);
-        opencode::write_script(
-            &path,
-            &opencode::render_script(
-                &alias,
-                &args.dir,
-                &ssh_config_path,
-                args.port,
-                args.remote_port,
-            ),
-        )?;
-    }
 
     // Verify against the file we just wrote. With the default path that is also
     // what the apps read; with `--ssh-config` it is not, and the summary says so
@@ -263,7 +247,16 @@ pub async fn command(args: Args) -> Result<()> {
     let checks = if args.no_verify {
         Vec::new()
     } else {
-        verify(&alias, &apps, &ssh_config_path).await
+        let ssh_apps = apps
+            .iter()
+            .copied()
+            .filter(|app| *app != App::OpenCode)
+            .collect::<Vec<_>>();
+        if ssh_apps.is_empty() {
+            Vec::new()
+        } else {
+            verify(&alias, &ssh_apps, &ssh_config_path).await
+        }
     };
     if custom_config && apps.iter().any(|app| *app != App::OpenCode) {
         println!(
@@ -274,6 +267,13 @@ pub async fn command(args: Args) -> Result<()> {
             format!("Include {}", ssh_config_path.display()).cyan()
         );
     }
+
+    let connection = if let Some(password) = &opencode_password {
+        println!("\nStarting OpenCode and checking its HTTPS connection...");
+        Some(opencode::start(&alias, &args.dir, &ssh_config_path, password).await?)
+    } else {
+        None
+    };
 
     summarize(
         &prepared,
@@ -292,19 +292,30 @@ pub async fn command(args: Args) -> Result<()> {
             .join(","),
     )
     .await;
-    if apps.contains(&App::OpenCode) {
+    if let Some(connection) = connection {
         println!(
-            "\nStarting OpenCode on {}. Keep this terminal open.",
-            prepared.agent_name
+            "\n{}",
+            if connection.reused {
+                "OpenCode is already running"
+            } else {
+                "OpenCode is ready"
+            }
+            .bold()
         );
-        opencode::run(opencode::connection_command(
-            &alias,
-            &args.dir,
-            &ssh_config_path,
-            args.port,
-            args.remote_port,
-        ))?;
+        println!("  Server:     {}", connection.url.cyan());
+        println!("  Username:   {}", connection.username);
+        println!("  Password:   {}", connection.password);
+        println!("  Directory:  {}", connection.directory);
+        println!("\nIn OpenCode Desktop, add this URL and credentials in Settings → Servers.");
+        println!(
+            "Open Home → Projects → this server → Add project → {} → New session.",
+            connection.directory
+        );
+        println!(
+            "You can close this terminal. Rerun this command after sleeping or restarting the agent."
+        );
     }
+
     Ok(())
 }
 
@@ -434,24 +445,14 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         );
     }
     if apps.contains(&App::OpenCode) {
+        println!("\nWould generate credentials for a new agent, or reuse its saved credentials.");
         println!(
-            "\n{}",
-            opencode::script_path(home, &agent_id)
-                .display()
-                .to_string()
-                .cyan()
+            "Would start password-protected OpenCode in the background on port 8080 from {}.",
+            args.dir
         );
-        print!(
-            "{}",
-            opencode::render_script(
-                &alias,
-                &args.dir,
-                ssh_config_path,
-                args.port,
-                args.remote_port
-            )
+        println!(
+            "Would verify the agent's existing HTTPS address and print its connection details."
         );
-        println!("Would start this server and tunnel in the foreground.");
     }
     if identity.is_none() {
         println!(
@@ -512,6 +513,14 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     // `--agent` is how that is cleaned up.
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
 
+    let stopped_opencode = apps.contains(&App::OpenCode) && agent.status == ca::Status::Running;
+    if stopped_opencode {
+        let alias = args
+            .alias
+            .clone()
+            .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
+        opencode::stop(&alias, ssh_config_path).await?;
+    }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
     let removed_block = ssh_config::remove_marked_block(ssh_config_path, &marker)?;
     let removed_entry = if apps.contains(&App::Claude) {
@@ -519,10 +528,7 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     } else {
         false
     };
-    let script_path = opencode::script_path(home, &agent.id);
-    let removed_script = apps.contains(&App::OpenCode) && opencode::remove_script(&script_path)?;
-
-    match (removed_block, removed_entry, removed_script) {
+    match (removed_block, removed_entry, stopped_opencode) {
         (false, false, false) => println!(
             "No `railway ca desktop` config found for agent {}.",
             agent.name.cyan()
@@ -542,10 +548,10 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
                     claude_settings_path(home).display()
                 );
             }
-            if removed_script {
-                println!("{} Removed {}", "✓".green(), script_path.display());
+            if stopped_opencode {
                 println!(
-                    "Stop any running OpenCode connection and remove its URL from OpenCode's server picker."
+                    "{} Stopped the managed OpenCode server. Remove its saved entry in OpenCode Desktop.",
+                    "✓".green()
                 );
             }
             println!(
@@ -759,9 +765,6 @@ fn summarize(
     checks: &[Check],
 ) {
     let dir = &args.dir;
-    let opencode_script = apps
-        .contains(&App::OpenCode)
-        .then(|| opencode::script_path(home, &prepared.agent_id));
     println!("\n{}", "Cloud agent ready for your desktop app".bold());
     println!("  {}  {}", "Agent  ".dimmed(), prepared.agent_name.bold());
     println!("  {}  {}", "Host   ".dimmed(), alias.bold());
@@ -778,14 +781,6 @@ fn summarize(
             claude_settings_path(home).display().to_string().bold()
         );
     }
-    if let Some(path) = &opencode_script {
-        println!(
-            "  {}  {}",
-            "       ".dimmed(),
-            path.display().to_string().bold()
-        );
-    }
-
     if !checks.is_empty() {
         println!();
         for check in checks {
@@ -797,26 +792,11 @@ fn summarize(
         }
     }
 
-    println!("\n{}", "Next:".bold());
+    if apps.iter().any(|app| *app != App::OpenCode) {
+        println!("\n{}", "Next:".bold());
+    }
     for app in apps {
         if *app == App::OpenCode {
-            println!(
-                "  OpenCode's server and tunnel start below. Keep this terminal open while connected."
-            );
-            println!(
-                "  In Settings → Servers, add {} (the trailing dot enables the remote folder picker).",
-                format!("http://localhost.:{}", args.port).cyan()
-            );
-            println!(
-                "  Open Home (Cmd+B / Ctrl+B), find that server under Projects, then Add project → {} → New session.",
-                dir.cyan()
-            );
-            println!(
-                "  Choose a directory on the agent. Setting the default server does not move existing chats."
-            );
-            println!(
-                "  Wait for the server's listening message before connecting. Ctrl-C stops the server and tunnel."
-            );
             continue;
         }
         println!(
@@ -871,12 +851,8 @@ mod tests {
         for flag in ["--dry-run", "--remove", "--no-verify"] {
             assert!(Args::try_parse_from(["desktop", "--opencode", flag]).is_ok());
         }
-        assert!(Args::try_parse_from(["desktop", "--codex", "--port", "14097"]).is_err());
-        for port in ["0", "65536", "invalid"] {
-            assert!(Args::try_parse_from(["desktop", "--opencode", "--port", port]).is_err());
-            assert!(
-                Args::try_parse_from(["desktop", "--opencode", "--remote-port", port]).is_err()
-            );
+        for flag in ["--port", "--remote-port"] {
+            assert!(Args::try_parse_from(["desktop", "--opencode", flag, "4096"]).is_err());
         }
     }
 
