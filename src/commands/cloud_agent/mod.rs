@@ -245,6 +245,8 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
             }
         }
     };
+    let mut args = args;
+    args.local_name_project = resolved.local_name_project;
     let launch = tui::LaunchRequest {
         project_id: resolved.project_id,
         environment_id: resolved.environment_id,

@@ -85,6 +85,7 @@ use crate::util::shell::shell_join;
 /// it inside `railway ca`'s manage screen with the tree collapsed, so the
 /// session has the whole window and the rest of the tool is one key away;
 /// everywhere else it hands the terminal straight to ssh.
+mod names;
 mod opencode;
 mod plumbing;
 
@@ -212,6 +213,10 @@ pub struct LaunchArgs {
     /// Environment name or ID (defaults to the linked environment)
     #[clap(long, short)]
     pub environment: Option<String>,
+
+    /// Preserve directory-based naming when Desktop/the TUI pins a resolved target.
+    #[clap(skip)]
+    pub(crate) local_name_project: Option<String>,
 
     /// Project ID (defaults to the linked project)
     #[clap(long, short)]
@@ -2145,7 +2150,7 @@ async fn resolve_target(
     args: &LaunchArgs,
     prefs: &mut AgentPrefs,
     home: &Path,
-) -> Result<(String, String)> {
+) -> Result<names::Target> {
     // The link is only consulted when nothing better is available, and reading
     // it can fail for reasons that are not this run's problem (no link at all,
     // the RAILWAY_ENVIRONMENT_ID-without-PROJECT_ID guard).
@@ -2199,7 +2204,7 @@ async fn resolve_target(
         None => None,
     };
 
-    match choose_target(args, prefs.default_project.as_ref(), linked) {
+    let mut target = match choose_target(args, prefs.default_project.as_ref(), linked) {
         // Either flag means the caller is targeting deliberately; hand both to
         // the shared resolver so `-p` alone still finds an environment.
         TargetSource::Flags => {
@@ -2212,18 +2217,26 @@ async fn resolve_target(
                 && is_uuid(project)
                 && is_uuid(environment)
             {
-                return Ok((project.clone(), environment.clone()));
+                names::Target::new((project.clone(), environment.clone()), false)
+            } else {
+                names::Target::new(
+                    resolve_project_and_env(
+                        configs,
+                        client,
+                        args.project.clone(),
+                        args.environment.clone(),
+                    )
+                    .await?,
+                    false,
+                )
             }
-            resolve_project_and_env(
-                configs,
-                client,
-                args.project.clone(),
-                args.environment.clone(),
-            )
-            .await
         }
-        TargetSource::Configured(project_id, environment_id)
-        | TargetSource::Linked(project_id, environment_id) => Ok((project_id, environment_id)),
+        TargetSource::Configured(project_id, environment_id) => {
+            names::Target::new((project_id, environment_id), true)
+        }
+        TargetSource::Linked(project_id, environment_id) => {
+            names::Target::new((project_id, environment_id), false)
+        }
         TargetSource::Setup => {
             println!(
                 "{}",
@@ -2233,14 +2246,24 @@ async fn resolve_target(
             *prefs = AgentPrefs::load_in(home).unwrap_or_default();
 
             match prefs.default_project.clone() {
-                Some(default) => Ok((default.project_id, default.environment_id)),
+                Some(default) => {
+                    names::Target::new((default.project_id, default.environment_id), true)
+                }
                 // They skipped the question. Fall back to the one-off picker so
                 // the launch they asked for still happens.
-                None => resolve_project_and_env(configs, client, None, None).await,
+                None => names::Target::new(
+                    resolve_project_and_env(configs, client, None, None).await?,
+                    false,
+                ),
             }
         }
-        TargetSource::Ask => resolve_project_and_env(configs, client, None, None).await,
-    }
+        TargetSource::Ask => names::Target::new(
+            resolve_project_and_env(configs, client, None, None).await?,
+            false,
+        ),
+    };
+    target.use_local_name |= args.local_name_project.as_deref() == Some(target.project_id.as_str());
+    Ok(target)
 }
 
 /// The single stdin stream `provision_script_with_skills` reads: the
@@ -2350,10 +2373,12 @@ async fn resolve_agent(
     configs: &mut Configs,
     client: &reqwest::Client,
     args: &LaunchArgs,
-    environment_id: &str,
+    target: &names::Target,
+    harness: Agent,
     progress: &dyn Progress,
     access: &RelayAccess,
 ) -> Result<(CodeAgent, bool, Option<std::path::PathBuf>)> {
+    let environment_id = target.environment_id.as_str();
     let backboard = configs.get_backboard();
 
     // An explicit agent wins over everything: the caller is looking at the one
@@ -2394,6 +2419,7 @@ async fn resolve_agent(
         variables[key] = serde_json::Value::String(value.clone());
     }
     let variables = crate::controllers::cloud_agent::with_default_variables(Some(variables));
+    let name = names::for_launch(client, configs, args, harness, target).await?;
     progress.step("Creating a cloud agent");
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(
@@ -2402,7 +2428,7 @@ async fn resolve_agent(
         mutations::cloud_agent_create::Variables {
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
-                name: args.name.clone(),
+                name,
                 variables,
             },
         },
@@ -2670,6 +2696,7 @@ pub struct Prepared {
 pub struct ResolvedLaunch {
     pub project_id: String,
     pub environment_id: String,
+    pub(crate) local_name_project: Option<String>,
     /// The harness slug, matching [`Agent::slug`].
     pub harness: &'static str,
 }
@@ -2691,12 +2718,12 @@ pub async fn resolve_launch(
 ) -> Result<ResolvedLaunch> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
     let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
-    let (project_id, environment_id) =
-        resolve_target(configs, client, args, &mut prefs, &home).await?;
+    let target = resolve_target(configs, client, args, &mut prefs, &home).await?;
     let harness = resolve_agent_choice(args, &mut prefs, &home)?.slug();
     Ok(ResolvedLaunch {
-        project_id,
-        environment_id,
+        local_name_project: target.local_name_project(),
+        project_id: target.project_id,
+        environment_id: target.environment_id,
         harness,
     })
 }
@@ -3000,7 +3027,8 @@ async fn prepare_inner(
             crate::commands::ssh::native::ensure_ssh_key_noninteractive(&client, &key_configs).await
         }),
     );
-    let (_project_id, environment_id) = target_res?;
+    let launch_target = target_res?;
+    let environment_id = launch_target.environment_id.clone();
     let identity = match identity {
         Ok(identity) => identity,
         Err(_) => {
@@ -3027,7 +3055,8 @@ async fn prepare_inner(
             &mut configs,
             &client,
             args,
-            &environment_id,
+            &launch_target,
+            agent,
             progress,
             &access,
         ),

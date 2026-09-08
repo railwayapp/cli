@@ -196,8 +196,8 @@ pub async fn command(args: Args) -> Result<()> {
     // Resolve once, then carry both IDs through every app's provisioning pass.
     // An environment alone still triggers the project picker in an unlinked
     // directory, even when --agent already identifies the whole target.
-    let (project_id, environment_id) = if let Some(agent) = &pinned {
-        (agent.project_id.clone(), agent.environment_id.clone())
+    let (project_id, environment_id, local_name_project) = if let Some(agent) = &pinned {
+        (agent.project_id.clone(), agent.environment_id.clone(), None)
     } else {
         let mut configs = Configs::new()?;
         let client = GQLClient::new_authorized(&configs)?;
@@ -207,7 +207,11 @@ pub async fn command(args: Args) -> Result<()> {
             &client,
         )
         .await?;
-        (target.project_id, target.environment_id)
+        (
+            target.project_id,
+            target.environment_id,
+            target.local_name_project,
+        )
     };
     let mut prepared: Option<code::Prepared> = None;
     for app in &apps {
@@ -220,6 +224,7 @@ pub async fn command(args: Args) -> Result<()> {
                 .or_else(|| pinned.as_ref().map(|a| a.id.clone())),
             Some((&project_id, &environment_id)),
         );
+        launch.local_name_project = local_name_project.clone();
         if let Some(password) = &opencode_password {
             launch
                 .boot_variables

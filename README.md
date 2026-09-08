@@ -95,6 +95,13 @@ missing, Railway offers to install it first. Declining, Esc, or Ctrl+C at
 either prompt leaves the server running and prints the connection details.
 Standard and Beta clients are detected and installed separately.
 
+New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
+(Beta): the first five letters/digits of the project name, lowercase, plus a
+random three-character suffix. When using your default cloud agents project,
+the label comes from the local repository or directory instead. Existing names
+are checked before creation; `--name` overrides the generated name. The same
+naming applies to `remote` and `railway ca desktop`.
+
 Reconnect to an existing server using your local client:
 
 ```bash
