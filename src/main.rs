@@ -926,6 +926,9 @@ mod cli_tests {
             assert_parses(&["ca", "herdr", "install", "--remove"]);
             assert_parses(&["ca", "herdr", "new", "--dry-run"]);
             assert_parses(&["ca", "herdr", "new", "--codex", "-p", "proj"]);
+            assert_parses(&["ca", "herdr", "agents", "--remote"]);
+            assert_parses(&["ca", "herdr", "agents", "--wake", "--open"]);
+            assert_parses(&["ca", "herdr", "sync", "--debounce", "30"]);
             assert_parses(&["ca", "herdr", "bootstrap", "my-box", "--claude"]);
             assert_parses(&["ca", "herdr", "sync", "--dry-run", "--json"]);
         }

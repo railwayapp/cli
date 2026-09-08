@@ -89,6 +89,23 @@ impl Herdr {
         self.output(&["plugin", "unlink", plugin_id]).map(drop)
     }
 
+    /// Best effort: a toast is never worth failing the action for.
+    pub fn notify(&self, title: &str, body: &str) {
+        let _ = self.output(&[
+            "notification",
+            "show",
+            title,
+            "--body",
+            body,
+            "--sound",
+            "none",
+        ]);
+    }
+
+    pub fn server_reload_config(&self) -> Result<()> {
+        self.output(&["server", "reload-config"]).map(drop)
+    }
+
     pub fn plugin_pane_open(&self, plugin_id: &str, entrypoint: &str) -> Result<()> {
         self.output(&[
             "plugin",

@@ -27,12 +27,23 @@ pub struct Args {
     /// Open the picker in a herdr popup pane instead of this terminal
     #[clap(long)]
     open: bool,
+
+    /// Running on a cloud agent VM: no herdr machines here, so connect and new
+    /// are left to Local; the row for this VM is marked
+    #[clap(long)]
+    remote: bool,
+
+    /// Only sleeping agents; with exactly one, wake it without asking
+    #[clap(long)]
+    wake: bool,
 }
 
 struct Row {
     agent: ca::Agent,
     project: String,
     machine: Option<Machine>,
+    remote: bool,
+    this_vm: bool,
 }
 
 impl Row {
@@ -49,12 +60,18 @@ impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{:<9}  {}/{}  {}",
+            "{:<9}  {}/{}",
             self.agent.status.label(),
             self.project,
-            self.agent.name,
-            self.machine_state()
-        )
+            self.agent.name
+        )?;
+        if self.this_vm {
+            write!(f, "  ← this VM")
+        } else if self.remote {
+            Ok(())
+        } else {
+            write!(f, "  {}", self.machine_state())
+        }
     }
 }
 
@@ -77,6 +94,9 @@ impl Action {
         Action::New,
         Action::Quit,
     ];
+
+    /// No machine catalog on a VM, so nothing to connect or add there.
+    const REMOTE: [Action; 4] = [Action::Sleep, Action::Wake, Action::Delete, Action::Quit];
 }
 
 impl fmt::Display for Action {
@@ -98,12 +118,14 @@ struct Picker {
     backboard: String,
     herdr: Herdr,
     state: State,
+    remote: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let herdr = Herdr::from_env();
     if args.open {
-        return herdr.plugin_pane_open(super::PLUGIN_ID, "agents");
+        let entrypoint = if args.wake { "wake" } else { "agents" };
+        return herdr.plugin_pane_open(super::PLUGIN_ID, entrypoint);
     }
 
     let configs = Configs::new()?;
@@ -116,11 +138,23 @@ pub async fn command(args: Args) -> Result<()> {
         backboard,
         herdr,
         state,
+        remote: args.remote,
     };
-    let names = lifecycle::place_names(&picker.client, &picker.configs).await;
+    let this_vm = std::env::var("RAILWAY_CLOUD_AGENT_ID").ok();
+    let mut names = picker.state.project_names.clone();
 
     loop {
         let agents = ca::list_mine(&picker.client, &picker.backboard).await?;
+        if agents.iter().any(|a| !names.contains_key(&a.project_id)) {
+            names = lifecycle::place_names(&picker.client, &picker.configs)
+                .await
+                .into_iter()
+                .collect();
+            if !names.is_empty() {
+                picker.state.project_names = names.clone();
+                let _ = picker.state.save();
+            }
+        }
         if agents.is_empty() {
             println!(
                 "No cloud agents. {} creates one and adds it to herdr.",
@@ -128,15 +162,22 @@ pub async fn command(args: Args) -> Result<()> {
             );
             return Ok(());
         }
-        let machines = picker.herdr.machines()?;
+        let machines = if args.remote {
+            Vec::new()
+        } else {
+            picker.herdr.machines()?
+        };
         let mut rows: Vec<Row> = agents
             .into_iter()
+            .filter(|agent| !args.wake || matches!(agent.status, ca::Status::Sleeping))
             .map(|agent| Row {
                 machine: sync::machine_for(&agent, &machines).cloned(),
                 project: names
                     .get(&agent.project_id)
                     .cloned()
                     .unwrap_or_else(|| agent.project_id.clone()),
+                remote: args.remote,
+                this_vm: this_vm.as_deref() == Some(agent.id.as_str()),
                 agent,
             })
             .collect();
@@ -146,6 +187,31 @@ pub async fn command(args: Args) -> Result<()> {
                 .then_with(|| a.agent.name.cmp(&b.agent.name))
         });
 
+        if args.wake {
+            return match rows.len() {
+                0 => {
+                    println!("No sleeping agents.");
+                    Ok(())
+                }
+                1 => {
+                    picker.wake(&rows[0]).await?;
+                    picker.resync().await
+                }
+                _ => match inquire::Select::new("Wake", rows)
+                    .with_render_config(Configs::get_render_config())
+                    .with_page_size(15)
+                    .with_help_message("↑↓ move, type to filter, enter wakes, esc quits")
+                    .prompt_skippable()?
+                {
+                    Some(row) => {
+                        picker.wake(&row).await?;
+                        picker.resync().await
+                    }
+                    None => Ok(()),
+                },
+            };
+        }
+
         let Some(row) = inquire::Select::new("Agent", rows)
             .with_render_config(Configs::get_render_config())
             .with_page_size(15)
@@ -154,20 +220,29 @@ pub async fn command(args: Args) -> Result<()> {
         else {
             return Ok(());
         };
-        let Some(action) = prompt_select_with_cancel(
-            &format!("{}/{}", row.project, row.agent.name),
-            Action::ALL.to_vec(),
-        )?
+        let actions = if args.remote {
+            Action::REMOTE.to_vec()
+        } else {
+            Action::ALL.to_vec()
+        };
+        let Some(action) =
+            prompt_select_with_cancel(&format!("{}/{}", row.project, row.agent.name), actions)?
         else {
             continue;
         };
 
+        // connect and new leave a machine to look at, so the popup closes
+        // behind them; the rest stay on the list.
         let result = match action {
-            Action::Connect => picker.connect(&row).await,
-            Action::Sleep => picker.sleep(&row).await,
-            Action::Wake => picker.wake(&row).await,
+            Action::Connect => return picker.connect(&row).await,
+            Action::Sleep => picker.sleep(&row).await.and(picker.resync().await),
+            Action::Wake => {
+                picker.wake(&row).await?;
+                picker.resync().await?;
+                return Ok(());
+            }
             Action::Delete => picker.delete(&row).await,
-            Action::New => picker.herdr.plugin_pane_open(super::PLUGIN_ID, "new"),
+            Action::New => return super::new::command(super::new::Args::interactive()).await,
             Action::Quit => return Ok(()),
         };
         if let Err(e) = result {
@@ -179,8 +254,13 @@ pub async fn command(args: Args) -> Result<()> {
 impl Picker {
     async fn connect(&mut self, row: &Row) -> Result<()> {
         let agent = self.ensure_awake(&row.agent).await?;
+        let spinner = create_spinner(format!("Waiting for {}'s ssh relay", agent.name));
+        let ready = super::relay::wait_until_ready(&agent).await;
+        spinner.finish_and_clear();
+        ready?;
         match &row.machine {
             Some(machine) => {
+                self.herdr.machine_disable(&machine.id)?;
                 self.herdr.machine_enable(&machine.id)?;
                 self.remember(&agent.id, Some(&machine.id))?;
                 println!(
@@ -223,6 +303,10 @@ impl Picker {
                 println!("Agent {} is already asleep.", agent.name.cyan());
             }
             ca::Status::Running | ca::Status::Starting => {
+                self.herdr.notify(
+                    &format!("Sleeping {}", agent.name),
+                    "railway: cloudAgentSleep issued; its herdr machine is being disabled",
+                );
                 let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
                 let result = ca::sleep(
                     &self.client,
@@ -257,12 +341,22 @@ impl Picker {
         let agent = self.ensure_awake(&row.agent).await?;
         match &row.machine {
             Some(machine) => {
-                if !machine.enabled {
-                    self.herdr.machine_enable(&machine.id)?;
-                }
+                let spinner = create_spinner(format!("Waiting for {}'s ssh relay", agent.name));
+                let ready = super::relay::wait_until_ready(&agent).await;
+                spinner.finish_and_clear();
+                ready?;
+                // Off then on: a profile change makes herdr open a fresh
+                // connection, which is what clears a stuck Attention state.
+                self.herdr.machine_disable(&machine.id)?;
+                self.herdr.machine_enable(&machine.id)?;
                 self.remember(&agent.id, Some(&machine.id))?;
-                println!("✓ Agent {} is running.", agent.name.cyan());
+                println!(
+                    "✓ Agent {} is running; {} is back in the sidebar.",
+                    agent.name.cyan(),
+                    machine.label.cyan()
+                );
             }
+            None if self.remote => println!("✓ Agent {} is running.", agent.name.cyan()),
             None => println!(
                 "✓ Agent {} is running. It has no herdr machine; {} adds one.",
                 agent.name.cyan(),
@@ -309,6 +403,10 @@ impl Picker {
                 return Ok(agent.clone());
             }
             ca::Status::Sleeping => {
+                self.herdr.notify(
+                    &format!("Waking {}", agent.name),
+                    "railway: cloudAgentWake issued; the machine is re-enabled once its ssh relay answers",
+                );
                 ca::wake(&self.client, &self.backboard, &agent.id).await?;
             }
             ca::Status::Starting => {}
@@ -329,6 +427,15 @@ impl Picker {
         .await;
         spinner.finish_and_clear();
         result
+    }
+
+    async fn resync(&mut self) -> Result<()> {
+        if self.remote {
+            return Ok(());
+        }
+        sync::resync(&self.client, &self.backboard, &self.herdr).await?;
+        self.state = State::load().unwrap_or_default();
+        Ok(())
     }
 
     fn remember(&mut self, agent_id: &str, profile_id: Option<&str>) -> Result<()> {

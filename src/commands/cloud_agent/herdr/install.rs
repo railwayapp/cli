@@ -28,6 +28,28 @@ key = "prefix+shift+c"
 type = "plugin_action"
 command = "railway.ca.new"
 description = "railway new agent"
+
+[[keys.command]]
+key = "prefix+shift+s"
+type = "plugin_action"
+command = "railway.ca.wake"
+description = "railway wake agent"
+"#;
+
+/// On a VM the same keys mean: the picker in remote mode, and sleep THIS agent.
+/// Same plugin id on both servers, so a binding reads the same wherever the
+/// client is pointed.
+pub(super) const REMOTE_KEYBINDING: &str = r#"[[keys.command]]
+key = "prefix+shift+a"
+type = "plugin_action"
+command = "railway.ca.agents"
+description = "railway agents"
+
+[[keys.command]]
+key = "prefix+shift+s"
+type = "plugin_action"
+command = "railway.ca.sleep-self"
+description = "railway sleep this agent"
 "#;
 
 #[derive(Parser)]
@@ -39,6 +61,10 @@ pub struct Args {
     /// Print the manifest and exit without writing or linking
     #[clap(long, conflicts_with = "remove")]
     print: bool,
+
+    /// Leave herdr's config.toml alone (no keybindings added or removed)
+    #[clap(long)]
+    no_keys: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -47,6 +73,10 @@ pub async fn command(args: Args) -> Result<()> {
     if args.remove {
         remove_from(&herdr, &dir)?;
         println!("✓ Unlinked herdr plugin {}", PLUGIN_ID.cyan());
+        if !args.no_keys && remove_keybindings(&herdr_config_path()?)? {
+            println!("✓ Removed the Railway keybindings from herdr's config.toml");
+            let _ = herdr.server_reload_config();
+        }
         return Ok(());
     }
     let manifest = Manifest::new(railway_binary()?);
@@ -71,11 +101,131 @@ pub async fn command(args: Args) -> Result<()> {
                 .yellow()
         ),
     }
-    println!(
-        "\nTo bind the pickers, add to your herdr config.toml:\n\n{}",
-        KEYBINDING.dimmed()
-    );
+    if args.no_keys {
+        println!(
+            "\nTo bind the pickers, add to your herdr config.toml:\n\n{}",
+            KEYBINDING.dimmed()
+        );
+        return Ok(());
+    }
+    let config = herdr_config_path()?;
+    if ensure_keybindings(&config)? {
+        println!(
+            "✓ Bound {} (railway agents) and {} (railway new agent) in {}",
+            "prefix+shift+a".cyan(),
+            "prefix+shift+c".cyan(),
+            config.display()
+        );
+        if herdr.server_reload_config().is_err() {
+            println!(
+                "{}",
+                "herdr is not running; the bindings apply when it starts.".dimmed()
+            );
+        }
+    }
     Ok(())
+}
+
+pub(super) const KEYS_MARKER: &str = "# railway ca herdr keys";
+
+/// herdr's own rule: `$XDG_CONFIG_HOME/herdr`, else `~/.config/herdr`.
+fn herdr_config_path() -> Result<PathBuf> {
+    let dir = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
+        _ => dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Unable to get home directory"))?
+            .join(".config"),
+    };
+    Ok(dir.join("herdr").join("config.toml"))
+}
+
+/// Our marker block is rewritten when the bindings changed; a config that
+/// binds the actions on its own, without the marker, is left alone.
+fn ensure_keybindings(path: &Path) -> Result<bool> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let current = existing.contains(KEYS_MARKER);
+    if !current && existing.contains("railway.ca.agents") {
+        return Ok(false);
+    }
+    let base = if current {
+        strip_keybindings(&existing)
+    } else {
+        existing.clone()
+    };
+    let wanted = with_keybindings(&base);
+    if wanted == existing {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, wanted).with_context(|| format!("Writing {}", path.display()))?;
+    Ok(true)
+}
+
+fn with_keybindings(existing: &str) -> String {
+    let mut out = existing.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(KEYS_MARKER);
+    out.push('\n');
+    out.push_str(KEYBINDING);
+    out
+}
+
+/// Drops the marker line and every `[[keys.command]]` table bound to a
+/// `railway.ca.*` action. Anything else in the file is kept byte for byte.
+fn remove_keybindings(path: &Path) -> Result<bool> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    let stripped = strip_keybindings(&text);
+    if stripped == text {
+        return Ok(false);
+    }
+    std::fs::write(path, stripped).with_context(|| format!("Writing {}", path.display()))?;
+    Ok(true)
+}
+
+fn strip_keybindings(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim() == KEYS_MARKER {
+            i += 1;
+            continue;
+        }
+        if line.trim() == "[[keys.command]]" {
+            let mut end = i + 1;
+            while end < lines.len() && !lines[end].trim_start().starts_with('[') {
+                end += 1;
+            }
+            let ours = lines[i..end]
+                .iter()
+                .any(|l| l.trim_start().starts_with("command") && l.contains("\"railway.ca."));
+            if ours {
+                while end > i + 1 && lines[end - 1].trim().is_empty() {
+                    end -= 1;
+                }
+                i = end;
+                continue;
+            }
+        }
+        out.push(line);
+        i += 1;
+    }
+    let mut joined = out.join("\n");
+    joined.truncate(joined.trim_end_matches('\n').len());
+    if !joined.is_empty() && text.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
 }
 
 fn install_into(herdr: &Herdr, dir: &Path, manifest: &Manifest) -> Result<()> {
@@ -129,16 +279,25 @@ fn find_in_path(name: &str, path: Option<OsString>) -> Option<PathBuf> {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Manifest {
+pub(super) struct Manifest {
     id: String,
     name: String,
     version: String,
     min_herdr_version: String,
     description: String,
     platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     startup: Vec<Startup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    events: Vec<Event>,
     actions: Vec<Action>,
     panes: Vec<Pane>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Event {
+    on: String,
+    command: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +350,12 @@ impl Manifest {
             startup: vec![Startup {
                 command: cmd(&["sync"]),
             }],
+            // Coming back to a Local workspace is the moment a slept machine
+            // should already read "disabled"; 30 s keeps rapid switching cheap.
+            events: vec![Event {
+                on: "workspace.focused".into(),
+                command: cmd(&["sync", "--debounce", "30"]),
+            }],
             actions: vec![
                 Action {
                     id: "sync".into(),
@@ -207,15 +372,71 @@ impl Manifest {
                     title: "Railway: new agent".into(),
                     command: cmd(&["new", "--open"]),
                 },
+                Action {
+                    id: "wake".into(),
+                    title: "Railway: wake agent".into(),
+                    command: cmd(&["agents", "--wake", "--open"]),
+                },
             ],
             panes: vec![
                 pane("agents", "Railway agents"),
                 pane("new", "New Railway agent"),
+                Pane {
+                    id: "wake".into(),
+                    title: "Wake Railway agent".into(),
+                    placement: "popup".into(),
+                    width: "80%".into(),
+                    height: 24,
+                    command: cmd(&["agents", "--wake"]),
+                },
             ],
         }
     }
 
-    fn render(&self) -> Result<String> {
+    /// The manifest bootstrap writes on the VM. Commands are the two scripts
+    /// bootstrap drops next to it, so it works before the VM's railway binary
+    /// knows `ca herdr`.
+    pub(super) fn remote() -> Self {
+        let sh = |script: &str, extra: &[&str]| -> Vec<String> {
+            ["sh", script]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_owned)
+                .collect()
+        };
+        Self {
+            id: PLUGIN_ID.into(),
+            name: "Railway cloud agents (this VM)".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            min_herdr_version: "0.9.0".into(),
+            description: "Railway agents picker and sleep for this VM".into(),
+            platforms: vec!["linux".into()],
+            startup: Vec::new(),
+            events: Vec::new(),
+            actions: vec![
+                Action {
+                    id: "agents".into(),
+                    title: "Railway: agents".into(),
+                    command: sh("agents.sh", &["--open"]),
+                },
+                Action {
+                    id: "sleep-self".into(),
+                    title: "Railway: sleep this agent".into(),
+                    command: sh("sleep-self.sh", &[]),
+                },
+            ],
+            panes: vec![Pane {
+                id: "agents".into(),
+                title: "Railway agents".into(),
+                placement: "popup".into(),
+                width: "80%".into(),
+                height: 24,
+                command: sh("agents.sh", &[]),
+            }],
+        }
+    }
+
+    pub(super) fn render(&self) -> Result<String> {
         toml::to_string(self).context("Rendering the herdr plugin manifest")
     }
 }
@@ -237,7 +458,7 @@ mod tests {
                 .iter()
                 .map(|a| a.id.as_str())
                 .collect::<Vec<_>>(),
-            ["sync", "agents", "new"]
+            ["sync", "agents", "new", "wake"]
         );
         assert_eq!(
             parsed
@@ -245,7 +466,7 @@ mod tests {
                 .iter()
                 .map(|p| p.id.as_str())
                 .collect::<Vec<_>>(),
-            ["agents", "new"]
+            ["agents", "new", "wake"]
         );
         assert_eq!(
             parsed.startup[0].command,
@@ -322,5 +543,74 @@ mod tests {
         remove_from(&herdr, &dir).unwrap();
         assert!(!dir.join(MANIFEST_FILE).exists());
         assert_eq!(fake.calls().last().unwrap(), "plugin unlink railway.ca");
+    }
+
+    #[test]
+    fn keybindings_are_added_once_and_removed_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr").join("config.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "[ui]\naccent = \"cyan\"\n\n[[keys.command]]\nkey = \"prefix+alt+g\"\ntype = \"popup\"\ncommand = \"lazygit\"\n";
+        std::fs::write(&path, before).unwrap();
+        assert!(ensure_keybindings(&path).unwrap());
+        assert!(!ensure_keybindings(&path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("railway.ca.agents").count(), 1, "{text}");
+        assert!(text.contains("railway.ca.new"), "{text}");
+        assert!(text.contains("lazygit"), "{text}");
+        assert!(remove_keybindings(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(!remove_keybindings(&path).unwrap());
+    }
+
+    #[test]
+    fn remote_manifest_uses_the_dropped_scripts_and_the_same_plugin_id() {
+        let text = Manifest::remote().render().unwrap();
+        let parsed: Manifest = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.id, PLUGIN_ID);
+        assert!(parsed.startup.is_empty() && parsed.events.is_empty());
+        let ids: Vec<&str> = parsed.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, vec!["agents", "sleep-self"]);
+        for command in parsed
+            .actions
+            .iter()
+            .map(|a| &a.command)
+            .chain(parsed.panes.iter().map(|p| &p.command))
+        {
+            assert_eq!(command[0], "sh", "{command:?}");
+            assert!(command[1].ends_with(".sh"), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn an_outdated_block_is_replaced_and_a_hand_binding_is_respected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let old = format!(
+            "x = 1\n\n{KEYS_MARKER}\n[[keys.command]]\nkey = \"prefix+shift+a\"\ntype = \"plugin_action\"\ncommand = \"railway.ca.agents\"\n"
+        );
+        std::fs::write(&path, &old).unwrap();
+        assert!(ensure_keybindings(&path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("x = 1\n\n"), "{text}");
+        assert_eq!(text.matches("[[keys.command]]").count(), 3, "{text}");
+        assert!(text.contains("railway.ca.wake"), "{text}");
+        assert!(!ensure_keybindings(&path).unwrap());
+
+        let hand = "[[keys.command]]\nkey = \"prefix+m\"\ntype = \"plugin_action\"\ncommand = \"railway.ca.agents\"\n";
+        std::fs::write(&path, hand).unwrap();
+        assert!(!ensure_keybindings(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), hand);
+    }
+
+    #[test]
+    fn missing_config_is_created_with_only_our_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr").join("config.toml");
+        assert!(ensure_keybindings(&path).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(KEYS_MARKER), "{text}");
+        assert!(remove_keybindings(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 }

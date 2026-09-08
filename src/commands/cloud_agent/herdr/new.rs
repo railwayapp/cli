@@ -44,6 +44,20 @@ pub struct Args {
     dry_run: bool,
 }
 
+impl Args {
+    /// The picker's "new agent": every step asked, nothing skipped.
+    pub(super) fn interactive() -> Self {
+        Self {
+            name: None,
+            project: None,
+            environment: None,
+            harness: Default::default(),
+            open: false,
+            dry_run: false,
+        }
+    }
+}
+
 pub async fn command(args: Args) -> Result<()> {
     if args.open {
         return Herdr::from_env().plugin_pane_open(super::PLUGIN_ID, "new");

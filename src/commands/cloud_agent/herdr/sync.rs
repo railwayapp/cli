@@ -27,6 +27,10 @@ pub struct Args {
     /// Output as JSON
     #[clap(long)]
     json: bool,
+
+    /// Do nothing when the last sync was this many seconds ago or less
+    #[clap(long, value_name = "SECONDS")]
+    debounce: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +41,10 @@ pub(super) enum Op {
     Disable(String),
     /// A disabled machine whose agent is running.
     Enable(String),
+    /// An enabled machine whose agent went sleeping → running since the last
+    /// sync. herdr parked it in Attention while the VM was down and never
+    /// retries that on its own; off and on again makes it reconnect.
+    Kick(String),
     /// An agent with no machine. Adding one is interactive, so only reported.
     Missing(ca::Agent),
 }
@@ -44,7 +52,7 @@ pub(super) enum Op {
 impl Op {
     fn profile_id(&self) -> Option<&str> {
         match self {
-            Op::Remove(id) | Op::Disable(id) | Op::Enable(id) => Some(id),
+            Op::Remove(id) | Op::Disable(id) | Op::Enable(id) | Op::Kick(id) => Some(id),
             Op::Missing(_) => None,
         }
     }
@@ -54,6 +62,7 @@ impl Op {
             Op::Remove(_) => "remove",
             Op::Disable(_) => "disable",
             Op::Enable(_) => "enable",
+            Op::Kick(_) => "reconnect",
             Op::Missing(_) => "missing",
         }
     }
@@ -93,6 +102,10 @@ pub(super) struct Plan {
     pub ops: Vec<Op>,
     /// agent id → herdr profile id, for every agent that has a machine
     pub matches: BTreeMap<String, String>,
+    /// profile id → agent, for the ops that must wait for its ssh relay first
+    pub agents: BTreeMap<String, ca::Agent>,
+    /// agent id → status label, remembered for the next run
+    pub statuses: BTreeMap<String, String>,
 }
 
 pub(super) fn is_machine_for(agent: &ca::Agent, machine: &Machine) -> bool {
@@ -104,8 +117,16 @@ pub(super) fn machine_for<'a>(agent: &ca::Agent, machines: &'a [Machine]) -> Opt
     machines.iter().find(|m| is_machine_for(agent, m))
 }
 
-pub(super) fn reconcile(agents: &[ca::Agent], machines: &[Machine]) -> Plan {
+pub(super) fn reconcile(
+    agents: &[ca::Agent],
+    machines: &[Machine],
+    previous: &BTreeMap<String, String>,
+    stuck: &std::collections::BTreeSet<String>,
+) -> Plan {
     let mut plan = Plan::default();
+    for agent in agents {
+        plan.statuses.insert(agent.id.clone(), agent.status.label());
+    }
     for machine in machines {
         if target::agent_id_of(&machine.target).is_none() {
             continue;
@@ -116,10 +137,20 @@ pub(super) fn reconcile(agents: &[ca::Agent], machines: &[Machine]) -> Plan {
         };
         plan.matches.insert(agent.id.clone(), machine.id.clone());
         let awake = matches!(agent.status, ca::Status::Running | ca::Status::Starting);
+        let was_awake = previous
+            .get(&agent.id)
+            .is_none_or(|s| s == "running" || s == "starting");
         if machine.enabled && !awake {
             plan.ops.push(Op::Disable(machine.id.clone()));
         } else if !machine.enabled && agent.status == ca::Status::Running {
+            plan.agents.insert(machine.id.clone(), agent.clone());
             plan.ops.push(Op::Enable(machine.id.clone()));
+        } else if machine.enabled
+            && agent.status == ca::Status::Running
+            && (!was_awake || stuck.contains(&machine.id))
+        {
+            plan.agents.insert(machine.id.clone(), agent.clone());
+            plan.ops.push(Op::Kick(machine.id.clone()));
         }
     }
     for agent in agents {
@@ -136,13 +167,26 @@ pub(super) struct Outcome {
     pub failed: Vec<(Op, String)>,
 }
 
-pub(super) fn apply(herdr: &Herdr, plan: &Plan) -> Outcome {
+/// `wait` holds Enable and Kick until the agent's ssh relay executes commands;
+/// enabling earlier is exactly what parks herdr in Attention.
+pub(super) async fn apply(herdr: &Herdr, plan: &Plan, wait: bool) -> Outcome {
     let mut outcome = Outcome::default();
     for op in &plan.ops {
+        if wait
+            && matches!(op, Op::Enable(_) | Op::Kick(_))
+            && let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id))
+            && let Err(e) = super::relay::wait_until_ready(agent).await
+        {
+            outcome.failed.push((op.clone(), format!("{e:#}")));
+            continue;
+        }
         let result = match op {
             Op::Remove(id) => herdr.machine_remove(id),
             Op::Disable(id) => herdr.machine_disable(id),
             Op::Enable(id) => herdr.machine_enable(id),
+            Op::Kick(id) => herdr
+                .machine_disable(id)
+                .and_then(|()| herdr.machine_enable(id)),
             Op::Missing(_) => continue,
         };
         match result {
@@ -154,6 +198,12 @@ pub(super) fn apply(herdr: &Herdr, plan: &Plan) -> Outcome {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    if let Some(secs) = args.debounce
+        && let Ok(state) = State::load()
+        && synced_within(&state, secs, Utc::now())
+    {
+        return Ok(());
+    }
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
@@ -161,16 +211,14 @@ pub async fn command(args: Args) -> Result<()> {
 
     let agents = ca::list_mine(&client, &backboard).await?;
     let machines = herdr.machines()?;
-    let plan = reconcile(&agents, &machines);
+    let mut state = State::load().unwrap_or_default();
+    let plan = reconcile(&agents, &machines, &state.agent_status, &stuck(&state));
 
     let outcome = if args.dry_run {
         Outcome::default()
     } else {
-        let outcome = apply(&herdr, &plan);
-        let mut state = State::load().unwrap_or_default();
-        state.machines = plan.matches.clone();
-        state.last_sync = Some(Utc::now().to_rfc3339());
-        state.save()?;
+        let outcome = apply(&herdr, &plan, true).await;
+        remember(&mut state, &plan, &outcome)?;
         outcome
     };
 
@@ -233,10 +281,13 @@ fn summary(plan: &Plan, outcome: &Outcome, agent_count: usize) -> String {
             .count()
     };
     let mut parts = Vec::new();
-    for verb in ["enable", "disable", "remove"] {
+    for verb in ["enable", "disable", "remove", "reconnect"] {
         let n = count(verb);
         if n > 0 {
-            parts.push(format!("{verb}d {n}"));
+            parts.push(format!(
+                "{verb}{} {n}",
+                if verb.ends_with('e') { "d" } else { "ed" }
+            ));
         }
     }
     let missing: Vec<&str> = plan
@@ -273,6 +324,54 @@ fn summary(plan: &Plan, outcome: &Outcome, agent_count: usize) -> String {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// The whole reconcile, quietly: what the picker runs after a sleep or wake so
+/// every machine row reflects the agent it points at.
+pub(super) async fn resync(client: &reqwest::Client, backboard: &str, herdr: &Herdr) -> Result<()> {
+    let agents = ca::list_mine(client, backboard).await?;
+    let machines = herdr.machines()?;
+    let mut state = State::load().unwrap_or_default();
+    let plan = reconcile(&agents, &machines, &state.agent_status, &stuck(&state));
+    let outcome = apply(herdr, &plan, true).await;
+    remember(&mut state, &plan, &outcome)?;
+    if let Some((op, err)) = outcome.failed.first() {
+        bail!("herdr sync: {op:?} failed: {err}");
+    }
+    Ok(())
+}
+
+fn stuck(state: &State) -> std::collections::BTreeSet<String> {
+    let Some(log) = super::attention::client_log_path() else {
+        return Default::default();
+    };
+    super::attention::stuck_profiles(
+        &super::attention::read_tail(&log),
+        &state.kicked_at,
+        Utc::now(),
+    )
+}
+
+fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    state.machines = plan.matches.clone();
+    state.agent_status = plan.statuses.clone();
+    for op in &outcome.applied {
+        if let Some(id) = op.profile_id() {
+            state.kicked_at.insert(id.to_string(), now.clone());
+        }
+    }
+    state.last_sync = Some(now);
+    state.save()
+}
+
+pub(super) fn synced_within(state: &State, secs: u64, now: chrono::DateTime<Utc>) -> bool {
+    state
+        .last_sync
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| now.signed_duration_since(t).num_seconds().unsigned_abs() <= secs)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -330,7 +429,7 @@ mod tests {
                 for op in &plan.ops {
                     match op {
                         Op::Disable(id) if id == &m.id => m.enabled = false,
-                        Op::Enable(id) if id == &m.id => m.enabled = true,
+                        Op::Enable(id) | Op::Kick(id) if id == &m.id => m.enabled = true,
                         _ => {}
                     }
                 }
@@ -414,7 +513,7 @@ mod tests {
             ),
         ];
         for (name, agents, machines, expected) in cases {
-            let plan = reconcile(&agents, &machines);
+            let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
             assert_eq!(ops_of(&plan), expected, "{name}");
         }
     }
@@ -428,7 +527,7 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines);
+        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
         assert_eq!(
             plan.matches,
             BTreeMap::from([
@@ -451,7 +550,7 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines);
+        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
         assert_eq!(
             ops_of(&plan),
             vec!["enable p1", "disable p2", "remove p3", "missing a3"]
@@ -459,13 +558,41 @@ mod tests {
 
         let machines = after(&machines, &plan);
         assert_eq!(machines.len(), 3);
-        let again = reconcile(&agents, &machines);
+        let again = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
         assert_eq!(ops_of(&again), vec!["missing a3"]);
         assert_eq!(again.matches, plan.matches);
     }
 
     #[test]
-    fn apply_runs_exactly_the_planned_herdr_commands() {
+    fn a_wake_done_elsewhere_reconnects_the_enabled_machine() {
+        let agents = [agent("a1", Status::Running)];
+        let machines = [machine("p1", &target::target(&agents[0]), true)];
+        let mut previous = BTreeMap::new();
+        previous.insert("a1".to_string(), "sleeping".to_string());
+        let plan = reconcile(&agents, &machines, &previous, &Default::default());
+        assert!(
+            matches!(plan.ops.as_slice(), [Op::Kick(id)] if id == "p1"),
+            "{:?}",
+            plan.ops
+        );
+        assert_eq!(plan.statuses.get("a1").map(String::as_str), Some("running"));
+        assert!(plan.agents.contains_key("p1"));
+
+        previous.insert("a1".to_string(), "running".to_string());
+        assert!(
+            reconcile(&agents, &machines, &previous, &Default::default())
+                .ops
+                .is_empty()
+        );
+        assert!(
+            reconcile(&agents, &machines, &BTreeMap::new(), &Default::default())
+                .ops
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_runs_exactly_the_planned_herdr_commands() {
         let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines(&format!(
             r#"[
                 {{"id":"p1","label":"proj/one","target":"{}","enabled":true}},
@@ -484,8 +611,8 @@ mod tests {
             agent("a3", Status::Running),
         ];
         let machines = herdr.machines().unwrap();
-        let plan = reconcile(&agents, &machines);
-        let outcome = apply(&herdr, &plan);
+        let plan = reconcile(&agents, &machines, &BTreeMap::new(), &Default::default());
+        let outcome = apply(&herdr, &plan, false).await;
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(outcome.applied.len(), 3);
         assert_eq!(
@@ -499,14 +626,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_collects_failures_instead_of_stopping() {
+    #[tokio::test]
+    async fn apply_collects_failures_instead_of_stopping() {
         let herdr = Herdr::at("/nonexistent/herdr");
         let plan = Plan {
             ops: vec![Op::Disable("p1".into()), Op::Remove("p2".into())],
-            matches: BTreeMap::new(),
+            ..Default::default()
         };
-        let outcome = apply(&herdr, &plan);
+        let outcome = apply(&herdr, &plan, false).await;
         assert!(outcome.applied.is_empty());
         assert_eq!(outcome.failed.len(), 2);
         assert!(matches!(outcome.failed[0].0, Op::Disable(_)));
@@ -516,10 +643,28 @@ mod tests {
     #[test]
     fn dry_run_lines_name_the_machine() {
         let machines = vec![ours("p1", "a1", true)];
-        let plan = reconcile(&[agent("a1", Status::Sleeping)], &machines);
+        let plan = reconcile(
+            &[agent("a1", Status::Sleeping)],
+            &machines,
+            &BTreeMap::new(),
+            &Default::default(),
+        );
         assert_eq!(
             plan.ops[0].describe(&machines),
             "disable  machine label-p1 (p1)"
         );
+    }
+
+    #[test]
+    fn debounce_window_reads_last_sync() {
+        let now = Utc::now();
+        let mut state = State::default();
+        assert!(!synced_within(&state, 30, now));
+        state.last_sync = Some((now - chrono::Duration::seconds(10)).to_rfc3339());
+        assert!(synced_within(&state, 30, now));
+        state.last_sync = Some((now - chrono::Duration::seconds(45)).to_rfc3339());
+        assert!(!synced_within(&state, 30, now));
+        state.last_sync = Some("not a date".into());
+        assert!(!synced_within(&state, 30, now));
     }
 }

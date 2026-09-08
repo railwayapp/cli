@@ -9,12 +9,14 @@
 //! command calls one of them.
 
 mod agents;
+mod attention;
 mod bootstrap;
 mod harness;
 mod herdr_cli;
 mod install;
 mod known_hosts;
 mod new;
+mod relay;
 mod state;
 mod sync;
 mod target;
