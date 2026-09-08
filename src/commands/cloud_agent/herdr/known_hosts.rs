@@ -9,6 +9,31 @@ use anyhow::{Context, Result};
 
 use crate::config::Configs;
 
+/// herdr's background reconnects run `ssh` with `StrictHostKeyChecking=yes`
+/// and no config of their own, so a user `Host` block that points the relay
+/// at `UserKnownHostsFile /dev/null` parks every machine in Attention after
+/// the first network blip. `ssh -G` shows what would actually be used.
+pub fn ssh_config_warning() -> Option<String> {
+    let (host, _) = Configs::get_ssh_relay();
+    let out = std::process::Command::new("ssh")
+        .args(["-G", host])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let files: Vec<&str> = text
+        .lines()
+        .find_map(|l| l.strip_prefix("userknownhostsfile "))
+        .map(|v| v.split_whitespace().collect())
+        .unwrap_or_default();
+    if files.iter().all(|f| *f == "/dev/null") {
+        return Some(format!(
+            "Your ssh config sends {host}'s host keys to /dev/null (UserKnownHostsFile). herdr reconnects with strict checking and will park every Railway machine in Attention; remove {host} from that Host block."
+        ));
+    }
+    None
+}
+
 pub fn ensure_relay_known_host() -> Result<Seeded> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to get home directory"))?;
     let (host, _) = Configs::get_ssh_relay();

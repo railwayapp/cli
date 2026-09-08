@@ -97,6 +97,9 @@ pub async fn command(args: Args) -> Result<()> {
             .yellow()
         );
     }
+    if let Some(warning) = super::known_hosts::ssh_config_warning() {
+        println!("{} {warning}", "!".yellow());
+    }
     match super::known_hosts::ensure_relay_known_host()? {
         super::known_hosts::Seeded::Added => {
             println!("✓ Added the Railway ssh relay to ~/.ssh/known_hosts")
