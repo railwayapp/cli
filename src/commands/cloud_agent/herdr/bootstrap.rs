@@ -76,6 +76,21 @@ pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
             println!("✓ Bootstrapped agent {} for herdr", agent.name.cyan());
             Ok(())
         }
+        Outcome::Failed(lines) => {
+            for line in &lines {
+                println!("  {line}");
+            }
+            let stderr = String::from_utf8_lossy(&stderr);
+            bail!(
+                "Bootstrap of agent {} did not complete; the FAILED lines above say where.{}",
+                agent.name,
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", stderr.trim())
+                }
+            )
+        }
         Outcome::HerdrMissing => {
             println!(
                 "{} herdr is not installed on agent {}; `herdr machine add` installs it. Re-run {} afterwards.",
@@ -95,6 +110,8 @@ pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
 }
 
 enum Outcome<'a> {
+    /// Steps ran and at least one reported FAILED; the lines say which.
+    Failed(Vec<&'a str>),
     Ok(Vec<&'a str>),
     HerdrMissing,
     NoMarker,
@@ -104,6 +121,15 @@ fn outcome(stdout: &str) -> Outcome<'_> {
     let lines: Vec<&str> = stdout.lines().map(str::trim).collect();
     if lines.contains(&"HERDR-MISSING") {
         return Outcome::HerdrMissing;
+    }
+    if lines.contains(&"BOOTSTRAP-FAILED") {
+        return Outcome::Failed(
+            lines
+                .iter()
+                .copied()
+                .filter(|l| !l.is_empty() && *l != "BOOTSTRAP-FAILED")
+                .collect(),
+        );
     }
     if !lines.contains(&"BOOTSTRAP-OK") {
         return Outcome::NoMarker;
@@ -120,6 +146,7 @@ fn outcome(stdout: &str) -> Outcome<'_> {
 /// (commented or not) when present, appends to the table otherwise, and creates
 /// the table at the end when it is missing. Other tables are never touched.
 const BODY: &str = r##"if ! command -v herdr >/dev/null 2>&1; then echo HERDR-MISSING; exit 0; fi
+fail=0
 for tool in claude codex; do
   if herdr integration install "$tool" >/dev/null 2>&1; then
     echo "integration $tool: ok"
@@ -136,7 +163,7 @@ set_table_key() {
     BEGIN { in_t = 0; seen = 0; done = 0 }
     /^[[:space:]]*\[/ {
       if (in_t && !done) { print line; done = 1 }
-      in_t = ($0 ~ "^[[:space:]]*\\[" table "\\][[:space:]]*$")
+      in_t = ($0 ~ "^[[:space:]]*\\[" table "\\][[:space:]]*(#.*)?$")
       if (in_t) seen = 1
     }
     in_t && !done && $0 ~ "^[[:space:]]*#?[[:space:]]*" key "[[:space:]]*=" { print line; done = 1; next }
@@ -147,7 +174,7 @@ set_table_key() {
         print line
       }
     }
-  ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+  ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg" || { echo "config: FAILED to write $cfg"; fail=1; }
 }
 set_table_key terminal shell_mode 'shell_mode = "login"'
 set_table_key terminal default_shell 'default_shell = "/bin/bash"'
@@ -162,13 +189,13 @@ prof="$HOME/.profile"
 if grep -q "railway ca herdr env" "$prof" 2>/dev/null; then
   echo "profile: env block present"
 else
-  cat >> "$prof" <<'PROFEOF'
+  if cat >> "$prof" <<'PROFEOF'
 
 # railway ca herdr env
 [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
 [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
 PROFEOF
-  echo "profile: env block added"
+  then echo "profile: env block added"; else echo "profile: FAILED to write $prof"; fail=1; fi
 fi
 if ws="$(herdr workspace list 2>/dev/null)"; then
   if command -v python3 >/dev/null 2>&1; then
@@ -194,7 +221,7 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
       done
     fi
   else
-    echo "workspace app: create failed"
+    echo "workspace app: FAILED to create"; fail=1
   fi
 else
   echo "workspace app: skipped (no herdr server running; connecting starts one)"
@@ -220,7 +247,7 @@ if herdr plugin list 2>/dev/null | grep -q "railway\.ca "; then
 elif herdr plugin link "$pdir" >/dev/null 2>&1; then
   echo "remote plugin: linked (new)"
 else
-  echo "remote plugin: link failed"
+  echo "remote plugin: FAILED to link $pdir"; fail=1
 fi
 keys_block="$(printf '%s\n%s\n' "@KEYS_MARKER@" '@KEYS@')"
 if grep -q "@KEYS_MARKER@" "$cfg" 2>/dev/null && command -v python3 >/dev/null 2>&1; then
@@ -249,8 +276,7 @@ RAILWAY_CA_PY
 elif grep -q "@KEYS_MARKER@" "$cfg" 2>/dev/null; then
   echo "keys: present"
 else
-  printf '\n%s\n' "$keys_block" >> "$cfg"
-  echo "keys: added"
+  if printf '\n%s\n' "$keys_block" >> "$cfg"; then echo "keys: added"; else echo "keys: FAILED to write $cfg"; fail=1; fi
 fi
 herdr server reload-config >/dev/null 2>&1 && echo "config: reloaded"
 "##;
@@ -320,7 +346,7 @@ fn harness_command(harness: &str) -> &'static str {
 
 fn script(remote: &Remote) -> String {
     format!(
-        "{HARNESS_PATH}\n{}\n{}\necho BOOTSTRAP-OK\n",
+        "{HARNESS_PATH}\n{}\n{}\nif [ \"$fail\" = 1 ]; then echo BOOTSTRAP-FAILED; else echo BOOTSTRAP-OK; fi\n",
         BODY.replace("@HARNESS_CMD@", &remote.harness_cmd),
         remote.segment()
     )
@@ -333,6 +359,10 @@ mod tests {
     #[test]
     fn outcome_reads_markers() {
         assert!(matches!(outcome("HERDR-MISSING\n"), Outcome::HerdrMissing));
+        assert!(matches!(
+            outcome("profile: FAILED to write /root/.profile\nBOOTSTRAP-FAILED\n"),
+            Outcome::Failed(lines) if lines == vec!["profile: FAILED to write /root/.profile"]
+        ));
         assert!(matches!(
             outcome("integration claude: ok\n"),
             Outcome::NoMarker
@@ -561,6 +591,28 @@ mod tests {
                 "{:?}",
                 vm.herdr_calls()
             );
+        }
+
+        #[test]
+        fn a_failed_step_ends_in_the_failed_marker() {
+            let vm = Vm::new(WORKSPACES_WITH_APP);
+            vm.install_herdr(
+                "#!/bin/bash\necho \"$*\" >> \"$HOME/herdr.log\"\nif [ \"$1 $2\" = \"plugin link\" ]; then exit 1; fi\nif [ \"$1 $2\" = \"workspace list\" ]; then cat <<'EOF'\n{\"result\":{\"workspaces\":[{\"label\":\"app\"}]}}\nEOF\nfi\n",
+            );
+            let out = vm.run();
+            assert!(out.contains("remote plugin: FAILED"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
+            assert!(!out.contains("BOOTSTRAP-OK"), "{out}");
+        }
+
+        #[test]
+        fn a_commented_table_header_is_still_the_table() {
+            let vm = Vm::new(WORKSPACES_WITH_APP);
+            vm.write_config("[terminal] # mine\nscrollback = 1\n");
+            vm.run();
+            let cfg = vm.config();
+            assert_eq!(cfg.matches("[terminal]").count(), 1, "{cfg}");
+            assert!(cfg.contains("shell_mode = \"login\""), "{cfg}");
         }
 
         #[test]

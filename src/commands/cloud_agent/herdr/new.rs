@@ -119,6 +119,10 @@ pub async fn command(args: Args) -> Result<()> {
     let target = target::target(&agent);
     let label = target::label(&row.project_name, &agent.name);
     super::known_hosts::ensure_relay_known_host()?;
+    let spinner = create_spinner(format!("Waiting for {}'s ssh relay", agent.name));
+    let ready = super::relay::wait_until_ready(&agent).await;
+    spinner.finish_and_clear();
+    ready?;
     herdr.machine_add(&target, &label)?;
 
     match herdr

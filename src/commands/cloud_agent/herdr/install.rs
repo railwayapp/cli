@@ -77,6 +77,9 @@ pub async fn command(args: Args) -> Result<()> {
     let dir = super::plugin_dir()?;
     let herdr = Herdr::from_env();
     if args.remove {
+        if let Some(pid) = super::watch::stop() {
+            println!("✓ Stopped the watcher (pid {pid})");
+        }
         remove_from(&herdr, &dir)?;
         println!("✓ Unlinked herdr plugin {}", PLUGIN_ID.cyan());
         if !args.no_keys && remove_keybindings(&herdr_config_path()?)? {
@@ -96,6 +99,16 @@ pub async fn command(args: Args) -> Result<()> {
         PLUGIN_ID.cyan(),
         dir.join(MANIFEST_FILE).display()
     );
+    if manifest.binary().contains("/target/") {
+        println!(
+            "{}",
+            format!(
+                "The manifest points at a build directory ({}); rerun install after moving or cleaning it.",
+                manifest.binary()
+            )
+            .yellow()
+        );
+    }
     match super::known_hosts::ensure_relay_known_host()? {
         super::known_hosts::Seeded::Added => {
             println!("✓ Added the Railway ssh relay to ~/.ssh/known_hosts")
@@ -207,6 +220,9 @@ fn remove_keybindings(path: &Path) -> Result<bool> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(false);
     };
+    if !text.contains(KEYS_MARKER) && !text.contains("\"railway.ca.") {
+        return Ok(false);
+    }
     let stripped = strip_keybindings(&text);
     if stripped == text {
         return Ok(false);
@@ -272,12 +288,21 @@ fn is_already_linked(e: &anyhow::Error) -> bool {
     e.to_string().to_lowercase().contains("already")
 }
 
+/// The manifest goes regardless: `plugin unlink` needs a running herdr, and a
+/// stopped one must not leave the files behind.
 fn remove_from(herdr: &Herdr, dir: &Path) -> Result<()> {
-    herdr.plugin_unlink(PLUGIN_ID)?;
+    let unlinked = herdr.plugin_unlink(PLUGIN_ID);
     match std::fs::remove_file(dir.join(MANIFEST_FILE)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-        _ => Ok(()),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
     }
+    if let Err(e) = unlinked {
+        println!(
+            "{} herdr did not unlink the plugin ({e:#}); run `herdr plugin unlink {PLUGIN_ID}` once it is up.",
+            "!".yellow()
+        );
+    }
+    Ok(())
 }
 
 /// The PATH entry when it is this same binary (a stable symlink such as
@@ -459,6 +484,14 @@ impl Manifest {
                 command: sh("agents.sh", &[]),
             }],
         }
+    }
+
+    fn binary(&self) -> &str {
+        self.actions
+            .first()
+            .and_then(|a| a.command.first())
+            .map(String::as_str)
+            .unwrap_or_default()
     }
 
     pub(super) fn render(&self) -> Result<String> {

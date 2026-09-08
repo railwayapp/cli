@@ -17,9 +17,6 @@ where
     subscribe_graphql_at::<T>("/graphql/v2", variables).await
 }
 
-/// The unpublished graph the web and mobile apps use. Same token, same access
-/// checks; its fields are simply not part of the documented public API and can
-/// change without notice, so callers need a fallback.
 pub async fn subscribe_graphql_internal<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
     variables: T::Variables,
 ) -> Result<Subscription<StreamingOperation<T>>>

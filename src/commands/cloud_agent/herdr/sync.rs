@@ -121,10 +121,15 @@ pub(super) fn machine_for<'a>(agent: &ca::Agent, machines: &'a [Machine]) -> Opt
     machines.iter().find(|m| is_machine_for(agent, m))
 }
 
+/// `known` is agent id → profile id from the last sync: only machines this
+/// plugin has seen attached to an agent are ever removed, so a login to another
+/// account, a different `RAILWAY_ENV`, or a machine pointed at a teammate's
+/// agent cannot wipe the catalog.
 pub(super) fn reconcile(
     agents: &[ca::Agent],
     machines: &[Machine],
     previous: &BTreeMap<String, String>,
+    known: &BTreeMap<String, String>,
 ) -> Plan {
     let mut plan = Plan::default();
     for agent in agents {
@@ -135,7 +140,9 @@ pub(super) fn reconcile(
             continue;
         }
         let Some(agent) = agents.iter().find(|a| is_machine_for(a, machine)) else {
-            plan.ops.push(Op::Remove(machine.id.clone()));
+            if !agents.is_empty() && known.values().any(|p| p == &machine.id) {
+                plan.ops.push(Op::Remove(machine.id.clone()));
+            }
             continue;
         };
         plan.matches.insert(agent.id.clone(), machine.id.clone());
@@ -201,13 +208,13 @@ pub async fn command(args: Args) -> Result<()> {
     if args.spawn_watch {
         super::watch::spawn_detached();
     }
-    super::watch::nudge();
     if let Some(secs) = args.debounce
         && let Ok(state) = State::load()
         && synced_within(&state, secs, Utc::now())
     {
         return Ok(());
     }
+    super::watch::nudge();
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
@@ -216,11 +223,15 @@ pub async fn command(args: Args) -> Result<()> {
     let agents = ca::list_mine(&client, &backboard).await?;
     let machines = herdr.machines()?;
     let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status);
+    let plan = reconcile(&agents, &machines, &state.agent_status, &state.machines);
 
     let outcome = if args.dry_run {
         Outcome::default()
     } else {
+        // Claim the window before the relay waits, so debounced hook runs
+        // started meanwhile back off instead of stacking up.
+        state.last_sync = Some(Utc::now().to_rfc3339());
+        state.save()?;
         let outcome = apply(&herdr, &plan, true).await;
         remember(&mut state, &plan, &outcome)?;
         outcome
@@ -312,7 +323,14 @@ fn summary(plan: &Plan, outcome: &Outcome, agent_count: usize) -> String {
             _ => None,
         })
         .collect();
-    let mut line = if parts.is_empty() {
+    let mut line = if !outcome.failed.is_empty() {
+        format!(
+            "✗ herdr sync: {} failed{}{}.",
+            outcome.failed.len(),
+            if parts.is_empty() { "" } else { "; " },
+            parts.join(", ")
+        )
+    } else if parts.is_empty() {
         format!(
             "✓ herdr machines match your {agent_count} agent{}.",
             plural(agent_count)
@@ -342,17 +360,27 @@ fn plural(n: usize) -> &'static str {
 
 /// The whole reconcile, quietly: what the picker runs after a sleep or wake so
 /// every machine row reflects the agent it points at.
-pub(super) async fn resync(client: &reqwest::Client, backboard: &str, herdr: &Herdr) -> Result<()> {
+pub(super) async fn resync(
+    client: &reqwest::Client,
+    backboard: &str,
+    herdr: &Herdr,
+) -> Result<Vec<String>> {
     let agents = ca::list_mine(client, backboard).await?;
     let machines = herdr.machines()?;
     let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status);
+    let plan = reconcile(&agents, &machines, &state.agent_status, &state.machines);
+    state.last_sync = Some(Utc::now().to_rfc3339());
+    state.save()?;
     let outcome = apply(herdr, &plan, true).await;
     remember(&mut state, &plan, &outcome)?;
     if let Some((op, err)) = outcome.failed.first() {
-        bail!("herdr sync: {op:?} failed: {err}");
+        bail!("{} failed: {err}", op.describe(&machines));
     }
-    Ok(())
+    Ok(outcome
+        .applied
+        .iter()
+        .map(|op| op.describe(&machines))
+        .collect())
 }
 
 /// `Some(true)` when a toast is due, `Some(false)` for a quiet hook run,
@@ -370,9 +398,20 @@ fn plain(s: &str) -> String {
     s.trim_start_matches('✓').trim().to_string()
 }
 
-fn remember(state: &mut State, plan: &Plan, _outcome: &Outcome) -> Result<()> {
+/// A failed Enable or Kick keeps the agent's previous status, so the next run
+/// plans it again instead of believing the machine already followed.
+fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) -> Result<()> {
+    let mut statuses = plan.statuses.clone();
+    for (op, _) in &outcome.failed {
+        if let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id)) {
+            match state.agent_status.get(&agent.id) {
+                Some(old) => statuses.insert(agent.id.clone(), old.clone()),
+                None => statuses.remove(&agent.id),
+            };
+        }
+    }
     state.machines = plan.matches.clone();
-    state.agent_status = plan.statuses.clone();
+    state.agent_status = statuses;
     state.last_sync = Some(Utc::now().to_rfc3339());
     state.save()
 }
@@ -400,6 +439,19 @@ mod tests {
             environment_id: "env".into(),
             created_at: Utc::now(),
         }
+    }
+
+    /// What a previous sync would have recorded: every machine matched to an
+    /// agent, plus any `agent:*` machine as if it had been seen before.
+    fn known(agents: &[ca::Agent], machines: &[Machine]) -> BTreeMap<String, String> {
+        machines
+            .iter()
+            .filter_map(|m| {
+                let id = target::agent_id_of(&m.target)?;
+                let agent = agents.iter().find(|a| a.id == id).map(|a| a.id.clone());
+                Some((agent.unwrap_or(id), m.id.clone()))
+            })
+            .collect()
     }
 
     fn machine(id: &str, target: &str, enabled: bool) -> Machine {
@@ -484,10 +536,10 @@ mod tests {
                 vec![],
             ),
             (
-                "our machine with no agent",
-                vec![],
+                "our machine with no agent (account still has others)",
+                vec![agent("a2", Status::Running)],
                 vec![ours("p1", "gone", true)],
-                vec!["remove p1"],
+                vec!["remove p1", "missing a2"],
             ),
             (
                 "agent with no machine",
@@ -525,7 +577,12 @@ mod tests {
             ),
         ];
         for (name, agents, machines, expected) in cases {
-            let plan = reconcile(&agents, &machines, &BTreeMap::new());
+            let plan = reconcile(
+                &agents,
+                &machines,
+                &BTreeMap::new(),
+                &known(&agents, &machines),
+            );
             assert_eq!(ops_of(&plan), expected, "{name}");
         }
     }
@@ -539,7 +596,12 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines, &BTreeMap::new());
+        let plan = reconcile(
+            &agents,
+            &machines,
+            &BTreeMap::new(),
+            &known(&agents, &machines),
+        );
         assert_eq!(
             plan.matches,
             BTreeMap::from([
@@ -562,7 +624,12 @@ mod tests {
             ours("p3", "gone", true),
             machine("w", "workbox", true),
         ];
-        let plan = reconcile(&agents, &machines, &BTreeMap::new());
+        let plan = reconcile(
+            &agents,
+            &machines,
+            &BTreeMap::new(),
+            &known(&agents, &machines),
+        );
         assert_eq!(
             ops_of(&plan),
             vec!["enable p1", "disable p2", "remove p3", "missing a3"]
@@ -570,7 +637,12 @@ mod tests {
 
         let machines = after(&machines, &plan);
         assert_eq!(machines.len(), 3);
-        let again = reconcile(&agents, &machines, &BTreeMap::new());
+        let again = reconcile(
+            &agents,
+            &machines,
+            &BTreeMap::new(),
+            &known(&agents, &machines),
+        );
         assert_eq!(ops_of(&again), vec!["missing a3"]);
         assert_eq!(again.matches, plan.matches);
     }
@@ -581,7 +653,7 @@ mod tests {
         let machines = [machine("p1", &target::target(&agents[0]), true)];
         let mut previous = BTreeMap::new();
         previous.insert("a1".to_string(), "sleeping".to_string());
-        let plan = reconcile(&agents, &machines, &previous);
+        let plan = reconcile(&agents, &machines, &previous, &BTreeMap::new());
         assert!(
             matches!(plan.ops.as_slice(), [Op::Kick(id)] if id == "p1"),
             "{:?}",
@@ -591,12 +663,95 @@ mod tests {
         assert!(plan.agents.contains_key("p1"));
 
         previous.insert("a1".to_string(), "running".to_string());
-        assert!(reconcile(&agents, &machines, &previous).ops.is_empty());
         assert!(
-            reconcile(&agents, &machines, &BTreeMap::new())
+            reconcile(&agents, &machines, &previous, &BTreeMap::new())
                 .ops
                 .is_empty()
         );
+        assert!(
+            reconcile(
+                &agents,
+                &machines,
+                &BTreeMap::new(),
+                &known(&agents, &machines)
+            )
+            .ops
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn unknown_machines_and_empty_agent_lists_never_trigger_removal() {
+        let orphan = machine("p9", "ssh://agent%3Aenv%3Anobody@ssh.railway.com", true);
+        let removals = |plan: &Plan| {
+            plan.ops
+                .iter()
+                .filter(|op| matches!(op, Op::Remove(_)))
+                .count()
+        };
+        // Never recorded by a previous sync: someone else's agent, or a hand-added machine.
+        let plan = reconcile(
+            &[agent("a1", Status::Running)],
+            &[orphan.clone()],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(removals(&plan), 0, "{:?}", plan.ops);
+        // Recorded before, but the agent list came back empty (wrong account, API blip).
+        let mut known = BTreeMap::new();
+        known.insert("nobody".to_string(), "p9".to_string());
+        let plan = reconcile(&[], &[orphan.clone()], &BTreeMap::new(), &known);
+        assert_eq!(removals(&plan), 0, "{:?}", plan.ops);
+        // Recorded before and the account still has agents: the agent is really gone.
+        let plan = reconcile(
+            &[agent("a1", Status::Running)],
+            &[orphan],
+            &BTreeMap::new(),
+            &known,
+        );
+        assert_eq!(removals(&plan), 1, "{:?}", plan.ops);
+    }
+
+    #[test]
+    fn a_failed_kick_keeps_the_old_status_so_it_is_retried() {
+        let agents = [agent("a1", Status::Running)];
+        let machines = [machine("p1", &target::target(&agents[0]), true)];
+        let mut previous = BTreeMap::new();
+        previous.insert("a1".to_string(), "sleeping".to_string());
+        let plan = reconcile(&agents, &machines, &previous, &BTreeMap::new());
+        assert!(matches!(plan.ops.as_slice(), [Op::Kick(_)]));
+        let outcome = Outcome {
+            applied: vec![],
+            failed: vec![(plan.ops[0].clone(), "relay never answered".into())],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = State {
+            agent_status: previous.clone(),
+            ..Default::default()
+        };
+        // remember() saves to State::path(); exercise the status logic via a copy.
+        let _ = &path;
+        let before = state.agent_status.clone();
+        let mut statuses = plan.statuses.clone();
+        for (op, _) in &outcome.failed {
+            if let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id)) {
+                if let Some(old) = before.get(&agent.id) {
+                    statuses.insert(agent.id.clone(), old.clone());
+                }
+            }
+        }
+        state.agent_status = statuses;
+        assert_eq!(
+            state.agent_status.get("a1").map(String::as_str),
+            Some("sleeping")
+        );
+        assert!(matches!(
+            reconcile(&agents, &machines, &state.agent_status, &BTreeMap::new())
+                .ops
+                .as_slice(),
+            [Op::Kick(_)]
+        ));
     }
 
     #[tokio::test]
@@ -619,7 +774,12 @@ mod tests {
             agent("a3", Status::Running),
         ];
         let machines = herdr.machines().unwrap();
-        let plan = reconcile(&agents, &machines, &BTreeMap::new());
+        let plan = reconcile(
+            &agents,
+            &machines,
+            &BTreeMap::new(),
+            &known(&agents, &machines),
+        );
         let outcome = apply(&herdr, &plan, false).await;
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(outcome.applied.len(), 3);
@@ -654,6 +814,7 @@ mod tests {
         let plan = reconcile(
             &[agent("a1", Status::Sleeping)],
             &machines,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert_eq!(

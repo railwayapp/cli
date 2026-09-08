@@ -37,8 +37,8 @@ const RESUBSCRIBE_MAX: Duration = Duration::from_secs(120);
 
 #[derive(Parser)]
 pub struct Args {
-    /// Stay attached to this terminal and print each event; the default is
-    /// meant for the detached process `install` starts
+    /// Stay attached to this terminal and print every event; detached, only
+    /// subscriptions, failures and applied changes are logged
     #[clap(long)]
     foreground: bool,
 }
@@ -129,8 +129,12 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
         }
         tokio::select! {
             _ = liveness.tick() => {
-                if !socket.exists() {
+                if !server_alive(socket) {
+                    say(true, "herdr session gone; exiting");
                     return Ok(());
+                }
+                if watched.is_empty() {
+                    relist = true;
                 }
             }
             _ = nudged.recv() => {
@@ -141,7 +145,7 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
                 say(verbose, &what);
                 tokio::time::sleep(DEBOUNCE).await;
                 while rx.try_recv().is_ok() {}
-                resync(verbose).await;
+                resync(verbose, &what).await;
             }
         }
     }
@@ -179,7 +183,7 @@ async fn subscribe(environment_id: String, tx: mpsc::Sender<Signal>, verbose: bo
             }
         };
         backoff = RESUBSCRIBE_MIN;
-        say(verbose, &format!("subscribed {environment_id}"));
+        say(true, &format!("subscribed {environment_id}"));
         while let Some(item) = stream.next().await {
             let what = match item {
                 Ok(response) => match response.data {
@@ -206,16 +210,22 @@ fn describe(environment_id: &str, agent: Option<Snapshot>) -> String {
     }
 }
 
-async fn resync(verbose: bool) {
+async fn resync(verbose: bool, cause: &str) {
     let run = async {
         let configs = Configs::new()?;
         let client = GQLClient::new_authorized(&configs)?;
         sync::resync(&client, &configs.get_backboard(), &Herdr::from_env()).await
     };
     match run.await {
-        Ok(()) => say(verbose, "synced"),
-        Err(e) => say(true, &format!("sync failed: {e:#}")),
+        Ok(applied) if applied.is_empty() => say(verbose, "synced, nothing to change"),
+        Ok(applied) => say(true, &format!("{cause}: {}", applied.join(", "))),
+        Err(e) => say(true, &format!("sync failed after \"{cause}\": {e:#}")),
     }
+}
+
+/// A unix socket file can outlive its server; only a connection proves one.
+fn server_alive(socket: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 fn say(verbose: bool, line: &str) {
@@ -236,16 +246,38 @@ fn pidfile_path() -> Result<PathBuf> {
     Ok(state.with_file_name(format!("{stem}.pid")))
 }
 
+/// The recorded pid, only while that pid is still one of our watchers: pids
+/// are reused after a crash or reboot, and a signal to a stranger is fatal.
 fn running_pid(pidfile: &Path) -> Option<u32> {
     let pid: u32 = std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()?;
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
+    let out = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let command = String::from_utf8_lossy(&out.stdout);
+    is_watcher_command(&command).then_some(pid)
+}
+
+fn is_watcher_command(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    words
+        .next()
+        .is_some_and(|exe| exe.ends_with("railway") || exe.contains("railway"))
+        && command.contains(" ca herdr watch")
+}
+
+/// Stop this session's watcher, if one of ours is running.
+pub fn stop() -> Option<u32> {
+    let pidfile = pidfile_path().ok()?;
+    let pid = running_pid(&pidfile)?;
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .ok()
-        .filter(|s| s.success())
-        .map(|_| pid)
+        .status();
+    let _ = std::fs::remove_file(&pidfile);
+    Some(pid)
 }
 
 /// Tell this session's watcher that the set of environments may have changed.
@@ -325,12 +357,19 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_pid_does_not_count_as_running() {
+    fn only_a_live_watcher_process_counts_as_running() {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("watch.pid");
         std::fs::write(&pidfile, "999999").unwrap();
         assert_eq!(running_pid(&pidfile), None);
+        // This test binary is alive but is not `railway ca herdr watch`:
+        // a reused pid must never be mistaken for our watcher.
         std::fs::write(&pidfile, std::process::id().to_string()).unwrap();
-        assert_eq!(running_pid(&pidfile), Some(std::process::id()));
+        assert_eq!(running_pid(&pidfile), None);
+        assert!(is_watcher_command(
+            "/opt/homebrew/bin/railway ca herdr watch --foreground"
+        ));
+        assert!(!is_watcher_command("/usr/bin/sleep 30"));
+        assert!(!is_watcher_command("railway ca herdr sync"));
     }
 }

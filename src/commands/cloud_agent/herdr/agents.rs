@@ -236,12 +236,14 @@ pub async fn command(args: Args) -> Result<()> {
         let result = match action {
             Action::Connect => return picker.connect(&row).await,
             Action::Sleep => picker.sleep(&row).await.and(picker.resync().await),
-            Action::Wake => {
-                picker.wake(&row).await?;
-                picker.resync().await?;
-                return Ok(());
-            }
-            Action::Delete => picker.delete(&row).await,
+            Action::Wake => match picker.wake(&row).await {
+                Ok(()) => {
+                    picker.resync().await?;
+                    return Ok(());
+                }
+                Err(e) => Err(e),
+            },
+            Action::Delete => picker.delete(&row).await.and(picker.resync().await),
             Action::New => return super::new::command(super::new::Args::interactive()).await,
             Action::Quit => return Ok(()),
         };
@@ -438,7 +440,9 @@ impl Picker {
         Ok(())
     }
 
+    /// Reloads first: the watcher may have written state since the picker opened.
     fn remember(&mut self, agent_id: &str, profile_id: Option<&str>) -> Result<()> {
+        self.state = State::load().unwrap_or_default();
         match profile_id {
             Some(profile) => {
                 self.state

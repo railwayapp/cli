@@ -126,7 +126,8 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Command::Wake(a)) => tracked("wake", lifecycle::wake(a)).await,
         Some(Command::Sleep(a)) => tracked("sleep", lifecycle::sleep(a)).await,
         Some(Command::Delete(a)) => tracked("delete", lifecycle::delete(a)).await,
-        Some(Command::Herdr(a)) => tracked("herdr", herdr::command(a)).await,
+        // Untracked: herdr runs these as hooks many times an hour.
+        Some(Command::Herdr(a)) => herdr::command(a).await,
         None if args.launch.is_bare() && is_stdout_terminal() => browse().await,
         // Flags given, or no terminal to draw on: behave like `railway code`,
         // which means the pane on a terminal and a plain ssh session off one.
