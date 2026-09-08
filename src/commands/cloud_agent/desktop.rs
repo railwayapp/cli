@@ -339,14 +339,6 @@ pub async fn command(args: Args) -> Result<()> {
             .await
             .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
-            "\nSaved the authenticated server, default server, and project in OpenCode Desktop."
-        );
-        println!(
-            "Open Home → Projects → Railway: {} → {} → New session.",
-            prepared.agent_name, connection.directory
-        );
-        println!("Existing chats keep their original server; start a new session in this project.");
-        println!(
             "You can close this terminal. Rerun this command after sleeping or restarting the agent."
         );
     }
