@@ -189,9 +189,10 @@ railway code get-config --json
 Each successful `railway code` setup saves its connection details locally,
 including when you decline or cancel the local-client prompt. OpenCode
 reconnects refresh this record too. `get-config` works from any directory and
-prints the most recently saved connection: the OpenCode server URL, username,
-password, project directory, connection commands, and Desktop configuration
-result, plus a direct SSH command and a copyable `~/.ssh/config` block.
+prints the most recently saved connection in one results panel: the OpenCode
+server URL, username, password, project directory, connection commands, and
+Desktop configuration result, plus a direct SSH command and a copyable
+`~/.ssh/config` block.
 SSH-based harness launches save the SSH details.
 
 The record is a snapshot; viewing it does not create, wake, or connect to an

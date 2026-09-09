@@ -86,6 +86,29 @@ fn get_config_replays_both_editions_and_ssh_without_prompting() {
                 .count(),
             1
         );
+        assert_eq!(
+            text.matches(&"─".repeat(64)).count(),
+            2,
+            "one results panel"
+        );
+        assert_eq!(text.matches("Connect with the Railway CLI:").count(), 1);
+        assert_eq!(
+            text.matches("Railway Cloud Agent SSH Configuration:")
+                .count(),
+            1
+        );
+        let flag = if beta { "--opencode2" } else { "--opencode" };
+        assert_eq!(
+            text.matches(&format!("railway code {flag} connect my-box"))
+                .count(),
+            1
+        );
+        assert_eq!(text.matches("railway ca ssh agent-123").count(), 1);
+        assert_eq!(
+            text.matches("OpenCode Desktop configuration updated")
+                .count(),
+            1
+        );
         for expected in [
             "https://example.up.railway.app",
             "fixture-password",

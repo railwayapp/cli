@@ -176,33 +176,25 @@ impl SavedConfig {
     }
 
     fn show(&self) -> Result<()> {
+        let divider = "─".repeat(64).cyan();
+        println!("\n{divider}");
         println!(
             "Saved connection for {} ({})",
             self.agent_name,
             self.saved_at.to_rfc3339()
         );
         if let Some(opencode) = &self.opencode {
-            opencode::show_connection(
-                &opencode.connection,
-                opencode.beta,
-                &self.agent_name,
-                opencode.desktop_configured,
-            )?;
-            if let Some(error) = &opencode.desktop_error {
-                println!("Desktop configuration was not saved: {error}");
-            } else if !opencode.desktop_configured {
-                let edition = if opencode.beta {
-                    "OpenCode2 [Beta]"
-                } else {
-                    "OpenCode"
-                };
-                println!("{edition} Desktop was not detected; desktop configuration was skipped.");
-            }
+            opencode::show_server_config(&opencode.connection, opencode.beta, &self.agent_name);
+            println!("\n{}", "Connect from your computer:".bold());
+            println!(
+                "  {}",
+                opencode::attach_command(&opencode.connection, opencode.beta)?
+            );
         }
-        let divider = "─".repeat(64).cyan();
-        println!("\n{divider}");
-        println!("{}", "Railway Cloud Agent SSH Configuration:".bold());
-        println!("  Agent:       {}", self.agent_name);
+        println!("\n{}", "Railway Cloud Agent SSH Configuration:".bold());
+        if self.opencode.is_none() {
+            println!("  Agent:       {}", self.agent_name);
+        }
         println!("  Agent ID:    {}", self.agent_id);
         println!("  Environment: {}", self.environment_id);
         println!("  Harness:     {}", self.harness);
@@ -210,6 +202,12 @@ impl SavedConfig {
         println!("\n{}", "SSH config block (for ~/.ssh/config):".bold());
         print!("{}", self.ssh_config);
         println!("\n{}", "Connect with the Railway CLI:".bold());
+        if let Some(opencode) = &self.opencode {
+            println!(
+                "  {}",
+                opencode::railway_connect_command(opencode.beta, &self.agent_name)
+            );
+        }
         println!(
             "  {}",
             shell_join(&[
@@ -219,6 +217,22 @@ impl SavedConfig {
                 self.agent_id.clone()
             ])
         );
+        if let Some(opencode) = &self.opencode {
+            if opencode.desktop_configured {
+                println!("\nOpenCode Desktop configuration updated (you may need to restart)");
+            } else if let Some(error) = &opencode.desktop_error {
+                println!("\nDesktop configuration was not saved: {error}");
+            } else {
+                let edition = if opencode.beta {
+                    "OpenCode2 [Beta]"
+                } else {
+                    "OpenCode"
+                };
+                println!(
+                    "\n{edition} Desktop was not detected; desktop configuration was skipped."
+                );
+            }
+        }
         println!("{divider}\n");
         Ok(())
     }
