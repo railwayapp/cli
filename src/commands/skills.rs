@@ -1,6 +1,7 @@
 use super::*;
 use crate::consts::get_user_agent;
 use crate::util::progress::{create_spinner, fail_spinner, success_spinner};
+use crate::util::update_status::{self, SkillsOutcome};
 use crate::util::write_atomic;
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -61,9 +62,23 @@ struct InstallTarget {
 }
 
 #[derive(Clone, Copy)]
-enum InstallMode {
+enum InstallMode<'a> {
     Explicit { force: bool, quiet: bool },
     Background,
+    Upgrade { cli_version: &'a str },
+}
+
+impl<'a> InstallMode<'a> {
+    fn managed_only(self) -> bool {
+        !matches!(self, Self::Explicit { .. })
+    }
+
+    fn cli_version(self) -> &'a str {
+        match self {
+            Self::Upgrade { cli_version } => cli_version,
+            _ => env!("CARGO_PKG_VERSION"),
+        }
+    }
 }
 
 type SkillFiles = HashMap<String, Vec<(PathBuf, Vec<u8>)>>;
@@ -107,11 +122,6 @@ struct SkillsManifest {
     /// immediate sync, regardless of the hourly upstream-check gate.
     #[serde(default)]
     cli_version: Option<String>,
-    /// The upstream SHA we last nagged about unmanaged (pre-manifest /
-    /// externally-synced) skill installs, so the banner fires once per
-    /// upstream commit rather than on every command.
-    #[serde(default)]
-    orphan_nag_sha: Option<String>,
     #[serde(default)]
     targets: BTreeMap<String, BTreeMap<String, SkillRecord>>,
 }
@@ -368,13 +378,24 @@ async fn fetch_latest_sha() -> Option<String> {
     (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())).then_some(sha)
 }
 
-/// Only prompt after an automatic attempt was unable to update all skills.
-pub(crate) fn cached_skill_update_requires_attention() -> bool {
+/// Explicit status reports local edits without interrupting normal commands.
+pub(crate) fn print_update_details() {
     let Some(home) = dirs::home_dir() else {
-        return false;
+        return;
     };
     let manifest = SkillsManifest::read(&home);
-    manifest.update_requires_attention()
+    if manifest.update_requires_attention() {
+        println!(
+            "Agent skills preserved: local changes detected. Run `railway skills update` for details."
+        );
+    }
+    let unmanaged = unmanaged_skill_tools(&home, &manifest);
+    if !unmanaged.is_empty() {
+        println!(
+            "Unmanaged Railway skills: {}. Run `railway skills update` to adopt unmodified copies.",
+            unmanaged.join(", ")
+        );
+    }
 }
 
 /// No-network read: true when a background auto-apply should be spawned (a
@@ -387,9 +408,17 @@ pub(crate) fn cached_skill_auto_apply_due() -> bool {
     manifest.should_auto_apply()
 }
 
+pub(crate) fn managed_install_info() -> (bool, Option<String>) {
+    let Some(home) = dirs::home_dir() else {
+        return (false, None);
+    };
+    let manifest = SkillsManifest::read(&home);
+    (manifest.has_installed_skills(), manifest.cli_version)
+}
+
 /// Background staleness check, run from the same task as the CLI version check.
-/// Hourly-gated and best-effort: refreshes the cached upstream SHA so the next
-/// invocation's banner is accurate. Skips entirely when no skills are installed.
+/// Hourly-gated and best-effort: refreshes the cached upstream SHA for automatic
+/// synchronization and explicit status. Skips when no managed skills are installed.
 pub(crate) async fn refresh_skill_update_state() {
     let Some(home) = dirs::home_dir() else {
         return;
@@ -398,11 +427,8 @@ pub(crate) async fn refresh_skill_update_state() {
         return;
     };
     let mut manifest = SkillsManifest::read(&home);
-    // Run the check for managed installs AND for unmanaged-but-present
-    // railway skills (pre-manifest installs), so the orphan nag can key
-    // off a real upstream SHA and re-arm when upstream moves. Machines
-    // with no railway skills anywhere still never hit the network.
-    if !manifest.has_installed_skills() && unmanaged_skill_tools(&home, &manifest).is_empty() {
+    // Only managed installs participate in automatic updates.
+    if !manifest.has_installed_skills() {
         return;
     }
 
@@ -420,7 +446,7 @@ pub(crate) async fn refresh_skill_update_state() {
     // Stamp `last_checked` regardless of the fetch outcome: a failing
     // GitHub API (rate limit, network) would otherwise re-fire the
     // request on every CLI invocation until one succeeded. Worst case
-    // a transient failure just delays the banner by one interval.
+    // a transient failure just delays discovery by one interval.
     manifest.last_checked = Some(Utc::now().to_rfc3339());
     if let Some(sha) = fetch_latest_sha().await {
         manifest.latest_sha = Some(sha);
@@ -518,10 +544,8 @@ const RAILWAY_SKILL_NAMES: &[&str] = &["use-railway"];
 
 /// Coding tools that have a railway skill on disk with no manifest record
 /// for that target — installs made before the CLI tracked skills, or
-/// external syncs. We never write to these without the user asking;
-/// `orphan_skills_nag_due` surfaces a banner pointing at
-/// `railway skills update` instead (which adopts up-to-date copies and
-/// safely skips modified ones).
+/// external syncs. Explicit update status points at `railway skills update`,
+/// which adopts up-to-date copies and safely skips modified ones.
 fn unmanaged_skill_tools(home: &Path, manifest: &SkillsManifest) -> Vec<&'static str> {
     coding_tools(home)
         .into_iter()
@@ -540,40 +564,6 @@ fn unmanaged_skill_tools(home: &Path, manifest: &SkillsManifest) -> Vec<&'static
         })
         .map(|tool| tool.name)
         .collect()
-}
-
-/// Banner check for unmanaged railway skills: returns the affected tool
-/// names when a nag is due and stamps the dedupe key so it fires once per
-/// upstream SHA (re-arming when upstream moves), not on every command.
-/// No network; a couple of stat calls per known tool.
-fn orphan_skills_nag(home: &Path) -> Option<Vec<String>> {
-    let _lock = lock_manifest(home).ok()?;
-    let mut manifest = SkillsManifest::read(home);
-    let orphans = unmanaged_skill_tools(home, &manifest);
-    if orphans.is_empty() {
-        return None;
-    }
-    // Key the nag to the last-seen upstream SHA; before the first
-    // background check lands there's no SHA yet, so a sentinel gives us
-    // exactly one pre-check nag.
-    let key = manifest
-        .latest_sha
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    if manifest.orphan_nag_sha.as_deref() == Some(key.as_str()) {
-        return None;
-    }
-    manifest.orphan_nag_sha = Some(key);
-    let _ = manifest.save(home);
-    Some(orphans.into_iter().map(str::to_string).collect())
-}
-
-/// No-network banner entry point for `main`: unmanaged railway skills
-/// found on disk (see `unmanaged_skill_tools`), at most once per upstream
-/// SHA.
-pub(crate) fn orphan_skills_nag_due() -> Option<Vec<String>> {
-    let home = dirs::home_dir()?;
-    orphan_skills_nag(&home)
 }
 
 /// What the background staleness check knows about an install, distinguishing
@@ -746,17 +736,30 @@ pub(super) async fn install_skills(
     force: bool,
     quiet: bool,
 ) -> Result<()> {
-    run_install(agent_filter, InstallMode::Explicit { force, quiet }).await
+    run_install(agent_filter, InstallMode::Explicit { force, quiet })
+        .await
+        .map(|_| ())
 }
 
 /// Headless skills refresh, spawned as a detached process (mirrors the binary's
 /// background self-update). Only updates manifest-managed skills, never forces,
 /// and prints nothing. Re-check preferences in the child, before any writes.
 pub(crate) async fn apply_update_in_background() -> Result<()> {
-    run_install(&[], InstallMode::Background).await
+    run_install(&[], InstallMode::Background).await.map(|_| ())
 }
 
-async fn run_install(agent_filter: &[String], mode: InstallMode) -> Result<()> {
+/// Explicit CLI upgrades include managed skills, even when automatic checks are
+/// disabled. This never forces local edits or installs skills for new users.
+pub(crate) async fn sync_for_upgrade(cli_version: &str) -> Result<SkillsOutcome> {
+    run_install(&[], InstallMode::Upgrade { cli_version })
+        .await?
+        .context("Skills synchronization did not complete")
+}
+
+async fn run_install(
+    agent_filter: &[String],
+    mode: InstallMode<'_>,
+) -> Result<Option<SkillsOutcome>> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let _lock = lock_manifest(&home)?;
     let manifest = SkillsManifest::read(&home);
@@ -764,9 +767,15 @@ async fn run_install(agent_filter: &[String], mode: InstallMode) -> Result<()> {
         InstallMode::Explicit { quiet, .. } => {
             (build_targets(&resolve_tools(&home, agent_filter)?), quiet)
         }
-        InstallMode::Background => {
-            if crate::telemetry::is_auto_update_disabled() || !manifest.should_auto_apply() {
-                return Ok(());
+        InstallMode::Background | InstallMode::Upgrade { .. } => {
+            if matches!(mode, InstallMode::Background)
+                && (crate::telemetry::is_auto_update_disabled() || !manifest.should_auto_apply())
+            {
+                return Ok(None);
+            }
+            if !manifest.has_installed_skills() {
+                update_status::record_skills(mode.cli_version(), SkillsOutcome::NotInstalled);
+                return Ok(Some(SkillsOutcome::NotInstalled));
             }
             let targets = manifest
                 .targets
@@ -785,33 +794,53 @@ async fn run_install(agent_filter: &[String], mode: InstallMode) -> Result<()> {
         print_target_summary("Installing to:", &targets);
     }
 
-    let source_sha = fetch_latest_sha().await;
-    if matches!(mode, InstallMode::Background) && source_sha.is_none() {
-        bail!("Failed to determine the latest Railway skills revision");
+    let report_outcome = mode.managed_only() || agent_filter.is_empty();
+    if report_outcome {
+        update_status::record_skills(mode.cli_version(), SkillsOutcome::Pending);
     }
-    let tarball_bytes = if quiet {
-        download_tarball(source_sha.as_deref()).await?
-    } else {
-        let mut spinner = create_spinner("Downloading skills...".to_string());
-        match download_tarball(source_sha.as_deref()).await {
-            Ok(bytes) => {
-                success_spinner(&mut spinner, "Downloaded skills".to_string());
-                bytes
-            }
-            Err(e) => {
-                fail_spinner(&mut spinner, "Failed to download skills".to_string());
-                return Err(e);
-            }
+    let result = async {
+        let source_sha = fetch_latest_sha().await;
+        if mode.managed_only() && source_sha.is_none() {
+            bail!("Failed to determine the latest Railway skills revision");
         }
-    };
+        let tarball_bytes = if quiet {
+            download_tarball(source_sha.as_deref()).await?
+        } else {
+            let mut spinner = create_spinner("Downloading skills...".to_string());
+            match download_tarball(source_sha.as_deref()).await {
+                Ok(bytes) => {
+                    success_spinner(&mut spinner, "Downloaded skills".to_string());
+                    bytes
+                }
+                Err(e) => {
+                    fail_spinner(&mut spinner, "Failed to download skills".to_string());
+                    return Err(e);
+                }
+            }
+        };
 
-    let skills = extract_skill_files(&tarball_bytes)?;
+        let skills = extract_skill_files(&tarball_bytes)?;
 
-    // The user may have disabled updates while the download was in flight.
-    if matches!(mode, InstallMode::Background) && crate::telemetry::is_auto_update_disabled() {
-        return Ok(());
+        // The user may have disabled updates while the download was in flight.
+        if matches!(mode, InstallMode::Background) && crate::telemetry::is_auto_update_disabled() {
+            return Ok(None);
+        }
+        install_downloaded_skills(&home, &targets, &skills, source_sha, manifest, mode).map(Some)
     }
-    install_downloaded_skills(&home, &targets, &skills, source_sha, manifest, mode)
+    .await;
+    if report_outcome {
+        match &result {
+            Ok(Some(outcome)) => update_status::record_skills(mode.cli_version(), outcome.clone()),
+            Err(error) => update_status::record_skills(
+                mode.cli_version(),
+                SkillsOutcome::Failed {
+                    message: error.to_string(),
+                },
+            ),
+            Ok(None) => {}
+        }
+    }
+    result
 }
 
 fn install_downloaded_skills(
@@ -820,11 +849,11 @@ fn install_downloaded_skills(
     skills: &SkillFiles,
     source_sha: Option<String>,
     mut manifest: SkillsManifest,
-    mode: InstallMode,
-) -> Result<()> {
+    mode: InstallMode<'_>,
+) -> Result<SkillsOutcome> {
     let (force, quiet) = match mode {
         InstallMode::Explicit { force, quiet } => (force, quiet),
-        InstallMode::Background => (false, true),
+        InstallMode::Background | InstallMode::Upgrade { .. } => (false, true),
     };
     let mut skill_names: Vec<&String> = skills.keys().collect();
     skill_names.sort();
@@ -844,15 +873,13 @@ fn install_downloaded_skills(
             let new_hashes = new_file_hashes(files);
             let skill_dir = target.skills_dir.join(skill_name);
             let record = manifest.record(&target_key, skill_name).cloned();
-            if matches!(mode, InstallMode::Background) && record.is_none() {
+            if mode.managed_only() && record.is_none() {
                 continue;
             }
             let state = match classify_skill(&skill_dir, &new_hashes, record.as_ref()) {
                 // A removed managed skill is a local deletion. Only an explicit
                 // install may recreate it; automatic sync must leave it alone.
-                SkillState::NotInstalled if matches!(mode, InstallMode::Background) => {
-                    SkillState::Modified
-                }
+                SkillState::NotInstalled if mode.managed_only() => SkillState::Modified,
                 state => state,
             };
 
@@ -927,20 +954,18 @@ fn install_downloaded_skills(
         }
     }
 
-    // Record the installed commit and reset the staleness cache so the "update
-    // available" banner clears immediately. We only advance source_sha when we
-    // applied the new content everywhere; if some skills were skipped as
-    // modified, leaving the old (or absent) SHA keeps the banner honest.
+    // Only advance source_sha when we applied the new content everywhere. If
+    // some skills were preserved, retain the prior revision for explicit status.
     // `auto_applied_sha` is stamped regardless so a background apply that only
     // skips modified skills doesn't re-download the same commit every run.
-    if let Some(sha) = source_sha {
+    if let Some(sha) = source_sha.as_ref() {
         if blocked == 0 {
             manifest.source_sha = Some(sha.clone());
         }
         manifest.latest_sha = Some(sha.clone());
         manifest.last_checked = Some(Utc::now().to_rfc3339());
-        manifest.auto_applied_sha = Some(sha);
-        manifest.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        manifest.auto_applied_sha = Some(sha.clone());
+        manifest.cli_version = Some(mode.cli_version().to_string());
     }
 
     manifest.save(home)?;
@@ -985,7 +1010,16 @@ fn install_downloaded_skills(
         }
     }
 
-    Ok(())
+    Ok(match source_sha {
+        Some(revision) if blocked > 0 => SkillsOutcome::Preserved {
+            revision,
+            count: blocked,
+        },
+        Some(revision) => SkillsOutcome::Synced { revision },
+        None => SkillsOutcome::Failed {
+            message: "Installed skills, but their upstream revision could not be verified".into(),
+        },
+    })
 }
 
 /// Re-execs this binary detached with `_RAILWAY_UPDATE_SKILLS` set so it
@@ -1139,32 +1173,6 @@ mod tests {
             .join("use-railway");
         std::fs::create_dir_all(&bare).unwrap();
         assert!(unmanaged_skill_tools(home2.path(), &SkillsManifest::default()).is_empty());
-    }
-
-    #[test]
-    fn orphan_nag_fires_once_per_upstream_sha() {
-        let home = tempfile::tempdir().unwrap();
-        plant_orphan_skill(home.path());
-
-        // First sighting nags (pre-check sentinel key) and stamps the manifest.
-        assert!(orphan_skills_nag(home.path()).is_some());
-        // Same key again: deduped.
-        assert!(orphan_skills_nag(home.path()).is_none());
-
-        // Upstream moved (background check recorded a new SHA): re-arms once.
-        let mut manifest = SkillsManifest::read(home.path());
-        manifest.latest_sha = Some("a".repeat(40));
-        manifest.save(home.path()).unwrap();
-        assert!(orphan_skills_nag(home.path()).is_some());
-        assert!(orphan_skills_nag(home.path()).is_none());
-    }
-
-    #[test]
-    fn orphan_nag_silent_when_no_skills_anywhere() {
-        let home = tempfile::tempdir().unwrap();
-        assert!(orphan_skills_nag(home.path()).is_none());
-        // And it must not create a manifest as a side effect.
-        assert!(!SkillsManifest::path(home.path()).exists());
     }
 
     // --- modification detection -------------------------------------------
@@ -1373,6 +1381,17 @@ mod tests {
 
     #[test]
     fn background_sync_updates_clean_skills_and_preserves_local_changes() {
+        assert_managed_sync_preserves_local_changes(InstallMode::Background);
+    }
+
+    #[test]
+    fn explicit_upgrade_sync_preserves_local_changes_and_records_the_installed_version() {
+        assert_managed_sync_preserves_local_changes(InstallMode::Upgrade {
+            cli_version: "255.255.254",
+        });
+    }
+
+    fn assert_managed_sync_preserves_local_changes(mode: InstallMode<'_>) {
         let home = tempfile::tempdir().unwrap();
         let mut manifest = SkillsManifest {
             source_sha: Some("old".to_string()),
@@ -1429,15 +1448,22 @@ mod tests {
             ),
         ]);
 
-        install_downloaded_skills(
+        let outcome = install_downloaded_skills(
             home.path(),
             &targets,
             &skills,
             Some("new".to_string()),
             manifest,
-            InstallMode::Background,
+            mode,
         )
         .unwrap();
+        assert_eq!(
+            outcome,
+            SkillsOutcome::Preserved {
+                revision: "new".into(),
+                count: 4
+            }
+        );
 
         let read = |path: &str| std::fs::read_to_string(home.path().join(path)).unwrap();
         assert_eq!(read("clean/use-railway/SKILL.md"), "v2");
@@ -1460,11 +1486,14 @@ mod tests {
         let manifest = SkillsManifest::read(home.path());
         assert_eq!(manifest.source_sha.as_deref(), Some("old"));
         assert_eq!(manifest.latest_sha.as_deref(), Some("new"));
-        assert!(
-            !manifest.should_auto_apply(),
-            "do not repeatedly retry modified skills"
-        );
-        assert!(manifest.update_requires_attention());
+        assert_eq!(manifest.cli_version.as_deref(), Some(mode.cli_version()));
+        if matches!(mode, InstallMode::Background) {
+            assert!(
+                !manifest.should_auto_apply(),
+                "do not repeatedly retry modified skills"
+            );
+            assert!(manifest.update_requires_attention());
+        }
     }
 
     #[test]

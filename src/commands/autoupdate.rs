@@ -219,6 +219,8 @@ pub async fn command(args: Args) -> Result<()> {
 
             println!("Install method: {}", method.name().bold());
             println!("Update strategy: {}", method.update_strategy());
+            crate::util::update_status::print_status();
+            crate::commands::skills::print_update_details();
 
             let update = UpdateCheck::read_normalized();
 
@@ -229,7 +231,7 @@ pub async fn command(args: Args) -> Result<()> {
             if let Some(ref staged) = crate::util::self_update::validated_staged_version() {
                 if auto_update_enabled {
                     println!(
-                        "Staged update: {} (will apply on next run)",
+                        "Staged update: {} (ready to install on the next interactive command)",
                         format!("v{staged}").green()
                     );
                 } else {

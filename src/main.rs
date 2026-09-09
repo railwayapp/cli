@@ -274,6 +274,29 @@ async fn main() -> Result<()> {
         || raw_subcommand.is_none()
         || matches!(raw_subcommand.as_deref(), Some("help"));
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
+    let machine_output = raw_args.iter().any(|arg| arg == "--json");
+    let embedded_setup = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
+    let normal_invocation = !is_update_management_cmd
+        && !is_read_only_invocation
+        && !matches!(
+            raw_subcommand.as_deref(),
+            Some("skills" | "setup" | "completion")
+        );
+    let show_update_receipt = auto_update_enabled
+        && normal_invocation
+        && is_tty
+        && std::io::stderr().is_terminal()
+        && !machine_output
+        && !embedded_setup;
+
+    if auto_update_enabled && normal_invocation && !embedded_setup {
+        let (managed, previous) = commands::skills::managed_install_info();
+        util::update_status::observe_running(
+            env!("CARGO_PKG_VERSION"),
+            previous.as_deref(),
+            managed,
+        );
+    }
 
     // Non-TTY invocations are a supported path for coding agents and other
     // automated CLI users. They are allowed to refresh the update cache and
@@ -281,6 +304,7 @@ async fn main() -> Result<()> {
     // so the running binary never changes under a scripted invocation.
     let auto_update_applied = auto_update_enabled
         && is_tty
+        && !machine_output
         && !is_update_management_cmd
         && !is_read_only_invocation
         && util::self_update::try_apply_staged().is_some();
@@ -301,25 +325,26 @@ async fn main() -> Result<()> {
     // through to a fresh check_update() and can discover newer releases.
     let known_pending = update.latest_version;
 
-    // Show the "new version available" banner only for TTY users. Coding
-    // agents and other non-interactive callers should still refresh update
-    // state in the background, but they should not receive human-facing
-    // upgrade prompts in command output.
-    //
-    // The persisted preference, environment override, and CI all suppress
-    // unsolicited update notices as well as automatic installs.
-    // The installer's embedded agent setup renders one cohesive flow; the
-    // version/skills update banners are noise mid-install (the user just
-    // configured skills), so suppress them in that context.
-    let embedded_setup = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
-    if is_tty && auto_update_enabled && !embedded_setup {
+    // Automatic discovery/downloads are quiet. Installs requiring manual action
+    // get one notice per release; completed automatic updates get one receipt.
+    if show_update_receipt {
+        // Present a completed prior attempt before a retry can mark skills
+        // pending again. Fast background completions also get a chance at exit.
+        if let Some(receipt) = util::update_status::take_receipt() {
+            eprintln!("{receipt}");
+        }
         if let Some(ref latest_version) = known_pending {
+            let method = util::install_method::InstallMethod::detect();
+            let can_install = (method.can_self_update() && method.can_write_binary())
+                || method.can_auto_run_package_manager();
             let is_skipped = skipped_version.as_deref() == Some(latest_version.as_str());
-            if !is_skipped
+            if !can_install
+                && !is_skipped
                 && matches!(
                     compare_semver(env!("CARGO_PKG_VERSION"), latest_version),
                     Ordering::Less
                 )
+                && util::update_status::available_notice_due(latest_version)
             {
                 eprintln!(
                     "{} v{} run {} to update ({} for more info)",
@@ -330,48 +355,6 @@ async fn main() -> Result<()> {
                 );
             }
         }
-
-        // Clean skills update silently. Only ask for intervention after an
-        // automatic attempt left locally modified skills behind.
-        if commands::skills::cached_skill_update_requires_attention() {
-            eprintln!(
-                "{} run {} to review ({} overwrites local changes)",
-                "Railway skills update skipped due to local changes:"
-                    .yellow()
-                    .bold(),
-                "railway skills update".cyan(),
-                "--force".cyan(),
-            );
-        }
-
-        // Railway skills on disk that this CLI isn't managing yet —
-        // installed before the manifest existed or synced externally.
-        // Nag (once per upstream SHA) toward the managed path; we never
-        // write to them without the user asking.
-        if let Some(tools) = commands::skills::orphan_skills_nag_due() {
-            eprintln!(
-                "{} ({}) — run {} to keep them current ({} overwrites local changes)",
-                "Unmanaged Railway skills found".yellow().bold(),
-                tools.join(", "),
-                "railway skills update".cyan(),
-                "--force".cyan(),
-            );
-        }
-    } else if auto_update_enabled && !is_help_or_error && !embedded_setup {
-        // Non-TTY counterpart of the banner above, for agent callers only.
-        // Staged-binary apply is TTY-gated (see auto_update_applied), so a
-        // machine whose railway usage is entirely agent-driven would
-        // otherwise never apply a downloaded update nor see a reason to —
-        // tell the driving agent once per pending version instead. Skipped
-        // on parse-error paths: a typo'd command should print only the
-        // clap error.
-        util::agent_advisory::maybe_show_upgrade_nudge(
-            &raw_args,
-            raw_subcommand.as_deref(),
-            known_pending.as_deref(),
-            skipped_version.as_deref(),
-        )
-        .await;
     }
 
     // Automatic checks and installs share the same opt-out, including non-TTY
@@ -482,6 +465,12 @@ async fn main() -> Result<()> {
     util::cac_deprecation::maybe_warn(&raw_args, subcommand_name.as_deref());
 
     handle_update_task(check_updates_handle).await;
+
+    if show_update_receipt {
+        if let Some(receipt) = util::update_status::take_receipt() {
+            eprintln!("{receipt}");
+        }
+    }
 
     Ok(())
 }
