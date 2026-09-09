@@ -64,7 +64,7 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
     {
         launch(&connection, beta, &prepared.agent_name, &desktop).await?;
     } else if interactive() {
-        println!("\nThe server is still running. Save these details to connect later:");
+        clear_setup_output();
         show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
     }
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
@@ -117,7 +117,7 @@ async fn launch(
     // The install prompt is deliberately after Enter/selection, and only for
     // the missing edition. Esc/Ctrl+C must never install or stop the server.
     let Some(binary) = local::ensure_client(beta).await? else {
-        println!("\nInstallation canceled. The server is still running:");
+        clear_setup_output();
         return show_connection(connection, beta, name, desktop);
     };
     println!("Launching local {}…", edition(beta));
