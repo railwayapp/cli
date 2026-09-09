@@ -70,6 +70,17 @@ railway mcp install --agent cursor
 railway skills --agent claude-code
 ```
 
+With automatic updates enabled, CLI-managed skills update silently in the background,
+including on the first normal command after a CLI version change (whether upgraded
+with `railway upgrade` or a package manager). Locally modified or deleted skills are
+skipped, and user-added files are preserved. Restart your coding tool to load updated
+skills. Use `railway skills update` to review skipped updates, or add `--force` to
+overwrite local changes explicitly.
+
+`railway autoupdate disable` (or `RAILWAY_NO_AUTO_UPDATE=1`) disables automatic CLI
+and skill updates and their update notices. Explicit `railway upgrade`,
+`railway check-updates`, and `railway skills update` commands remain available.
+
 Opt into the local GraphQL-backed MCP server instead:
 
 ```bash
@@ -77,6 +88,25 @@ railway setup agent -y --local
 # or
 railway mcp install --local --agent cursor
 ```
+
+## Update progress and status
+
+`railway upgrade` presents CLI installation and managed skill synchronization as
+one flow. Stages advance as work completes, and the final summary says whether
+the new version is active or will be used on the next command. This explicit
+command also synchronizes managed skills when automatic updates are disabled.
+
+Automatic discovery and downloads run quietly. After the new CLI is active and
+its skill sync has finished, an interactive command shows one completion receipt
+per CLI version. Preserved local edits are reported neutrally; a skill-sync
+failure is reported separately from a successful CLI install. Commands using
+JSON, piped output, help, and version output do not show or consume receipts.
+Install methods that require manual upgrades get one availability notice per
+release instead.
+
+Run `railway autoupdate status` to inspect the running and recorded installed
+versions, staged/in-progress CLI updates, skill-sync results, and unmanaged
+skills. Use `railway skills update` for detailed skill results or to retry a sync.
 
 ## OpenCode clients and remote servers
 
