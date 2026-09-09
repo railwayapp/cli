@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
@@ -21,7 +21,7 @@ const BOOTSTRAP: &str = include_str!("opencode.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
 
 // Deliberately no Debug: this value contains the server password.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Connection {
     pub url: String,
     pub username: String,
@@ -32,7 +32,12 @@ pub(crate) struct Connection {
 
 /// Shared connection details for Desktop setup and local-client commands.
 /// Keep commands free of border prefixes so they can be copied directly.
-pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -> Result<()> {
+pub(crate) fn show_connection(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop_configured: bool,
+) -> Result<()> {
     let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
     let command = attach_command(connection, beta)?;
     let divider = "─".repeat(64).cyan();
@@ -40,7 +45,7 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
     println!("{}", format!("{edition} server on {name}").cyan().bold());
     println!(
         "\n{}",
-        format!("Add a server in {edition} Desktop with these settings:").bold()
+        format!("Railway {edition} Server Configuration:").bold()
     );
     println!("  {}      {name}", "Name:".bold());
     println!("  {}    {}", "Server:".bold(), connection.url);
@@ -49,7 +54,7 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
     println!("  {} {}", "Directory:".bold(), connection.directory);
     println!("\n{}", "Connect from your computer:".bold());
     println!("  {command}");
-    println!("\n{}", "Or reconnect with Railway:".bold());
+    println!("\n{}", "Connect with the Railway CLI:".bold());
     println!(
         "  {}",
         shell_join(&[
@@ -60,6 +65,9 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
             name.into()
         ])
     );
+    if desktop_configured {
+        println!("\nOpenCode Desktop configuration updated (you may need to restart)");
+    }
     println!("{divider}\n");
     Ok(())
 }

@@ -5,10 +5,13 @@ use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, stream};
 use is_terminal::IsTerminal;
 
-use super::{CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle};
+use super::{
+    CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle,
+    saved_config::SavedConfig,
+};
 use crate::client::GQLClient;
 use crate::commands::cloud_agent::{
-    access,
+    access, desktop,
     opencode::{self, Connection, local},
 };
 use crate::config::Configs;
@@ -46,18 +49,36 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         "\nStarting {} in the background and opening its authenticated HTTPS endpoint...",
         edition(beta)
     );
-    if beta {
-        println!("The first start downloads the latest Beta and can take several minutes.");
-    }
     let connection = opencode::start_prepared(&prepared, &directory, &password, beta).await?;
-    opencode::show_connection(&connection, beta, &prepared.agent_name)?;
-    if interactive() && local::confirm(&format!("Launch your local {} client now?", edition(beta)))?
-    {
-        launch(&connection, beta, &prepared.agent_name).await?;
-    } else if interactive() {
-        println!("\nThe server is still running. Save these details to connect later:");
-        opencode::show_connection(&connection, beta, &prepared.agent_name)?;
+    let desktop = desktop::configure_installed_opencode(
+        beta,
+        &connection,
+        &prepared.agent_id,
+        &prepared.agent_name,
+    )
+    .await;
+    let saved = SavedConfig::from_prepared(&prepared)
+        .map(|saved| saved.with_opencode(&connection, beta, &desktop))
+        .and_then(|saved| saved.save());
+    clear_setup_output();
+    show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
+    let launch_result = if interactive()
+        && local::confirm(&format!(
+            "Launch {} and connect to the Railway Cloud Agent now?",
+            edition(beta)
+        ))? {
+        launch(&connection, beta, &prepared.agent_name, &desktop).await
+    } else {
+        if interactive() {
+            clear_setup_output();
+            show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
+        }
+        Ok(())
+    };
+    if let Err(error) = saved {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
     }
+    launch_result?;
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
     Ok(())
 }
@@ -66,21 +87,55 @@ fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
+/// Clear setup chatter only after the server is ready. Failed launches retain
+/// their diagnostics, and redirected output stays free of terminal controls.
+fn clear_setup_output() {
+    if interactive() {
+        let _ = console::Term::stdout().clear_screen();
+    }
+}
+
 fn edition(beta: bool) -> &'static str {
     if beta { "OpenCode2 [Beta]" } else { "OpenCode" }
 }
 
-async fn launch(connection: &Connection, beta: bool, name: &str) -> Result<()> {
+fn show_connection(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop: &Result<bool>,
+) -> Result<()> {
+    opencode::show_connection(connection, beta, name, matches!(desktop, Ok(true)))?;
+    match desktop {
+        Ok(true) => {}
+        Ok(false) => println!(
+            "{} Desktop not detected; desktop configuration skipped.",
+            edition(beta)
+        ),
+        Err(error) => eprintln!(
+            "Could not automatically configure {} Desktop: {error:#}\nThe server is still running. Use the connection details above, or rerun this command to retry.",
+            edition(beta)
+        ),
+    }
+    Ok(())
+}
+
+async fn launch(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop: &Result<bool>,
+) -> Result<()> {
     // The install prompt is deliberately after Enter/selection, and only for
     // the missing edition. Esc/Ctrl+C must never install or stop the server.
     let Some(binary) = local::ensure_client(beta).await? else {
-        println!("\nInstallation canceled. The server is still running:");
-        return opencode::show_connection(connection, beta, name);
+        clear_setup_output();
+        return show_connection(connection, beta, name, desktop);
     };
     println!("Launching local {}…", edition(beta));
     let result = local::run_client(&binary, connection, beta);
     println!("\nThe server on {name} is still running.");
-    opencode::show_connection(connection, beta, name)?;
+    show_connection(connection, beta, name, desktop)?;
     let status = result?;
     if !status.success() {
         bail!("The local {} client exited with {status}.", edition(beta));
@@ -272,11 +327,29 @@ pub(super) async fn connect(
     let connection = opencode::reconnect(&relay_info(&selected, &relay), beta)
         .await
         .with_context(|| format!("Connecting to {} ({})", selected.name, edition(beta)))?;
-    opencode::show_connection(&connection, beta, &selected.name)?;
-    if interactive() {
-        launch(&connection, beta, &selected.name).await?;
+    let desktop =
+        desktop::configure_installed_opencode(beta, &connection, &selected.id, &selected.name)
+            .await;
+    let saved = SavedConfig::new(
+        &selected.id,
+        &selected.name,
+        &selected.environment_id,
+        if beta { "opencode2" } else { "opencode" },
+        relay.identity.as_deref(),
+    )
+    .map(|saved| saved.with_opencode(&connection, beta, &desktop))
+    .and_then(|saved| saved.save());
+    clear_setup_output();
+    show_connection(&connection, beta, &selected.name, &desktop)?;
+    let launch_result = if interactive() {
+        launch(&connection, beta, &selected.name, &desktop).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = saved {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
     }
-    Ok(())
+    launch_result
 }
 
 #[cfg(test)]

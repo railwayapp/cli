@@ -118,8 +118,20 @@ railway code --opencode2
 railway code --opencode2 --new
 ```
 
-The CLI prints the server URL, username, password, and project directory for
-manual setup in OpenCode Desktop, plus a shell command to connect directly.
+When the matching OpenCode Desktop edition has an existing settings file or
+desktop database, Railway automatically saves the server URL, credentials,
+default server, and project in it. The final output confirms that configuration
+was updated; open `Railway: <agent-name>` in Desktop's server picker. Both JSON
+settings and SQLite renderer state are supported, with backups of previous settings.
+You may need to restart OpenCode Desktop to load the updated configuration.
+Configuration failures are non-fatal and reported alongside the connection
+details; rerun the command to retry.
+
+The CLI also prints the server URL, username, password, and project directory
+for manual setup, plus a shell command to connect directly.
+After successful setup in an interactive terminal, it clears the setup messages
+and shows the connection details, with the Desktop update confirmation inside
+the result panel. Failed setup keeps its diagnostic output visible.
 Press Enter to launch the matching local terminal client. If that client is
 missing, Railway offers to install it first. Declining, Esc, or Ctrl+C at
 either prompt leaves the server running and prints the connection details.
@@ -142,10 +154,11 @@ railway code --opencode2 connect my-box
 `connect` discovers running servers of the selected edition on agents you own.
 One match connects directly; multiple matches show a `workspace/project/agent`
 picker. A name or ID targets an agent directly and can wake a saved server.
+Connecting also refreshes the detected Desktop edition's configuration.
 Connecting never creates a new agent or installs a server on an unrelated box.
-In noninteractive terminals, the CLI prints connection details instead of
-prompting, installing software, or opening a client; multiple matches require
-a name or ID.
+In noninteractive terminals, the CLI still attempts Desktop configuration and
+prints connection details instead of prompting, installing software, or
+launching a terminal client; multiple matches require a name or ID.
 
 To run both client and server inside the cloud agent, in Railway CA:
 
@@ -158,12 +171,35 @@ railway code --opencode2 remote --new
 For the local-client setup, `--dir` selects the remote project directory
 (default `/app`). Beta uses its server's startup directory, so switching it
 requires a fresh agent. Setup uses the same generated credentials, HTTPS
-checks, provider sign-in behavior, skills, and MCP sync as Desktop. It prints
-Desktop settings for manual entry. A running server and its password are
-reused. Use `railway ca sleep <name>` when finished.
+checks, provider sign-in behavior, skills, and MCP sync as Desktop. It saves
+settings in detected Desktop installations and prints them for manual entry.
+A running server and its password are reused. Use `railway ca sleep <name>`
+when finished.
 
 Put harness-specific arguments after `--`, for example:
 `railway code --opencode2 -- run --standalone "explain this project"`.
+
+### Retrieve the last connection configuration
+
+```bash
+railway code get-config
+railway code get-config --json
+```
+
+Each successful `railway code` setup saves its connection details locally,
+including when you decline or cancel the local-client prompt. OpenCode
+reconnects refresh this record too. `get-config` works from any directory and
+prints the most recently saved connection: the OpenCode server URL, username,
+password, project directory, connection commands, and Desktop configuration
+result, plus a direct SSH command and a copyable `~/.ssh/config` block.
+SSH-based harness launches save the SSH details.
+
+The record is a snapshot; viewing it does not create, wake, or connect to an
+agent. It is stored in `~/.railway/last-code-config.json` with owner-only
+permissions on Unix, replaced after each successful setup, and removed by
+`railway logout`. JSON output includes the saved connection credentials.
+Launches made before this feature was installed have no record; run a setup
+or reconnect once to save one.
 
 ## Cloud agents in desktop apps
 
@@ -206,8 +242,8 @@ Use `railway ca --opencode2` for a terminal session. In the new-session picker,
 highlight OpenCode and press Tab to switch to **OpenCode2 [Beta]**. Tab also
 switches editions in the prompt footer; Shift+Tab cycles harnesses.
 
-Setup also prints the connection details. On macOS, it gracefully restarts the selected
-running edition to apply the settings. Quit the apps before setup on Windows/Linux.
+Setup also prints the connection details and a reminder that you may need to
+restart OpenCode Desktop to load the updated configuration.
 Private `.railway-backup` files preserve the previous settings and server state.
 You can close the terminal after setup; there is no local tunnel to keep running.
 

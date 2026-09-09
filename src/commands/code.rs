@@ -88,10 +88,36 @@ use crate::util::shell::shell_join;
 mod names;
 mod opencode;
 mod plumbing;
+mod saved_config;
 
-pub type Args = LaunchArgs;
+pub(crate) fn clear_saved_config() {
+    if let Some(home) = dirs::home_dir() {
+        saved_config::clear_in(&home);
+    }
+}
 
-pub async fn command(mut args: Args) -> Result<()> {
+/// Launch a coding agent on a Railway cloud agent VM
+#[derive(Parser)]
+#[clap(args_conflicts_with_subcommands = true)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Option<Commands>,
+
+    #[clap(flatten)]
+    launch: LaunchArgs,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Show the connection details saved by the last successful launch or reconnect
+    GetConfig(saved_config::Args),
+}
+
+pub async fn command(args: Args) -> Result<()> {
+    if let Some(Commands::GetConfig(args)) = args.command {
+        return saved_config::command(args);
+    }
+    let mut args = args.launch;
     if let Some(action) = args.opencode_action()? {
         let beta = args.opencode2;
         match action {
@@ -109,7 +135,7 @@ pub async fn command(mut args: Args) -> Result<()> {
 }
 
 /// CA's launch flags and OpenCode's `remote` action keep the in-agent UI.
-pub(crate) async fn launch_in_cloud(args: Args) -> Result<()> {
+pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
     // never what someone typing it meant, and the failure is invisible — the
@@ -136,7 +162,7 @@ pub(crate) async fn launch_in_cloud(args: Args) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --opencode           # prepare a server, offer to open your local client\n  railway code --opencode2          # same, with OpenCode2 Beta\n  railway code --opencode remote    # run client and server inside railway ca\n  railway code --opencode2 --new\n  railway code --opencode2 connect  # choose an existing server, connect locally\n  railway code --opencode connect my-box\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\n`--opencode` and `--opencode2` prepare a server and offer to open your local\nclient. Missing clients can be installed after confirmation. `connect [agent]`\nreconnects locally; `remote` runs the client inside Railway CA.\n\nSessions running inside `railway ca` open in its manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --opencode           # prepare a server, offer to open your local client\n  railway code --opencode2          # same, with OpenCode2 Beta\n  railway code --opencode remote    # run client and server inside railway ca\n  railway code --opencode2 --new\n  railway code --opencode2 connect  # choose an existing server, connect locally\n  railway code --opencode connect my-box\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\n`--opencode` and `--opencode2` prepare a server and offer to open your local\nclient. Missing clients can be installed after confirmation. `connect [agent]`\nreconnects locally; `remote` runs the client inside Railway CA.\nLaunch and connect automatically save the connection in the matching Desktop\nedition when its settings file or database is detected. The final output\nreports success or a non-fatal configuration failure. You may need to restart\nOpenCode Desktop to load the updated configuration.\n\nSessions running inside `railway ca` open in its manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
 )]
 pub struct LaunchArgs {
     /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
@@ -2891,6 +2917,17 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
+    // App-mode callers finish their HTTP/Desktop setup after prepare returns.
+    // Do not replace the last usable record with an incomplete setup.
+    if !args.app_mode
+        && let Ok(prepared) = &result
+        && let Err(error) =
+            saved_config::SavedConfig::from_prepared(prepared).and_then(|saved| saved.save())
+    {
+        progress.note(&format!(
+            "Could not save connection details for railway code get-config: {error:#}"
+        ));
+    }
     // After the outcome, and detached: the stages are already measured, and
     // reporting them must not extend the launch they describe.
     ssh_tel::flush_stages("cloud_agent_launch");

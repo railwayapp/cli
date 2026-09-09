@@ -37,11 +37,12 @@ use crate::util::shell::shell_join;
 
 use super::opencode;
 mod opencode_config;
+pub(crate) use opencode_config::configure_installed as configure_installed_opencode;
 
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nOn macOS, running editions are gracefully restarted to apply settings.\nQuit Desktop before setup on Windows/Linux. Open Home → Projects →\nRailway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart the app after setup.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nYou may need to restart OpenCode Desktop to load the updated configuration.\nOpen Home → Projects → Railway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -292,9 +293,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let connection = if let Some(password) = &opencode_password {
         if args.opencode2 {
-            println!(
-                "\nStarting OpenCode2 [Beta] and checking its HTTPS connection. The first startup downloads the latest Beta and may take several minutes..."
-            );
+            println!("\nStarting OpenCode2 [Beta] and checking its HTTPS connection...");
         } else {
             println!("\nStarting OpenCode and checking its HTTPS connection...");
         }
@@ -339,10 +338,20 @@ pub async fn command(args: Args) -> Result<()> {
             }
             .bold()
         );
-        opencode::show_connection(&connection, args.opencode2, &prepared.agent_name)?;
-        opencode_config::configure(args.opencode2, &connection, &prepared.agent_id, &prepared.agent_name)
-            .await
-            .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
+        let configured = opencode_config::configure(
+            args.opencode2,
+            &connection,
+            &prepared.agent_id,
+            &prepared.agent_name,
+        )
+        .await;
+        opencode::show_connection(
+            &connection,
+            args.opencode2,
+            &prepared.agent_name,
+            configured.is_ok(),
+        )?;
+        configured.context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
             "You can close this terminal. Rerun this command after sleeping or restarting the agent."
         );
@@ -492,9 +501,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
                 target.root.display()
             );
         }
-        println!(
-            "Would gracefully restart OpenCode Desktop if running on macOS (quit it first on Windows/Linux)."
-        );
+        println!("You may need to restart OpenCode Desktop to load the updated configuration.");
     }
     if identity.is_none() {
         println!(

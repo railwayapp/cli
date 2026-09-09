@@ -12,7 +12,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use colored::Colorize;
 use rusqlite::{Connection as Database, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
@@ -54,6 +53,12 @@ pub(super) struct Target {
 impl Target {
     pub fn name(&self) -> &'static str {
         self.channel.name()
+    }
+
+    fn is_installed(&self) -> bool {
+        [SETTINGS, GLOBAL, DATABASE]
+            .iter()
+            .any(|name| self.root.join(name).is_file())
     }
 }
 
@@ -306,169 +311,43 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn running_pid(target: &Target) -> Result<Option<nix::unistd::Pid>> {
-    use nix::unistd::Pid;
-    // Chromium's singleton lock is a symlink named <hostname>-<pid>.
-    let lock = match fs::read_link(target.root.join("SingletonLock")) {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Reading OpenCode Desktop's application lock"),
-    };
-    let pid = lock
-        .to_str()
-        .and_then(|value| value.rsplit_once('-'))
-        .and_then(|(_, pid)| pid.parse::<i32>().ok())
-        .filter(|pid| *pid > 1)
-        .context("Unrecognized OpenCode Desktop application lock; quit the app before setup")?;
-    let pid = Pid::from_raw(pid);
-    Ok(process_is_running(pid)?.then_some(pid))
-}
-
-#[cfg(unix)]
-fn is_running(target: &Target) -> Result<bool> {
-    Ok(running_pid(target)?.is_some())
-}
-
-#[cfg(unix)]
-fn process_is_running(pid: nix::unistd::Pid) -> Result<bool> {
-    use nix::errno::Errno;
-    use nix::sys::signal::kill;
-    match kill(pid, None) {
-        Ok(()) | Err(Errno::EPERM) => Ok(true),
-        Err(Errno::ESRCH) => Ok(false),
-        Err(error) => Err(error).context("Checking whether OpenCode Desktop is running"),
-    }
-}
-
-#[cfg(windows)]
-fn is_running(target: &Target) -> Result<bool> {
-    let executable = format!("{}.exe", target.name());
-    let output = std::process::Command::new("tasklist")
-        .args([
-            "/FI",
-            &format!("IMAGENAME eq {executable}"),
-            "/NH",
-            "/FO",
-            "CSV",
-        ])
-        .output()?;
-    if !output.status.success() {
-        bail!("Could not check OpenCode Desktop; quit the app before setup");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .to_ascii_lowercase()
-        .contains(&format!("\"{}\"", executable.to_ascii_lowercase())))
-}
-
-/// Catch unsupported stores (or an open app on Windows/Linux) before provisioning.
+/// Catch unsupported stores before provisioning.
 pub(super) fn preflight(beta: bool) -> Result<()> {
     for target in targets(beta)? {
         Stores::read(&target.root)
             .with_context(|| format!("Reading {} settings", target.name()))?;
-        #[cfg(not(target_os = "macos"))]
-        if is_running(&target)? {
-            bail!(
-                "Quit {}, then rerun this command to save its server configuration.",
-                target.name()
-            );
-        }
     }
     Ok(())
 }
 
-async fn pause(target: &Target) -> Result<bool> {
-    #[cfg(target_os = "macos")]
-    let Some(pid) = running_pid(target)? else {
+/// Opportunistic setup for `railway code`: only write to an existing Desktop
+/// installation of the selected edition. Callers keep failures non-fatal.
+pub(crate) async fn configure_installed(
+    beta: bool,
+    connection: &Connection,
+    agent_id: &str,
+    agent_name: &str,
+) -> Result<bool> {
+    let mut configured = false;
+    for target in targets(beta)? {
+        configured |= configure_installed_target(&target, connection, agent_id, agent_name).await?;
+    }
+    Ok(configured)
+}
+
+async fn configure_installed_target(
+    target: &Target,
+    connection: &Connection,
+    agent_id: &str,
+    agent_name: &str,
+) -> Result<bool> {
+    if !target.is_installed() {
         return Ok(false);
-    };
-    #[cfg(not(target_os = "macos"))]
-    if !is_running(target)? {
-        return Ok(false);
     }
-    #[cfg(target_os = "macos")]
-    {
-        println!(
-            "Restarting {} to apply its server configuration...",
-            target.name()
-        );
-        // NSRunningApplication requests a graceful quit without force-killing
-        // helpers or requiring Apple Events access to control another app.
-        let script = format!(
-            "ObjC.import('AppKit'); var apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier('{}'); for (var i = 0; i < apps.count; i++) {{ apps.objectAtIndex(i).terminate; }}",
-            target.channel.id()
-        );
-        let output = tokio::process::Command::new("/usr/bin/osascript")
-            .args(["-l", "JavaScript", "-e", &script])
-            .output()
-            .await
-            .context("Quit OpenCode Desktop and rerun setup")?;
-        if !output.status.success() {
-            bail!("Unable to quit OpenCode Desktop. Quit the app and rerun setup.");
-        }
-        wait_for_exit(target, pid).await?;
-        Ok(true)
-    }
-    #[cfg(not(target_os = "macos"))]
-    bail!("Quit OpenCode Desktop, then rerun this command to save its server configuration.")
-}
-
-#[cfg(target_os = "macos")]
-async fn wait_for_exit(target: &Target, pid: nix::unistd::Pid) -> Result<()> {
-    // Electron can remove SingletonLock before the process finishes flushing
-    // state. Wait for the original PID too, before writing or reopening.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-    while process_is_running(pid)? || is_running(target)? {
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "OpenCode Desktop is still running. Quit the app and rerun setup; its configuration was not changed."
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    Ok(())
-}
-
-async fn resume(target: &Target, was_running: bool) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    if was_running {
-        let mut command = tokio::process::Command::new("/usr/bin/open");
-        command.args(["-b", target.channel.id()]);
-        return reopen(&mut command).await;
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (target, was_running);
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-async fn reopen(command: &mut tokio::process::Command) -> Result<()> {
-    for attempt in 0..3 {
-        // Capture stderr so a recoverable LaunchServices error does not look
-        // like a failed configuration write. -600 can briefly outlive the PID.
-        let output = command.output().await?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let error = String::from_utf8_lossy(&output.stderr);
-        if !error.contains("error -600") || attempt == 2 {
-            bail!("Unable to reopen OpenCode Desktop: {}", error.trim());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-    unreachable!()
-}
-
-fn finish_update<T>(target: &Target, saved: Result<T>, restarted: Result<()>) -> Result<T> {
-    let saved = saved?;
-    if restarted.is_err() {
-        eprintln!(
-            "\n{} Settings saved, but {} could not be reopened automatically. Open the app manually to apply them.",
-            "!".yellow().bold(),
-            target.name()
-        );
-    }
-    Ok(saved)
+    configure_target(target, connection, agent_id, agent_name)
+        .await
+        .with_context(|| format!("Configuring {} Desktop", target.name()))?;
+    Ok(true)
 }
 
 pub(super) async fn configure(
@@ -481,11 +360,6 @@ pub(super) async fn configure(
         configure_target(&target, connection, agent_id, agent_name)
             .await
             .with_context(|| format!("Configuring {}", target.name()))?;
-        println!(
-            "Saved connection in {} ({})",
-            target.name(),
-            target.root.display()
-        );
     }
     Ok(())
 }
@@ -497,15 +371,9 @@ async fn configure_target(
     agent_name: &str,
 ) -> Result<()> {
     let root = &target.root;
-    let was_running = pause(target).await?;
-    // Read AFTER quitting: the renderer flushes its latest state on exit.
-    let result = (|| {
-        let mut stores = Stores::read(root)?;
-        stores.upsert(connection, agent_id, agent_name)?;
-        stores.save(root)
-    })();
-    let restarted = resume(target, was_running).await;
-    finish_update(target, result, restarted)
+    let mut stores = Stores::read(root)?;
+    stores.upsert(connection, agent_id, agent_name)?;
+    stores.save(root)
 }
 
 pub(super) async fn remove(agent_id: &str, beta: bool) -> Result<bool> {
@@ -518,18 +386,12 @@ pub(super) async fn remove(agent_id: &str, beta: bool) -> Result<bool> {
 
 async fn remove_target(target: &Target, agent_id: &str) -> Result<bool> {
     let root = &target.root;
-    if !Stores::read(root)?.managed.contains_key(agent_id) {
+    let mut stores = Stores::read(root)?;
+    if !stores.remove(agent_id)? {
         return Ok(false);
     }
-    let was_running = pause(target).await?;
-    let result: Result<bool> = (|| {
-        let mut stores = Stores::read(root)?;
-        let removed = stores.remove(agent_id)?;
-        stores.save(root)?;
-        Ok(removed)
-    })();
-    let restarted = resume(target, was_running).await;
-    finish_update(target, result, restarted)
+    stores.save(root)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -546,101 +408,130 @@ mod tests {
         }
     }
 
-    #[test]
-    fn saved_configuration_and_removal_succeed_when_reopening_fails() {
-        let base = tempfile::tempdir().unwrap();
-        let target = target_at(base.path(), true);
-        let connection = connection();
-        let saved = (|| {
-            let mut stores = Stores::read(&target.root)?;
-            stores.upsert(&connection, "agent", "box")?;
-            stores.save(&target.root)
-        })();
-        finish_update(&target, saved, Err(anyhow::anyhow!("launch error -600"))).unwrap();
-        let mut stores = Stores::read(&target.root).unwrap();
-        assert_eq!(stores.settings["defaultServerUrl"], connection.url);
-        assert_eq!(
-            stores.server["list"][0]["http"]["password"],
-            connection.password
-        );
-        let removed = (|| {
-            let removed = stores.remove("agent")?;
-            stores.save(&target.root)?;
-            Ok(removed)
-        })();
-        assert!(finish_update(&target, removed, Err(anyhow::anyhow!("launch failed"))).unwrap());
-        assert!(Stores::read(&target.root).unwrap().managed.is_empty());
-    }
-
-    #[test]
-    fn configuration_errors_stay_errors_regardless_of_reopening() {
-        let base = tempfile::tempdir().unwrap();
-        let target = target_at(base.path(), false);
-        fs::create_dir_all(&target.root).unwrap();
-        fs::write(target.root.join(GLOBAL), "invalid JSON").unwrap();
-        for restarted in [Ok(()), Err(anyhow::anyhow!("launch failed"))] {
-            let result = Stores::read(&target.root).map(|_| ());
-            let error = finish_update(&target, result, restarted).unwrap_err();
+    #[tokio::test]
+    async fn automatic_setup_skips_missing_desktop_even_if_other_edition_exists() {
+        for beta in [false, true] {
+            let base = tempfile::tempdir().unwrap();
+            let target = target_at(base.path(), beta);
+            let other = target_at(base.path(), !beta);
+            fs::create_dir_all(&other.root).unwrap();
+            fs::write(other.root.join(SETTINGS), "{}").unwrap();
+            assert!(other.is_installed());
             assert!(
-                error
-                    .to_string()
-                    .contains("Invalid OpenCode Desktop settings")
+                !configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .unwrap()
             );
-            assert_eq!(
-                fs::read_to_string(target.root.join(GLOBAL)).unwrap(),
-                "invalid JSON"
+            assert!(!target.root.exists());
+
+            // An empty directory or Railway's own metadata is not evidence of
+            // an installed Desktop app. Neither are directories named as stores.
+            fs::create_dir_all(&target.root).unwrap();
+            fs::write(target.root.join(MANAGED), "{}").unwrap();
+            for name in [SETTINGS, GLOBAL, DATABASE] {
+                fs::create_dir(target.root.join(name)).unwrap();
+            }
+            assert!(
+                !configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .unwrap()
             );
+            assert_eq!(fs::read_dir(&target.root).unwrap().count(), 4);
+            assert_eq!(fs::read_dir(&other.root).unwrap().count(), 1);
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn waits_for_original_process_after_singleton_lock_disappears() {
-        let base = tempfile::tempdir().unwrap();
-        let target = target_at(base.path(), true);
-        fs::create_dir_all(&target.root).unwrap();
-        let flushed = target.root.join("flushed");
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 0.2; printf flushed > \"$1\"", "sh"])
-            .arg(&flushed)
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = nix::unistd::Pid::from_raw(child.id().unwrap() as i32);
-        let lock = target.root.join("SingletonLock");
-        std::os::unix::fs::symlink(format!("test-host-{pid}"), &lock).unwrap();
-        assert_eq!(running_pid(&target).unwrap(), Some(pid));
-        fs::remove_file(lock).unwrap();
-        assert!(!is_running(&target).unwrap());
-        let reaper = tokio::spawn(async move { child.wait().await.unwrap() });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            wait_for_exit(&target, pid),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(fs::read_to_string(flushed).unwrap(), "flushed");
-        assert!(reaper.await.unwrap().success());
+    async fn automatic_setup_detects_stores_and_refreshes_the_saved_connection() {
+        for beta in [false, true] {
+            for name in [SETTINGS, GLOBAL, DATABASE] {
+                let base = tempfile::tempdir().unwrap();
+                let target = target_at(base.path(), beta);
+                fs::create_dir_all(&target.root).unwrap();
+                if name == DATABASE {
+                    let db = Database::open(target.root.join(DATABASE)).unwrap();
+                    db.execute_batch(
+                        "CREATE TABLE state (name TEXT NOT NULL, key TEXT NOT NULL,
+                            value TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                            PRIMARY KEY (name, key));",
+                    )
+                    .unwrap();
+                } else {
+                    fs::write(target.root.join(name), "{}").unwrap();
+                }
+                let mut connection = connection();
+                for password in ["initial-password", "refreshed-password"] {
+                    connection.password = password.into();
+                    connection.directory = "/app/custom-project".into();
+                    assert!(
+                        configure_installed_target(&target, &connection, "agent", "box")
+                            .await
+                            .unwrap()
+                    );
+                    let saved = Stores::read(&target.root).unwrap();
+                    assert_eq!(saved.sqlite, name == DATABASE);
+                    assert_eq!(saved.server["list"].as_array().unwrap().len(), 1);
+                    assert_eq!(saved.server["list"][0]["http"]["password"], password);
+                    assert_eq!(saved.server["list"][0]["displayName"], "Railway: box");
+                    assert_eq!(saved.settings["defaultServerUrl"], connection.url);
+                    assert_eq!(
+                        saved.server["projects"][&connection.url][0]["worktree"],
+                        connection.directory
+                    );
+                    assert_eq!(saved.managed["agent"], connection.url);
+                }
+                assert!(!target_at(base.path(), !beta).root.exists());
+            }
+        }
     }
 
-    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn retries_transient_launchservices_failure_but_bounds_attempts() {
-        let root = tempfile::tempdir().unwrap();
-        for (failures, expected_attempts, succeeds) in [(1, 2, true), (3, 3, false)] {
-            let count = root.path().join(format!("count-{failures}"));
-            let mut command = tokio::process::Command::new("/bin/sh");
-            command.args([
-                "-c",
-                "n=0; if [ -f \"$1\" ]; then n=$(cat \"$1\"); fi; n=$((n+1)); printf '%s' \"$n\" > \"$1\"; if [ \"$n\" -le \"$2\" ]; then printf '%s' 'launch failed with error -600.' >&2; exit 1; fi",
-                "sh",
-            ]).arg(&count).arg(failures.to_string());
-            assert_eq!(reopen(&mut command).await.is_ok(), succeeds);
-            assert_eq!(
-                fs::read_to_string(count).unwrap(),
-                expected_attempts.to_string()
+    async fn automatic_setup_reports_invalid_stores_without_overwriting_them() {
+        for name in [GLOBAL, DATABASE] {
+            let base = tempfile::tempdir().unwrap();
+            let target = target_at(base.path(), true);
+            fs::create_dir_all(&target.root).unwrap();
+            fs::write(target.root.join(name), "invalid settings").unwrap();
+            assert!(
+                configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .is_err()
             );
+            assert_eq!(
+                fs::read_to_string(target.root.join(name)).unwrap(),
+                "invalid settings"
+            );
+            assert!(!target.root.join(SETTINGS).exists());
+            assert!(!target.root.join(MANAGED).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_and_removal_preserve_existing_application_lock() {
+        for beta in [false, true] {
+            let base = tempfile::tempdir().unwrap();
+            let target = target_at(base.path(), beta);
+            fs::create_dir_all(&target.root).unwrap();
+            fs::write(target.root.join(SETTINGS), "{}").unwrap();
+            // Setup must not interpret or manipulate Desktop's process lock.
+            let lock = target.root.join("SingletonLock");
+            fs::write(&lock, "desktop owns this lock").unwrap();
+            let connection = connection();
+            assert!(
+                configure_installed_target(&target, &connection, "agent", "box")
+                    .await
+                    .unwrap()
+            );
+            let saved = Stores::read(&target.root).unwrap();
+            assert_eq!(saved.settings["defaultServerUrl"], connection.url);
+            assert_eq!(
+                saved.server["list"][0]["http"]["password"],
+                connection.password
+            );
+            assert_eq!(fs::read_to_string(&lock).unwrap(), "desktop owns this lock");
+            assert!(remove_target(&target, "agent").await.unwrap());
+            assert!(Stores::read(&target.root).unwrap().managed.is_empty());
+            assert_eq!(fs::read_to_string(&lock).unwrap(), "desktop owns this lock");
         }
     }
 
