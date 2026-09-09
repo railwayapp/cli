@@ -58,7 +58,11 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
     )
     .await;
     show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
-    if interactive() && local::confirm(&format!("Launch your local {} client now?", edition(beta)))?
+    if interactive()
+        && local::confirm(&format!(
+            "Launch {} and connect to the Railway Cloud Agent now?",
+            edition(beta)
+        ))?
     {
         launch(&connection, beta, &prepared.agent_name, &desktop).await?;
     } else if interactive() {
@@ -85,10 +89,7 @@ fn show_connection(
 ) -> Result<()> {
     opencode::show_connection(connection, beta, name)?;
     match desktop {
-        Ok(true) => println!(
-            "Added server credentials, default server, and project to {} Desktop. Select Railway: {name} in the server picker.",
-            edition(beta)
-        ),
+        Ok(true) => println!("OpenCode Desktop configuration updated (you may need to restart)"),
         Ok(false) => println!(
             "{} Desktop not detected; desktop configuration skipped.",
             edition(beta)

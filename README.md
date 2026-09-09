@@ -121,11 +121,11 @@ railway code --opencode2 --new
 When the matching OpenCode Desktop edition has an existing settings file or
 desktop database, Railway automatically saves the server URL, credentials,
 default server, and project in it. The final output confirms that configuration
-was added; open `Railway: <agent-name>` in Desktop's server picker. Both JSON
+was updated; open `Railway: <agent-name>` in Desktop's server picker. Both JSON
 settings and SQLite renderer state are supported, with backups of previous settings.
-On macOS, a running Desktop app is gracefully restarted to apply the configuration.
-On Windows/Linux, quit Desktop first. Configuration failures are non-fatal and
-reported alongside the connection details; rerun the command to retry.
+You may need to restart OpenCode Desktop to load the updated configuration.
+Configuration failures are non-fatal and reported alongside the connection
+details; rerun the command to retry.
 
 The CLI also prints the server URL, username, password, and project directory
 for manual setup, plus a shell command to connect directly.
@@ -217,8 +217,8 @@ Use `railway ca --opencode2` for a terminal session. In the new-session picker,
 highlight OpenCode and press Tab to switch to **OpenCode2 [Beta]**. Tab also
 switches editions in the prompt footer; Shift+Tab cycles harnesses.
 
-Setup also prints the connection details. On macOS, it gracefully restarts the selected
-running edition to apply the settings. Quit the apps before setup on Windows/Linux.
+Setup also prints the connection details and a reminder that you may need to
+restart OpenCode Desktop to load the updated configuration.
 Private `.railway-backup` files preserve the previous settings and server state.
 You can close the terminal after setup; there is no local tunnel to keep running.
 

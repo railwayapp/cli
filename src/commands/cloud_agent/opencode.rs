@@ -40,7 +40,7 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
     println!("{}", format!("{edition} server on {name}").cyan().bold());
     println!(
         "\n{}",
-        format!("{edition} Desktop connection settings:").bold()
+        format!("Railway {edition} Server Configuration:").bold()
     );
     println!("  {}      {name}", "Name:".bold());
     println!("  {}    {}", "Server:".bold(), connection.url);
@@ -49,7 +49,7 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
     println!("  {} {}", "Directory:".bold(), connection.directory);
     println!("\n{}", "Connect from your computer:".bold());
     println!("  {command}");
-    println!("\n{}", "Or reconnect with Railway:".bold());
+    println!("\n{}", "Connect with the Railway CLI:".bold());
     println!(
         "  {}",
         shell_join(&[
