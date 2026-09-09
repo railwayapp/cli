@@ -1,0 +1,5 @@
+[target.i686-pc-windows-gnu.env]
+# Bundled SQLite links MinGW's kernel32 alongside winapi's bundled import
+# libraries, which both define _imp__InterlockedCompareExchange@12 on i686.
+# Use the toolchain's import libraries consistently inside the cross container.
+passthrough = ["WINAPI_NO_BUNDLED_LIBRARIES=1"]
