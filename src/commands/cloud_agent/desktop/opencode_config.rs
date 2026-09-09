@@ -360,7 +360,6 @@ pub(super) async fn configure(
         configure_target(&target, connection, agent_id, agent_name)
             .await
             .with_context(|| format!("Configuring {}", target.name()))?;
-        println!("OpenCode Desktop configuration updated (you may need to restart)");
     }
     Ok(())
 }

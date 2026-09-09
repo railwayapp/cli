@@ -46,9 +46,6 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         "\nStarting {} in the background and opening its authenticated HTTPS endpoint...",
         edition(beta)
     );
-    if beta {
-        println!("The first start downloads the latest Beta and can take several minutes.");
-    }
     let connection = opencode::start_prepared(&prepared, &directory, &password, beta).await?;
     let desktop = desktop::configure_installed_opencode(
         beta,
@@ -57,6 +54,7 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         &prepared.agent_name,
     )
     .await;
+    clear_setup_output();
     show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
     if interactive()
         && local::confirm(&format!(
@@ -77,6 +75,14 @@ fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
+/// Clear setup chatter only after the server is ready. Failed launches retain
+/// their diagnostics, and redirected output stays free of terminal controls.
+fn clear_setup_output() {
+    if interactive() {
+        let _ = console::Term::stdout().clear_screen();
+    }
+}
+
 fn edition(beta: bool) -> &'static str {
     if beta { "OpenCode2 [Beta]" } else { "OpenCode" }
 }
@@ -87,9 +93,9 @@ fn show_connection(
     name: &str,
     desktop: &Result<bool>,
 ) -> Result<()> {
-    opencode::show_connection(connection, beta, name)?;
+    opencode::show_connection(connection, beta, name, matches!(desktop, Ok(true)))?;
     match desktop {
-        Ok(true) => println!("OpenCode Desktop configuration updated (you may need to restart)"),
+        Ok(true) => {}
         Ok(false) => println!(
             "{} Desktop not detected; desktop configuration skipped.",
             edition(beta)
@@ -312,6 +318,7 @@ pub(super) async fn connect(
     let desktop =
         desktop::configure_installed_opencode(beta, &connection, &selected.id, &selected.name)
             .await;
+    clear_setup_output();
     show_connection(&connection, beta, &selected.name, &desktop)?;
     if interactive() {
         launch(&connection, beta, &selected.name, &desktop).await?;

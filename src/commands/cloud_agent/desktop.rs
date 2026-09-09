@@ -293,9 +293,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let connection = if let Some(password) = &opencode_password {
         if args.opencode2 {
-            println!(
-                "\nStarting OpenCode2 [Beta] and checking its HTTPS connection. The first startup downloads the latest Beta and may take several minutes..."
-            );
+            println!("\nStarting OpenCode2 [Beta] and checking its HTTPS connection...");
         } else {
             println!("\nStarting OpenCode and checking its HTTPS connection...");
         }
@@ -340,10 +338,20 @@ pub async fn command(args: Args) -> Result<()> {
             }
             .bold()
         );
-        opencode::show_connection(&connection, args.opencode2, &prepared.agent_name)?;
-        opencode_config::configure(args.opencode2, &connection, &prepared.agent_id, &prepared.agent_name)
-            .await
-            .context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
+        let configured = opencode_config::configure(
+            args.opencode2,
+            &connection,
+            &prepared.agent_id,
+            &prepared.agent_name,
+        )
+        .await;
+        opencode::show_connection(
+            &connection,
+            args.opencode2,
+            &prepared.agent_name,
+            configured.is_ok(),
+        )?;
+        configured.context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
             "You can close this terminal. Rerun this command after sleeping or restarting the agent."
         );

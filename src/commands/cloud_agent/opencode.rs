@@ -32,7 +32,12 @@ pub(crate) struct Connection {
 
 /// Shared connection details for Desktop setup and local-client commands.
 /// Keep commands free of border prefixes so they can be copied directly.
-pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -> Result<()> {
+pub(crate) fn show_connection(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop_configured: bool,
+) -> Result<()> {
     let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
     let command = attach_command(connection, beta)?;
     let divider = "─".repeat(64).cyan();
@@ -60,6 +65,9 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
             name.into()
         ])
     );
+    if desktop_configured {
+        println!("\nOpenCode Desktop configuration updated (you may need to restart)");
+    }
     println!("{divider}\n");
     Ok(())
 }

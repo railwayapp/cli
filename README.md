@@ -129,6 +129,9 @@ details; rerun the command to retry.
 
 The CLI also prints the server URL, username, password, and project directory
 for manual setup, plus a shell command to connect directly.
+After successful setup in an interactive terminal, it clears the setup messages
+and shows the connection details, with the Desktop update confirmation inside
+the result panel. Failed setup keeps its diagnostic output visible.
 Press Enter to launch the matching local terminal client. If that client is
 missing, Railway offers to install it first. Declining, Esc, or Ctrl+C at
 either prompt leaves the server running and prints the connection details.
