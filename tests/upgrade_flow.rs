@@ -3,13 +3,24 @@
 #![cfg(unix)]
 
 use serde_json::json;
-use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::{Command, Output},
+    sync::Mutex,
+};
 
-fn install_fixture(home: &Path, script: &str) -> Command {
-    install_fixture_at(home, "node_modules/railway/railway", "npm", script)
+static FIXTURE_LAUNCH: Mutex<()> = Mutex::new(());
+
+fn run_fixture(home: &Path, script: &str) -> Output {
+    run_fixture_at(home, "node_modules/railway/railway", "npm", script)
 }
 
-fn install_fixture_at(home: &Path, path: &str, manager: &str, script: &str) -> Command {
+fn run_fixture_at(home: &Path, path: &str, manager: &str, script: &str) -> Output {
+    // A concurrent child launch can inherit another test's writable copy handle
+    // until exec, causing ETXTBSY when that test starts its copied executable.
+    // Keep fixture writes and child execution together under the same lock.
+    let _launch = FIXTURE_LAUNCH.lock().unwrap();
     let executable = home.join(path);
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_railway"), &executable).unwrap();
@@ -29,7 +40,7 @@ fn install_fixture_at(home: &Path, path: &str, manager: &str, script: &str) -> C
         .env("RAILWAY_NO_AUTO_UPDATE", "1")
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
         .args(["upgrade", "--yes"]);
-    command
+    command.output().unwrap()
 }
 
 #[test]
@@ -41,14 +52,12 @@ printf '#!/bin/sh\necho railway 255.255.254\n' > "$HOME/homebrew/opt/railway/bin
 /bin/chmod +x "$HOME/homebrew/opt/railway/bin/railway"
 /bin/rm "$TEST_RAILWAY_EXE"
 "#;
-    let output = install_fixture_at(
+    let output = run_fixture_at(
         home.path(),
         "homebrew/Cellar/railway/old/bin/railway",
         "brew",
         script,
-    )
-    .output()
-    .unwrap();
+    );
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{text}");
     assert!(
@@ -67,7 +76,7 @@ echo 'package manager chatter'
 #[test]
 fn explicit_upgrade_shows_verified_cli_and_skill_outcomes_even_with_auto_updates_off() {
     let home = tempfile::tempdir().unwrap();
-    let output = install_fixture(home.path(), INSTALL).output().unwrap();
+    let output = run_fixture(home.path(), INSTALL);
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{text}");
     assert!(output.stdout.is_empty());
@@ -95,9 +104,7 @@ fn explicit_upgrade_shows_verified_cli_and_skill_outcomes_even_with_auto_updates
 #[test]
 fn package_manager_failure_keeps_diagnostics_and_never_claims_completion() {
     let home = tempfile::tempdir().unwrap();
-    let output = install_fixture(home.path(), "echo 'registry unavailable' >&2\nexit 7")
-        .output()
-        .unwrap();
+    let output = run_fixture(home.path(), "echo 'registry unavailable' >&2\nexit 7");
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(text.contains("registry unavailable"), "{text}");
@@ -115,7 +122,7 @@ fn cli_success_with_skill_failure_is_recorded_as_partial_success() {
     std::fs::write(home.path().join(".railway/skills.json"), json!({
         "targets": {target.to_str().unwrap(): {"use-railway": {"installed_at": "t", "files": {}}}}
     }).to_string()).unwrap();
-    let output = install_fixture(home.path(), INSTALL).output().unwrap();
+    let output = run_fixture(home.path(), INSTALL);
     let text = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{text}");
     assert!(text.contains("✓ CLI installed"), "{text}");
