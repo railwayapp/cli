@@ -282,6 +282,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         if !output.ok {
             bail!(runner_diagnostics_message(&output));
         }
+        reject_failed_apply_result(output.apply_result.as_ref())?;
         maybe_detailed_exit(&args, command, &output);
         return Ok(());
     }
@@ -290,6 +291,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
     if !output.ok {
         bail!(runner_diagnostics_message(&output));
     }
+    reject_failed_apply_result(output.apply_result.as_ref())?;
 
     maybe_detailed_exit(&args, command, &output);
 
@@ -745,6 +747,26 @@ fn runner_diagnostics_message(response: &RunnerResponse) -> String {
     )
 }
 
+fn reject_failed_apply_result(apply_result: Option<&ChangeSetApplyResult>) -> Result<()> {
+    let Some(apply_result) = apply_result else {
+        return Ok(());
+    };
+    if !crate::iac::apply_status_is_failure(&apply_result.status) {
+        return Ok(());
+    }
+    let messages = crate::iac::apply_diagnostic_messages(&apply_result.diagnostics);
+    if messages.is_empty() {
+        bail!(
+            "Railway configuration apply failed (status: {}).",
+            apply_result.status
+        );
+    }
+    bail!(
+        "Railway configuration apply failed:\n{}",
+        messages.join("\n")
+    )
+}
+
 pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
     print_response_with_options_and_next(response, verbose, true);
 }
@@ -810,6 +832,28 @@ pub(super) fn print_response_with_options_and_next(
         .unwrap_or(&[]);
 
     if let Some(apply_result) = &response.apply_result {
+        if crate::iac::apply_status_is_failure(&apply_result.status) {
+            println!("{} {}", "Apply".red().bold(), "failed".red());
+            for message in crate::iac::apply_diagnostic_messages(&apply_result.diagnostics) {
+                println!("{} {}", "Error".red().bold(), message.red());
+            }
+            let empty_diagnostics = match &apply_result.diagnostics {
+                Value::Array(items) => items.is_empty(),
+                Value::Null => true,
+                _ => false,
+            };
+            if apply_result.changes.is_empty() && empty_diagnostics {
+                println!(
+                    "{} {}",
+                    "Error".red().bold(),
+                    format!(
+                        "Railway configuration apply failed (status: {}).",
+                        apply_result.status
+                    )
+                    .red()
+                );
+            }
+        }
         print_operation_results(apply_result, verbose);
         if verbose {
             println!();
@@ -1045,5 +1089,36 @@ mod runner_discovery_tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
 
         assert_eq!(find_project_runner(&shared), None);
+    }
+
+    #[test]
+    fn reject_failed_apply_result_surfaces_server_diagnostics() {
+        let apply_result = ChangeSetApplyResult {
+            id: "iac-change-set/env/hash".into(),
+            status: "failed".into(),
+            changes: Vec::new(),
+            diagnostics: serde_json::json!([{
+                "message": "A service named \"Redis Exporter\" already exists in this project but not in this environment."
+            }]),
+            deployment_id: None,
+            staged_patch_id: None,
+        };
+        let err = reject_failed_apply_result(Some(&apply_result))
+            .expect_err("failed apply must exit non-zero");
+        let message = format!("{err:#}");
+        assert!(message.contains("Railway configuration apply failed"));
+        assert!(message.contains("Redis Exporter"));
+        assert!(reject_failed_apply_result(None).is_ok());
+        assert!(
+            reject_failed_apply_result(Some(&ChangeSetApplyResult {
+                id: "ok".into(),
+                status: "applied".into(),
+                changes: Vec::new(),
+                diagnostics: serde_json::json!([]),
+                deployment_id: None,
+                staged_patch_id: None,
+            }))
+            .is_ok()
+        );
     }
 }

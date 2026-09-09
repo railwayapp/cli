@@ -21,6 +21,7 @@ pub use compiler::{
     graph_to_environment_config, project_definition_to_graph,
 };
 pub use engine::{NativeRun, run as run_native};
+pub(crate) use engine::{apply_diagnostic_messages, apply_status_is_failure};
 #[allow(dead_code)]
 pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
 #[allow(dead_code)]
