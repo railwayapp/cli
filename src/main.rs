@@ -272,7 +272,8 @@ async fn main() -> Result<()> {
     // first-time users don't trigger update side effects.
     let is_read_only_invocation = is_help_or_error
         || raw_subcommand.is_none()
-        || matches!(raw_subcommand.as_deref(), Some("help"));
+        || matches!(raw_subcommand.as_deref(), Some("help"))
+        || args.as_ref().is_ok_and(is_code_get_config);
     let auto_update_enabled = !telemetry::is_auto_update_disabled();
     let machine_output = raw_args.iter().any(|arg| arg == "--json");
     let embedded_setup = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
@@ -475,6 +476,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn is_code_get_config(cli: &clap::ArgMatches) -> bool {
+    matches!(cli.subcommand(), Some(("code", args)) if args.subcommand_name() == Some("get-config"))
+}
+
 fn command_needs_refresh(cli: &clap::ArgMatches) -> bool {
     // Commands that do not require authentication -- skip token refresh for these.
     const NO_AUTH_COMMANDS: &[&str] = &[
@@ -506,7 +511,10 @@ fn command_needs_refresh(cli: &clap::ArgMatches) -> bool {
 
     cli.subcommand_name()
         .map(|cmd| {
-            !NO_AUTH_COMMANDS.contains(&cmd) && !is_mcp_install && !is_public_templates_command
+            !NO_AUTH_COMMANDS.contains(&cmd)
+                && !is_mcp_install
+                && !is_public_templates_command
+                && !is_code_get_config(cli)
         })
         .unwrap_or(false)
 }
@@ -883,6 +891,22 @@ mod cli_tests {
             assert_parses(&["setup", "agent", "--local", "-y"]);
             assert_parses(&["setup", "agent", "--oauth"]);
             assert_parses(&["setup", "agent", "--oauth", "-y"]);
+        }
+
+        #[test]
+        fn code_get_config_is_local_and_preserves_harness_arguments() {
+            for args in [
+                vec!["code", "get-config"],
+                vec!["code", "get-config", "--json"],
+            ] {
+                let matches = parse(&args).unwrap();
+                assert!(is_code_get_config(&matches));
+                assert!(!command_needs_refresh(&matches));
+            }
+            let forwarded = parse(&["code", "--codex", "--", "get-config"]).unwrap();
+            assert!(!is_code_get_config(&forwarded));
+            assert!(command_needs_refresh(&forwarded));
+            assert!(parse(&["code", "get-config", "--new"]).is_err());
         }
 
         #[test]

@@ -5,7 +5,10 @@ use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, stream};
 use is_terminal::IsTerminal;
 
-use super::{CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle};
+use super::{
+    CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle,
+    saved_config::SavedConfig,
+};
 use crate::client::GQLClient;
 use crate::commands::cloud_agent::{
     access, desktop,
@@ -54,19 +57,28 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         &prepared.agent_name,
     )
     .await;
+    let saved = SavedConfig::from_prepared(&prepared)
+        .map(|saved| saved.with_opencode(&connection, beta, &desktop))
+        .and_then(|saved| saved.save());
     clear_setup_output();
     show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
-    if interactive()
+    let launch_result = if interactive()
         && local::confirm(&format!(
             "Launch {} and connect to the Railway Cloud Agent now?",
             edition(beta)
-        ))?
-    {
-        launch(&connection, beta, &prepared.agent_name, &desktop).await?;
-    } else if interactive() {
-        clear_setup_output();
-        show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
+        ))? {
+        launch(&connection, beta, &prepared.agent_name, &desktop).await
+    } else {
+        if interactive() {
+            clear_setup_output();
+            show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
+        }
+        Ok(())
+    };
+    if let Err(error) = saved {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
     }
+    launch_result?;
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
     Ok(())
 }
@@ -318,12 +330,26 @@ pub(super) async fn connect(
     let desktop =
         desktop::configure_installed_opencode(beta, &connection, &selected.id, &selected.name)
             .await;
+    let saved = SavedConfig::new(
+        &selected.id,
+        &selected.name,
+        &selected.environment_id,
+        if beta { "opencode2" } else { "opencode" },
+        relay.identity.as_deref(),
+    )
+    .map(|saved| saved.with_opencode(&connection, beta, &desktop))
+    .and_then(|saved| saved.save());
     clear_setup_output();
     show_connection(&connection, beta, &selected.name, &desktop)?;
-    if interactive() {
-        launch(&connection, beta, &selected.name, &desktop).await?;
+    let launch_result = if interactive() {
+        launch(&connection, beta, &selected.name, &desktop).await
+    } else {
+        Ok(())
+    };
+    if let Err(error) = saved {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
     }
-    Ok(())
+    launch_result
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
@@ -21,7 +21,7 @@ const BOOTSTRAP: &str = include_str!("opencode.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
 
 // Deliberately no Debug: this value contains the server password.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Connection {
     pub url: String,
     pub username: String,

@@ -16,6 +16,8 @@ pub async fn command(_args: Args) -> Result<()> {
     // anything — leaving it behind would be a surprise. Revoking it upstream is
     // still theirs to do; this only drops our copy.
     super::code::clear_claude_token_cache();
+    // The last code connection can also contain an OpenCode server password.
+    super::code::clear_saved_config();
     println!("Logged out successfully");
     Ok(())
 }

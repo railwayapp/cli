@@ -88,10 +88,36 @@ use crate::util::shell::shell_join;
 mod names;
 mod opencode;
 mod plumbing;
+mod saved_config;
 
-pub type Args = LaunchArgs;
+pub(crate) fn clear_saved_config() {
+    if let Some(home) = dirs::home_dir() {
+        saved_config::clear_in(&home);
+    }
+}
 
-pub async fn command(mut args: Args) -> Result<()> {
+/// Launch a coding agent on a Railway cloud agent VM
+#[derive(Parser)]
+#[clap(args_conflicts_with_subcommands = true)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Option<Commands>,
+
+    #[clap(flatten)]
+    launch: LaunchArgs,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Show the connection details saved by the last successful launch or reconnect
+    GetConfig(saved_config::Args),
+}
+
+pub async fn command(args: Args) -> Result<()> {
+    if let Some(Commands::GetConfig(args)) = args.command {
+        return saved_config::command(args);
+    }
+    let mut args = args.launch;
     if let Some(action) = args.opencode_action()? {
         let beta = args.opencode2;
         match action {
@@ -109,7 +135,7 @@ pub async fn command(mut args: Args) -> Result<()> {
 }
 
 /// CA's launch flags and OpenCode's `remote` action keep the in-agent UI.
-pub(crate) async fn launch_in_cloud(args: Args) -> Result<()> {
+pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
     // never what someone typing it meant, and the failure is invisible — the
@@ -2891,6 +2917,17 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
+    // App-mode callers finish their HTTP/Desktop setup after prepare returns.
+    // Do not replace the last usable record with an incomplete setup.
+    if !args.app_mode
+        && let Ok(prepared) = &result
+        && let Err(error) =
+            saved_config::SavedConfig::from_prepared(prepared).and_then(|saved| saved.save())
+    {
+        progress.note(&format!(
+            "Could not save connection details for railway code get-config: {error:#}"
+        ));
+    }
     // After the outcome, and detached: the stages are already measured, and
     // reporting them must not extend the launch they describe.
     ssh_tel::flush_stages("cloud_agent_launch");
