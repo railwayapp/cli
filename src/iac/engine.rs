@@ -594,9 +594,82 @@ pub(crate) async fn apply_change_set(
         let mut value = serde_json::to_value(&applied.result.rest)?;
         value["id"] = json!(applied.result.id);
         value["status"] = json!(applied.result.status);
-        return Ok(value);
+        return ensure_apply_succeeded(value);
     }
-    wait_for_apply(client, endpoint, environment_id, &applied.result.id).await
+    ensure_apply_succeeded(
+        wait_for_apply(client, endpoint, environment_id, &applied.result.id).await?,
+    )
+}
+
+/// Reject a terminal change-set apply whose workflow ended in failure.
+///
+/// Backboard can return `status: "failed"` with an empty `changes` list and
+/// the real explanation only in `diagnostics` (for example a duplicate
+/// database name). Treating that payload as success made `railway config
+/// apply` exit 0 and print nothing while the environment was unchanged.
+pub(crate) fn ensure_apply_succeeded(result: Value) -> Result<Value> {
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !apply_status_is_failure(status) {
+        return Ok(result);
+    }
+
+    let messages = apply_diagnostic_messages(result.get("diagnostics").unwrap_or(&Value::Null));
+    if messages.is_empty() {
+        bail!("Railway configuration apply failed (status: {status}).");
+    }
+    bail!(
+        "Railway configuration apply failed:\n{}",
+        messages.join("\n")
+    )
+}
+
+pub(crate) fn apply_status_is_failure(status: &str) -> bool {
+    matches!(status, "failed" | "error" | "cancelled")
+}
+
+pub(crate) fn apply_diagnostic_messages(diagnostics: &Value) -> Vec<String> {
+    match diagnostics {
+        Value::Array(items) => items.iter().filter_map(apply_diagnostic_message).collect(),
+        Value::Object(object) => {
+            if let Some(items) = object
+                .get("items")
+                .or_else(|| object.get("diagnostics"))
+                .and_then(Value::as_array)
+            {
+                items.iter().filter_map(apply_diagnostic_message).collect()
+            } else {
+                apply_diagnostic_message(diagnostics).into_iter().collect()
+            }
+        }
+        Value::String(message) if !message.is_empty() => vec![message.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn apply_diagnostic_message(value: &Value) -> Option<String> {
+    match value {
+        Value::String(message) if !message.is_empty() => Some(message.clone()),
+        Value::Object(object) => {
+            let message = object.get("message")?.as_str()?.trim();
+            if message.is_empty() {
+                return None;
+            }
+            let path = object
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if path.is_empty() {
+                Some(message.to_string())
+            } else {
+                Some(format!("{path}: {message}"))
+            }
+        }
+        _ => None,
+    }
 }
 
 async fn wait_for_apply(
@@ -681,6 +754,51 @@ mod tests {
         let node = &buckets.project.unwrap().buckets.edges[0].node;
         assert_eq!(node.name.as_deref(), Some("uploads"));
         assert_eq!(node.group_id.as_deref(), Some("grp-1"));
+    }
+
+    #[test]
+    fn ensure_apply_succeeded_rejects_failed_workflow_with_diagnostics() {
+        let err = ensure_apply_succeeded(json!({
+            "id": "iac-change-set/env/hash",
+            "status": "failed",
+            "changes": [],
+            "diagnostics": [{
+                "message": "A service named \"Redis Exporter\" already exists in this project but not in this environment."
+            }]
+        }))
+        .expect_err("failed apply must not look like success");
+        let message = format!("{err:#}");
+        assert!(message.contains("Railway configuration apply failed"));
+        assert!(message.contains("Redis Exporter"));
+    }
+
+    #[test]
+    fn ensure_apply_succeeded_allows_successful_statuses() {
+        for status in ["applied", "completed", "success", "noop"] {
+            let result = ensure_apply_succeeded(json!({
+                "id": "iac-change-set/env/hash",
+                "status": status,
+                "changes": [],
+                "diagnostics": []
+            }))
+            .unwrap();
+            assert_eq!(result["status"], status);
+        }
+    }
+
+    #[test]
+    fn apply_diagnostic_messages_read_path_qualified_entries() {
+        let messages = apply_diagnostic_messages(&json!([
+            { "path": "service.api", "message": "invalid image" },
+            "bare diagnostic"
+        ]));
+        assert_eq!(
+            messages,
+            vec![
+                "service.api: invalid image".to_string(),
+                "bare diagnostic".to_string()
+            ]
+        );
     }
 
     #[test]
