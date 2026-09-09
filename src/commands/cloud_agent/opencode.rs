@@ -43,6 +43,21 @@ pub(crate) fn show_connection(
     let divider = "─".repeat(64).cyan();
     println!("\n{divider}");
     println!("{}", format!("{edition} server on {name}").cyan().bold());
+    show_server_config(connection, beta, name);
+    println!("\n{}", "Connect from your computer:".bold());
+    println!("  {command}");
+    println!("\n{}", "Connect with the Railway CLI:".bold());
+    println!("  {}", railway_connect_command(beta, name));
+    if desktop_configured {
+        println!("\nOpenCode Desktop configuration updated (you may need to restart)");
+    }
+    println!("{divider}\n");
+    Ok(())
+}
+
+/// The server fields, without a surrounding panel or connection commands.
+pub(crate) fn show_server_config(connection: &Connection, beta: bool, name: &str) {
+    let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
     println!(
         "\n{}",
         format!("Railway {edition} Server Configuration:").bold()
@@ -52,24 +67,16 @@ pub(crate) fn show_connection(
     println!("  {}  {}", "Username:".bold(), connection.username);
     println!("  {}  {}", "Password:".bold(), connection.password);
     println!("  {} {}", "Directory:".bold(), connection.directory);
-    println!("\n{}", "Connect from your computer:".bold());
-    println!("  {command}");
-    println!("\n{}", "Connect with the Railway CLI:".bold());
-    println!(
-        "  {}",
-        shell_join(&[
-            "railway".into(),
-            "code".into(),
-            if beta { "--opencode2" } else { "--opencode" }.into(),
-            "connect".into(),
-            name.into()
-        ])
-    );
-    if desktop_configured {
-        println!("\nOpenCode Desktop configuration updated (you may need to restart)");
-    }
-    println!("{divider}\n");
-    Ok(())
+}
+
+pub(crate) fn railway_connect_command(beta: bool, name: &str) -> String {
+    shell_join(&[
+        "railway".into(),
+        "code".into(),
+        if beta { "--opencode2" } else { "--opencode" }.into(),
+        "connect".into(),
+        name.into(),
+    ])
 }
 
 pub(crate) fn generate_password() -> String {
