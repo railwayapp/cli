@@ -409,6 +409,9 @@ mod tests {
         assert!(pick_project(vec![], None, None).is_err());
     }
 
+    // The fake herdr is a shebang script: unix only.
+
+    #[cfg(unix)]
     #[test]
     fn profile_id_is_looked_up_by_target_after_add() {
         let target = target::target_for("env-1", "agent-1");

@@ -578,6 +578,9 @@ mod tests {
         assert_eq!(binary_path(exe.clone(), None), exe);
     }
 
+    // The fake herdr is a shebang script: unix only.
+
+    #[cfg(unix)]
     #[test]
     fn install_writes_the_manifest_and_links_the_dir() {
         let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines("[]");

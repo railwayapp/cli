@@ -754,6 +754,9 @@ mod tests {
         ));
     }
 
+    // The fake herdr is a shebang script: unix only.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn apply_runs_exactly_the_planned_herdr_commands() {
         let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines(&format!(
@@ -794,6 +797,9 @@ mod tests {
         );
     }
 
+    // The fake herdr is a shebang script: unix only.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn apply_collects_failures_instead_of_stopping() {
         let herdr = Herdr::at("/nonexistent/herdr");

@@ -148,7 +148,7 @@ impl Herdr {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod fake {
     //! `tests/fakes/herdr` answers `machine list --json` from
     //! `$FAKE_HERDR_MACHINES` and appends every argv line to `$FAKE_HERDR_LOG`.
@@ -196,6 +196,9 @@ pub(crate) mod fake {
 mod tests {
     use super::*;
 
+    // The fake herdr is a shebang script: unix only.
+
+    #[cfg(unix)]
     #[test]
     fn machine_list_parses_and_calls_are_logged() {
         let fake = fake::FakeHerdr::with_machines(
