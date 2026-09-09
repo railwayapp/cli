@@ -1,6 +1,6 @@
 [package]
 name = "railwayapp"
-version = "5.49.6"
+version = "5.50.0"
 edition = "2024"
 license = "MIT"
 authors = ["Railway <contact@railway.com>"]
@@ -116,6 +116,7 @@ russh = { version = "0.60.2", default-features = false, features = [
   "rsa",
 ] }
 tempfile = "3.23.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 portable-pty = "0.8"
 vt100 = "0.16"
 

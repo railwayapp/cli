@@ -127,7 +127,7 @@ impl Settings {
             .map(|row| match row {
                 Row::Agent => (
                     "Coding agent".into(),
-                    default_harnesses()[self.agent].to_string(),
+                    super::app::harness_label(default_harnesses()[self.agent]).to_string(),
                     harness_blurb(default_harnesses()[self.agent]).into(),
                 ),
                 Row::Project => (
@@ -451,7 +451,7 @@ mod tests {
 
         // And it wraps in both directions.
         assert_eq!(saved(s.left()).agent, "railway");
-        assert_eq!(saved(s.left()).agent, "grok");
+        assert_eq!(saved(s.left()).agent, "opencode2");
     }
 
     /// Enter on a cycling row steps it forward — a row that says "change me"
