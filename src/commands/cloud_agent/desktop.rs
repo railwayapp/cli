@@ -37,6 +37,7 @@ use crate::util::shell::shell_join;
 
 use super::opencode;
 mod opencode_config;
+pub(crate) use opencode_config::configure_installed as configure_installed_opencode;
 
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]

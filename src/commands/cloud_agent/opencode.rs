@@ -40,7 +40,7 @@ pub(crate) fn show_connection(connection: &Connection, beta: bool, name: &str) -
     println!("{}", format!("{edition} server on {name}").cyan().bold());
     println!(
         "\n{}",
-        format!("Add a server in {edition} Desktop with these settings:").bold()
+        format!("{edition} Desktop connection settings:").bold()
     );
     println!("  {}      {name}", "Name:".bold());
     println!("  {}    {}", "Server:".bold(), connection.url);

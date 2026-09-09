@@ -8,7 +8,7 @@ use is_terminal::IsTerminal;
 use super::{CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle};
 use crate::client::GQLClient;
 use crate::commands::cloud_agent::{
-    access,
+    access, desktop,
     opencode::{self, Connection, local},
 };
 use crate::config::Configs;
@@ -50,13 +50,20 @@ pub(super) async fn start(mut args: LaunchArgs, beta: bool) -> Result<()> {
         println!("The first start downloads the latest Beta and can take several minutes.");
     }
     let connection = opencode::start_prepared(&prepared, &directory, &password, beta).await?;
-    opencode::show_connection(&connection, beta, &prepared.agent_name)?;
+    let desktop = desktop::configure_installed_opencode(
+        beta,
+        &connection,
+        &prepared.agent_id,
+        &prepared.agent_name,
+    )
+    .await;
+    show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
     if interactive() && local::confirm(&format!("Launch your local {} client now?", edition(beta)))?
     {
-        launch(&connection, beta, &prepared.agent_name).await?;
+        launch(&connection, beta, &prepared.agent_name, &desktop).await?;
     } else if interactive() {
         println!("\nThe server is still running. Save these details to connect later:");
-        opencode::show_connection(&connection, beta, &prepared.agent_name)?;
+        show_connection(&connection, beta, &prepared.agent_name, &desktop)?;
     }
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
     Ok(())
@@ -70,17 +77,46 @@ fn edition(beta: bool) -> &'static str {
     if beta { "OpenCode2 [Beta]" } else { "OpenCode" }
 }
 
-async fn launch(connection: &Connection, beta: bool, name: &str) -> Result<()> {
+fn show_connection(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop: &Result<bool>,
+) -> Result<()> {
+    opencode::show_connection(connection, beta, name)?;
+    match desktop {
+        Ok(true) => println!(
+            "Added server credentials, default server, and project to {} Desktop. Select Railway: {name} in the server picker.",
+            edition(beta)
+        ),
+        Ok(false) => println!(
+            "{} Desktop not detected; desktop configuration skipped.",
+            edition(beta)
+        ),
+        Err(error) => eprintln!(
+            "Could not automatically configure {} Desktop: {error:#}\nThe server is still running. Use the connection details above, or rerun this command to retry.",
+            edition(beta)
+        ),
+    }
+    Ok(())
+}
+
+async fn launch(
+    connection: &Connection,
+    beta: bool,
+    name: &str,
+    desktop: &Result<bool>,
+) -> Result<()> {
     // The install prompt is deliberately after Enter/selection, and only for
     // the missing edition. Esc/Ctrl+C must never install or stop the server.
     let Some(binary) = local::ensure_client(beta).await? else {
         println!("\nInstallation canceled. The server is still running:");
-        return opencode::show_connection(connection, beta, name);
+        return show_connection(connection, beta, name, desktop);
     };
     println!("Launching local {}…", edition(beta));
     let result = local::run_client(&binary, connection, beta);
     println!("\nThe server on {name} is still running.");
-    opencode::show_connection(connection, beta, name)?;
+    show_connection(connection, beta, name, desktop)?;
     let status = result?;
     if !status.success() {
         bail!("The local {} client exited with {status}.", edition(beta));
@@ -272,9 +308,12 @@ pub(super) async fn connect(
     let connection = opencode::reconnect(&relay_info(&selected, &relay), beta)
         .await
         .with_context(|| format!("Connecting to {} ({})", selected.name, edition(beta)))?;
-    opencode::show_connection(&connection, beta, &selected.name)?;
+    let desktop =
+        desktop::configure_installed_opencode(beta, &connection, &selected.id, &selected.name)
+            .await;
+    show_connection(&connection, beta, &selected.name, &desktop)?;
     if interactive() {
-        launch(&connection, beta, &selected.name).await?;
+        launch(&connection, beta, &selected.name, &desktop).await?;
     }
     Ok(())
 }

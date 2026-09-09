@@ -55,6 +55,12 @@ impl Target {
     pub fn name(&self) -> &'static str {
         self.channel.name()
     }
+
+    fn is_installed(&self) -> bool {
+        [SETTINGS, GLOBAL, DATABASE]
+            .iter()
+            .any(|name| self.root.join(name).is_file())
+    }
 }
 
 fn target_at(base: &Path, beta: bool) -> Target {
@@ -471,6 +477,36 @@ fn finish_update<T>(target: &Target, saved: Result<T>, restarted: Result<()>) ->
     Ok(saved)
 }
 
+/// Opportunistic setup for `railway code`: only write to an existing Desktop
+/// installation of the selected edition. Callers keep failures non-fatal.
+pub(crate) async fn configure_installed(
+    beta: bool,
+    connection: &Connection,
+    agent_id: &str,
+    agent_name: &str,
+) -> Result<bool> {
+    let mut configured = false;
+    for target in targets(beta)? {
+        configured |= configure_installed_target(&target, connection, agent_id, agent_name).await?;
+    }
+    Ok(configured)
+}
+
+async fn configure_installed_target(
+    target: &Target,
+    connection: &Connection,
+    agent_id: &str,
+    agent_name: &str,
+) -> Result<bool> {
+    if !target.is_installed() {
+        return Ok(false);
+    }
+    configure_target(target, connection, agent_id, agent_name)
+        .await
+        .with_context(|| format!("Configuring {} Desktop", target.name()))?;
+    Ok(true)
+}
+
 pub(super) async fn configure(
     beta: bool,
     connection: &Connection,
@@ -543,6 +579,104 @@ mod tests {
             password: "secret".into(),
             directory: "/app".into(),
             reused: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_setup_skips_missing_desktop_even_if_other_edition_exists() {
+        for beta in [false, true] {
+            let base = tempfile::tempdir().unwrap();
+            let target = target_at(base.path(), beta);
+            let other = target_at(base.path(), !beta);
+            fs::create_dir_all(&other.root).unwrap();
+            fs::write(other.root.join(SETTINGS), "{}").unwrap();
+            assert!(other.is_installed());
+            assert!(
+                !configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .unwrap()
+            );
+            assert!(!target.root.exists());
+
+            // An empty directory or Railway's own metadata is not evidence of
+            // an installed Desktop app. Neither are directories named as stores.
+            fs::create_dir_all(&target.root).unwrap();
+            fs::write(target.root.join(MANAGED), "{}").unwrap();
+            for name in [SETTINGS, GLOBAL, DATABASE] {
+                fs::create_dir(target.root.join(name)).unwrap();
+            }
+            assert!(
+                !configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(fs::read_dir(&target.root).unwrap().count(), 4);
+            assert_eq!(fs::read_dir(&other.root).unwrap().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_setup_detects_stores_and_refreshes_the_saved_connection() {
+        for beta in [false, true] {
+            for name in [SETTINGS, GLOBAL, DATABASE] {
+                let base = tempfile::tempdir().unwrap();
+                let target = target_at(base.path(), beta);
+                fs::create_dir_all(&target.root).unwrap();
+                if name == DATABASE {
+                    let db = Database::open(target.root.join(DATABASE)).unwrap();
+                    db.execute_batch(
+                        "CREATE TABLE state (name TEXT NOT NULL, key TEXT NOT NULL,
+                            value TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                            PRIMARY KEY (name, key));",
+                    )
+                    .unwrap();
+                } else {
+                    fs::write(target.root.join(name), "{}").unwrap();
+                }
+                let mut connection = connection();
+                for password in ["initial-password", "refreshed-password"] {
+                    connection.password = password.into();
+                    connection.directory = "/app/custom-project".into();
+                    assert!(
+                        configure_installed_target(&target, &connection, "agent", "box")
+                            .await
+                            .unwrap()
+                    );
+                    let saved = Stores::read(&target.root).unwrap();
+                    assert_eq!(saved.sqlite, name == DATABASE);
+                    assert_eq!(saved.server["list"].as_array().unwrap().len(), 1);
+                    assert_eq!(saved.server["list"][0]["http"]["password"], password);
+                    assert_eq!(saved.server["list"][0]["displayName"], "Railway: box");
+                    assert_eq!(saved.settings["defaultServerUrl"], connection.url);
+                    assert_eq!(
+                        saved.server["projects"][&connection.url][0]["worktree"],
+                        connection.directory
+                    );
+                    assert_eq!(saved.managed["agent"], connection.url);
+                }
+                assert!(!target_at(base.path(), !beta).root.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_setup_reports_invalid_stores_without_overwriting_them() {
+        for name in [GLOBAL, DATABASE] {
+            let base = tempfile::tempdir().unwrap();
+            let target = target_at(base.path(), true);
+            fs::create_dir_all(&target.root).unwrap();
+            fs::write(target.root.join(name), "invalid settings").unwrap();
+            assert!(
+                configure_installed_target(&target, &connection(), "agent", "box")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read_to_string(target.root.join(name)).unwrap(),
+                "invalid settings"
+            );
+            assert!(!target.root.join(SETTINGS).exists());
+            assert!(!target.root.join(MANAGED).exists());
         }
     }
 
