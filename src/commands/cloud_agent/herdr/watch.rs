@@ -107,8 +107,7 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
     let mut tasks: JoinSet<()> = JoinSet::new();
     let mut watched: BTreeSet<String> = BTreeSet::new();
     let mut liveness = tokio::time::interval(LIVENESS);
-    let mut nudged = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-        .context("Installing the SIGUSR1 handler")?;
+    let mut nudged = nudge_signal()?;
     let mut relist = true;
 
     loop {
@@ -137,7 +136,7 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
                     relist = true;
                 }
             }
-            _ = nudged.recv() => {
+            _ = nudge_recv(&mut nudged) => {
                 say(verbose, "nudged: re-listing environments");
                 relist = true;
             }
@@ -224,8 +223,40 @@ async fn resync(verbose: bool, cause: &str) {
 }
 
 /// A unix socket file can outlive its server; only a connection proves one.
+#[cfg(unix)]
 fn server_alive(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
+#[cfg(not(unix))]
+fn server_alive(socket: &Path) -> bool {
+    socket.exists()
+}
+
+#[cfg(unix)]
+type NudgeSignal = tokio::signal::unix::Signal;
+#[cfg(not(unix))]
+type NudgeSignal = ();
+
+#[cfg(unix)]
+fn nudge_signal() -> Result<NudgeSignal> {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+        .context("Installing the SIGUSR1 handler")
+}
+
+#[cfg(not(unix))]
+fn nudge_signal() -> Result<NudgeSignal> {
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn nudge_recv(signal: &mut NudgeSignal) {
+    signal.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn nudge_recv(_: &mut NudgeSignal) {
+    std::future::pending::<()>().await
 }
 
 fn say(verbose: bool, line: &str) {
@@ -248,6 +279,7 @@ fn pidfile_path() -> Result<PathBuf> {
 
 /// The recorded pid, only while that pid is still one of our watchers: pids
 /// are reused after a crash or reboot, and a signal to a stranger is fatal.
+#[cfg(unix)]
 fn running_pid(pidfile: &Path) -> Option<u32> {
     let pid: u32 = std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()?;
     let out = Command::new("ps")
@@ -259,6 +291,12 @@ fn running_pid(pidfile: &Path) -> Option<u32> {
     is_watcher_command(&command).then_some(pid)
 }
 
+#[cfg(not(unix))]
+fn running_pid(_pidfile: &Path) -> Option<u32> {
+    None
+}
+
+#[allow(dead_code)]
 fn is_watcher_command(command: &str) -> bool {
     let mut words = command.split_whitespace();
     words
@@ -269,6 +307,9 @@ fn is_watcher_command(command: &str) -> bool {
 
 /// Stop this session's watcher, if one of ours is running.
 pub fn stop() -> Option<u32> {
+    if !cfg!(unix) {
+        return None;
+    }
     let pidfile = pidfile_path().ok()?;
     let pid = running_pid(&pidfile)?;
     let _ = Command::new("kill")
@@ -282,6 +323,9 @@ pub fn stop() -> Option<u32> {
 
 /// Tell this session's watcher that the set of environments may have changed.
 pub fn nudge() {
+    if !cfg!(unix) {
+        return;
+    }
     let Ok(pidfile) = pidfile_path() else { return };
     if let Some(pid) = running_pid(&pidfile) {
         let _ = Command::new("kill")
@@ -300,6 +344,9 @@ pub fn running() -> Option<u32> {
 /// Start this session's watcher in the background unless one is up. Quiet on
 /// every failure: without a watcher the plugin degrades to the manual sync key.
 pub fn spawn_detached() {
+    if !cfg!(unix) {
+        return;
+    }
     let Ok(pidfile) = pidfile_path() else { return };
     if running_pid(&pidfile).is_some() || std::env::var_os("HERDR_SOCKET_PATH").is_none() {
         return;
