@@ -26,6 +26,29 @@ jobs:
         with:
           command: check
 
+  windows-gnu-release:
+    name: Release build (i686-pc-windows-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: i686-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Match release.yml's cross target and release profile: cargo check and
+      # native Windows tests do not catch cross-target linker failures.
+      - name: Run cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --locked --target i686-pc-windows-gnu
+          use-cross: true
+
   lints:
     name: Lints
     runs-on: ubuntu-latest
