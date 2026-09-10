@@ -128,7 +128,8 @@ Configuration failures are non-fatal and reported alongside the connection
 details; rerun the command to retry.
 
 The CLI also prints the server URL, username, password, and project directory
-for manual setup, plus a shell command to connect directly.
+for manual setup, plus a Railway reconnect command:
+`railway code --opencode connect <agent>` (or `--opencode2` for Beta).
 After successful setup in an interactive terminal, it clears the setup messages
 and shows the connection details, with the Desktop update confirmation inside
 the result panel. Failed setup keeps its diagnostic output visible.
@@ -138,11 +139,11 @@ either prompt leaves the server running and prints the connection details.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
-(Beta): the first five letters/digits of the project name, lowercase, plus a
-random three-character suffix. When using your default cloud agents project,
-the label comes from the local repository or directory instead. Existing names
-are checked before creation; `--name` overrides the generated name. The same
-naming applies to `remote` and `railway ca desktop`.
+(Beta); Codex uses `codex-railg-3ed`: the first five letters/digits of the project
+name, lowercase, plus a random three-character suffix. When using your default
+cloud agents project, the label comes from the local repository or directory
+instead. Existing names are checked before creation; `--name` overrides the
+generated name. The same naming applies to `remote` and `railway ca desktop`.
 
 Reconnect to an existing server using your local client:
 
@@ -179,28 +180,118 @@ when finished.
 Put harness-specific arguments after `--`, for example:
 `railway code --opencode2 -- run --standalone "explain this project"`.
 
-### Retrieve the last connection configuration
+## Codex with local terminal or Desktop clients
+
+Run the native Codex terminal UI on your computer, connected to Codex App Server
+on a persistent Railway cloud agent:
 
 ```bash
-railway code get-config
-railway code get-config --json
+railway code --codex --new
+railway code --codex --agent my-box --dir /app
+railway code --codex connect my-box
+railway code --codex connect
 ```
 
-Each successful `railway code` setup saves its connection details locally,
-including when you decline or cancel the local-client prompt. OpenCode
-reconnects refresh this record too. `get-config` works from any directory and
-prints the most recently saved connection in one results panel: the OpenCode
-server URL, username, password, project directory, connection commands, and
-Desktop configuration result, plus a direct SSH command and a copyable
-`~/.ssh/config` block.
-SSH-based harness launches save the SSH details.
+New Codex agents use the same naming rules as OpenCode, with a `codex-` prefix
+(for example, `codex-railg-3ed`). The generated name works with `connect`,
+`get-config`, and cloud-agent lifecycle commands; `--name` sets a custom name.
 
-The record is a snapshot; viewing it does not create, wake, or connect to an
-agent. It is stored in `~/.railway/last-code-config.json` with owner-only
-permissions on Unix, replaced after each successful setup, and removed by
-`railway logout`. JSON output includes the saved connection credentials.
-Launches made before this feature was installed have no record; run a setup
-or reconnect once to save one.
+For a Desktop-only workflow:
+
+```bash
+railway code --codex desktop-only --new
+railway code --codex desktop-only --agent my-box --dir /app
+```
+
+This prepares the VM, starts or reuses the authenticated backend App Server,
+verifies its public endpoint, registers SSH, and saves the remote project for
+Codex Desktop to import at its next startup. It then exits, leaving the backend
+running. It never prompts to
+install or launch a local terminal client. The results panel shows backend
+credentials, the SSH configuration file location, the Desktop project name, and
+commands to reconnect or retrieve the configuration.
+
+Terminal setup carries your available local Codex sign-in and configured
+skills/MCP sync, starts App Server on port 8080, verifies its public WebSocket
+handshake, and offers to launch the local client. Tools, files, and threads live
+on the VM. Use `/resume` in Codex to reopen a remote thread. `connect` discovers
+running Codex servers; an explicit agent also wakes and restarts a previously
+configured server as needed.
+
+The remote terminal client uses a separate, persistent `CODEX_HOME` under
+`~/.railway/codex-client/<backend-id>/`. The VM owns its tools and sessions;
+local-only MCP servers, plugins, and hooks must not participate in remote
+startup. This also keeps the terminal's busy indicator and cancellation state
+consistent with the backend. Ctrl+C interrupts active work and exits when idle;
+Ctrl+D on an empty prompt detaches even during startup.
+
+The terminal connection uses `wss://` through the agent's public domain. Its
+bearer token is passed to the local client through an environment variable.
+The remote server's token, PID, version, directory, and logs live under
+`~/.railway/codex/`. Repeated setup reuses the server and token. An occupied port
+or a different running project directory requires another agent (`--new`).
+
+Setup and `connect` also register and verify the agent's SSH host in
+`~/.ssh/config` as `railway-<agent-name>`, using the same registration as
+`railway ca desktop --codex`. Reconnecting upgrades the previous
+`railway-agent-<agent-name>` default in both SSH and Codex Desktop's saved config.
+They merge the connection and remote project into
+`~/.codex/codex-app/config.json` (`$CODEX_HOME/codex-app/config.json` when set)
+in the background. Setup never launches or activates Codex Desktop; the app
+imports the saved configuration when you next start it.
+Find `Railway: <name>` in Codex Desktop's project sidebar. An existing custom SSH
+alias and project label are preserved. `connect` imports the server's actual
+working directory. You can use the same VM from the terminal and Desktop.
+
+The VM must have a Codex release with `--ws-auth` and `--ws-token-file` support.
+Terminal mode uses a local client with the same version as the server. If needed,
+it offers to install that official `@openai/codex` version with npm into
+`~/.railway/runtimes/codex-client/<version>/`.
+
+For scripts, `--connection-json` returns a single JSON object containing
+`schemaVersion`, agent identity, and connection `url`, `token`, `directory`,
+`version`, and `reused`. Progress goes to stderr.
+
+```bash
+railway code --codex --connection-json connect my-box
+railway code --codex remote             # run the UI inside Railway CA
+railway code --codex -- exec "run tests" # execute inside the VM
+```
+
+Closing the local client leaves the server running. Use `railway ca sleep my-box`
+to stop compute, then `railway code --codex connect my-box` to wake and reconnect.
+Codex currently marks its remote App Server transport experimental.
+
+## Retrieve saved connection configuration
+
+```bash
+railway code get-config                  # most recently saved connection
+railway code get-config my-box           # a specific agent by name
+railway code get-config codex-railg-3ed   # generated names work too
+railway code get-config <agent-id>        # use an ID if names are ambiguous
+railway code get-config my-box --json
+```
+
+Codex terminal setup, `connect`, and `desktop-only` (including its
+`railway ca desktop --codex` alias) save the verified backend connection and
+Desktop configuration outcome. OpenCode/OpenCode2 setup and reconnect also save
+their server details; ordinary cloud-terminal launches save SSH details.
+
+`get-config` works from any directory, using local snapshots without login,
+network access, waking a VM, launching a client, or applying Desktop configuration.
+Its human-readable output uses the same concise results panel as creation and
+reconnect.
+`--json` includes the saved agent/SSH metadata and the harness-specific `codex`
+or `opencode` object, including credentials and Desktop status. These are saved
+details, rather than a live health check; rerun setup/connect to refresh them.
+
+Railway retains the latest snapshot per agent in `~/.railway/code-configs.json`
+and continues writing `~/.railway/last-code-config.json` for compatibility with
+existing CLI versions. Existing latest snapshots are retained when the archive
+is first written. Named lookup requires a connection previously saved on this
+computer; unknown names report an error, and duplicate names list their IDs.
+The files are private and atomically updated under a lock. `railway logout`
+removes both saved-configuration files.
 
 ## Cloud agents in desktop apps
 
@@ -214,6 +305,12 @@ railway ca desktop --opencode --new
 railway ca desktop --opencode2 --new
 ```
 
+With Codex selected alone, `railway ca desktop --codex` is a compatibility alias
+for `railway code --codex desktop-only`. It uses the same backend startup and
+Desktop import flow, forwarding `--agent`, `--new`, `--dir`, project/environment,
+and its SSH alias/config/verification options. The existing `--dry-run`,
+`--remove`, and multi-app setup commands remain available.
+
 App flags can be combined to prepare the same agent for several apps. Setup
 carries available local sign-ins, applies your skills/MCP sync preferences,
 and writes the agent's SSH configuration. `--dry-run` previews the local files
@@ -221,6 +318,15 @@ without creating or waking an agent or starting a connection. Existing agents
 are reused and woken as needed; if none exists in the target environment, setup
 creates one. `--new` always creates a fresh agent, including when several app
 flags are combined. It cannot be combined with `--agent` or `--remove`.
+
+Codex setup registers the SSH host and named remote project using Codex Desktop's
+version-1 app configuration, entirely in the background. It never launches or
+activates the app. Codex Desktop imports the configuration on its next startup.
+Existing connections and retry/timeout preferences
+are retained; changed configuration is backed up to `config.json.railway-backup`.
+`--dry-run` previews the merged config. `--remove` removes the SSH
+block and that alias's import declaration; remove already-imported connections
+and projects inside Codex, since its import mechanism does not delete them.
 
 OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)

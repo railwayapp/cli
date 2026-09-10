@@ -1,4 +1,4 @@
-//! Readable defaults for newly created OpenCode agents.
+//! Readable defaults for newly created Codex and OpenCode agents.
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Result, bail};
@@ -32,6 +32,7 @@ impl Target {
 
 fn prefix(agent: Agent) -> Option<&'static str> {
     match agent {
+        Agent::Codex => Some("codex"),
         Agent::OpenCode => Some("oc"),
         Agent::OpenCode2 => Some("oc2"),
         _ => None,
@@ -145,11 +146,14 @@ mod tests {
         assert_eq!(prefix(Agent::OpenCode), Some("oc"));
         assert_eq!(prefix(Agent::OpenCode2), Some("oc2"));
         assert_eq!(prefix(Agent::Claude), None);
-        assert_eq!(prefix(Agent::Codex), None);
-        assert_eq!(
-            available_name("oc2", "Railgun", &HashSet::new(), 4405).unwrap(),
-            "oc2-railg-3ed"
-        );
+        assert_eq!(prefix(Agent::Codex), Some("codex"));
+        for agent in [Agent::Codex, Agent::OpenCode, Agent::OpenCode2] {
+            let prefix = prefix(agent).unwrap();
+            assert_eq!(
+                available_name(prefix, "Railgun", &HashSet::new(), 4405).unwrap(),
+                format!("{prefix}-railg-3ed")
+            );
+        }
         for (label, expected) in [
             ("Rail Gun!", "railg"),
             ("My-API_2", "myapi"),
@@ -163,15 +167,18 @@ mod tests {
 
     #[test]
     fn collisions_wrap_without_changing_the_project_or_edition() {
-        let existing = HashSet::from(["oc-railg-zzz".into(), "oc-railg-000".into()]);
-        assert_eq!(
-            available_name("oc", "Railgun", &existing, SUFFIX_COUNT - 1).unwrap(),
-            "oc-railg-001"
-        );
-        assert_eq!(
-            available_name("oc2", "Railgun", &existing, SUFFIX_COUNT - 1).unwrap(),
-            "oc2-railg-zzz"
-        );
+        for prefix in ["codex", "oc", "oc2"] {
+            let existing =
+                HashSet::from([format!("{prefix}-railg-zzz"), format!("{prefix}-railg-000")]);
+            assert_eq!(
+                available_name(prefix, "Railgun", &existing, SUFFIX_COUNT - 1).unwrap(),
+                format!("{prefix}-railg-001")
+            );
+            assert_eq!(
+                available_name("other", "Railgun", &existing, SUFFIX_COUNT - 1).unwrap(),
+                "other-railg-zzz"
+            );
+        }
     }
 
     #[test]
@@ -237,13 +244,15 @@ mod tests {
             name: Some("My-Name".into()),
             ..Default::default()
         };
-        assert_eq!(
-            for_launch(&client, &configs, &args, Agent::OpenCode2, &target)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("My-Name")
-        );
+        for agent in [Agent::Codex, Agent::OpenCode, Agent::OpenCode2] {
+            assert_eq!(
+                for_launch(&client, &configs, &args, agent, &target)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("My-Name")
+            );
+        }
         assert!(
             for_launch(
                 &client,

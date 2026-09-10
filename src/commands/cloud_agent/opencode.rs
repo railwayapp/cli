@@ -39,13 +39,10 @@ pub(crate) fn show_connection(
     desktop_configured: bool,
 ) -> Result<()> {
     let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
-    let command = attach_command(connection, beta)?;
     let divider = "─".repeat(64).cyan();
     println!("\n{divider}");
     println!("{}", format!("{edition} server on {name}").cyan().bold());
     show_server_config(connection, beta, name);
-    println!("\n{}", "Connect from your computer:".bold());
-    println!("  {command}");
     println!("\n{}", "Connect with the Railway CLI:".bold());
     println!("  {}", railway_connect_command(beta, name));
     if desktop_configured {
@@ -241,26 +238,7 @@ pub(crate) async fn stop(alias: &str, ssh_config: &Path, beta: bool) -> Result<(
     Ok(())
 }
 
-/// Print credentials as environment variables, keeping them out of the URL.
-/// Beta's packaged Desktop CLI is usable even without an opencode2 PATH entry.
-pub(crate) fn attach_command(connection: &Connection, beta: bool) -> Result<String> {
-    validate_url(&connection.url)?;
-    let client = local_client(beta);
-    Ok(format_attach_command(
-        connection,
-        beta,
-        &client,
-        cfg!(windows),
-    ))
-}
-
-fn local_client(beta: bool) -> String {
-    local::find_client(beta)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| if beta { "opencode2" } else { "opencode" }.into())
-}
-
-/// Arguments shared by the printable command and the actual local child.
+/// Arguments passed to the local client when Railway launches it.
 pub(crate) fn attach_args(connection: &Connection, beta: bool) -> Vec<String> {
     if beta {
         vec!["--server".into(), connection.url.clone()]
@@ -318,34 +296,6 @@ pub(crate) async fn reconnect(
     verify_connection(&connection, beta).await?;
     verify_client_directory(&connection, beta).await?;
     Ok(connection)
-}
-
-fn format_attach_command(
-    connection: &Connection,
-    beta: bool,
-    client: &str,
-    powershell: bool,
-) -> String {
-    let mut args = vec![client.to_string()];
-    args.extend(attach_args(connection, beta));
-    if powershell {
-        let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-        return format!(
-            "$env:OPENCODE_SERVER_USERNAME = {}; $env:OPENCODE_SERVER_PASSWORD = {}; & {}",
-            quote(&connection.username),
-            quote(&connection.password),
-            args.iter()
-                .map(|arg| quote(arg))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-    }
-    format!(
-        "OPENCODE_SERVER_USERNAME={} OPENCODE_SERVER_PASSWORD={} {}",
-        shell_join(std::slice::from_ref(&connection.username)),
-        shell_join(std::slice::from_ref(&connection.password)),
-        shell_join(&args)
-    )
 }
 
 fn validate_url(value: &str) -> Result<url::Url> {
@@ -423,61 +373,16 @@ mod tests {
     }
 
     #[test]
-    fn attach_commands_use_the_matching_client_protocol_and_auth() {
+    fn attach_arguments_use_the_matching_client_protocol() {
         let connection = connection();
-        let standard = format_attach_command(&connection, false, "opencode", false);
         assert_eq!(
-            standard,
-            "OPENCODE_SERVER_USERNAME=opencode OPENCODE_SERVER_PASSWORD=test-password opencode attach https://app-box.up.railway.app --dir /app"
+            attach_args(&connection, false),
+            ["attach", "https://app-box.up.railway.app", "--dir", "/app"]
         );
-        let beta = format_attach_command(&connection, true, "opencode2", false);
         assert_eq!(
-            beta,
-            "OPENCODE_SERVER_USERNAME=opencode OPENCODE_SERVER_PASSWORD=test-password opencode2 --server https://app-box.up.railway.app"
+            attach_args(&connection, true),
+            ["--server", "https://app-box.up.railway.app"]
         );
-        assert!(!beta.contains("test-password@"));
-    }
-
-    #[test]
-    fn powershell_attach_quotes_passwords_and_client_paths() {
-        let mut connection = connection();
-        connection.password = "pass'word$".into();
-        let command =
-            format_attach_command(&connection, true, "C:/OpenCode Beta/opencode2.exe", true);
-        assert!(command.contains("$env:OPENCODE_SERVER_PASSWORD = 'pass''word$'"));
-        assert!(command.contains("& 'C:/OpenCode Beta/opencode2.exe' '--server'"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn attach_command_preserves_quoted_credentials_and_remote_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let client = root.path().join("local client");
-        std::fs::write(&client, "#!/bin/sh\nprintf '%s\\n' \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\" \"$@\"\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut connection = connection();
-        connection.password = "pass'word $(touch INJECTED)".into();
-        connection.directory = "/app/a project' $(touch INJECTED)".into();
-        for beta in [false, true] {
-            let command = format_attach_command(&connection, beta, client.to_str().unwrap(), false);
-            let result = std::process::Command::new("sh")
-                .args(["-c", &command])
-                .current_dir(root.path())
-                .output()
-                .unwrap();
-            assert!(result.status.success());
-            let output = String::from_utf8(result.stdout).unwrap();
-            let lines = output.lines().collect::<Vec<_>>();
-            assert_eq!(lines[0], connection.username);
-            assert_eq!(lines[1], connection.password);
-            if beta {
-                assert_eq!(&lines[2..], ["--server", connection.url.as_str()]);
-            } else {
-                assert_eq!(lines.last().unwrap(), &connection.directory);
-            }
-            assert!(!root.path().join("INJECTED").exists());
-        }
     }
 
     #[test]

@@ -427,8 +427,17 @@ async fn main() -> Result<()> {
         }
     }
 
+    let saved_config_only = is_code_get_config(&cli);
     let subcommand_name = cli.subcommand_name().map(str::to_string);
-    let exec_result = exec_cli(cli).await;
+    // Saved connection replay is entirely local, including skipping telemetry.
+    let exec_result = if saved_config_only {
+        let args = <commands::code::Args as clap::FromArgMatches>::from_arg_matches(
+            cli.subcommand().unwrap().1,
+        )?;
+        commands::code::command(args).await
+    } else {
+        exec_cli(cli).await
+    };
 
     // Send telemetry for silent auto-update apply (after auth is available).
     if auto_update_applied {
@@ -462,8 +471,10 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref()).await;
-    util::cac_deprecation::maybe_warn(&raw_args, subcommand_name.as_deref());
+    if !saved_config_only {
+        util::agent_advisory::maybe_show(&raw_args, subcommand_name.as_deref()).await;
+        util::cac_deprecation::maybe_warn(&raw_args, subcommand_name.as_deref());
+    }
 
     handle_update_task(check_updates_handle).await;
 
@@ -898,6 +909,9 @@ mod cli_tests {
             for args in [
                 vec!["code", "get-config"],
                 vec!["code", "get-config", "--json"],
+                vec!["code", "get-config", "my-box"],
+                vec!["code", "get-config", "my-box", "--json"],
+                vec!["code", "get-config", "--json", "my-box"],
             ] {
                 let matches = parse(&args).unwrap();
                 assert!(is_code_get_config(&matches));
@@ -907,6 +921,7 @@ mod cli_tests {
             assert!(!is_code_get_config(&forwarded));
             assert!(command_needs_refresh(&forwarded));
             assert!(parse(&["code", "get-config", "--new"]).is_err());
+            assert!(parse(&["code", "get-config", "one", "two"]).is_err());
         }
 
         #[test]
