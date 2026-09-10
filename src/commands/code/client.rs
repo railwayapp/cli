@@ -8,6 +8,7 @@ use is_terminal::IsTerminal;
 use super::saved_config::SavedConfig;
 use super::{CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, SessionStyle};
 use crate::client::GQLClient;
+use crate::commands::cloud_agent::client_sessions::Connection;
 use crate::commands::cloud_agent::{
     access, codex, desktop,
     opencode::{self, local},
@@ -49,11 +50,6 @@ impl Harness {
             )),
         }
     }
-}
-
-enum Connection {
-    Codex(codex::Connection),
-    OpenCode(opencode::Connection, bool),
 }
 
 impl Connection {
@@ -128,6 +124,78 @@ pub(super) enum LaunchMode {
     DesktopOnly(desktop::CodexOptions),
 }
 
+/// The CA launch pipeline for server-backed clients. Provisioning and runtime
+/// setup stay behind the frame; only the finished local PTY enters the pane.
+pub(crate) async fn prepare_pane(
+    mut args: LaunchArgs,
+    harness: &str,
+    progress: &dyn Progress,
+) -> Result<crate::commands::cloud_agent::tui::ClientPane> {
+    let beta = harness == "opencode2";
+    let directory = args.remote_dir.take();
+    let password = opencode::generate_password();
+    args.app_mode = true;
+    if harness != "codex" {
+        args.boot_variables
+            .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+        args.boot_variables
+            .insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+    }
+    let prepared = super::prepare(&args, progress, SessionStyle::Pane).await?;
+    let directory = directory
+        .or_else(|| {
+            super::saved_config::client_connection(&prepared.agent_id, &prepared.environment_id)
+                .filter(|c| c.harness() == harness)
+                .map(|c| c.directory().to_string())
+        })
+        .unwrap_or_else(|| "/app".into());
+    let result: Result<_> = async {
+        progress.step(&format!("Starting {harness} server"));
+        let connection = if harness == "codex" {
+            Connection::Codex(codex::start_prepared(&prepared, &directory, &password).await?)
+        } else {
+            Connection::OpenCode(
+                opencode::start_prepared(&prepared, &directory, &password, beta).await?,
+                beta,
+            )
+        };
+        let saved = connection
+            .configure_snapshot(
+                SavedConfig::from_prepared(&prepared)?,
+                prepared.identity.as_deref(),
+                &desktop::CodexOptions::default(),
+                false,
+            )
+            .await;
+        saved.save()?;
+        progress.step(&format!("Preparing local {harness} client"));
+        let binary = match &connection {
+            Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
+            Connection::OpenCode(_, beta) => local::ensure_client_quiet(*beta).await?,
+        };
+        let thread = connection.new_thread().await?;
+        let prompt = connection
+            .initial_prompt(thread.as_ref(), args.initial_prompt)
+            .await?;
+        Ok(crate::commands::cloud_agent::tui::ClientPane {
+            agent_id: prepared.agent_id.clone(),
+            agent_name: prepared.agent_name.clone(),
+            environment_id: prepared.environment_id.clone(),
+            binary,
+            connection,
+            thread,
+            prompt,
+        })
+    }
+    .await;
+    result.with_context(|| {
+        format!(
+            "Opening {harness} on {} ({})",
+            prepared.agent_name, prepared.agent_id
+        )
+    })
+}
+
 pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMode) -> Result<()> {
     let desktop_only = matches!(&mode, LaunchMode::DesktopOnly(_));
     let desktop_options = match mode {
@@ -146,7 +214,7 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
     let directory = args.remote_dir.take().unwrap_or_else(|| "/app".into());
     args.app_mode = true;
     let password = opencode::generate_password();
-    if matches!(harness, Harness::OpenCode | Harness::OpenCode2) {
+    if harness != Harness::Codex {
         args.boot_variables
             .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
         args.boot_variables
@@ -220,16 +288,15 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
         super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
         return saved.require_desktop();
     }
-    if interactive()
-        && local::confirm(&format!(
-            "Launch your local {} client now?",
-            harness.edition()
-        ))?
-    {
-        launch(&connection, harness, &saved, &persisted).await?;
-    } else if interactive() {
-        clear_setup_output();
-        connection.show(&saved, &persisted)?;
+    if interactive() {
+        launch(
+            &connection,
+            harness,
+            &saved,
+            &persisted,
+            args.initial_prompt.clone(),
+        )
+        .await?;
     }
     super::ssh_tel::drain_detached(Duration::from_secs(2)).await;
     Ok(())
@@ -313,11 +380,11 @@ async fn launch(
     harness: Harness,
     saved: &SavedConfig,
     persisted: &Result<()>,
+    prompt: Option<String>,
 ) -> Result<()> {
-    // The install prompt is deliberately after Enter/selection, and only for
-    // the missing edition. Esc/Ctrl+C must never install or stop the server.
+    // Codex is version-matched automatically; OpenCode still offers installation.
     let binary = match connection {
-        Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
+        Connection::Codex(c) => Some(codex::local::ensure_client(&c.version).await?),
         Connection::OpenCode(_, beta) => local::ensure_client(*beta).await?,
     };
     let Some(binary) = binary else {
@@ -325,22 +392,25 @@ async fn launch(
         return connection.show(saved, persisted);
     };
     println!("Launching local {}…", harness.edition());
-    let result = match connection {
-        Connection::Codex(c) => codex::local::run_client(&binary, c),
-        Connection::OpenCode(c, beta) => local::run_client(&binary, c, *beta),
-    };
-    if result.as_ref().is_ok_and(|status| status.success()) {
+    let thread = connection.new_thread().await?;
+    let prompt = connection.initial_prompt(thread.as_ref(), prompt).await?;
+    let result = crate::commands::cloud_agent::launch_client_in_pane(
+        crate::commands::cloud_agent::tui::ClientPane {
+            agent_id: saved.agent_id.clone(),
+            agent_name: saved.agent_name.clone(),
+            environment_id: saved.environment_id.clone(),
+            binary,
+            connection: connection.clone(),
+            thread,
+            prompt,
+        },
+    )
+    .await;
+    if result.is_ok() {
         clear_setup_output();
     }
     connection.show(saved, persisted)?;
-    let status = result?;
-    if !status.success() {
-        bail!(
-            "The local {} client exited with {status}.",
-            harness.edition()
-        );
-    }
-    Ok(())
+    result
 }
 
 struct Candidate {
@@ -570,7 +640,7 @@ pub(super) async fn connect(
     clear_setup_output();
     connection.show(&saved, &persisted)?;
     if interactive() {
-        launch(&connection, harness, &saved, &persisted).await?;
+        launch(&connection, harness, &saved, &persisted, None).await?;
     }
     Ok(())
 }

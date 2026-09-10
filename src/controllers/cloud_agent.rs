@@ -393,6 +393,63 @@ pub async fn list_sessions(
         .unwrap_or_default())
 }
 
+/// A harness conversation the platform heard about through hook reports.
+///
+/// Unlike a console session, a thread outlives the VM stopping: the
+/// transcript sits on the agent's disk, so a resume-capable harness can
+/// reopen it by id after a sleep or reboot ended every terminal.
+#[derive(Clone)]
+pub struct SessionThread {
+    pub harness: String,
+    pub session_id: String,
+    pub state: String,
+    pub prompt: Option<String>,
+    pub updated_at: String,
+}
+
+/// Reported harness threads for an agent, newest first, one per conversation
+/// (a thread reports repeatedly as its turns land; the newest report wins).
+pub async fn list_session_threads(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+    environment_id: &str,
+) -> Result<Vec<SessionThread>> {
+    let res = post_graphql::<queries::CloudAgentSessionThreads, _>(
+        client,
+        backboard,
+        queries::cloud_agent_session_threads::Variables {
+            cloud_agent_id: agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    let mut newest: std::collections::HashMap<String, SessionThread> =
+        std::collections::HashMap::new();
+    for snapshot in res
+        .cloud_agent
+        .map(|agent| agent.sessions)
+        .unwrap_or_default()
+    {
+        let thread = SessionThread {
+            harness: snapshot.harness,
+            session_id: snapshot.session_id,
+            state: snapshot.state,
+            prompt: snapshot.latest_prompt.or(snapshot.prompt),
+            updated_at: snapshot.updated_at,
+        };
+        match newest.get(&thread.session_id) {
+            Some(existing) if existing.updated_at >= thread.updated_at => {}
+            _ => {
+                newest.insert(thread.session_id.clone(), thread);
+            }
+        }
+    }
+    let mut threads: Vec<_> = newest.into_values().collect();
+    threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(threads)
+}
+
 /// How an agent was picked, so callers can say so.
 pub enum Resolution {
     /// The caller named it.

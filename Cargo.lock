@@ -4020,6 +4020,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
+ "async-tungstenite",
  "base64",
  "box_drawing",
  "chrono",

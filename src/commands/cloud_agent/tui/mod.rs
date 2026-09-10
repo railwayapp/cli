@@ -25,6 +25,7 @@ pub mod wizard;
 use std::io::{Write, stdout};
 use std::panic;
 
+use super::client_sessions::{self, Connection as ClientConnection, Thread as ClientThread};
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -206,20 +207,16 @@ fn save_default_project(target: &Target) -> Result<()> {
     prefs.save_in(&home)
 }
 
-/// The `ssh` command that reaches one session from any terminal.
-///
-/// The same shape the dashboard hands out: the relay target is a username, the
-/// session is named through `SetEnv`, and the port only appears when the relay
-/// is not on 22.
-fn ssh_command_for(environment_id: &str, agent_id: &str, session_name: &str) -> String {
-    let (host, port) = Configs::get_ssh_relay();
-    let port = match port {
-        Some(port) if port != 22 => format!("-p {port} "),
-        _ => String::new(),
-    };
-    format!(
-        "ssh {port}-o SetEnv=RAILWAY_DURABLE_SESSION_NAME={session_name} agent:{environment_id}:{agent_id}@{host}"
-    )
+/// Open a new login shell on this VM, bypassing any harness autostart.
+fn ssh_command_for(environment_id: &str, agent_id: &str) -> String {
+    use crate::commands::ssh::native;
+    let mut args = vec!["ssh".to_string(), "-t".to_string()];
+    args.extend(native::relay_port_args());
+    args.push(native::relay_destination(&format!(
+        "agent:{environment_id}:{agent_id}"
+    )));
+    args.push(code::LOGIN_SHELL_COMMAND.to_string());
+    crate::util::shell::shell_join(&args)
 }
 
 /// How often the loading spinner advances. Fast enough to read as motion,
@@ -244,6 +241,11 @@ pub enum Outcome {
     NeedsCredential(LaunchRequest),
     /// Give the whole terminal to one session, then come back.
     FullScreen(FullScreenRequest),
+    /// Open a new shell on an existing VM, then return to the same panes.
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
+    },
     Quit,
 }
 
@@ -258,6 +260,14 @@ pub struct FullScreenRequest {
 
 /// Everything the loop reacts to besides keystrokes.
 enum Message {
+    ClientThreadSelected {
+        client_id: String,
+        thread: ClientThread,
+    },
+    ClientReady {
+        pane: Box<ClientPane>,
+        background: bool,
+    },
     AgentsLoaded {
         path: (usize, usize, usize),
         environment_id: String,
@@ -360,6 +370,158 @@ enum Message {
 /// Forwards launch-pipeline steps into the loading screen.
 struct ChannelProgress(mpsc::UnboundedSender<Message>);
 
+/// A local client of a remote conversation, never an SSH console session.
+pub(crate) struct ClientPane {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub environment_id: String,
+    pub binary: std::path::PathBuf,
+    pub connection: ClientConnection,
+    pub thread: Option<ClientThread>,
+    pub prompt: Option<String>,
+}
+
+impl ClientPane {
+    fn name(&self) -> String {
+        client_sessions::name(
+            self.connection.harness(),
+            &self.agent_id,
+            self.thread.as_ref().map(|t| t.id.as_str()),
+        )
+    }
+}
+
+fn open_client(
+    app: &mut App,
+    pane: ClientPane,
+    background: bool,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<()> {
+    let name = pane.name();
+    if let Some(index) = app
+        .sessions
+        .iter()
+        .position(|s| s.durable_name == name && !s.ended())
+    {
+        app.connecting.remove(&name);
+        if !background {
+            app.active = Some(index);
+            app.focus = app::ManageFocus::Session;
+        }
+        return Ok(());
+    }
+    let notify = tx.clone();
+    let client_id = super::opencode::generate_password();
+    let bridge = if let ClientConnection::Codex(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        let bridge = super::codex::bridge::Bridge::start(connection.clone(), move |thread| {
+            let _ = updates.send(Message::ClientThreadSelected {
+                client_id: id.clone(),
+                thread,
+            });
+        })?;
+        Some(bridge)
+    } else {
+        None
+    };
+    let mut session = session::Session::spawn_client(
+        pane.agent_id.clone(),
+        pane.agent_name,
+        &pane.binary,
+        &pane.connection,
+        bridge.as_ref().map(|bridge| bridge.url.as_str()),
+        pane.thread.as_ref().map(|t| t.id.as_str()),
+        pane.prompt.as_deref(),
+        24,
+        80,
+        move || {
+            let _ = notify.send(Message::SessionOutput);
+        },
+    )?;
+    // Keep the VM identity for reconnect/sleep actions. The local process uses
+    // the provider's authenticated API, not the SSH console transport.
+    session.ssh_target = format!("agent:{}:{}", pane.environment_id, pane.agent_id);
+    session.client_id = Some(client_id);
+    session.client_thread = pane.thread;
+    session.client_bridge = bridge;
+    if background {
+        app.attach_session_background(session, pane.agent_id.clone());
+    } else {
+        app.attach_session(session, pane.agent_id.clone());
+        app.expand_agent_after_load(pane.agent_id.clone());
+    }
+    schedule_session_refresh(pane.agent_id, tx);
+    Ok(())
+}
+
+fn reconnect_client(
+    connect: app::AutoConnect,
+    background: bool,
+    tx: &mpsc::UnboundedSender<Message>,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let (harness, _, thread_id) = client_sessions::parse_name(&connect.session_name)
+                .ok_or_else(|| anyhow::anyhow!("Invalid client conversation identity"))?;
+            let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+            let mut connection = if harness == "codex" {
+                ClientConnection::Codex(super::codex::reconnect(&info).await?)
+            } else {
+                ClientConnection::OpenCode(
+                    super::opencode::reconnect(&info, harness == "opencode2").await?,
+                    harness == "opencode2",
+                )
+            };
+            let binary = match &connection {
+                ClientConnection::Codex(c) => {
+                    super::codex::local::ensure_client(&c.version).await?
+                }
+                ClientConnection::OpenCode(_, beta) => {
+                    super::opencode::local::ensure_client_quiet(*beta).await?
+                }
+            };
+            let thread = if let Some(id) = thread_id {
+                Some(connection.thread(id).await?)
+            } else {
+                None
+            };
+            if let Some(thread) = &thread {
+                if let ClientConnection::Codex(c) = &connection {
+                    super::codex::trust_directory(c, &thread.directory).await?;
+                }
+                connection.set_directory(&thread.directory);
+            }
+            Ok::<_, anyhow::Error>(ClientPane {
+                agent_id: connect.agent_id,
+                agent_name: connect.agent_name,
+                environment_id: connect.environment_id,
+                binary,
+                connection,
+                thread,
+                prompt: None,
+            })
+        }
+        .await;
+        let message = match result {
+            Ok(pane) => Message::ClientReady {
+                pane: Box::new(pane),
+                background,
+            },
+            Err(error) if background => Message::AutoConnectFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+            Err(error) => Message::ReattachFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(message);
+    });
+}
+
 impl Progress for ChannelProgress {
     fn step(&self, text: &str) {
         let _ = self.0.send(Message::LaunchStep(text.to_string()));
@@ -395,6 +557,14 @@ impl InflightLaunch {
                         prepared.agent_name, prepared.agent_name, prepared.agent_name
                     ));
                 }
+                Ok(Some(Message::ClientReady { pane, .. })) => {
+                    return Some(format!(
+                        "Agent {} is ready — `railway code --{} connect {}` reconnects it.",
+                        pane.agent_name,
+                        pane.connection.harness(),
+                        pane.agent_name
+                    ));
+                }
                 // Failed before creating anything worth reporting.
                 Ok(Some(Message::LaunchFailed(_))) => return None,
                 Ok(Some(_)) => continue,
@@ -419,6 +589,19 @@ fn spawn_prepare(req: LaunchRequest, sink: mpsc::UnboundedSender<Message>) {
         let req = req;
         let args = launch_args_for(&req);
         let progress = ChannelProgress(sink.clone());
+        if !args.client_on_agent
+            && matches!(req.harness.as_str(), "codex" | "opencode" | "opencode2")
+        {
+            let message = match code::client::prepare_pane(args, &req.harness, &progress).await {
+                Ok(pane) => Message::ClientReady {
+                    pane: Box::new(pane),
+                    background: false,
+                },
+                Err(err) => Message::LaunchFailed(format!("{err:#}")),
+            };
+            let _ = sink.send(message);
+            return;
+        }
         let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
             Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
             Err(err) => Message::LaunchFailed(format!("{err:#}")),
@@ -632,6 +815,17 @@ async fn fetch_sessions(
     cloud_agent_id: &str,
     environment_id: &str,
 ) -> Result<Vec<ConsoleSession>> {
+    if let Some(connection) = code::saved_config::client_connection(cloud_agent_id, environment_id)
+    {
+        return Ok(connection
+            .list()
+            .await?
+            .iter()
+            .map(|thread| {
+                ConsoleSession::client_thread(cloud_agent_id, connection.harness(), Some(thread))
+            })
+            .collect());
+    }
     let res = post_graphql::<queries::CloudAgentSessionThreads, _>(
         client,
         backboard,
@@ -683,7 +877,7 @@ async fn fetch_sessions(
         &mut snapshots,
     )
     .await;
-    Ok(res
+    let sessions: Vec<ConsoleSession> = res
         .cloud_agent_console_sessions
         .map(|conn| {
             conn.edges
@@ -699,7 +893,8 @@ async fn fetch_sessions(
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok(sessions)
 }
 
 pub async fn run(
@@ -718,6 +913,9 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    if let Some(pane) = app.autostart_client.take() {
+        open_client(app, pane, false, &tx)?;
+    }
 
     // A launch the caller had to step outside for (a Claude mint) resumes here.
     if let Some(req) = pending {
@@ -921,6 +1119,11 @@ pub async fn run(
                 session_name,
                 agent_name,
             }) => {
+                if client_sessions::is_client(&session_name) {
+                    app.activate_session(&agent_id);
+                    app.maximized = true;
+                    continue;
+                }
                 // The pane's ssh has to go first: two clients attached to one
                 // durable session would fight over its screen.
                 let Some(index) = app.sessions.iter().position(|s| s.agent_id == agent_id) else {
@@ -936,6 +1139,21 @@ pub async fn run(
                     session_name,
                     agent_name,
                 }));
+            }
+            Some(Effect::OpenShell {
+                agent_id,
+                agent_name,
+            }) => {
+                if app.hold_for_ssh_key(HeldConnect::OpenShell {
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                }) {
+                    continue;
+                }
+                return Ok(Outcome::OpenShell {
+                    agent_id,
+                    agent_name,
+                });
             }
             Some(Effect::Reattach {
                 agent_id,
@@ -957,6 +1175,19 @@ pub async fn run(
                 // The spinner goes on now — connect_info takes a beat, and a
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
+                if client_sessions::is_client(&session_name) {
+                    reconnect_client(
+                        app::AutoConnect {
+                            agent_id,
+                            agent_name,
+                            environment_id,
+                            session_name,
+                        },
+                        false,
+                        &tx,
+                    );
+                    continue;
+                }
                 let tx = tx.clone();
                 let client = client.clone();
                 let backboard = backboard.clone();
@@ -1121,11 +1352,10 @@ pub async fn run(
             Some(Effect::CopySsh {
                 agent_id,
                 environment_id,
-                session_name,
             }) => {
-                let command = ssh_command_for(&environment_id, &agent_id, &session_name);
+                let command = ssh_command_for(&environment_id, &agent_id);
                 match crate::util::clipboard::copy(&command) {
-                    Ok(()) => app.toast("Copied the ssh command"),
+                    Ok(()) => app.toast("Copied the SSH shell command"),
                     Err(err) => app.toast_error(format!("Couldn't copy: {err}")),
                 }
             }
@@ -1382,6 +1612,10 @@ fn last_assistant_text(catchup: &serde_json::Value) -> Option<String> {
 /// shape as a keyed reattach, but its outcome lands as the quiet messages —
 /// success must not steal focus and failure must not toast.
 fn spawn_auto_connect(connect: app::AutoConnect, tx: &mpsc::UnboundedSender<Message>) {
+    if client_sessions::is_client(&connect.session_name) {
+        reconnect_client(connect, true, tx);
+        return;
+    }
     let app::AutoConnect {
         agent_id,
         agent_name,
@@ -1467,6 +1701,25 @@ fn handle_message(
     stop_fetching: &StopFlag,
 ) -> Option<Effect> {
     match message {
+        Message::ClientThreadSelected { client_id, thread } => {
+            if let Some(agent_id) = app.client_thread_selected(&client_id, thread) {
+                schedule_session_refresh(agent_id, tx);
+            }
+            None
+        }
+        Message::ClientReady { pane, background } => {
+            let name = pane.name();
+            let environment_id = pane.environment_id.clone();
+            if let Err(error) = open_client(app, *pane, background, tx) {
+                app.connecting.remove(&name);
+                if background {
+                    app.auto_connect_failed(&name, &format!("{error:#}"));
+                } else {
+                    app.launch_failed(format!("Could not open local client: {error:#}"));
+                }
+            }
+            app.reveal_environment(&environment_id)
+        }
         Message::RateLimited { retry_after_secs } => {
             app.rate_limited(retry_after_secs);
             None
@@ -2348,16 +2601,18 @@ mod tests {
         assert_eq!(args.agent_id, None);
     }
 
-    /// The copied command has to be the one that reaches *this* session: the
-    /// relay target is a username, and the session is named through SetEnv.
+    /// Copying SSH opens a shell on the exact VM, bypassing both the durable
+    /// agent session and the login profile's harness autostart.
     #[test]
-    fn the_copied_ssh_command_names_the_session_and_the_relay() {
-        let command = ssh_command_for("env_1", "ca_1", "claude-3s9r89");
-        assert!(command.starts_with("ssh "), "{command}");
-        assert!(
-            command.contains("-o SetEnv=RAILWAY_DURABLE_SESSION_NAME=claude-3s9r89"),
-            "{command}"
+    fn the_copied_ssh_command_opens_a_shell_on_the_vm() {
+        let command = ssh_command_for("env_1", "ca_1");
+        let args = shlex::split(&command).unwrap();
+        assert_eq!(&args[..2], &["ssh", "-t"]);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(code::LOGIN_SHELL_COMMAND)
         );
+        assert!(!command.contains("RAILWAY_DURABLE_SESSION_NAME"));
         assert!(command.contains("agent:env_1:ca_1@"), "{command}");
         // The target is a username on the relay, not a host of its own.
         assert!(!command.contains(" agent:env_1:ca_1 "), "{command}");

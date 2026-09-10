@@ -1061,7 +1061,11 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         .selected_agent_status()
         .is_some_and(|status| status != "running");
     let hint: Vec<(&str, &str)> = if app.pane_is_full() {
-        vec![("⌥f", "restore the tree"), ("⌥⇧esc / ^]", "stop typing")]
+        vec![
+            ("⌥f", "restore the tree"),
+            ("⌥b", "SSH shell"),
+            ("⌥⇧esc / ^]", "stop typing"),
+        ]
     } else if app.focus == ManageFocus::Session {
         // A dead pane's keys are recovery, not typing — the hint has to say
         // so, or "stop typing" advertises an input nothing is reading.
@@ -1075,7 +1079,11 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ("esc", "back to the tree"),
             ]
         } else {
-            let mut keys = vec![("⌥⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
+            let mut keys = vec![
+                ("⌥⇧esc / ^]", "stop typing"),
+                ("⌥f", "maximize"),
+                ("⌥b", "SSH shell"),
+            ];
             // The agent is taking the clicks, so say how to take one back — this is
             // the terminal's own convention, but nobody guesses it.
             if app.active_session().is_some_and(|s| s.wants_mouse()) {
@@ -1102,21 +1110,43 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ("⌥s", "settings"),
                 ("q", "quit"),
             ],
-            Some(RowKind::Session(..)) => vec![
-                ("enter", "connect"),
-                ("⌥f", "maximize"),
-                ("⌥enter", "full screen"),
-                ("c", "copy ssh"),
-                ("x", "end session"),
-                if sleeping {
-                    ("w", "wake")
-                } else {
-                    ("s", "sleep")
-                },
-                ("d", "delete agent"),
-            ],
+            Some(RowKind::Session(w, p, e, a, i)) => {
+                let conversation = app
+                    .console_session(w, p, e, a, i)
+                    .is_some_and(|s| super::super::client_sessions::is_client(&s.name));
+                vec![
+                    ("enter", if conversation { "resume" } else { "connect" }),
+                    ("⌥b", "SSH shell"),
+                    ("⌥f", "maximize"),
+                    (
+                        "⌥enter",
+                        if conversation {
+                            "maximize"
+                        } else {
+                            "full screen"
+                        },
+                    ),
+                    ("c", "copy shell"),
+                    (
+                        "x",
+                        if conversation {
+                            "disconnect"
+                        } else {
+                            "end session"
+                        },
+                    ),
+                    if sleeping {
+                        ("w", "wake")
+                    } else {
+                        ("s", "sleep")
+                    },
+                    ("d", "delete agent"),
+                ]
+            }
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
+                ("⌥b", "SSH shell"),
+                ("c", "copy shell"),
                 ("n", "new agent"),
                 if sleeping {
                     ("w", "wake")
@@ -1460,20 +1490,27 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
         .iter()
         .map(|i| super::app::HARNESSES[*i])
         .map(|slug| PanelRow {
-            label: super::app::harness_label(slug).to_string(),
+            label: match slug {
+                "railway" => "Railway",
+                "grok" => "Grok Build",
+                "codex" => "ChatGPT",
+                "claude" => "Claude Code",
+                "opencode" => "OpenCode",
+                "opencode2" => "OpenCode2 [Beta]",
+                "shell" => "Shell",
+                other => other,
+            }
+            .to_string(),
             tag: String::new(),
-            detail: super::wizard::harness_blurb(slug).to_string(),
+            detail: String::new(),
         })
         .collect();
-    let footer = Line::from(chord_spans(
-        theme,
-        &[
-            ("↑↓", "choose"),
-            ("tab", "OpenCode version"),
-            ("enter", "new agent"),
-            ("esc", "cancel"),
-        ],
-    ));
+    let mut shortcuts = vec![("↑↓", "choose")];
+    if super::app::opencode_alternate(cursor).is_some() {
+        shortcuts.push(("tab", "OpenCode version"));
+    }
+    shortcuts.extend([("enter", "new agent"), ("esc", "cancel")]);
+    let footer = Line::from(chord_spans(theme, &shortcuts));
 
     render_panel(
         f,

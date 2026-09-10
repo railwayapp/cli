@@ -241,7 +241,7 @@ pub(crate) async fn stop(alias: &str, ssh_config: &Path, beta: bool) -> Result<(
 /// Arguments passed to the local client when Railway launches it.
 pub(crate) fn attach_args(connection: &Connection, beta: bool) -> Vec<String> {
     if beta {
-        vec!["--server".into(), connection.url.clone()]
+        vec!["--server".into(), connection.url.clone(), "--auto".into()]
     } else {
         vec![
             "attach".into(),
@@ -298,7 +298,7 @@ pub(crate) async fn reconnect(
     Ok(connection)
 }
 
-fn validate_url(value: &str) -> Result<url::Url> {
+pub(super) fn validate_url(value: &str) -> Result<url::Url> {
     let url = url::Url::parse(value).context("Invalid OpenCode public URL")?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -381,7 +381,7 @@ mod tests {
         );
         assert_eq!(
             attach_args(&connection, true),
-            ["--server", "https://app-box.up.railway.app"]
+            ["--server", "https://app-box.up.railway.app", "--auto"]
         );
     }
 

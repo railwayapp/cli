@@ -119,9 +119,15 @@ pub struct SshArgs {
     #[clap(value_name = "AGENT")]
     agent: Option<String>,
 
-    /// Attach to this durable session by name, rather than the agent's only one
-    #[clap(long, value_name = "NAME")]
+    /// Attach to a durable session, optionally by name, instead of opening a shell
+    #[clap(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "", conflicts_with = "command")]
     session: Option<String>,
+
+    /// Resume the agent's most recent Claude conversation in a fresh session
+    /// (after a sleep or reboot ended the terminal it ran in), instead of
+    /// starting a new one or being asked
+    #[clap(long, conflicts_with_all = ["session", "command"])]
+    resume: bool,
 
     /// Accepted for compatibility; agents now always stay running on
     /// disconnect. `railway ca sleep` stops the compute bill
@@ -131,10 +137,23 @@ pub struct SshArgs {
     #[clap(flatten)]
     target: TargetArgs,
 
-    /// Run this command instead of attaching to a session (`-- bash` for a
-    /// plain shell)
+    /// Run this command instead of opening a shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+impl SshArgs {
+    /// A plain SSH connection always opens a shell, even on a VM configured
+    /// to autostart a harness. Session attachment and resume are explicit.
+    fn remote_command(&self) -> Option<Vec<String>> {
+        if !self.command.is_empty() {
+            Some(self.command.clone())
+        } else if self.session.is_some() || self.resume {
+            None
+        } else {
+            Some(vec![code::LOGIN_SHELL_COMMAND.to_string()])
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -507,6 +526,23 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     }
 }
 
+/// The TUI's shell shortcut targets an existing VM by ID. Return the SSH
+/// status instead of exiting the CLI, so the manage screen can resume.
+pub(super) async fn ssh_shell(agent_id: String) -> Result<i32> {
+    ssh_connect(SshArgs {
+        agent: Some(agent_id),
+        session: None,
+        resume: false,
+        keep_awake: false,
+        target: TargetArgs {
+            environment: None,
+            project: None,
+        },
+        command: Vec::new(),
+    })
+    .await
+}
+
 /// Connect, and hand back what the remote side exited with.
 async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let mut configs = Configs::new()?;
@@ -620,15 +656,16 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     ready?;
     ca::remember(configs, &agent)?;
 
-    let connected = if !args.command.is_empty() {
+    let connected = if let Some(command) = args.remote_command() {
         telemetry::track_lifecycle_detached("ssh_command");
-        run_command(&agent, &args.command).await
+        run_command(&agent, &command).await
     } else {
         attach(
             client,
             &backboard,
             &agent,
-            args.session.as_deref(),
+            args.session.as_deref().filter(|name| !name.is_empty()),
+            args.resume,
             was_running,
         )
         .await
@@ -667,8 +704,8 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
 }
 
 /// Run one command on the agent instead of attaching. This is ssh's ordinary
-/// trailing-command behaviour, and `railway ca ssh -- bash` is how you get a
-/// plain shell on a box whose default is a coding agent.
+/// trailing-command behaviour. Bare `railway ca ssh` supplies the login-shell
+/// command with the harness autostart disabled.
 async fn run_command(agent: &ca::Agent, command: &[String]) -> Result<i32> {
     let info = code::connect_info(&agent.environment_id, &agent.id).await?;
     let command = command.to_vec();
@@ -697,8 +734,26 @@ async fn attach(
     backboard: &str,
     agent: &ca::Agent,
     requested: Option<&str>,
+    resume: bool,
     was_running: bool,
 ) -> Result<i32> {
+    // An explicit --resume doesn't attach at all: the user is saying the
+    // conversation they want has no terminal any more (a sleep or reboot took
+    // it), so reopen the newest one directly.
+    if resume {
+        let threads = resumable_threads(client, backboard, agent).await?;
+        let Some(thread) = threads.into_iter().next() else {
+            bail!(
+                "Agent {} has no resumable Claude conversations. \
+                 `railway ca ssh {} --session` starts a fresh session.",
+                agent.name,
+                agent.name,
+            );
+        };
+        telemetry::track_lifecycle_detached("ssh_resume_session");
+        return start_session(agent, Some(thread.session_id)).await;
+    }
+
     let sessions = ca::list_sessions(client, backboard, &agent.id).await?;
     let mut running: Vec<_> = sessions.into_iter().filter(|s| s.running).collect();
 
@@ -735,8 +790,15 @@ async fn attach(
         }
         None => match running.len() {
             0 => {
+                // No terminal to attach to — but the platform may still know
+                // conversations whose transcripts survived on the disk (a
+                // sleep or reboot ends every terminal, never the work).
+                if let Some(id) = offer_resume(client, backboard, agent).await? {
+                    telemetry::track_lifecycle_detached("ssh_resume_session");
+                    return start_session(agent, Some(id)).await;
+                }
                 telemetry::track_lifecycle_detached("ssh_new_session");
-                return start_session(agent).await;
+                return start_session(agent, None).await;
             }
             1 => running[0].name.clone(),
             _ => bail!(
@@ -771,13 +833,115 @@ async fn attach(
     Ok(code)
 }
 
+/// The conversations `claude --resume <id>` can reopen on this agent, newest
+/// first. Claude only: it is the one harness with a verified resume-by-id CLI.
+/// Read failures degrade to "none" — resume is an offer, and a listing hiccup
+/// must not block connecting.
+async fn resumable_threads(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &ca::Agent,
+) -> Result<Vec<ca::SessionThread>> {
+    let threads = ca::list_session_threads(client, backboard, &agent.id, &agent.environment_id)
+        .await
+        .unwrap_or_default();
+    Ok(threads
+        .into_iter()
+        .filter(|thread| thread.harness == "claude" && !thread.session_id.is_empty())
+        .collect())
+}
+
+/// One line per resumable conversation, prompt first — the prompt is how the
+/// user recognizes their work; the state and age qualify it.
+struct ResumeChoice(ca::SessionThread);
+
+impl std::fmt::Display for ResumeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prompt = self.0.prompt.as_deref().unwrap_or("(no prompt recorded)");
+        let mut prompt: String = prompt.chars().take(56).collect();
+        if self
+            .0
+            .prompt
+            .as_deref()
+            .is_some_and(|p| p.chars().count() > 56)
+        {
+            prompt.push('…');
+        }
+        write!(
+            f,
+            "{prompt} · {}{}",
+            self.0.state,
+            thread_age(&self.0.updated_at)
+        )
+    }
+}
+
+/// " · 3h ago" when the thread's timestamp parses, nothing when it doesn't.
+fn thread_age(updated_at: &str) -> String {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return String::new();
+    };
+    let minutes = (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_minutes();
+    let age = match minutes {
+        m if m < 1 => "just now".to_string(),
+        m if m < 60 => format!("{m}m ago"),
+        m if m < 60 * 24 => format!("{}h ago", m / 60),
+        m => format!("{}d ago", m / (60 * 24)),
+    };
+    format!(" · {age}")
+}
+
+/// When the agent has resumable conversations and a person is at the terminal,
+/// ask whether to reopen one; `None` means start fresh (the default, and the
+/// only behavior for scripted callers).
+async fn offer_resume(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &ca::Agent,
+) -> Result<Option<String>> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(None);
+    }
+    let threads = resumable_threads(client, backboard, agent).await?;
+    if threads.is_empty() {
+        return Ok(None);
+    }
+    let mut options = vec!["Start a fresh session".to_string()];
+    options.extend(
+        threads
+            .iter()
+            .take(5)
+            .map(|thread| format!("Resume: {}", ResumeChoice(thread.clone()))),
+    );
+    let picked = crate::util::prompt::prompt_select_with_cancel(
+        &format!(
+            "{} has Claude conversations from before it last stopped",
+            agent.name
+        ),
+        options.clone(),
+    )?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let index = options.iter().position(|option| *option == picked);
+    Ok(match index {
+        Some(0) | None => None,
+        Some(i) => threads.get(i - 1).map(|thread| thread.session_id.clone()),
+    })
+}
+
 /// Start the agent's first session: install and configure the harness, then run
 /// it under a *named* durable session so the platform tracks it, it survives
-/// this ssh dying, and the next `railway ca ssh` reattaches instead of starting
-/// a second copy.
-async fn start_session(agent: &ca::Agent) -> Result<i32> {
-    let harness = code::default_harness()?;
-    let launch = LaunchArgs::for_target(
+/// this ssh dying, and the next `railway ca ssh --session` reattaches instead of starting
+/// a second copy. With a resume id, the session relaunches Claude continuing
+/// that conversation instead of starting the default harness fresh.
+async fn start_session(agent: &ca::Agent, resume_session_id: Option<String>) -> Result<i32> {
+    let harness = match resume_session_id {
+        // The id came from a claude thread; the default harness may differ.
+        Some(_) => "claude",
+        None => code::default_harness()?,
+    };
+    let mut launch = LaunchArgs::for_target(
         agent.project_id.clone(),
         agent.environment_id.clone(),
         harness,
@@ -785,10 +949,16 @@ async fn start_session(agent: &ca::Agent) -> Result<i32> {
         None,
         Some(agent.id.clone()),
     );
+    launch.resume_session_id = resume_session_id;
 
     println!(
         "{}",
-        format!("No session on {} yet — starting {harness}.", agent.name).dimmed()
+        if launch.resume_session_id.is_some() {
+            format!("Resuming your Claude conversation on {}.", agent.name)
+        } else {
+            format!("No session on {} yet — starting {harness}.", agent.name)
+        }
+        .dimmed()
     );
     let progress = code::CliProgress::default();
     let prepared = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await?;
@@ -927,6 +1097,35 @@ mod tests {
             .await
             .unwrap_err();
             assert!(error.to_string().contains("cannot wake now"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ssh_defaults_to_a_shell_and_attaches_only_when_requested() {
+        let bare = SshArgs::try_parse_from(["ssh", "my-agent"]).unwrap();
+        assert_eq!(
+            bare.remote_command(),
+            Some(vec![code::LOGIN_SHELL_COMMAND.to_string()])
+        );
+        let attached =
+            SshArgs::try_parse_from(["ssh", "my-agent", "--session", "railway-abc"]).unwrap();
+        assert_eq!(attached.remote_command(), None);
+        let automatic = SshArgs::try_parse_from(["ssh", "my-agent", "--session"]).unwrap();
+        assert_eq!(automatic.remote_command(), None);
+        assert_eq!(automatic.session.as_deref(), Some(""));
+        let resumed = SshArgs::try_parse_from(["ssh", "my-agent", "--resume"]).unwrap();
+        assert_eq!(resumed.remote_command(), None);
+        let command =
+            SshArgs::try_parse_from(["ssh", "my-agent", "--", "bash", "-lc", "pwd"]).unwrap();
+        assert_eq!(
+            command.remote_command(),
+            Some(vec!["bash".into(), "-lc".into(), "pwd".into()])
+        );
+        for flag in [vec!["--resume"], vec!["--session", "railway-abc"]] {
+            let mut args = vec!["ssh", "my-agent"];
+            args.extend(flag);
+            args.extend(["--", "bash"]);
+            assert!(SshArgs::try_parse_from(args).is_err());
         }
     }
 

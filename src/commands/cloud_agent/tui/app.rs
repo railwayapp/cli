@@ -27,9 +27,9 @@ use super::theme::Theme;
 /// shell, so it takes no prompt and sits after every real agent.
 pub const HARNESSES: &[&str] = &[
     "railway",
-    "claude",
-    "codex",
     "grok",
+    "codex",
+    "claude",
     "opencode",
     "opencode2",
     "shell",
@@ -93,7 +93,6 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
             ("⌥⇧[ ⌥⇧]", "previous / next session"),
-            ("c", "copy an ssh command for it"),
             ("⌥⇧esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
@@ -105,6 +104,8 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "agents",
         &[
+            ("⌥b", "open an SSH shell outside the TUI"),
+            ("c", "copy an SSH shell command"),
             ("n", "new agent — pick its harness first"),
             ("⌥n", "new agent now, on the selected harness"),
             (
@@ -194,6 +195,33 @@ pub struct ThreadSnapshot {
 const LAUNCH_PROLOGUE: &str = "export RAILWAY_CODE_AUTOSTARTED=1; ";
 
 impl ConsoleSession {
+    pub(super) fn client_thread(
+        agent_id: &str,
+        harness: &str,
+        thread: Option<&super::super::client_sessions::Thread>,
+    ) -> Self {
+        Self {
+            name: super::super::client_sessions::name(
+                harness,
+                agent_id,
+                thread.map(|t| t.id.as_str()),
+            ),
+            kind: "THREAD".into(),
+            command: Some(harness.into()),
+            running: true,
+            attached: false,
+            created_at: thread.and_then(|t| t.created_at),
+            snapshot: thread.map(|thread| ThreadSnapshot {
+                harness: harness.into(),
+                session_id: thread.id.clone(),
+                state: thread.state.clone(),
+                prompt: Some(thread.title.clone()),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: thread.updated_at.clone(),
+            }),
+        }
+    }
     /// Is this worth showing?
     ///
     /// Only what is still running. Finished sessions are our own provisioning
@@ -210,6 +238,13 @@ impl ConsoleSession {
     /// already leads with its harness. The plain name when the harness is
     /// unknowable.
     pub fn short_name(&self) -> String {
+        if let Some((harness, _, _)) = super::super::client_sessions::parse_name(&self.name) {
+            return self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.prompt.clone())
+                .unwrap_or_else(|| format!("New {harness} conversation"));
+        }
         match self.harness_slug() {
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
                 let segments: Vec<&str> = self.name.split('-').collect();
@@ -230,6 +265,9 @@ impl ConsoleSession {
     /// name is the fallback for a session nothing has reported from (a plain
     /// shell, a run that hasn't spoken yet).
     pub fn thread_label(&self) -> String {
+        if super::super::client_sessions::is_client(&self.name) {
+            return truncate(&self.short_name(), 28);
+        }
         if let Some(snapshot) = &self.snapshot {
             fn clean(text: Option<&str>) -> Option<&str> {
                 text.map(str::trim).filter(|text| !text.is_empty())
@@ -265,6 +303,8 @@ impl ConsoleSession {
             "railway-agent-tui" | "railway-agent" => Some("railway"),
             "claude" => Some("claude"),
             "codex" => Some("codex"),
+            "opencode" => Some("opencode"),
+            "opencode2" => Some("opencode2"),
             "grok" => Some("grok"),
             _ => None,
         }
@@ -760,6 +800,10 @@ pub struct SshKeyOffer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeldConnect {
     Launch(LaunchRequest),
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
+    },
     Reattach {
         agent_id: String,
         agent_name: String,
@@ -773,6 +817,13 @@ impl HeldConnect {
     pub fn into_effect(self) -> Effect {
         match self {
             HeldConnect::Launch(req) => Effect::Launch(req),
+            HeldConnect::OpenShell {
+                agent_id,
+                agent_name,
+            } => Effect::OpenShell {
+                agent_id,
+                agent_name,
+            },
             HeldConnect::Reattach {
                 agent_id,
                 agent_name,
@@ -880,11 +931,15 @@ pub enum Effect {
     /// by ⌥r, by the auto-refresh tick, and on re-entry after the TUI has
     /// handed the terminal back. See [`super::start_refresh`].
     RefreshAll,
-    /// Put an `ssh` command for one session on the clipboard.
+    /// Put an SSH shell command for this VM on the clipboard.
     CopySsh {
         agent_id: String,
         environment_id: String,
-        session_name: String,
+    },
+    /// Leave the TUI for a new shell on an existing VM, keeping its panes.
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
     },
     /// Leave the TUI and give the whole terminal to one session.
     FullScreen {
@@ -983,6 +1038,7 @@ pub struct App {
     /// the same path a keypress would, so the ssh-key gate and the Claude
     /// mint still get their say.
     pub autostart: Option<LaunchRequest>,
+    pub(crate) autostart_client: Option<super::ClientPane>,
     /// Like `autostart`, but the pipeline is already running — started beside
     /// the tree load because its gates were verified up front. The loop adopts
     /// it on frame one instead of dispatching.
@@ -1146,6 +1202,7 @@ impl App {
             manage_prompt: None,
             maximized: false,
             autostart: None,
+            autostart_client: None,
             autostart_inflight: None,
             quit_when_done: false,
             exit_note: None,
@@ -2024,6 +2081,15 @@ impl App {
         agent_id: &str,
         result: Result<Vec<ConsoleSession>, String>,
     ) {
+        let selected = self.selected_row().and_then(|row| {
+            let RowKind::Session(w, p, e, a, i) = row.kind else {
+                return None;
+            };
+            let (id, _) = self.agent_at(w, p, e, a)?;
+            let session = self.console_session(w, p, e, a, i)?;
+            (id == agent_id && super::super::client_sessions::is_client(&session.name))
+                .then(|| session.name.clone())
+        });
         // Whatever this reply says, its agent's fast poll is no longer in
         // flight (see `threads_to_poll`).
         self.thread_polls.remove(agent_id);
@@ -2094,6 +2160,9 @@ impl App {
                 .map(|s| s.name.as_str())
                 .collect();
             self.ending.retain(|name| live.contains(name.as_str()));
+        }
+        if self.pending_select_session.is_none() {
+            self.pending_select_session = selected;
         }
         self.clamp_cursor();
         // The platform's list may still be missing sessions we are attached
@@ -2218,14 +2287,16 @@ impl App {
             // half the time you press it. The costs, all in a shell: ⌥f is
             // Meta-f (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
             // non-incremental history searches, which few people bind and
-            // both harnesses ignore), and ⌥r is Meta-r (revert-line).
+            // both harnesses ignore), and ⌥r is Meta-r (revert-line). ⌥b
+            // opens a full SSH shell on this pane's VM; it takes Meta-b
+            // (backward-word) while a pane owns the keyboard.
             // Readline leaves Meta-] and Meta-[ unbound, bash binds Meta-{
             // only to the rarely-reached complete-into-braces, and `^]`
             // (character-search) is untouched because only the Meta forms are
             // claimed. Nothing else is intercepted — ⌥s still reaches the
             // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | 'n' | 'p' | 'r' | ']' | '[')
+                && matches!(chord, 'b' | 'f' | 'n' | 'p' | 'r' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -2918,6 +2989,9 @@ impl App {
                             // adopted from our own panes — already attached by
                             // definition.
                             if !session.is_interesting()
+                                // Conversation history is resumable, not a list
+                                // of processes to attach in the background.
+                                || super::super::client_sessions::is_client(&session.name)
                                 || session.created_at.is_none()
                                 || self.ending.contains(&session.name)
                                 || self.auto_attempted.contains(&session.name)
@@ -3064,7 +3138,9 @@ impl App {
         // session that is running, `attached` (we demonstrably are), and not
         // already claimed by another pane — newest first when several fit.
         for i in 0..self.sessions.len() {
-            if self.sessions[i].ended() {
+            if self.sessions[i].ended()
+                || super::super::client_sessions::is_client(&self.sessions[i].durable_name)
+            {
                 continue;
             }
             let agent_id = self.sessions[i].agent_id.clone();
@@ -3109,13 +3185,19 @@ impl App {
         // selected and connected instead of waiting on the relay's
         // bookkeeping. The reconciliation above retires it as soon as the
         // real record lands.
-        let panes: Vec<(String, String)> = self
+        let panes: Vec<_> = self
             .sessions
             .iter()
             .filter(|pane| !pane.ended())
-            .map(|pane| (pane.agent_id.clone(), pane.durable_name.clone()))
+            .map(|pane| {
+                (
+                    pane.agent_id.clone(),
+                    pane.durable_name.clone(),
+                    pane.client_thread.clone(),
+                )
+            })
             .collect();
-        for (agent_id, name) in panes {
+        for (agent_id, name, thread) in panes {
             'tree: for ws in &mut self.tree {
                 for proj in &mut ws.projects {
                     for env in &mut proj.envs {
@@ -3125,14 +3207,23 @@ impl App {
                         let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
                             continue;
                         };
-                        let ours = ConsoleSession {
-                            name: name.clone(),
-                            kind: "SHELL".into(),
-                            command: None,
-                            running: true,
-                            attached: true,
-                            created_at: None,
-                            snapshot: None,
+                        let ours = if let Some((harness, _, _)) =
+                            super::super::client_sessions::parse_name(&name)
+                        {
+                            let mut row =
+                                ConsoleSession::client_thread(&agent_id, harness, thread.as_ref());
+                            row.name = name.clone();
+                            row
+                        } else {
+                            ConsoleSession {
+                                name: name.clone(),
+                                kind: "SHELL".into(),
+                                command: None,
+                                running: true,
+                                attached: true,
+                                created_at: None,
+                                snapshot: None,
+                            }
                         };
                         match &mut agent.sessions {
                             LoadSessions::Loaded(sessions) => {
@@ -3148,6 +3239,35 @@ impl App {
             }
         }
         self.select_pending_session();
+    }
+
+    /// A native client selected a conversation; adopt its exact provider ID.
+    pub(super) fn client_thread_selected(
+        &mut self,
+        client_id: &str,
+        thread: super::super::client_sessions::Thread,
+    ) -> Option<String> {
+        let index = self
+            .sessions
+            .iter()
+            .position(|s| s.client_id.as_deref() == Some(client_id))?;
+        let pane = &mut self.sessions[index];
+        let agent_id = pane.agent_id.clone();
+        let old = pane.durable_name.clone();
+        let draft =
+            super::super::client_sessions::parse_name(&old).is_some_and(|(_, _, id)| id.is_none());
+        let name = super::super::client_sessions::name(&pane.harness, &agent_id, Some(&thread.id));
+        pane.durable_name = name.clone();
+        pane.client_thread = Some(thread);
+        if self.active == Some(index) || self.pending_select_session.as_deref() == Some(&old) {
+            self.pending_select_session = Some(name.clone());
+        }
+        self.auto_attempted.insert(name);
+        if draft {
+            self.remove_session_row(&agent_id, &old);
+        }
+        self.adopt_pane_sessions();
+        Some(agent_id)
     }
 
     /// What a maximized-header tab says for the pane at `index`: the
@@ -3366,7 +3486,11 @@ impl App {
                 // Dropping the session detaches its local half; the agent
                 // stays running (sleeping is deliberate, never a side effect).
                 if let Some(session) = self.take_session(i) {
-                    if watched && unasked && settled {
+                    if watched
+                        && unasked
+                        && settled
+                        && !super::super::client_sessions::is_client(&session.durable_name)
+                    {
                         respawn = Some((session.agent_id.clone(), session.harness.clone()));
                     }
                     closed = Some(session.agent_name.clone());
@@ -3563,6 +3687,10 @@ impl App {
             && let Some(session) = self.console_session(w, p, e, a, i)
         {
             let name = session.name.clone();
+            if super::super::client_sessions::is_client(&name) {
+                self.maximized = true;
+                return self.reattach_row(row.kind);
+            }
             let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
             return Some(Effect::FullScreen {
                 agent_id,
@@ -3571,10 +3699,40 @@ impl App {
             });
         }
         let session = self.sessions.get(self.active?)?;
+        if super::super::client_sessions::is_client(&session.durable_name) {
+            self.maximized = true;
+            return None;
+        }
         Some(Effect::FullScreen {
             agent_id: session.agent_id.clone(),
             session_name: session.durable_name.clone(),
             agent_name: session.agent_name.clone(),
+        })
+    }
+
+    /// Choose the VM the user is looking at, never the default launch target
+    /// or a different pane when the tree has focus.
+    fn shell_agent(&self) -> Option<(String, String)> {
+        if self.focus == ManageFocus::Session {
+            let session = self.active_session()?;
+            return Some((session.agent_id.clone(), session.agent_name.clone()));
+        }
+        match self.selected_row()?.kind {
+            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => {
+                self.agent_at(w, p, e, a)
+            }
+            _ => None,
+        }
+    }
+
+    fn open_shell(&mut self) -> Option<Effect> {
+        let Some((agent_id, agent_name)) = self.shell_agent() else {
+            self.status = "Select a VM to open an SSH shell".into();
+            return None;
+        };
+        Some(Effect::OpenShell {
+            agent_id,
+            agent_name,
         })
     }
 
@@ -3987,6 +4145,9 @@ impl App {
     fn alt_action(&mut self, action: char) -> Option<Effect> {
         self.status.clear();
         match action {
+            'b' if self.screen == Screen::Manage && self.confirm.is_none() && !self.keys_open => {
+                self.open_shell()
+            }
             's' => {
                 self.start_settings();
                 None
@@ -4384,19 +4545,19 @@ impl App {
                 self.full_screen_current()
             }
             KeyCode::Char('f') => self.full_screen_current(),
-            // The command to reach this exact session from another terminal —
-            // the same one the dashboard hands out.
+            // A separate shell on this exact VM, even from a session row.
             KeyCode::Char('c') => {
-                let RowKind::Session(w, p, e, a, i) = row?.kind else {
-                    self.status = "Select a session to copy its ssh command".into();
-                    return None;
+                let (w, p, e, a) = match row?.kind {
+                    RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+                    _ => {
+                        self.status = "Select a VM or session to copy its SSH shell command".into();
+                        return None;
+                    }
                 };
-                let session_name = self.console_session(w, p, e, a, i)?.name.clone();
                 let (agent_id, _) = self.agent_at(w, p, e, a)?;
                 Some(Effect::CopySsh {
                     agent_id,
                     environment_id: self.tree[w].projects[p].envs[e].id.clone(),
-                    session_name,
                 })
             }
             KeyCode::Right | KeyCode::Char('l') => self.set_expanded(row?.kind, true),
@@ -4503,6 +4664,16 @@ impl App {
                 let name = self.console_session(w, p, e, a, i)?.name.clone();
                 let (agent_id, _) = self.agent_at(w, p, e, a)?;
                 let environment_id = self.tree[w].projects[p].envs[e].id.clone();
+                if super::super::client_sessions::is_client(&name) {
+                    return match self.pane_for_row(kind) {
+                        Some(index) => Some(Effect::CloseSession { index }),
+                        None => {
+                            self.status =
+                                "This conversation is saved on the VM. Enter resumes it.".into();
+                            None
+                        }
+                    };
+                }
                 self.ending.insert(name.clone());
                 Some(Effect::KillSession {
                     agent_id,
@@ -5418,7 +5589,7 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// Everywhere else the unshifted chord is simply absent — it can go dead, but
 /// never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', 'n', 'p', 'r', ']', '['];
+    const ACTIONS: &[char] = &['b', 'f', 's', 'n', 'p', 'r', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = match c.to_ascii_lowercase() {
@@ -5438,6 +5609,7 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     // nothing until the next keystroke, so without Meta it simply doesn't
     // exist — the same trade ⌥[ documents above.
     match key.code {
+        KeyCode::Char('∫') => Some('b'),
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
         KeyCode::Char('π') => Some('p'),
@@ -6027,6 +6199,127 @@ mod tests {
     /// pane was minted with — so when the listing arrives, the pane adopts
     /// the listed name and the placeholder collapses into the real row,
     /// rather than both standing as duplicates.
+    #[test]
+    fn client_conversation_keeps_its_identity_and_reconnects_without_becoming_an_ssh_session() {
+        let mut a = loaded_app();
+        let name = super::super::super::client_sessions::name("codex", "ca_1", Some("thread-1"));
+        let thread = super::super::super::client_sessions::Thread {
+            id: "thread-1".into(),
+            title: "Fix deployment startup".into(),
+            directory: "/app".into(),
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            updated_at: "now".into(),
+            state: "idle".into(),
+        };
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = name.clone();
+        pane.harness = "codex".into();
+        a.attach_session(pane, "ca_1".into());
+        let shell = ConsoleSession {
+            name: "unrelated-shell".into(),
+            kind: "SHELL".into(),
+            command: Some("bash".into()),
+            running: true,
+            attached: true,
+            created_at: None,
+            snapshot: None,
+        };
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![shell.clone()]));
+        assert_eq!(
+            a.sessions[0].durable_name, name,
+            "never adopt the SSH shell's identity"
+        );
+        for _ in 0..2 {
+            a.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![
+                    shell.clone(),
+                    ConsoleSession::client_thread("ca_1", "codex", Some(&thread)),
+                ]),
+            );
+        }
+        let rows = a.rows();
+        let instance_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.label == "Fix deployment startup")
+            .collect();
+        assert_eq!(instance_rows.len(), 1);
+        assert!(
+            a.take_auto_connects()
+                .iter()
+                .all(|c| c.session_name != name),
+            "history never spawns clients automatically"
+        );
+        a.cursor = instance_rows[0].0;
+        a.focus = ManageFocus::Tree;
+        assert_eq!(a.on_key(key(KeyCode::Char('f'))), None);
+        assert!(a.maximized);
+        a.focus = ManageFocus::Tree;
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('x'))),
+            Some(Effect::CloseSession { index: 0 })
+        ));
+        drop(a.take_session(0));
+        a.focus = ManageFocus::Tree;
+        assert!(
+            matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, agent_id, .. }) if session_name == name && agent_id == "ca_1")
+        );
+    }
+
+    #[test]
+    fn native_thread_selection_and_title_refresh_follow_ids_not_row_positions() {
+        use super::super::super::client_sessions::{self, Thread};
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "box");
+        pane.harness = "codex".into();
+        pane.durable_name = client_sessions::name("codex", "ca_1", None);
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        let first = Thread {
+            id: "thread-1".into(),
+            title: "First conversation".into(),
+            directory: "/app".into(),
+            created_at: None,
+            updated_at: String::new(),
+            state: "idle".into(),
+        };
+        a.client_thread_selected("local-client", first.clone());
+        assert_eq!(a.session_tab_label(0), "First conversation");
+        assert!(!a.rows().iter().any(|r| r.label.contains("New codex")));
+        let mut second = first.clone();
+        second.id = "thread-2".into();
+        second.title = "Second conversation".into();
+        a.client_thread_selected("local-client", second.clone());
+        assert_eq!(
+            a.sessions[0].durable_name,
+            client_sessions::name("codex", "ca_1", Some("thread-2"))
+        );
+        let rows = vec![
+            ConsoleSession::client_thread("ca_1", "codex", Some(&first)),
+            ConsoleSession::client_thread("ca_1", "codex", Some(&second)),
+        ];
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "First conversation")
+            .unwrap();
+        let mut renamed = first.clone();
+        renamed.title = "Renamed conversation".into();
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![
+                ConsoleSession::client_thread("ca_1", "codex", Some(&second)),
+                ConsoleSession::client_thread("ca_1", "codex", Some(&renamed)),
+            ]),
+        );
+        assert_eq!(a.selected_row().unwrap().label, "Renamed conversation");
+        assert!(a.take_auto_connects().is_empty());
+    }
+
     #[test]
     fn a_platform_listing_renames_the_pane_instead_of_duplicating() {
         let mut a = loaded_app();
@@ -7453,10 +7746,13 @@ mod tests {
     fn shift_tab_cycles_the_harness_on_the_prompt() {
         let mut a = app();
         assert_eq!(a.harness_name(), "claude");
+        a.set_harness(Some("railway"));
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "codex");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "grok");
+        assert_eq!(a.harness_name(), "claude");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "opencode");
         a.on_key(key(KeyCode::BackTab));
@@ -7664,7 +7960,7 @@ mod tests {
         let Some(Effect::SaveSettings(outcome)) = a.on_key(key(KeyCode::Right)) else {
             panic!("expected a save");
         };
-        assert_eq!(outcome.agent, "codex");
+        assert_eq!(outcome.agent, "opencode");
         assert_eq!(
             outcome.theme, a.theme.slug,
             "the rest rides along unchanged"
@@ -9408,10 +9704,9 @@ mod tests {
         assert!(a.confirm.is_none(), "a key read is not a key pressed");
     }
 
-    /// `c` copies a command for the highlighted session, and says so when
-    /// there is no session under the cursor.
+    /// `c` copies a shell command for the VM behind either kind of row.
     #[test]
-    fn c_copies_an_ssh_command_for_the_session() {
+    fn c_copies_an_ssh_shell_command_for_a_vm_or_session() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -9435,7 +9730,19 @@ mod tests {
             Some(Effect::CopySsh {
                 agent_id: "ca_1".into(),
                 environment_id: "env_prod".into(),
-                session_name: "claude-one".into(),
+            })
+        );
+
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('c'))),
+            Some(Effect::CopySsh {
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
             })
         );
 
@@ -9444,7 +9751,93 @@ mod tests {
         a.cursor = 0;
         a.prompt_focused = false;
         assert_eq!(a.on_key(key(KeyCode::Char('c'))), None);
-        assert!(a.status.contains("Select a session"), "{}", a.status);
+        assert!(a.status.contains("Select a VM"), "{}", a.status);
+    }
+
+    #[test]
+    fn option_b_opens_the_selected_vm_including_without_an_agent_session() {
+        for chord in [alt('b'), alt('B'), key(KeyCode::Char('∫'))] {
+            let mut a = loaded_app();
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.label == "nimble-otter")
+                .unwrap();
+            assert_eq!(
+                a.on_key(chord),
+                Some(Effect::OpenShell {
+                    agent_id: "ca_1".into(),
+                    agent_name: "nimble-otter".into(),
+                })
+            );
+            assert!(a.sessions.is_empty());
+        }
+    }
+
+    #[test]
+    fn option_b_uses_the_focused_panes_vm_and_keeps_the_session() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_other", "other-vm"), "ca_other".into());
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        a.focus = ManageFocus::Session;
+        assert_eq!(
+            a.on_key(alt('b')),
+            Some(Effect::OpenShell {
+                agent_id: "ca_other".into(),
+                agent_name: "other-vm".into(),
+            })
+        );
+        assert_eq!(a.sessions.len(), 1);
+        assert_eq!(a.focus, ManageFocus::Session);
+
+        // With the tree focused, its row wins over that unrelated pane.
+        a.focus = ManageFocus::Tree;
+        assert_eq!(
+            a.on_key(alt('b')),
+            Some(Effect::OpenShell {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+            })
+        );
+        a.cursor = 0;
+        assert_eq!(a.on_key(alt('b')), None);
+        assert!(a.status.contains("Select a VM"));
+    }
+
+    #[test]
+    fn option_b_respects_dialogs_and_the_ssh_key_gate() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        a.on_key(key(KeyCode::Char('?')));
+        assert_eq!(a.on_key(alt('b')), None);
+        a.keys_open = false;
+        a.on_key(key(KeyCode::Char('d')));
+        assert!(a.confirm.is_some());
+        assert_eq!(a.on_key(alt('b')), None);
+        a.confirm = None;
+
+        let held = HeldConnect::OpenShell {
+            agent_id: "ca_1".into(),
+            agent_name: "nimble-otter".into(),
+        };
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        assert!(a.hold_for_ssh_key(held.clone()));
+        assert_eq!(a.ssh_gate.as_ref().unwrap().then, Some(held.clone()));
+        assert_eq!(
+            held.into_effect(),
+            Effect::OpenShell {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+            }
+        );
     }
 
     /// Landing on an agent opens it, so its sessions are there without a

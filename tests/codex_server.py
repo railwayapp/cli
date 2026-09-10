@@ -26,6 +26,8 @@ if "--version" in sys.argv:
     sys.exit()
 assert sys.argv[1] == "app-server"
 assert sys.argv[sys.argv.index("--ws-auth") + 1] == "capability-token"
+assert 'approval_policy="never"' in sys.argv
+assert 'sandbox_mode="danger-full-access"' in sys.argv
 token = pathlib.Path(sys.argv[sys.argv.index("--ws-token-file") + 1]).read_text()
 port = int(sys.argv[sys.argv.index("--listen") + 1].rsplit(":", 1)[1])
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -61,6 +63,26 @@ class BootstrapTests(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_text(f"#!{sys.executable}\n" + FAKE)
         binary.chmod(0o700)
+        npm = binary.with_name("npm")
+        npm.write_text(f"#!{sys.executable}\n" + r'''
+import os, pathlib, sys
+home = pathlib.Path(os.environ['HOME'])
+with (home / 'npm-calls').open('a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\n')
+if os.environ.get('FAKE_UPDATE_FAIL'):
+    print('registry unavailable', file=sys.stderr)
+    sys.exit(1)
+if sys.argv[1] == 'view':
+    print(os.environ.get('FAKE_LATEST', '0.153.4'))
+else:
+    prefix = pathlib.Path(sys.argv[sys.argv.index('--prefix') + 1])
+    binary = prefix / 'node_modules/.bin/codex'
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text((home / '.local/bin/codex').read_text().replace('0.153.4', prefix.name))
+    binary.chmod(0o700)
+    print('installation output stays in update.log')
+''')
+        npm.chmod(0o700)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
@@ -133,6 +155,49 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.SetupError, "already serving"):
             bootstrap.setup({"directory": str(self.home), "token": self.token}, self.home, self.port)
         self.assertEqual(len(self.children), 1)
+
+    def test_start_upgrades_running_instance_and_local_connection_version(self):
+        first = self.start()
+        old_pid = self.children[0].pid
+        with patch.dict(os.environ, {"FAKE_LATEST": "0.154.0"}):
+            updated = self.start()
+            self.assertEqual(updated["version"], "0.154.0")
+            self.assertFalse(updated["reused"])
+            self.assertEqual(updated["token"], first["token"])
+            self.assertEqual(updated["directory"], first["directory"])
+            self.assertIsNotNone(self.children[0].poll())
+            self.assertNotEqual(self.children[-1].pid, old_pid)
+            self.assertTrue(self.start()["reused"])
+        calls = (self.home / 'npm-calls').read_text()
+        self.assertEqual(calls.count('install --prefix'), 2)
+        self.assertIn('@openai/codex@0.154.0', calls)
+
+    def test_connect_and_inspect_do_not_update_a_running_instance(self):
+        first = self.start()
+        calls = (self.home / 'npm-calls').read_text()
+        with patch.dict(os.environ, {"FAKE_UPDATE_FAIL": "1"}):
+            connected = self.start(action="connect")
+            self.assertTrue(connected["reused"])
+            self.assertEqual(connected["version"], first["version"])
+            self.assertIsNotNone(self.start(action="inspect"))
+        self.assertEqual((self.home / 'npm-calls').read_text(), calls)
+
+    def test_failed_update_keeps_the_existing_server_available(self):
+        first = self.start()
+        with patch.dict(os.environ, {"FAKE_UPDATE_FAIL": "1"}):
+            with self.assertRaisesRegex(bootstrap.SetupError, 'Could not update Codex'):
+                self.start()
+        self.assertTrue(bootstrap.healthy(self.port, first['token']))
+        self.assertIn('registry unavailable', (self.root / 'update.log').read_text())
+        self.assertEqual(len(self.children), 1)
+
+    def test_invalid_registry_version_never_installs_or_stops_the_server(self):
+        first = self.start()
+        with patch.dict(os.environ, {"FAKE_LATEST": "../../malicious"}):
+            with self.assertRaisesRegex(bootstrap.SetupError, 'latest official Codex release'):
+                self.start()
+        self.assertTrue(bootstrap.healthy(self.port, first['token']))
+        self.assertEqual((self.home / 'npm-calls').read_text().count('install --prefix'), 1)
 
     def test_busy_port_is_not_taken_over(self):
         with socket.socket() as sock:
