@@ -12,7 +12,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use super::herdr_cli::{Herdr, Machine};
-use super::state::State;
+use super::state::Store;
 use super::sync;
 use super::target;
 use crate::client::GQLClient;
@@ -134,7 +134,7 @@ struct Picker {
     client: reqwest::Client,
     backboard: String,
     herdr: Herdr,
-    state: State,
+    store: Store,
     remote: bool,
 }
 
@@ -148,17 +148,17 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
-    let state = State::load().unwrap_or_default();
+    let store = Store::new(&configs)?;
     let mut picker = Picker {
         configs,
         client,
         backboard,
         herdr,
-        state,
+        store,
         remote: args.remote,
     };
     let this_vm = std::env::var("RAILWAY_CLOUD_AGENT_ID").ok();
-    let mut names = picker.state.project_names.clone();
+    let mut names = picker.store.load()?.project_names;
 
     loop {
         let agents = ca::list_mine(&picker.client, &picker.backboard).await?;
@@ -168,16 +168,11 @@ pub async fn command(args: Args) -> Result<()> {
                 .into_iter()
                 .collect();
             if !names.is_empty() {
-                picker.state.project_names = names.clone();
-                let _ = picker.state.save();
+                picker
+                    .store
+                    .update(|s| s.project_names = names.clone())
+                    .await?;
             }
-        }
-        if agents.is_empty() {
-            println!(
-                "No cloud agents. {} creates one and adds it to herdr.",
-                "railway ca herdr new".cyan()
-            );
-            return Ok(());
         }
         let machines = if args.remote {
             Vec::new()
@@ -229,12 +224,14 @@ pub async fn command(args: Args) -> Result<()> {
             };
         }
 
-        let mut items = Vec::with_capacity(rows.len() + 2);
-        if !args.remote {
-            items.push(Item::New);
+        let items = picker_items(rows, args.remote);
+        if items.is_empty() {
+            println!(
+                "No cloud agents. {} creates one and adds it to herdr.",
+                "railway ca herdr new".cyan()
+            );
+            return Ok(());
         }
-        items.push(Item::Sync);
-        items.extend(rows.into_iter().map(Item::Agent));
         let Some(item) = inquire::Select::new("Agent", items)
             .with_render_config(Configs::get_render_config())
             .with_page_size(17)
@@ -296,6 +293,19 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
+fn picker_items(rows: Vec<Row>, remote: bool) -> Vec<Item> {
+    if remote && rows.is_empty() {
+        return Vec::new();
+    }
+    let mut items = Vec::with_capacity(rows.len() + 2);
+    if !remote {
+        items.push(Item::New);
+    }
+    items.push(Item::Sync);
+    items.extend(rows.into_iter().map(Item::Agent));
+    items
+}
+
 impl Picker {
     async fn connect(&mut self, row: &Row) -> Result<()> {
         let agent = self.ensure_awake(&row.agent).await?;
@@ -305,15 +315,18 @@ impl Picker {
         ready?;
         match &row.machine {
             Some(machine) => {
-                self.herdr.machine_disable(&machine.id)?;
-                self.herdr.machine_enable(&machine.id)?;
-                self.remember(&agent.id, Some(&machine.id))?;
+                self.reconnect(&agent, machine).await?;
+                if let Some(harness) = self.store.load()?.bootstrap_pending.get(&agent.id).cloned()
+                {
+                    super::bootstrap::run(&agent, &harness, &self.store).await?;
+                }
                 println!(
                     "✓ {} is enabled in herdr; pick it from the sidebar.",
                     machine.label.cyan()
                 );
             }
             None => {
+                let harness = super::harness::choose(&Default::default(), true)?;
                 let target = target::target(&agent);
                 let label = target::label(&row.project, &agent.name);
                 super::known_hosts::ensure_relay_known_host()?;
@@ -323,15 +336,9 @@ impl Picker {
                     .machines()?
                     .into_iter()
                     .find(|m| sync::is_machine_for(&agent, m));
-                self.remember(&agent.id, added.as_ref().map(|m| m.id.as_str()))?;
-                let harness = super::harness::choose(&Default::default(), true)?;
-                if let Err(e) = super::bootstrap::run(&agent, harness).await {
-                    eprintln!(
-                        "{} bootstrap did not finish: {e:#}\n  {} retries it.",
-                        "warning:".yellow(),
-                        format!("railway ca herdr bootstrap {}", agent.name).cyan()
-                    );
-                }
+                self.remember(&agent.id, added.as_ref().map(|m| m.id.as_str()))
+                    .await?;
+                super::bootstrap::run(&agent, harness, &self.store).await?;
                 println!(
                     "✓ Added {} to herdr; pick it from the sidebar.",
                     label.cyan()
@@ -343,42 +350,34 @@ impl Picker {
 
     async fn sleep(&mut self, row: &Row) -> Result<()> {
         let agent = &row.agent;
-        match agent.status {
-            ca::Status::Sleeping => {
-                println!("Agent {} is already asleep.", agent.name.cyan());
-            }
-            ca::Status::Running | ca::Status::Starting => {
-                self.herdr.notify(
-                    &format!("Sleeping {}", agent.name),
-                    "railway: cloudAgentSleep issued; its herdr machine is being disabled",
-                );
-                let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
-                let result = ca::sleep(
-                    &self.client,
-                    &self.backboard,
-                    &agent.environment_id,
-                    &agent.id,
-                )
-                .await;
-                spinner.finish_and_clear();
-                result?;
-                println!(
-                    "✓ Sleeping agent {}; its disk is kept, compute stops billing.",
-                    agent.name.cyan()
-                );
-            }
-            _ => bail!(
-                "Agent {} is {}; there is nothing running to sleep.",
-                agent.name,
-                agent.status.label()
-            ),
-        }
+        self.herdr.notify(
+            &format!("Sleeping {}", agent.name),
+            "Requesting sleep; its disk is kept",
+        );
+        let mut locked = self.store.lock().await?;
+        let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
+        let result = ca::sleep(
+            &self.client,
+            &self.backboard,
+            &agent.environment_id,
+            &agent.id,
+        )
+        .await;
+        spinner.finish_and_clear();
+        result?;
+        locked.state.sleep_until.insert(
+            agent.id.clone(),
+            chrono::Utc::now() + chrono::Duration::seconds(60),
+        );
+        // Record the acknowledgement even if disabling Herdr subsequently fails.
+        locked.save()?;
         if let Some(machine) = &row.machine {
-            if machine.enabled {
-                self.herdr.machine_disable(&machine.id)?;
-            }
-            self.remember(&agent.id, Some(&machine.id))?;
+            self.herdr.machine_disable(&machine.id)?;
         }
+        println!(
+            "✓ Sleep requested for agent {}; compute stops billing once it is asleep.",
+            agent.name.cyan()
+        );
         Ok(())
     }
 
@@ -392,9 +391,7 @@ impl Picker {
                 ready?;
                 // Off then on: a profile change makes herdr open a fresh
                 // connection, which is what clears a stuck Attention state.
-                self.herdr.machine_disable(&machine.id)?;
-                self.herdr.machine_enable(&machine.id)?;
-                self.remember(&agent.id, Some(&machine.id))?;
+                self.reconnect(&agent, machine).await?;
                 println!(
                     "✓ Agent {} is running; {} is back in the sidebar.",
                     agent.name.cyan(),
@@ -425,6 +422,7 @@ impl Picker {
             return Ok(());
         }
 
+        let mut locked = self.store.lock().await?;
         let spinner = create_spinner(format!("Deleting agent {}", agent.name));
         let result = ca::delete(&self.client, &self.backboard, &agent.id).await;
         spinner.finish_and_clear();
@@ -436,30 +434,26 @@ impl Picker {
         if let Some(machine) = &row.machine {
             self.herdr.machine_remove(&machine.id)?;
         }
-        self.remember(&agent.id, None)?;
+        locked.state.machines.remove(&agent.id);
+        locked.state.sleep_until.remove(&agent.id);
+        locked.state.bootstrap_pending.remove(&agent.id);
+        locked.save()?;
         println!("✓ Deleted agent {}", agent.name.cyan());
         Ok(())
     }
 
     async fn ensure_awake(&mut self, agent: &ca::Agent) -> Result<ca::Agent> {
-        match agent.status {
-            ca::Status::Running => {
-                ca::remember(&mut self.configs, agent)?;
-                return Ok(agent.clone());
-            }
-            ca::Status::Sleeping => {
-                self.herdr.notify(
-                    &format!("Waking {}", agent.name),
-                    "railway: cloudAgentWake issued; the machine is re-enabled once its ssh relay answers",
-                );
-                ca::wake(&self.client, &self.backboard, &agent.id).await?;
-            }
-            ca::Status::Starting => {}
-            _ => bail!(
-                "Agent {} is {} and cannot be woken.",
-                agent.name,
-                agent.status.label()
-            ),
+        // Inventory can lag a sleep/wake elsewhere. The server reads live VM
+        // state and handles no-ops; always send the user's intent to it.
+        self.herdr.notify(
+            &format!("Waking {}", agent.name),
+            "The machine is re-enabled once its SSH relay answers",
+        );
+        {
+            let mut locked = self.store.lock().await?;
+            ca::wake(&self.client, &self.backboard, &agent.id).await?;
+            locked.state.sleep_until.remove(&agent.id);
+            locked.save()?;
         }
         ca::remember(&mut self.configs, agent)?;
         let spinner = create_spinner(format!("Waking agent {}", agent.name));
@@ -478,24 +472,93 @@ impl Picker {
         if self.remote {
             return Ok(Vec::new());
         }
-        let applied = sync::resync(&self.client, &self.backboard, &self.herdr).await?;
-        self.state = State::load().unwrap_or_default();
-        Ok(applied)
+        sync::resync(&self.client, &self.backboard, &self.herdr, &self.store).await
     }
 
-    /// Reloads first: the watcher may have written state since the picker opened.
-    fn remember(&mut self, agent_id: &str, profile_id: Option<&str>) -> Result<()> {
-        self.state = State::load().unwrap_or_default();
-        match profile_id {
-            Some(profile) => {
-                self.state
-                    .machines
-                    .insert(agent_id.to_string(), profile.to_string());
-            }
-            None => {
-                self.state.machines.remove(agent_id);
-            }
+    async fn reconnect(&self, agent: &ca::Agent, machine: &Machine) -> Result<()> {
+        let mut locked = self.store.lock().await?;
+        if locked.state.sleep_pending(&agent.id, chrono::Utc::now()) {
+            bail!(
+                "A sleep was requested for {} while connecting; wake it again to reconnect.",
+                agent.name
+            );
         }
-        self.state.save()
+        self.herdr.machine_disable(&machine.id)?;
+        self.herdr.machine_enable(&machine.id)?;
+        locked
+            .state
+            .machines
+            .insert(agent.id.clone(), machine.id.clone());
+        locked.save()
+    }
+
+    async fn remember(&self, agent_id: &str, profile_id: Option<&str>) -> Result<()> {
+        self.store
+            .update(|state| match profile_id {
+                Some(profile) => {
+                    state
+                        .machines
+                        .insert(agent_id.to_string(), profile.to_string());
+                }
+                None => {
+                    state.machines.remove(agent_id);
+                }
+            })
+            .await
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::testkit::MockBackboard;
+
+    #[tokio::test]
+    async fn an_observed_running_agent_still_sends_the_wake_request() {
+        let api = MockBackboard::spawn();
+        let home = tempfile::tempdir().unwrap();
+        let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines("[]");
+        let agent = ca::Agent {
+            id: "agent-1".into(),
+            name: "reviewer".into(),
+            status: ca::Status::Running,
+            project_id: "project-1".into(),
+            environment_id: "environment-1".into(),
+            created_at: chrono::Utc::now(),
+        };
+        api.stub(
+            "CloudAgentWake",
+            serde_json::json!({"cloudAgentWake": {"id": agent.id, "status": "STARTING"}}),
+        );
+        api.stub(
+            "CloudAgent",
+            serde_json::json!({"cloudAgent": {
+                "id": agent.id, "name": agent.name, "status": "RUNNING",
+                "projectId": agent.project_id, "environmentId": agent.environment_id,
+                "createdAt": agent.created_at,
+            }}),
+        );
+        let mut picker = Picker {
+            configs: api.configs(&home),
+            client: reqwest::Client::new(),
+            backboard: api.url(),
+            herdr: fake.herdr(),
+            store: Store::at(home.path().join("state.json"), &api.url(), "test"),
+            remote: false,
+        };
+        picker.ensure_awake(&agent).await.unwrap();
+        assert!(
+            api.requests()
+                .iter()
+                .any(|r| r["operationName"] == "CloudAgentWake"),
+            "an inventory observation must not veto explicit wake intent"
+        );
+    }
+
+    #[test]
+    fn empty_local_picker_offers_creation() {
+        let items = picker_items(Vec::new(), false);
+        assert!(matches!(items.first(), Some(Item::New)));
+        assert!(picker_items(Vec::new(), true).is_empty());
     }
 }
