@@ -90,7 +90,7 @@ impl Connection {
     }
 
     fn show(&self, saved: &SavedConfig, persisted: &Result<()>) -> Result<()> {
-        saved.show(false)?;
+        saved.show()?;
         if let Err(error) = persisted {
             eprintln!("Could not save connection details for railway code get-config: {error:#}");
         }

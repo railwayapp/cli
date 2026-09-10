@@ -126,6 +126,7 @@ impl AppConfig {
         if alias.trim().is_empty() || directory.trim().is_empty() {
             bail!("Codex Desktop requires an SSH alias and remote project directory");
         }
+        self.migrate_alias(alias, name);
         // Codex trims paths and normalizes trailing separators when matching projects.
         let directory = normalized_path(directory);
         for connection in &mut self.remote_connections {
@@ -161,6 +162,43 @@ impl AppConfig {
             });
         }
         Ok(())
+    }
+
+    fn migrate_alias(&mut self, alias: &str, name: &str) {
+        use crate::commands::ssh::config::{agent_alias, codex_agent_alias};
+        // Reconnect upgrades Railway's old default without dropping projects or
+        // custom labels. An explicitly selected custom alias is kept as-is.
+        if alias != codex_agent_alias(name) {
+            return;
+        }
+        let legacy = agent_alias(name);
+        while let Some(index) = self
+            .remote_connections
+            .iter()
+            .position(|c| c.ssh_alias.trim() == legacy)
+        {
+            let mut previous = self.remote_connections.remove(index);
+            if let Some(current) = self
+                .remote_connections
+                .iter_mut()
+                .find(|c| c.ssh_alias.trim() == alias)
+            {
+                for project in previous.projects {
+                    if let Some(existing) = current.projects.iter_mut().find(|p| {
+                        normalized_path(&p.remote_path) == normalized_path(&project.remote_path)
+                    }) {
+                        if existing.label.is_none() {
+                            existing.label = project.label;
+                        }
+                    } else {
+                        current.projects.push(project);
+                    }
+                }
+            } else {
+                previous.ssh_alias = alias.into();
+                self.remote_connections.insert(index, previous);
+            }
+        }
     }
 }
 
@@ -341,6 +379,74 @@ mod tests {
             current["remoteConnections"][1]["projects"][2],
             json!({"remotePath":"/app/new project","label":"Railway: box"})
         );
+    }
+
+    #[test]
+    fn legacy_alias_migration_preserves_projects_labels_and_preferences() {
+        for already_imported in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            let mut original = json!({"version":1,"sshConnectTimeoutSeconds":45,
+                "remoteConnections":[
+                    {"sshAlias":"personal","projects":[{"remotePath":"/work","label":"Personal"}]},
+                    {"sshAlias":"railway-agent-codex-railg-3ed","projects":[
+                        {"remotePath":"/app/","label":"My project"},
+                        {"remotePath":"/other","label":"Other project"}]}]});
+            if already_imported {
+                original["remoteConnections"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({
+                    "sshAlias":"railway-codex-railg-3ed","projects":[
+                        {"remotePath":"/app"},
+                        {"remotePath":"/other/","label":"Updated label"},
+                        {"remotePath":"/new","label":"New project"}]}));
+            }
+            let before = serde_json::to_vec(&original).unwrap();
+            fs::write(&path, &before).unwrap();
+            assert!(
+                update(&path, |c| c.upsert(
+                    "railway-codex-railg-3ed",
+                    "codex-railg-3ed",
+                    "/app"
+                ))
+                .unwrap()
+            );
+            assert_eq!(
+                fs::read(path.with_file_name("config.json.railway-backup")).unwrap(),
+                before
+            );
+            let config = read(&path).unwrap();
+            assert_eq!(config.ssh_connect_timeout_seconds, Some(45));
+            assert_eq!(config.remote_connections.len(), 2);
+            assert_eq!(
+                serde_json::to_value(&config.remote_connections[0]).unwrap(),
+                original["remoteConnections"][0]
+            );
+            let connection = &config.remote_connections[1];
+            assert_eq!(connection.ssh_alias, "railway-codex-railg-3ed");
+            assert_eq!(
+                connection.projects.len(),
+                if already_imported { 3 } else { 2 }
+            );
+            assert_eq!(connection.projects[0].label.as_deref(), Some("My project"));
+            assert_eq!(
+                connection.projects[1].label.as_deref(),
+                Some(if already_imported {
+                    "Updated label"
+                } else {
+                    "Other project"
+                })
+            );
+            assert!(
+                !update(&path, |c| c.upsert(
+                    "railway-codex-railg-3ed",
+                    "codex-railg-3ed",
+                    "/app/"
+                ))
+                .unwrap()
+            );
+        }
     }
 
     #[test]

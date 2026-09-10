@@ -259,32 +259,19 @@ impl SavedConfig {
     }
 
     /// One panel is shared by setup, reconnect, client exit/cancel and replay.
-    pub(super) fn show(&self, replay: bool) -> Result<()> {
-        print!("{}", self.render(replay)?);
+    pub(super) fn show(&self) -> Result<()> {
+        print!("{}", self.render()?);
         Ok(())
     }
 
-    fn render(&self, replay: bool) -> Result<String> {
+    fn render(&self) -> Result<String> {
         let divider = "─".repeat(64).cyan();
         let mut out = format!("\n{divider}\n");
-        if replay {
-            writeln!(
-                out,
-                "Saved connection for {} ({})",
-                self.agent_name,
-                self.saved_at.to_rfc3339()
-            )?;
-            writeln!(
-                out,
-                "Local snapshot; live server status has not been checked."
-            )?;
-        } else {
-            writeln!(
-                out,
-                "{} connection ready on {}",
-                self.harness, self.agent_name
-            )?;
-        }
+        writeln!(
+            out,
+            "{} connection details for {}",
+            self.harness, self.agent_name
+        )?;
         if let Some(codex) = &self.codex {
             let c = &codex.connection;
             writeln!(
@@ -348,9 +335,8 @@ impl SavedConfig {
                 )?;
             }
         }
-        // Backend setup uses the concise OpenCode results layout. SSH-only
-        // connections and existing OpenCode snapshots retain their SSH details.
-        let show_ssh = self.codex.is_none() && (replay || self.opencode.is_none());
+        // Only SSH-based sessions need the SSH panel, in both creation and replay.
+        let show_ssh = self.codex.is_none() && self.opencode.is_none();
         if show_ssh {
             writeln!(
                 out,
@@ -380,7 +366,7 @@ impl SavedConfig {
                     "code".into(),
                     format!("--{}", self.harness),
                     "connect".into(),
-                    self.agent_id.clone()
+                    self.agent_name.clone()
                 ])
             )?;
         }
@@ -403,7 +389,7 @@ impl SavedConfig {
                 "railway".into(),
                 "code".into(),
                 "get-config".into(),
-                self.agent_id.clone()
+                self.agent_name.clone()
             ])
         )?;
         writeln!(
@@ -413,7 +399,7 @@ impl SavedConfig {
                 "railway".into(),
                 "ca".into(),
                 "sleep".into(),
-                self.agent_id.clone()
+                self.agent_name.clone()
             ])
         )?;
         writeln!(out, "{divider}\n")?;
@@ -492,7 +478,7 @@ pub(super) fn command(args: Args) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&saved)?);
         Ok(())
     } else {
-        saved.show(true)
+        saved.show()
     }
 }
 
@@ -681,16 +667,15 @@ mod tests {
     #[test]
     fn codex_panel_replays_custom_desktop_settings_and_failed_import_with_usable_backend() {
         let snapshot = saved("id", "box").with_codex(&codex("token"), true, &desktop());
-        let panel = snapshot.render(true).unwrap();
+        let panel = snapshot.render().unwrap();
         assert_eq!(panel.matches(&"─".repeat(64)).count(), 2);
         assert_eq!(panel.matches("Codex App Server Configuration:").count(), 1);
         assert_eq!(panel.matches("Codex Desktop configured:").count(), 1);
         for expected in [
             "My custom label",
             "SSH configuration written to /home/user/custom ssh",
-            "railway code --codex connect id",
-            "railway code get-config id",
-            "live server status has not been checked",
+            "railway code --codex connect box",
+            "railway code get-config box",
         ] {
             assert!(panel.contains(expected), "missing {expected}");
         }
@@ -704,7 +689,7 @@ mod tests {
         failed.save_in(home.path()).unwrap();
         let loaded = SavedConfig::load_in(home.path(), None).unwrap();
         assert!(loaded.require_desktop().is_err());
-        let panel = loaded.render(true).unwrap();
+        let panel = loaded.render().unwrap();
         assert!(panel.contains("still-usable") && panel.contains("SSH check failed"));
         assert!(!panel.contains("Codex Desktop configured:"));
     }

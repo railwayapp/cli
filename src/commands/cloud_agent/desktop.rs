@@ -75,7 +75,7 @@ pub struct Args {
     #[clap(long, default_value = "/app", value_name = "PATH")]
     dir: String,
 
-    /// Host alias to write (defaults to railway-agent-<name>)
+    /// Host alias to write (Codex: railway-<name>; other apps: railway-agent-<name>)
     #[clap(long)]
     alias: Option<String>,
 
@@ -255,6 +255,7 @@ pub async fn command(args: Args) -> Result<()> {
         &prepared.environment_id,
         prepared.identity.as_deref(),
         args.alias.as_deref(),
+        apps.contains(&App::Codex),
     )?;
     let claude_entry = apps
         .contains(&App::Claude)
@@ -437,8 +438,9 @@ fn register_ssh(
     environment_id: &str,
     identity: Option<&Path>,
     alias: Option<&str>,
+    codex: bool,
 ) -> Result<String> {
-    let alias = registered_ssh_alias(path, agent_name, environment_id, alias)?;
+    let alias = registered_ssh_alias(path, agent_name, environment_id, alias, codex)?;
     let marker = ssh_config::agent_marker(environment_id, agent_name);
     let block = render_block(agent_name, environment_id, &alias, identity)?;
     ssh_config::upsert_marked_block(path, &marker, &block)
@@ -451,16 +453,25 @@ fn registered_ssh_alias(
     agent_name: &str,
     environment_id: &str,
     alias: Option<&str>,
+    codex: bool,
 ) -> Result<String> {
     if alias.is_some_and(|alias| !ssh_config::is_valid_agent_name(alias)) {
         bail!("SSH alias must be a single host name (letters, digits, '.', '_' or '-').");
     }
     let marker = ssh_config::agent_marker(environment_id, agent_name);
-    Ok(match alias {
-        Some(alias) => alias.to_owned(),
-        None => ssh_config::marked_host_alias(path, &marker)?
-            .unwrap_or_else(|| ssh_config::agent_alias(agent_name)),
-    })
+    if let Some(alias) = alias {
+        return Ok(alias.to_owned());
+    }
+    let previous = ssh_config::marked_host_alias(path, &marker)?;
+    let legacy_default = ssh_config::agent_alias(agent_name);
+    if codex
+        && previous
+            .as_deref()
+            .is_none_or(|alias| alias == legacy_default)
+    {
+        return Ok(ssh_config::codex_agent_alias(agent_name));
+    }
+    Ok(previous.unwrap_or(legacy_default))
 }
 
 pub(crate) fn preflight_codex_desktop() -> Result<()> {
@@ -526,6 +537,7 @@ pub(crate) async fn configure_codex(
         environment_id,
         identity,
         options.alias.as_deref(),
+        true,
     )?;
     if !options.no_verify {
         require_codex_checks(&verify(&alias, &[App::Codex], &path).await)?;
@@ -624,6 +636,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         &agent_name,
         &environment_id,
         args.alias.as_deref(),
+        apps.contains(&App::Codex),
     )?;
     let block = render_block(&agent_name, &environment_id, &alias, identity.as_deref())?;
 
@@ -736,8 +749,13 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
             &agent.name,
             &agent.environment_id,
             args.alias.as_deref(),
+            false,
         )?;
-        codex_config::remove(&alias)?
+        let mut removed = codex_config::remove(&alias)?;
+        if args.alias.is_none() {
+            removed |= codex_config::remove(&ssh_config::codex_agent_alias(&agent.name))?;
+        }
+        removed
     } else {
         false
     };
@@ -749,10 +767,13 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     let stopped_opencode =
         apps.iter().any(|app| app.is_opencode()) && agent.status == ca::Status::Running;
     if stopped_opencode {
-        let alias = args
-            .alias
-            .clone()
-            .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
+        let alias = registered_ssh_alias(
+            ssh_config_path,
+            &agent.name,
+            &agent.environment_id,
+            args.alias.as_deref(),
+            false,
+        )?;
         opencode::stop(&alias, ssh_config_path, args.opencode2).await?;
     }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
@@ -1138,14 +1159,22 @@ mod tests {
         fs::write(&path, personal).unwrap();
         let old_key = home.path().join("old key");
         let new_key = home.path().join("new key");
-        let alias = register_ssh(&path, "box", "env-id", Some(&old_key), Some("my-codex")).unwrap();
+        let alias = register_ssh(
+            &path,
+            "box",
+            "env-id",
+            Some(&old_key),
+            Some("my-codex"),
+            true,
+        )
+        .unwrap();
         assert_eq!(alias, "my-codex");
 
         // Terminal setup uses the same registration without requesting an alias.
-        let alias = register_ssh(&path, "box", "env-id", Some(&new_key), None).unwrap();
+        let alias = register_ssh(&path, "box", "env-id", Some(&new_key), None, true).unwrap();
         assert_eq!(alias, "my-codex");
         assert_eq!(
-            registered_ssh_alias(&path, "box", "env-id", None).unwrap(),
+            registered_ssh_alias(&path, "box", "env-id", None, true).unwrap(),
             alias
         );
         let updated = fs::read_to_string(&path).unwrap();
@@ -1157,7 +1186,7 @@ mod tests {
         assert!(updated.contains("User agent:env-id:box"));
         assert!(updated.contains("new key"));
         assert!(!updated.contains("old key"));
-        register_ssh(&path, "box", "env-id", Some(&new_key), None).unwrap();
+        register_ssh(&path, "box", "env-id", Some(&new_key), None, true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), updated);
         #[cfg(unix)]
         {
@@ -1171,19 +1200,66 @@ mod tests {
 
     #[test]
     fn shared_ssh_registration_creates_a_default_and_leaves_ambiguous_blocks_intact() {
+        for (codex, name, expected) in [
+            (false, "box", "railway-agent-box"),
+            (true, "codex-railg-3ed", "railway-codex-railg-3ed"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join(".ssh/config");
+            assert_eq!(
+                register_ssh(&path, name, "env-id", None, None, codex).unwrap(),
+                expected
+            );
+            let existing = fs::read_to_string(&path).unwrap();
+            let ambiguous = existing.replace(&format!("Host {expected}\n"), "Host box other\n");
+            fs::write(&path, &ambiguous).unwrap();
+            assert!(register_ssh(&path, name, "env-id", None, None, codex).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
+            assert!(
+                register_ssh(
+                    &path,
+                    name,
+                    "env-id",
+                    None,
+                    Some("bad\nHost injected"),
+                    codex
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
+        }
+    }
+
+    #[test]
+    fn codex_registration_migrates_the_legacy_default_in_place() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".ssh/config");
+        let name = "codex-railg-3ed";
+        register_ssh(&path, name, "env-id", None, None, false).unwrap();
+        let legacy = fs::read_to_string(&path).unwrap();
         assert_eq!(
-            register_ssh(&path, "box", "env-id", None, None).unwrap(),
-            "railway-agent-box"
+            registered_ssh_alias(&path, name, "env-id", None, true).unwrap(),
+            "railway-codex-railg-3ed"
         );
-        let existing = fs::read_to_string(&path).unwrap();
-        let ambiguous = existing.replace("Host railway-agent-box\n", "Host box other\n");
-        fs::write(&path, &ambiguous).unwrap();
-        assert!(register_ssh(&path, "box", "env-id", None, None).is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
-        assert!(register_ssh(&path, "box", "env-id", None, Some("bad\nHost injected")).is_err());
-        assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        for _ in 0..2 {
+            assert_eq!(
+                register_ssh(&path, name, "env-id", None, None, true).unwrap(),
+                "railway-codex-railg-3ed"
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                legacy.replace(
+                    "Host railway-agent-codex-railg-3ed\n",
+                    "Host railway-codex-railg-3ed\n"
+                )
+            );
+            // Other apps sharing this registration use the migrated host too.
+            assert_eq!(
+                registered_ssh_alias(&path, name, "env-id", None, false).unwrap(),
+                "railway-codex-railg-3ed"
+            );
+        }
     }
 
     #[test]

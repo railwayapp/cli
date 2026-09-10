@@ -331,6 +331,10 @@ pub(crate) fn agent_alias(agent_name: &str) -> String {
     format!("railway-agent-{}", sanitize_alias(agent_name))
 }
 
+pub(crate) fn codex_agent_alias(agent_name: &str) -> String {
+    format!("railway-{}", sanitize_alias(agent_name))
+}
+
 /// The strict single-token grammar backboard enforces on a coding-agent name at
 /// create: `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`. `railway ca desktop` renders the
 /// server-returned name verbatim into an OpenSSH `User` line, so a name outside

@@ -139,11 +139,11 @@ either prompt leaves the server running and prints the connection details.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
-(Beta): the first five letters/digits of the project name, lowercase, plus a
-random three-character suffix. When using your default cloud agents project,
-the label comes from the local repository or directory instead. Existing names
-are checked before creation; `--name` overrides the generated name. The same
-naming applies to `remote` and `railway ca desktop`.
+(Beta); Codex uses `codex-railg-3ed`: the first five letters/digits of the project
+name, lowercase, plus a random three-character suffix. When using your default
+cloud agents project, the label comes from the local repository or directory
+instead. Existing names are checked before creation; `--name` overrides the
+generated name. The same naming applies to `remote` and `railway ca desktop`.
 
 Reconnect to an existing server using your local client:
 
@@ -192,6 +192,10 @@ railway code --codex connect my-box
 railway code --codex connect
 ```
 
+New Codex agents use the same naming rules as OpenCode, with a `codex-` prefix
+(for example, `codex-railg-3ed`). The generated name works with `connect`,
+`get-config`, and cloud-agent lifecycle commands; `--name` sets a custom name.
+
 For a Desktop-only workflow:
 
 ```bash
@@ -228,7 +232,9 @@ The remote server's token, PID, version, directory, and logs live under
 or a different running project directory requires another agent (`--new`).
 
 Setup and `connect` also register and verify the agent's SSH host in
-`~/.ssh/config`, using the same registration as `railway ca desktop --codex`.
+`~/.ssh/config` as `railway-<agent-name>`, using the same registration as
+`railway ca desktop --codex`. Reconnecting upgrades the previous
+`railway-agent-<agent-name>` default in both SSH and Codex Desktop's saved config.
 They merge the connection and remote project into
 `~/.codex/codex-app/config.json` (`$CODEX_HOME/codex-app/config.json` when set)
 in the background. Setup never launches or activates Codex Desktop; the app
@@ -261,6 +267,7 @@ Codex currently marks its remote App Server transport experimental.
 ```bash
 railway code get-config                  # most recently saved connection
 railway code get-config my-box           # a specific agent by name
+railway code get-config codex-railg-3ed   # generated names work too
 railway code get-config <agent-id>        # use an ID if names are ambiguous
 railway code get-config my-box --json
 ```
@@ -272,7 +279,8 @@ their server details; ordinary cloud-terminal launches save SSH details.
 
 `get-config` works from any directory, using local snapshots without login,
 network access, waking a VM, launching a client, or applying Desktop configuration.
-Its human-readable output replays one results panel with the snapshot's timestamp.
+Its human-readable output uses the same concise results panel as creation and
+reconnect.
 `--json` includes the saved agent/SSH metadata and the harness-specific `codex`
 or `opencode` object, including credentials and Desktop status. These are saved
 details, rather than a live health check; rerun setup/connect to refresh them.

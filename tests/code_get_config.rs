@@ -60,10 +60,15 @@ fn run(home: &Path, args: &[&str]) -> Output {
 
 #[test]
 fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
-    for harness in ["codex", "opencode", "opencode2", "claude"] {
+    for (harness, name) in [
+        ("codex", "codex-railg-3ed"),
+        ("opencode", "oc-railg-3ed"),
+        ("opencode2", "oc2-railg-3ed"),
+        ("claude", "my-box"),
+    ] {
         let home = tempfile::tempdir().unwrap();
-        fixture(home.path(), harness, "agent-123", "my-box");
-        let output = run(home.path(), &["my-box"]);
+        fixture(home.path(), harness, "agent-123", name);
+        let output = run(home.path(), &[name]);
         assert!(
             output.status.success(),
             "{}",
@@ -72,20 +77,34 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
         assert!(output.stderr.is_empty());
         let text = String::from_utf8(output.stdout).unwrap();
         assert_eq!(text.matches(&"─".repeat(64)).count(), 2);
-        if harness != "codex" {
+        if harness == "claude" {
             assert_eq!(
                 text.matches("Railway Cloud Agent SSH Configuration:")
                     .count(),
                 1
             );
             assert!(text.contains("Host railway-agent-my-box"));
+        } else {
+            for removed in [
+                "Railway Cloud Agent SSH Configuration:",
+                "SSH config block",
+                "Host railway-agent-",
+                "railway ca ssh",
+            ] {
+                assert!(!text.contains(removed), "unexpected SSH detail: {removed}");
+            }
+            assert!(text.contains(&format!("railway code --{harness} connect {name}")));
         }
+        assert!(text.contains(&format!("railway code get-config {name}")));
+        assert!(text.contains(&format!("railway ca sleep {name}")));
         assert_eq!(text.matches("Connect with the Railway CLI:").count(), 1);
         for removed in [
             "Connect from your computer:",
             "CODEX_HOME=",
             "RAILWAY_CODEX_SERVER_TOKEN=",
             "OPENCODE_SERVER_PASSWORD=",
+            "Saved connection for",
+            "live server status has not been checked",
         ] {
             assert!(
                 !text.contains(removed),
@@ -100,13 +119,10 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
                 "SSH configuration written to /home/user/.ssh/config",
                 "wss://example.up.railway.app:443",
                 "Codex App Server Configuration:",
-                "railway code --codex connect agent-123",
-                "railway code get-config agent-123",
             ] {
                 assert!(text.contains(expected), "missing {expected}");
             }
         } else if harness.starts_with("opencode") {
-            assert!(text.contains(&format!("railway code --{harness} connect agent-123")));
             assert!(
                 text.contains("fixture-password") && text.contains("Desktop configuration updated")
             );
@@ -116,9 +132,13 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
 
 #[test]
 fn json_uses_legacy_snapshots_without_login_or_writes() {
-    for harness in ["codex", "opencode2"] {
+    for (harness, name) in [
+        ("codex", "codex-railg-3ed"),
+        ("opencode", "oc-railg-3ed"),
+        ("opencode2", "oc2-railg-3ed"),
+    ] {
         let home = tempfile::tempdir().unwrap();
-        let expected = fixture(home.path(), harness, "agent-123", "my-box");
+        let expected = fixture(home.path(), harness, "agent-123", name);
         fs::write(
             home.path().join(".railway/config.json"),
             "invalid login config",
@@ -128,7 +148,7 @@ fn json_uses_legacy_snapshots_without_login_or_writes() {
         let before = fs::read(&path).unwrap();
         for args in [
             vec!["--json"],
-            vec!["my-box", "--json"],
+            vec![name, "--json"],
             vec!["--json", "agent-123"],
         ] {
             let output = run(home.path(), &args);
@@ -154,7 +174,7 @@ fn json_uses_legacy_snapshots_without_login_or_writes() {
 #[test]
 fn named_lookup_selects_an_older_agent_and_reports_duplicates_and_missing_agents() {
     let home = tempfile::tempdir().unwrap();
-    let mut first = fixture(home.path(), "codex", "first-id", "shared-name");
+    let mut first = fixture(home.path(), "codex", "first-id", "codex-railg-3ed");
     first["saved_at"] = json!("2026-09-08T12:00:00Z");
     let second = fixture(home.path(), "opencode", "second-id", "shared-name");
     fs::write(
@@ -164,6 +184,7 @@ fn named_lookup_selects_an_older_agent_and_reports_duplicates_and_missing_agents
     .unwrap();
     for (args, expected) in [
         (vec!["first-id", "--json"], &first),
+        (vec!["codex-railg-3ed", "--json"], &first),
         (vec!["--json"], &second),
     ] {
         let output = run(home.path(), &args);
@@ -173,6 +194,12 @@ fn named_lookup_selects_an_older_agent_and_reports_duplicates_and_missing_agents
             *expected
         );
     }
+    first["agent_name"] = json!("shared-name");
+    fs::write(
+        home.path().join(".railway/code-configs.json"),
+        serde_json::to_vec(&json!({"version":1,"connections":[first,second]})).unwrap(),
+    )
+    .unwrap();
     for (selector, message) in [
         ("shared-name", "Multiple saved agents"),
         ("missing", "No saved connection details for"),
