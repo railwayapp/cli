@@ -60,6 +60,18 @@ pub struct CreateArgs {
     #[clap(value_name = "NAME")]
     name: Option<String>,
 
+    /// Provision the public code endpoint (defaults to port 4096)
+    #[clap(long)]
+    code_endpoint: bool,
+
+    /// Provision the public code endpoint on this port
+    #[clap(long, value_parser = ca::parse_code_port)]
+    code_port: Option<u16>,
+
+    /// Restore this cloud-agent checkpoint into the new VM
+    #[clap(long, value_name = "CHECKPOINT_ID")]
+    from_checkpoint: Option<String>,
+
     /// Set a variable on the agent (repeatable, comma-separable). Values may
     /// reference other variables — `DB_URL=postgres.DATABASE_URL` or the full
     /// `${{postgres.DATABASE_URL}}` form — resolved server-side at create time
@@ -279,6 +291,10 @@ pub async fn create(args: CreateArgs) -> Result<()> {
         &environment_id,
         args.name.clone(),
         variables,
+        ca::CreateOptions {
+            code_port: args.code_port.or(args.code_endpoint.then_some(4096)),
+            checkpoint_id: args.from_checkpoint,
+        },
     )
     .await
     {
@@ -561,7 +577,15 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                 "{}",
                 format!("No cloud agents yet — creating one in {where_label}.").dimmed()
             );
-            let agent = ca::create(client, &backboard, &environment_id, None, None).await?;
+            let agent = ca::create(
+                client,
+                &backboard,
+                &environment_id,
+                None,
+                None,
+                ca::CreateOptions::default(),
+            )
+            .await?;
             (agent, ca::Resolution::Sole)
         }
     };
@@ -879,6 +903,32 @@ mod tests {
     use super::*;
     use crate::testkit::MockBackboard;
     use serde_json::json;
+
+    #[test]
+    fn create_accepts_checkpoint_and_optional_code_endpoint() {
+        let args = CreateArgs::try_parse_from([
+            "create",
+            "restored",
+            "--from-checkpoint",
+            "checkpoint",
+            "--code-port",
+            "5000",
+        ])
+        .unwrap();
+        assert_eq!(args.from_checkpoint.as_deref(), Some("checkpoint"));
+        assert_eq!(args.code_port, Some(5000));
+        assert!(
+            !CreateArgs::try_parse_from(["create", "plain"])
+                .unwrap()
+                .code_endpoint
+        );
+        assert!(
+            CreateArgs::try_parse_from(["create", "coded", "--code-endpoint"])
+                .unwrap()
+                .code_endpoint
+        );
+        assert!(CreateArgs::try_parse_from(["create", "--code-port", "8080"]).is_err());
+    }
 
     #[tokio::test]
     async fn wake_sends_intent_even_when_the_inventory_reports_running() {

@@ -61,15 +61,18 @@ class BootstrapTests(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_text(f"#!{sys.executable}\n" + FAKE)
         binary.chmod(0o700)
-        with socket.socket() as sock, socket.socket() as code:
+        with socket.socket() as sock, socket.socket() as code, socket.socket() as custom:
             sock.bind(("127.0.0.1", 0))
             code.bind(("127.0.0.1", 0))
+            custom.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
             self.code_port = code.getsockname()[1]
+            self.custom_port = custom.getsockname()[1]
         self.root = self.home / ".railway/codex"
         self.token = "a" * 43
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith("RAILWAY_PUBLIC_DOMAIN")}
+                       if not key.startswith(("RAILWAY_PUBLIC_DOMAIN", "RAILWAY_CODE_PORT"))}
+        environment['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
         environment[f"RAILWAY_PUBLIC_DOMAIN_{self.port}"] = "test.example.com"
         env = patch.dict(os.environ, environment, clear=True)
         env.start()
@@ -150,15 +153,16 @@ class BootstrapTests(unittest.TestCase):
                 self.start()
         self.assertEqual(self.children, [])
 
-    def test_code_endpoint_coexists_with_app_and_survives_reconnect_and_restart(self):
-        os.environ[f"RAILWAY_PUBLIC_DOMAIN_{self.code_port}"] = "code.example.com"
+    def test_custom_code_endpoint_coexists_with_app_and_survives_reconnect_and_restart(self):
+        os.environ['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        os.environ[f"RAILWAY_PUBLIC_DOMAIN_{self.custom_port}"] = "code.example.com"
         os.environ["RAILWAY_PUBLIC_DOMAIN"] = "app.example.com"
         with socket.socket() as app:
             app.bind(("0.0.0.0", self.port))
             app.listen()
             first = self.start()
             self.assertEqual(first["url"], "wss://code.example.com:443")
-            self.assertEqual(json.loads((self.root / "server.json").read_text())["port"], self.code_port)
+            self.assertEqual(json.loads((self.root / "server.json").read_text())["port"], self.custom_port)
             self.assertIsNotNone(bootstrap.setup({"action": "inspect"}, self.home))
             self.assertTrue(bootstrap.setup({"action": "connect"}, self.home)["reused"])
             self.stop_children()
@@ -196,6 +200,65 @@ class BootstrapTests(unittest.TestCase):
         del os.environ[f"RAILWAY_PUBLIC_DOMAIN_{self.port}"]
         os.environ["RAILWAY_PUBLIC_DOMAIN"] = "legacy.example.com"
         self.assertEqual(self.start()["url"], "wss://legacy.example.com:443")
+
+    def test_checkpoint_restore_adopts_new_port_including_pre_port_state(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                os.environ['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+                os.environ.pop('RAILWAY_CODE_PORT', None)
+                first = self.start()
+                path = self.root / 'server.json'
+                saved = json.loads(path.read_text())
+                self.stop_children()
+                if legacy:
+                    saved.pop('port')
+                    saved.pop('vm_id')
+                bootstrap.save(path, saved)
+                os.environ['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+                os.environ['RAILWAY_CODE_PORT'] = str(self.custom_port)
+                os.environ[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-restored.example.com'
+                with socket.socket() as app:
+                    app.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    app.bind(('0.0.0.0', self.port))
+                    app.listen()
+                    restored = bootstrap.setup({'action': 'connect'}, self.home)
+                    self.assertEqual(restored['url'], 'wss://code-restored.example.com:443')
+                    self.assertEqual(restored['token'], first['token'])
+                    self.assertEqual(restored['directory'], first['directory'])
+                    self.assertFalse(restored['reused'])
+                    state = json.loads(path.read_text())
+                    self.assertEqual((state['port'], state['vm_id']), (self.custom_port, 'vm-restored'))
+                    self.stop_children()
+                path.unlink()
+
+    def test_restoring_without_endpoint_does_not_keep_source_code_port(self):
+        os.environ['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        os.environ[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-source.example.com'
+        self.start()
+        self.stop_children()
+        os.environ['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        del os.environ['RAILWAY_CODE_PORT']
+        del os.environ[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}']
+        self.assertEqual(bootstrap.setup({'action': 'connect'}, self.home)['url'], 'wss://test.example.com:443')
+
+    def test_configured_port_requires_its_own_domain_and_rejects_invalid_ports(self):
+        os.environ['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        os.environ[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-other.example.com'
+        with self.assertRaisesRegex(bootstrap.SetupError, f'no valid public address for port {self.custom_port}'):
+            self.start()
+        for port in ('0', '1023', str(self.port), '8790', '65536', 'nope'):
+            os.environ['RAILWAY_CODE_PORT'] = port
+            with self.assertRaisesRegex(bootstrap.SetupError, 'RAILWAY_CODE_PORT'):
+                self.start()
+        self.assertEqual(self.children, [])
+
+    def test_restored_pid_is_never_adopted(self):
+        self.start()
+        os.environ['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        self.assertIsNone(bootstrap.setup({'action': 'inspect'}, self.home))
+        with self.assertRaisesRegex(bootstrap.SetupError, 'occupied by another process'):
+            self.start()
+        self.assertIsNone(self.children[0].poll())
 
     def test_busy_code_port_does_not_fall_back_to_the_free_app_port(self):
         os.environ[f"RAILWAY_PUBLIC_DOMAIN_{self.code_port}"] = "code.example.com"

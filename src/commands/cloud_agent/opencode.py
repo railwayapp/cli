@@ -42,7 +42,14 @@ def process_start(pid):
         return None
 
 
+def restored_state(state):
+    current = os.environ.get("RAILWAY_FACTORY_VM_ID")
+    return bool(current and state.get("vm_id") and state["vm_id"] != current)
+
+
 def owned_process(state):
+    if restored_state(state):
+        return False
     pid = state.get("pid")
     start = state.get("start")
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
@@ -78,12 +85,25 @@ def port_available(port):
 
 
 def server_port(state):
-    # Old launchers never recorded a port, even on a VM with the code domain.
-    # Keep their saved servers on the app endpoint across reconnects and wakes.
-    port = state.get("port", LEGACY_PORT) if state else (
-        CODE_PORT if os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{CODE_PORT}") else LEGACY_PORT
-    )
-    if type(port) is not int or port not in (CODE_PORT, LEGACY_PORT):
+    configured = os.environ.get("RAILWAY_CODE_PORT")
+    if configured:
+        if not configured.isascii() or not configured.isdecimal():
+            raise SetupError("RAILWAY_CODE_PORT must be a valid code endpoint port.")
+        configured = int(configured)
+        if not 1024 <= configured <= 65535 or configured in (LEGACY_PORT, 8790):
+            raise SetupError("RAILWAY_CODE_PORT must be 1024-65535, excluding the app and gateway ports.")
+    # A live legacy server retains its endpoint. On a restored disk there is
+    # no owned process: adopt the new VM's explicit code port, even when the
+    # checkpoint contains pre-port launcher state. The API owns this setting.
+    if owned_process(state):
+        port = state.get("port", LEGACY_PORT)
+    elif configured:
+        port = configured
+    elif state and not restored_state(state):
+        port = state.get("port", LEGACY_PORT)
+    else:
+        port = CODE_PORT if os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{CODE_PORT}") else LEGACY_PORT
+    if type(port) is not int or not 1024 <= port <= 65535 or port == 8790:
         raise SetupError("The saved OpenCode server has an unsupported port.")
     return port
 
@@ -178,7 +198,8 @@ def setup(request, home):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            state = dict(credentials, harness=harness, directory=directory, port=port)
+            state = dict(credentials, harness=harness, directory=directory, port=port,
+                         vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"))
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
@@ -207,6 +228,9 @@ def setup(request, home):
             if cwd.exists():
                 state["directory"] = str(cwd.resolve())
                 save(state_path, state)
+        if reused and not state.get("vm_id") and os.environ.get("RAILWAY_FACTORY_VM_ID"):
+            state["vm_id"] = os.environ["RAILWAY_FACTORY_VM_ID"]
+            save(state_path, state)
         return dict(credentials, url=f"https://{domain}", directory=directory, reused=reused)
 
 

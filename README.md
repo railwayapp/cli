@@ -110,17 +110,80 @@ skills. Use `railway skills update` for detailed skill results or to retry a syn
 
 ## Coding backend and app endpoints
 
-Cloud agents with a `code-*` domain expose port 4096 for a managed Codex or
+The `code-*` endpoint is optional and configured only at VM creation.
+Ordinary cloud agents do not request it by default.
+Managed Codex/OpenCode client setup requests it automatically when creating a VM:
+
+```bash
+railway code --codex --new
+railway code --opencode --new
+railway code --opencode2 --new
+
+# Explicitly request the endpoint on a plain cloud agent:
+railway ca create my-box --code-endpoint
+
+# Choose a custom port instead of the default 4096:
+railway code --opencode2 --new --code-port 5000
+railway ca create my-box --code-port 5000
+```
+
+OpenCode Desktop setup also requests it. SSH-only sessions do not need the code
+endpoint. The API uses the optional `CloudAgentCreateInput.codeEndpoint` object:
+`{}` selects port 4096, `{ "port": 5000 }` selects a custom port, and omission
+disables it. Ports must be 1024-65535, excluding the app port 8080 and gateway
+port 8790. The API injects `RAILWAY_CODE_PORT` from that configuration, and
+FactoryVM injects `RAILWAY_PUBLIC_DOMAIN_<port>`. Caller and bootstrap variables
+cannot override `RAILWAY_CODE_PORT` or provision a route by setting it.
+
+Cloud agents with a `code-*` domain expose the configured port for a managed Codex or
 OpenCode server. Both launchers use this endpoint, leaving the `app-*` domain
 and port 8080 available for your application. One managed backend can occupy
 the code port at a time; setup reports a conflict if another process uses it.
 OpenCode2's server URL also serves its web UI with the printed credentials.
 
-Agents created before the code endpoint was available continue using port 8080.
-Existing managed servers retain their saved port when reconnecting or waking,
-including servers configured by older CLI versions. Use a fresh agent for a
-separate code endpoint. A saved code connection never falls back to the app URL
-if its code domain is unavailable.
+Agents without a code endpoint continue using port 8080 for managed backends.
+This is creation-time configuration: setting an environment variable inside an existing VM
+or reconnecting does not attach a domain. Sleep/wake preserves the chosen routes.
+Running managed servers keep their current endpoint. On restart, a server uses
+the VM's explicit code-port configuration; older VMs without it retain their
+saved port. A configured code endpoint never falls back to the app domain if its
+domain is unavailable.
+
+### Add or change the endpoint using a checkpoint
+
+Capture the source with the existing `cloudAgentCheckpointCreate` mutation and
+poll `cloudAgentCheckpoint` until its status is `SUCCEEDED`. Then create a new VM:
+
+```bash
+railway ca create restored-box --from-checkpoint <checkpoint-id> --code-endpoint
+# Or select a custom port:
+railway ca create restored-box --from-checkpoint <checkpoint-id> --code-port 5000
+railway code --opencode2 --agent restored-box
+```
+
+The equivalent API request is:
+
+```graphql
+mutation {
+  cloudAgentCreate(input: {
+    environmentId: "<same-environment-id>"
+    name: "restored-box"
+    cloudAgentCheckpointId: "<checkpoint-id>"
+    codeEndpoint: { port: 5000 }
+  }) {
+    id
+    name
+    domains { prefix port domain }
+  }
+}
+```
+
+The disk is restored into a new VM with its own identity and domains. Processes
+do not carry over. Saved Codex/OpenCode credentials and project directories are
+reused, while the launchers adopt the new VM's configured endpoint. Source VM
+variables are not copied automatically; pass needed variables or use a bootstrap.
+Checkpoint and bootstrap creates opt in explicitly. The separate fork operation
+preserves the source VM's code endpoint and port.
 
 ## OpenCode clients and remote servers
 
@@ -226,7 +289,7 @@ credentials, the SSH configuration file location, the Desktop project name, and
 commands to reconnect or retrieve the configuration.
 
 Terminal setup carries your available local Codex sign-in and configured
-skills/MCP sync, starts App Server on the code port (4096, or 8080 for legacy
+skills/MCP sync, starts App Server on the configured code port (default 4096, or 8080 for legacy
 connections), verifies its public WebSocket
 handshake, and offers to launch the local client. Tools, files, and threads live
 on the VM. Use `/resume` in Codex to reopen a remote thread. `connect` discovers
@@ -345,7 +408,7 @@ and projects inside Codex, since its import mechanism does not delete them.
 
 OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
-in the background on the code port (4096, or 8080 for legacy connections), checks
+in the background on the configured code port (default 4096, or 8080 for legacy connections), checks
 its public endpoint, and saves the URL,
 username, password, default server, and remote project in Desktop's settings.
 `--opencode` configures only standard OpenCode (`ai.opencode.desktop`).
