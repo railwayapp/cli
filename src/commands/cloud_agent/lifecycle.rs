@@ -351,27 +351,18 @@ pub async fn create(args: CreateArgs) -> Result<()> {
 pub async fn wake(args: WakeArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let (configs, client) = (&mut configs, &client);
+    wake_with(&mut configs, &client, args).await
+}
+
+async fn wake_with(configs: &mut Configs, client: &reqwest::Client, args: WakeArgs) -> Result<()> {
     let (project, environment) = (args.target.project.clone(), args.target.environment.clone());
     let scoped = scope(configs, client, project, environment).await?;
     let (agent, _) = ca::resolve(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
     let backboard = configs.get_backboard();
 
-    match agent.status {
-        ca::Status::Running => {
-            println!("Agent {} is already awake.", agent.name.cyan());
-            ca::remember(configs, &agent)?;
-            return Ok(());
-        }
-        ca::Status::Sleeping => ca::wake(client, &backboard, &agent.id).await?,
-        // Something else is already booting it; a second wake would be noise.
-        ca::Status::Starting => {}
-        _ => bail!(
-            "Agent {} is {} and cannot be woken.",
-            agent.name,
-            agent.status.label()
-        ),
-    }
+    // The inventory is an observation. Let the mutation's live state check
+    // decide whether waking is necessary, including when we last saw RUNNING.
+    ca::wake(client, &backboard, &agent.id).await?;
     ca::remember(configs, &agent)?;
 
     if args.no_wait {
@@ -405,20 +396,18 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
             }
             None => ca::list_mine(client, &backboard).await?,
         };
-        let awake: Vec<_> = agents
-            .into_iter()
-            .filter(|a| matches!(a.status, ca::Status::Running | ca::Status::Starting))
-            .collect();
-        if awake.is_empty() {
-            println!("No running agents to sleep.");
+        // A sleeping observation may predate a wake elsewhere. Send the intent
+        // for every agent; the server handles already-asleep agents as no-ops.
+        if agents.is_empty() {
+            println!("No cloud agents to sleep.");
             return Ok(());
         }
         telemetry::track_lifecycle("sleep_all", Duration::ZERO, None).await;
-        let spinner = create_spinner(format!("Sleeping {} agents", awake.len()));
+        let spinner = create_spinner(format!("Requesting sleep for {} agents", agents.len()));
         // Concurrently: each sleep now flushes the agent's disk over ssh first,
         // and run in sequence that would make the cost-control command take a
         // second per agent — slow enough that people stop reaching for it.
-        let failed: Vec<String> = futures::future::join_all(awake.iter().map(|agent| {
+        let failed: Vec<String> = futures::future::join_all(agents.iter().map(|agent| {
             let backboard = backboard.clone();
             async move {
                 ca::sleep(client, &backboard, &agent.environment_id, &agent.id)
@@ -432,27 +421,17 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
         .flatten()
         .collect();
         spinner.finish_and_clear();
-        println!("✓ Slept {} agents.", awake.len() - failed.len());
+        println!(
+            "✓ Sleep requested for {} agents.",
+            agents.len() - failed.len()
+        );
         if !failed.is_empty() {
-            bail!("Some agents are still running:\n{}", failed.join("\n"));
+            bail!("Some sleep requests failed:\n{}", failed.join("\n"));
         }
         return Ok(());
     }
 
     let (agent, _) = ca::resolve(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
-    match agent.status {
-        ca::Status::Sleeping => {
-            println!("Agent {} is already asleep.", agent.name.cyan());
-            return Ok(());
-        }
-        ca::Status::Running | ca::Status::Starting => {}
-        _ => bail!(
-            "Agent {} is {} — there is nothing running to sleep.",
-            agent.name,
-            agent.status.label()
-        ),
-    }
-
     let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
     let result = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
     spinner.finish_and_clear();
@@ -462,7 +441,7 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
     // still reports it running. Claiming a state the next command contradicts is
     // worse than describing the action taken.
     println!(
-        "✓ Sleeping agent {} — its disk is kept, compute stops billing.",
+        "✓ Sleep requested for agent {} — its disk is kept; compute stops billing once it is asleep.",
         agent.name.cyan()
     );
     Ok(())
@@ -630,10 +609,9 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
             Err(e) => Err(e),
         },
         _ => Err(anyhow::anyhow!(
-            "Agent {} is {} — it cannot be connected to. `railway ca delete {}` and create a new one.",
+            "Agent {} is reported as {} and cannot be connected to. Check `railway ca list` and retry, or use `railway ca create` to create a separate agent.",
             agent.name,
-            agent.status.label(),
-            agent.name
+            agent.status.label()
         )),
     };
     if let Some(spinner) = spinner {
@@ -899,6 +877,58 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn wake_sends_intent_even_when_the_inventory_reports_running() {
+        for status in ["RUNNING", "STARTING", "SLEEPING", "FAILED", "FUTURE_STATE"] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            server.stub(
+                "MyCloudAgents",
+                json!({"myCloudAgents": [{
+                    "id": "existing", "name": "my-agent", "status": status,
+                    "projectId": "project", "environmentId": "env",
+                    "createdAt": "2026-09-10T00:00:00Z"
+                }]}),
+            );
+            server.stub(
+                "CloudAgentWake",
+                json!({"cloudAgentWake": {
+                    "id": "existing", "status": "STARTING"
+                }}),
+            );
+            server.stub_graphql_error("CloudAgentWake", "cannot wake now");
+            wake_with(
+                &mut configs,
+                &reqwest::Client::new(),
+                WakeArgs::parse_from(["wake", "my-agent", "--no-wait"]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                server.variables_for("CloudAgentWake"),
+                vec![json!({"id": "existing"})]
+            );
+            assert!(
+                server.variables_for("CloudAgent").is_empty(),
+                "--no-wait must not poll"
+            );
+            assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+
+            // A newer server-side refusal must not be hidden by the old status.
+            let error = wake_with(
+                &mut configs,
+                &reqwest::Client::new(),
+                WakeArgs::parse_from(["wake", "my-agent", "--no-wait"]),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("cannot wake now"), "{error}");
+        }
+    }
 
     #[test]
     fn truncate_leaves_short_values_alone() {

@@ -60,10 +60,24 @@ impl Status {
         }
     }
 
-    /// The agent exists and can be brought back: it is worth listing, waking,
-    /// sleeping or connecting to.
+    /// The observed state permits connecting or waiting for a boot. A false
+    /// result says nothing about whether the agent exists or should be replaced.
     pub fn is_live(&self) -> bool {
         matches!(self, Status::Running | Status::Sleeping | Status::Starting)
+    }
+
+    /// Read a status label retained by the TUI through the same vocabulary as
+    /// the lifecycle commands. Future states remain unknown, not a live state.
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "running" => Self::Running,
+            "sleeping" => Self::Sleeping,
+            "starting" => Self::Starting,
+            "crashed" => Self::Crashed,
+            "failed" => Self::Failed,
+            "deleting" => Self::Deleting,
+            other => Self::Unknown(other.to_owned()),
+        }
     }
 }
 
@@ -385,7 +399,7 @@ pub enum Resolution {
     Named,
     /// It is the agent this machine last used in its environment.
     Remembered,
-    /// It is the caller's only live agent in scope.
+    /// It is the caller's only agent in scope.
     Sole,
 }
 
@@ -419,7 +433,7 @@ pub async fn resolve(
 
 /// [`resolve`], with the empty account handed back instead of an error.
 ///
-/// `None` means exactly "no live agents in scope, and no name was given" —
+/// `None` means exactly "no agents or remembered targets in scope, and no name was given" —
 /// the one case where a caller can reasonably do something other than fail,
 /// e.g. a connect command creating the first agent. Every other outcome
 /// (a named agent missing, more than one candidate) is still an error here,
@@ -440,14 +454,28 @@ pub async fn resolve_or_none(
         return match_selector(candidates, selector).map(|agent| Some((agent, Resolution::Named)));
     }
 
-    let live: Vec<Agent> = candidates
-        .into_iter()
-        .filter(|a| a.status.is_live())
-        .collect();
+    // Missing from inventory is not permission to forget a selected VM or
+    // redirect a bare command to somebody else. Naming a target above is an
+    // explicit override; scoping to another environment also excludes this pointer.
+    for env in configs.code_agent_environments() {
+        if environment_id.is_some_and(|scope| scope != env) {
+            continue;
+        }
+        if let Some(id) = configs.get_code_agent(&env)
+            && !candidates
+                .iter()
+                .any(|a| a.environment_id == env && a.id == id)
+        {
+            bail!(
+                "Remembered agent {id} is unavailable in this scope. Check `railway ca list` and name an agent explicitly, or use `railway ca create` to create a separate agent."
+            );
+        }
+    }
 
     // The pointer is what makes bare `railway ca ssh` mean "the agent I was
-    // just working in" rather than "whichever one sorts first".
-    let mut remembered: Vec<Agent> = live
+    // just working in" rather than "whichever one sorts first". Observed status
+    // must not erase that identity: FAILED can also mean the VM lookup failed.
+    let mut remembered: Vec<Agent> = candidates
         .iter()
         .filter(|a| configs.get_code_agent(&a.environment_id).as_deref() == Some(a.id.as_str()))
         .cloned()
@@ -456,16 +484,16 @@ pub async fn resolve_or_none(
         return Ok(Some((remembered.remove(0), Resolution::Remembered)));
     }
 
-    match live.len() {
+    match candidates.len() {
         0 => Ok(None),
         1 => Ok(Some((
-            live.into_iter().next().expect("len checked"),
+            candidates.into_iter().next().expect("len checked"),
             Resolution::Sole,
         ))),
         _ => bail!(
             "You have {} cloud agents and none is this directory's. Name one:\n{}",
-            live.len(),
-            describe(&live)
+            candidates.len(),
+            describe(&candidates)
         ),
     }
 }
@@ -537,6 +565,137 @@ pub fn humanize_age(created_at: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn a_missing_remembered_target_never_redirects_or_permits_creation() {
+        for scoped in [None, Some("env")] {
+            for has_other in [false, true] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                configs.set_code_agent("env", "remembered");
+                let nodes = if has_other {
+                    json!([{
+                        "id": "other", "name": "other-agent", "status": "RUNNING",
+                        "projectId": "project", "environmentId": "env",
+                        "createdAt": "2026-09-10T00:00:00Z"
+                    }])
+                } else {
+                    json!([])
+                };
+                server.stub("MyCloudAgents", json!({"myCloudAgents": nodes}));
+                server.stub("CloudAgents", json!({"cloudAgents": nodes}));
+                let result = resolve_or_none(&configs, &reqwest::Client::new(), None, scoped).await;
+                assert!(
+                    result.is_err(),
+                    "missing identity must not select another VM or allow creation"
+                );
+                assert_eq!(configs.get_code_agent("env").as_deref(), Some("remembered"));
+                if has_other {
+                    let (agent, _) =
+                        resolve_or_none(&configs, &reqwest::Client::new(), Some("other"), scoped)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        agent.id, "other",
+                        "an explicit target can override a missing pointer"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remembered_targets_outside_the_requested_scope_do_not_block_selection() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs.set_code_agent("other-env", "old-target");
+        server.stub(
+            "CloudAgents",
+            json!({"cloudAgents": [{
+                "id": "in-scope", "name": "my-agent", "status": "RUNNING",
+                "projectId": "project", "environmentId": "env",
+                "createdAt": "2026-09-10T00:00:00Z"
+            }]}),
+        );
+        let (agent, _) = resolve_or_none(&configs, &reqwest::Client::new(), None, Some("env"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.id, "in-scope");
+    }
+
+    #[tokio::test]
+    async fn failed_observations_remain_candidates_and_keep_the_remembered_target() {
+        for status in ["FAILED", "CRASHED", "DELETING", "FUTURE_STATE"] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            let node = json!({
+                "id": "existing", "name": "my-agent", "status": status,
+                "projectId": "project", "environmentId": "env",
+                "createdAt": "2026-09-10T00:00:00Z"
+            });
+            server.stub("MyCloudAgents", json!({"myCloudAgents": [node.clone()]}));
+            let client = reqwest::Client::new();
+            let (agent, how) = resolve_or_none(&configs, &client, None, None)
+                .await
+                .unwrap()
+                .expect("an observation must not erase a VM");
+            assert_eq!(agent.id, "existing");
+            assert!(matches!(how, Resolution::Sole));
+
+            configs.set_code_agent("env", "existing");
+            let mut other = node.clone();
+            other["id"] = json!("other");
+            other["status"] = json!("RUNNING");
+            server.stub("CloudAgents", json!({"cloudAgents": [node, other]}));
+            let (agent, how) = resolve_or_none(&configs, &client, None, Some("env"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agent.id, "existing",
+                "{status} must not redirect to the running VM"
+            );
+            assert!(matches!(how, Resolution::Remembered));
+            assert_eq!(
+                server.variables_for("CloudAgents"),
+                vec![json!({"environmentId": "env", "mine": true})]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_empty_inventory_permits_automatic_creation() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        server.stub("MyCloudAgents", json!({"myCloudAgents": []}));
+        assert!(
+            resolve_or_none(&configs, &client, None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        server.stub_graphql_error("CloudAgents", "temporarily unavailable");
+        assert!(
+            resolve_or_none(&configs, &client, None, Some("env"))
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_or_none(&configs, &client, Some("missing"), None)
+                .await
+                .is_err()
+        );
+    }
 
     fn agent(id: &str, name: &str, status: Status) -> Agent {
         Agent {
