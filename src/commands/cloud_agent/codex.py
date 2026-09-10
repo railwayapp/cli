@@ -13,6 +13,9 @@ import subprocess
 import sys
 import time
 
+CODE_PORT = 4096
+LEGACY_PORT = 8080
+
 
 class SetupError(Exception):
     pass
@@ -101,7 +104,18 @@ def runtime(environment):
     return match[1]
 
 
-def setup(request, home, port=8080):
+def server_port(state):
+    # Old launchers never recorded a port, even on a VM with the code domain.
+    # Keep their saved servers on the app endpoint across reconnects and wakes.
+    port = state.get("port", LEGACY_PORT) if state else (
+        CODE_PORT if os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{CODE_PORT}") else LEGACY_PORT
+    )
+    if type(port) is not int or port not in (CODE_PORT, LEGACY_PORT):
+        raise SetupError("The saved Codex server has an unsupported port.")
+    return port
+
+
+def setup(request, home):
     os.umask(0o077)
     action = request.get("action", "start")
     if action not in ("start", "connect", "inspect"):
@@ -110,6 +124,7 @@ def setup(request, home, port=8080):
     state_path = root / "server.json"
     if action == "inspect":
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        port = server_port(state)
         if (owned_process(state) and state.get("token") and state.get("directory")
                 and healthy(port, state["token"])):
             return {"directory": state["directory"], "version": state.get("version")}
@@ -124,6 +139,7 @@ def setup(request, home, port=8080):
         except BlockingIOError:
             raise SetupError("Another Codex setup is running on this agent. Retry when it finishes.") from None
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        port = server_port(state)
         if action == "connect":
             if not state.get("directory") or not state.get("token"):
                 raise SetupError("The saved Codex connection is incomplete. Rerun railway code --codex --agent <name>.")
@@ -131,9 +147,11 @@ def setup(request, home, port=8080):
         directory = str(Path(request["directory"]).resolve(strict=True))
         if not Path(directory).is_dir():
             raise SetupError("Codex's working directory must be a directory.")
-        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN_8080") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        domain = os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{port}")
+        if not domain and port == LEGACY_PORT:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if not domain or not re.fullmatch(r"[a-zA-Z0-9.-]+", domain):
-            raise SetupError("This agent has no valid public address for port 8080.")
+            raise SetupError(f"This agent has no valid public address for port {port}.")
         token = state.get("token") or request.get("token")
         if not isinstance(token, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{43,}", token):
             raise SetupError("Codex requires a high-entropy URL-safe connection token.")
@@ -153,7 +171,7 @@ def setup(request, home, port=8080):
             token_path = root / "server-token"
             token_path.write_text(token)
             os.chmod(token_path, 0o600)
-            state = dict(token=token, directory=directory, version=version)
+            state = dict(token=token, directory=directory, version=version, port=port)
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(

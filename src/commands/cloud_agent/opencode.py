@@ -16,6 +16,9 @@ import time
 import urllib.error
 import urllib.request
 
+CODE_PORT = 4096
+LEGACY_PORT = 8080
+
 
 class SetupError(Exception):
     pass
@@ -74,7 +77,18 @@ def port_available(port):
         return False
 
 
-def setup(request, home, port=8080):
+def server_port(state):
+    # Old launchers never recorded a port, even on a VM with the code domain.
+    # Keep their saved servers on the app endpoint across reconnects and wakes.
+    port = state.get("port", LEGACY_PORT) if state else (
+        CODE_PORT if os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{CODE_PORT}") else LEGACY_PORT
+    )
+    if type(port) is not int or port not in (CODE_PORT, LEGACY_PORT):
+        raise SetupError("The saved OpenCode server has an unsupported port.")
+    return port
+
+
+def setup(request, home):
     harness = request.get("harness", "opencode")
     if harness not in ("opencode", "opencode2"):
         raise SetupError("Unsupported OpenCode harness.")
@@ -85,6 +99,7 @@ def setup(request, home, port=8080):
         # Discovery is read-only, returns no credentials, and must not seed
         # directories or start a server on an unrelated cloud agent.
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        port = server_port(state)
         if (state.get("harness", "opencode") == harness and owned_process(state)
                 and health(port, state, harness) == (200, True)
                 and health(port, harness=harness)[0] == 401):
@@ -122,6 +137,7 @@ def setup(request, home, port=8080):
                 save(state_path, state)
             return {"stopped": True}
 
+        port = server_port(state)
         if request.get("action") == "connect":
             if state.get("harness", "opencode") != harness or not state.get("password") or not state.get("username"):
                 raise SetupError("This agent has no server for the selected OpenCode edition.")
@@ -134,9 +150,11 @@ def setup(request, home, port=8080):
         directory = str(Path(request["directory"]).resolve(strict=True))
         if not Path(directory).is_dir():
             raise SetupError("OpenCode's working directory must be a directory.")
-        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN_8080") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        domain = os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{port}")
+        if not domain and port == LEGACY_PORT:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if not domain:
-            raise SetupError("This agent has no public address for port 8080.")
+            raise SetupError(f"This agent has no public address for port {port}.")
         credentials = {
             "username": state.get("username") or os.environ.get("OPENCODE_SERVER_USERNAME") or "opencode",
             "password": state.get("password") or os.environ.get("OPENCODE_SERVER_PASSWORD") or request["password"],
@@ -160,7 +178,7 @@ def setup(request, home, port=8080):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            state = dict(credentials, harness=harness, directory=directory)
+            state = dict(credentials, harness=harness, directory=directory, port=port)
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(

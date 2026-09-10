@@ -108,6 +108,20 @@ Run `railway autoupdate status` to inspect the running and recorded installed
 versions, staged/in-progress CLI updates, skill-sync results, and unmanaged
 skills. Use `railway skills update` for detailed skill results or to retry a sync.
 
+## Coding backend and app endpoints
+
+Cloud agents with a `code-*` domain expose port 4096 for a managed Codex or
+OpenCode server. Both launchers use this endpoint, leaving the `app-*` domain
+and port 8080 available for your application. One managed backend can occupy
+the code port at a time; setup reports a conflict if another process uses it.
+OpenCode2's server URL also serves its web UI with the printed credentials.
+
+Agents created before the code endpoint was available continue using port 8080.
+Existing managed servers retain their saved port when reconnecting or waking,
+including servers configured by older CLI versions. Use a fresh agent for a
+separate code endpoint. A saved code connection never falls back to the app URL
+if its code domain is unavailable.
+
 ## OpenCode clients and remote servers
 
 Prepare an authenticated server on a cloud agent and open your local client:
@@ -212,7 +226,8 @@ credentials, the SSH configuration file location, the Desktop project name, and
 commands to reconnect or retrieve the configuration.
 
 Terminal setup carries your available local Codex sign-in and configured
-skills/MCP sync, starts App Server on port 8080, verifies its public WebSocket
+skills/MCP sync, starts App Server on the code port (4096, or 8080 for legacy
+connections), verifies its public WebSocket
 handshake, and offers to launch the local client. Tools, files, and threads live
 on the VM. Use `/resume` in Codex to reopen a remote thread. `connect` discovers
 running Codex servers; an explicit agent also wakes and restarts a previously
@@ -330,7 +345,8 @@ and projects inside Codex, since its import mechanism does not delete them.
 
 OpenCode Desktop connects directly to the agent's existing HTTPS address.
 The CLI starts password-protected [`opencode serve`](https://opencode.ai/docs/server/)
-in the background on port 8080, checks its public endpoint, and saves the URL,
+in the background on the code port (4096, or 8080 for legacy connections), checks
+its public endpoint, and saves the URL,
 username, password, default server, and remote project in Desktop's settings.
 `--opencode` configures only standard OpenCode (`ai.opencode.desktop`).
 `--opencode2` configures only [OpenCode2 Beta](https://github.com/anomalyco/opencode-beta)
@@ -364,8 +380,8 @@ Legacy `auth.json` is used only when no Beta credential store exists. Credential
 sent over SSH and the temporary transfer file is removed after import. If there is
 no local sign-in to copy, connect the provider in the remote server's settings.
 
-OpenCode uses the agent's public app port (8080). Setup refuses to take over
-an occupied port; stop the other process or use `--new` for a fresh agent.
+OpenCode uses the agent's code endpoint when available. Setup refuses to take
+over an occupied server port; stop the other process or use `--new` for a fresh agent.
 Rerunning `railway ca desktop --opencode --agent my-box` reuses the running
 server and its credentials, or starts it again after a sleep/wake or restart.
 The remote credential and process state are stored privately under

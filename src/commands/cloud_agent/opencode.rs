@@ -1,6 +1,6 @@
-//! OpenCode Desktop and local terminal clients connect directly to the agent's existing HTTPS domain.
+//! OpenCode Desktop and local terminal clients connect directly to the agent's code HTTPS domain.
 //! SSH is used only to start a detached, password-protected server on port
-//! 8080. The VM keeps the credential and PID so reconnects are idempotent.
+//! 4096 (8080 on legacy agents). The VM keeps the port, credential and PID so reconnects are idempotent.
 
 use std::path::Path;
 use std::process::Stdio;
