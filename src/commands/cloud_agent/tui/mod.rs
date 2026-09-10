@@ -499,7 +499,7 @@ async fn fetch_agents(
         .map(|a| Agent {
             id: a.id,
             name: a.name,
-            status: format!("{:?}", a.status).to_lowercase(),
+            status: crate::controllers::cloud_agent::Status::from(a.status).label(),
             sessions: LoadSessions::NotLoaded,
             expanded: false,
         })
@@ -531,7 +531,7 @@ async fn fetch_my_agents(
                 Agent {
                     id: a.id,
                     name: a.name,
-                    status: format!("{:?}", a.status).to_lowercase(),
+                    status: crate::controllers::cloud_agent::Status::from(a.status).label(),
                     sessions: LoadSessions::NotLoaded,
                     expanded: false,
                 },

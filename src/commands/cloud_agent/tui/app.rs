@@ -1838,14 +1838,17 @@ impl App {
         // When this environment last heard from the platform, so an
         // account-wide snapshot taken before it cannot overwrite it. See
         // [`Self::my_agents_loaded`].
-        if let Some(id) = answered {
-            self.answered_at.insert(id, std::time::Instant::now());
+        if let Some(id) = &answered {
+            self.answered_at
+                .insert(id.clone(), std::time::Instant::now());
         }
         if let Some(err) = refresh_failed {
             self.toast_error(format!("Couldn't refresh: {err}"));
         }
         self.collapse_if_empty(w, p);
-        self.settle_watched_agents();
+        if let Some(id) = answered {
+            self.settle_watched_agents(&[id]);
+        }
         self.restore_cursor(anchor);
         self.select_pending();
         // A just-launched agent arrives here before its sessions can be
@@ -1904,10 +1907,10 @@ impl App {
             }
         }
         let now = std::time::Instant::now();
-        for id in answered {
-            self.answered_at.insert(id, now);
+        for id in &answered {
+            self.answered_at.insert(id.clone(), now);
         }
-        self.settle_watched_agents();
+        self.settle_watched_agents(&answered);
         self.restore_cursor(anchor);
         self.select_pending();
         self.adopt_pane_sessions();
@@ -4698,9 +4701,9 @@ impl App {
 
     /// Start a lifecycle action on the agent under the cursor.
     ///
-    /// Refuses the no-ops rather than sending them: waking a running agent or
-    /// sleeping a sleeping one would spend a round-trip to change nothing, and
-    /// the status line explains why the key did nothing.
+    /// Let the server decide no-ops from live VM state: this tree's observation
+    /// can predate a sleep or wake elsewhere. Only duplicate in-flight requests
+    /// are suppressed locally.
     fn agent_op(&mut self, op: AgentOp) -> Option<Effect> {
         let row = self.selected_row()?;
         // A session belongs to an agent, so acting on it from a session row is
@@ -4717,18 +4720,6 @@ impl App {
         if self.ops.contains_key(&agent.id) {
             return None;
         }
-        match (op, agent.status.as_str()) {
-            (AgentOp::Sleep, "sleeping") => {
-                self.status = format!("{} is already asleep", agent.name);
-                return None;
-            }
-            (AgentOp::Wake, "running") => {
-                self.status = format!("{} is already running", agent.name);
-                return None;
-            }
-            _ => {}
-        }
-
         let pending = PendingConfirm {
             op,
             agent_id: agent.id.clone(),
@@ -5089,19 +5080,41 @@ impl App {
         }
     }
 
-    /// Clear the watch for any agent that has arrived, or that has gone.
-    fn settle_watched_agents(&mut self) {
+    /// Clear a watch on arrival, disappearance, or an observation that cannot
+    /// reach the target. A terminal state should not hide under "waking…" until
+    /// the patience expires.
+    fn settle_watched_agents(&mut self, answered: &[String]) {
         if self.watching.is_empty() {
             return;
         }
         let mut arrived: Vec<String> = Vec::new();
+        let mut failures = Vec::new();
         for (id, watch) in &self.watching {
-            let status = self.status_of_agent(id);
-            match status {
+            // A failed refresh or another environment's response supplies no
+            // new evidence about this operation. Retain its pending label.
+            if !answered.contains(&watch.environment_id) {
+                continue;
+            }
+            match self.agent_by_id(id) {
                 // Gone from the list entirely: deleted elsewhere, or never
                 // there. Either way nothing is coming.
                 None => arrived.push(id.clone()),
-                Some(status) if status == watch.want => arrived.push(id.clone()),
+                Some(agent) if agent.status == watch.want => arrived.push(id.clone()),
+                Some(agent)
+                    if !crate::controllers::cloud_agent::Status::from_label(&agent.status)
+                        .is_live() =>
+                {
+                    arrived.push(id.clone());
+                    let action = if watch.want == "running" {
+                        "wake"
+                    } else {
+                        "sleep"
+                    };
+                    failures.push(format!(
+                        "Couldn't {action} agent {}: reported as {}",
+                        agent.name, agent.status
+                    ));
+                }
                 Some(_) => {}
             }
         }
@@ -5109,18 +5122,20 @@ impl App {
             self.watching.remove(&id);
             self.ops.remove(&id);
         }
+        if !failures.is_empty() {
+            failures.sort();
+            self.status = failures.join("; ");
+        }
     }
 
-    /// An agent's status as the tree currently has it, wherever it lives.
-    fn status_of_agent(&self, agent_id: &str) -> Option<String> {
+    /// An agent as the tree currently has it, wherever it lives.
+    fn agent_by_id(&self, agent_id: &str) -> Option<&Agent> {
         self.tree.iter().find_map(|ws| {
             ws.projects.iter().find_map(|project| {
-                project.envs.iter().find_map(|env| {
-                    env.agents_vec()
-                        .iter()
-                        .find(|agent| agent.id == agent_id)
-                        .map(|agent| agent.status.clone())
-                })
+                project
+                    .envs
+                    .iter()
+                    .find_map(|env| env.agents_vec().iter().find(|agent| agent.id == agent_id))
             })
         })
     }
@@ -7764,10 +7779,10 @@ mod tests {
         assert_eq!(a.ops.get("ca_1").copied(), Some("deleting…"));
     }
 
-    /// Sleep and wake are reversible, so they run without a prompt — but not
-    /// when they would do nothing.
+    /// Sleep and wake send intent even when the last observation suggests a
+    /// no-op. The server can see a newer state than this tree.
     #[test]
-    fn sleep_and_wake_skip_the_no_ops() {
+    fn sleep_and_wake_let_the_server_decide_no_ops() {
         let mut a = loaded_app();
         a.cursor = a
             .rows()
@@ -7775,10 +7790,24 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .unwrap();
 
-        // The agent is running: waking is a no-op and says so.
-        assert_eq!(a.on_key(key(KeyCode::Char('w'))), None);
-        assert!(a.status.contains("already running"));
-        assert!(a.ops.is_empty());
+        // Last observed running, but it may have slept elsewhere since then.
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('w'))),
+            Some(Effect::Agent {
+                op: AgentOp::Wake,
+                ..
+            })
+        ));
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('w'))),
+            None,
+            "no duplicate requests"
+        );
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
 
         let effect = a.on_key(key(KeyCode::Char('s'))).unwrap();
         assert_eq!(
@@ -7820,6 +7849,61 @@ mod tests {
             a.selected_row().unwrap().status.as_deref(),
             Some("sleeping")
         );
+
+        // Last observed sleeping, but it may have woken elsewhere since then.
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('s'))),
+            Some(Effect::Agent {
+                op: AgentOp::Sleep,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn terminal_observations_end_operation_watches_immediately() {
+        for op in [AgentOp::Wake, AgentOp::Sleep] {
+            for status in ["crashed", "failed", "deleting", "future_state"] {
+                let mut a = loaded_app();
+                a.ops.insert("ca_1".into(), op.pending_label());
+                a.agent_op_finished("ca_1", "env_prod", op, None);
+                a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "nimble-otter", status)]));
+                assert!(!a.watching_agents(), "{op:?}: {status}");
+                assert!(a.ops.is_empty(), "{op:?}: {status}");
+                assert!(a.status.contains("nimble-otter"), "{}", a.status);
+                assert!(a.status.contains(status), "{}", a.status);
+                assert!(a.watch_tick().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn operation_watches_require_a_successful_refresh_of_their_environment() {
+        for old_status in ["running", "failed"] {
+            let mut a = loaded_app();
+            a.agents_loaded(
+                (0, 0, 0),
+                Ok(vec![agent("ca_1", "nimble-otter", old_status)]),
+            );
+            a.ops.insert("ca_1".into(), AgentOp::Wake.pending_label());
+            a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+            a.agents_loaded((0, 0, 0), Err("temporarily unavailable".into()));
+            assert!(
+                a.watching_agents(),
+                "old {old_status} is not a new observation"
+            );
+            a.agents_loaded((0, 0, 1), Ok(vec![]));
+            assert!(
+                a.watching_agents(),
+                "an unrelated environment cannot settle this watch"
+            );
+            a.agents_loaded(
+                (0, 0, 0),
+                Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+            );
+            assert!(!a.watching_agents());
+            assert!(a.ops.is_empty());
+        }
     }
 
     /// The bug this exists for: a wake is accepted long before the VM is up,

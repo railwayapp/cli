@@ -15,6 +15,7 @@ use crate::commands::ssh::{
     ensure_ssh_key_quiet, probe_native_ssh, run_native_ssh_captured, run_native_ssh_with_opts,
 };
 use crate::config::Configs;
+use crate::controllers::cloud_agent as ca;
 use crate::controllers::project::get_project;
 use crate::errors::RailwayError;
 use crate::gql::{mutations, queries};
@@ -1818,44 +1819,10 @@ fn ssh_plumbing(
     bail!("SSH to the agent failed after {attempts} attempts (exit {code}):\n{reason}")
 }
 
-/// One cloud agent, reduced to what this command steers on. `pub(crate)`
-/// because [`wait_until_connectable`] returns it to the `railway ca` verbs.
-#[derive(Clone)]
-pub(crate) struct CodeAgent {
-    id: String,
-    name: String,
-    status: queries::cloud_agent::CloudAgentStatus,
-}
-
 /// How long to wait for a created or woken agent to reach RUNNING before
 /// giving up. A cold create boots a microVM and publishes routes; a wake
 /// restores a checkpoint and is much quicker.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// Read one agent by id, scoped to the environment. `None` means it is gone
-/// (deleted, or it belongs to another environment) — the caller's cue to forget
-/// its stored pointer rather than to fail.
-async fn fetch_agent(
-    client: &reqwest::Client,
-    backboard: &str,
-    environment_id: &str,
-    id: &str,
-) -> Result<Option<CodeAgent>> {
-    let res = post_graphql::<queries::CloudAgent, _>(
-        client,
-        backboard,
-        queries::cloud_agent::Variables {
-            id: id.to_owned(),
-            environment_id: environment_id.to_owned(),
-        },
-    )
-    .await?;
-    Ok(res.cloud_agent.map(|a| CodeAgent {
-        id: a.id,
-        name: a.name,
-        status: a.status,
-    }))
-}
 
 /// Wait until the agent is *connectable*, by probing the SSH route itself
 /// rather than polling status up to RUNNING. The platform routes a shell as
@@ -1900,8 +1867,8 @@ pub(crate) async fn wait_until_connectable(
     id: &str,
     access: &RelayAccess,
     initial_delay: std::time::Duration,
-) -> Result<(CodeAgent, Option<std::path::PathBuf>)> {
-    use queries::cloud_agent::CloudAgentStatus as S;
+) -> Result<(ca::Agent, Option<std::path::PathBuf>)> {
+    use ca::Status as S;
     // Measured as one stage because this is the leg the platform owns — VM
     // boot/restore up to a routable SSH target. Per-round detail goes to stderr
     // under RAILWAY_STAGE_TIMING; the recorded stage is what telemetry sees.
@@ -1924,7 +1891,7 @@ pub(crate) async fn wait_until_connectable(
     // it ride the probe cadence would triple backboard polling per launching
     // client for nothing. Round 1 always fetches.
     let mut last_fetch: Option<std::time::Instant> = None;
-    let mut last_agent: Option<CodeAgent> = None;
+    let mut last_agent: Option<ca::Agent> = None;
     loop {
         round += 1;
         let round_started = std::time::Instant::now();
@@ -1949,28 +1916,28 @@ pub(crate) async fn wait_until_connectable(
         // on its full ConnectTimeout against a box that will never answer.
         let fetch_due = last_fetch.is_none_or(|at| at.elapsed().as_millis() >= 700);
         if fetch_due {
-            let agent = fetch_agent(client, backboard, environment_id, id)
+            let agent = ca::get(client, backboard, environment_id, id)
                 .await?
                 .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
             last_fetch = Some(std::time::Instant::now());
             match agent.status {
-                S::RUNNING | S::STARTING | S::SLEEPING => {}
-                S::CRASHED => bail!(
+                S::Running | S::Starting | S::Sleeping => {}
+                S::Crashed => bail!(
                     "Agent {} crashed while starting. `railway code --new` for a fresh one.",
                     agent.name
                 ),
-                S::FAILED => bail!(
+                S::Failed => bail!(
                     "Agent {} failed to start. `railway code --new` for a fresh one.",
                     agent.name
                 ),
-                S::DELETING => bail!("Agent {} is being deleted.", agent.name),
-                S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+                S::Deleting => bail!("Agent {} is being deleted.", agent.name),
+                S::Unknown(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
             }
             // RUNNING routes by definition, so don't spend another round on a
             // probe that lost the race to the status flip — but there is no
             // verified connection to promote (the in-flight probe is abandoned;
             // its master, if any, exits on the persist backstop).
-            if agent.status == S::RUNNING {
+            if agent.status == S::Running {
                 ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
                 return Ok((agent, None));
             }
@@ -2038,36 +2005,35 @@ fn release_probe_master(socket: &std::path::Path, target: &str) {
         .spawn();
 }
 
-/// Bring an agent that already exists up to RUNNING: reuse it when it is
-/// already up, wake it when it is asleep or still booting. `None` means the
-/// agent is dead and the caller should create a fresh one.
+/// Connect to the selected agent, waking it when needed. An unusable observation
+/// is an error on this agent, never permission to replace it with another VM.
 async fn ready_existing_agent(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
-    agent: CodeAgent,
+    agent: ca::Agent,
     progress: &dyn Progress,
     access: &RelayAccess,
-) -> Result<Option<(CodeAgent, Option<std::path::PathBuf>)>> {
-    use queries::cloud_agent::CloudAgentStatus as S;
+) -> Result<(ca::Agent, Option<std::path::PathBuf>)> {
+    use ca::Status as S;
 
     match agent.status {
-        S::RUNNING => {
+        S::Running => {
             progress.note(&format!(
                 "Using agent {} (--new for a fresh one)",
                 agent.name
             ));
-            Ok(Some((agent, None)))
+            Ok((agent, None))
         }
         // STARTING means a previous run is still booting it, so a re-run seconds
         // after a ctrl-c waits rather than minting a duplicate. SLEEPING is the
         // resting state this command leaves behind.
-        S::SLEEPING | S::STARTING => {
+        S::Sleeping | S::Starting => {
             progress.step(&format!("Waking agent {}", agent.name));
             // The delay below is the wake's physical floor; a STARTING agent
             // caught mid-boot gets none — it may be routable right now.
             let mut probe_delay = std::time::Duration::ZERO;
-            if agent.status == S::SLEEPING {
+            if agent.status == S::Sleeping {
                 let wake_started = std::time::Instant::now();
                 let wake = post_graphql::<mutations::CloudAgentWake, _>(
                     client,
@@ -2096,19 +2062,17 @@ async fn ready_existing_agent(
                 "Woke agent {} — your work is on its disk",
                 running.name
             ));
-            Ok(Some((running, probe_master)))
+            Ok((running, probe_master))
         }
-        S::CRASHED | S::FAILED | S::DELETING | S::Other(_) => {
-            progress.note(&format!(
-                "Agent {} is {:?}; creating a fresh one.",
-                agent.name, agent.status
-            ));
-            Ok(None)
-        }
+        S::Crashed | S::Failed | S::Deleting | S::Unknown(_) => bail!(
+            "Agent {} is reported as {} and cannot be connected to. Check `railway ca list` and retry, or use `railway code --new` to create a separate agent.",
+            agent.name,
+            agent.status.label()
+        ),
     }
 }
 
-/// The caller's own live agent in this environment, when there is exactly one.
+/// The caller's own agent in this environment, when there is exactly one.
 ///
 /// `mine` is load-bearing rather than tidiness: agents authorize per
 /// environment, so an unfiltered list includes teammates' — and adopting one
@@ -2118,23 +2082,11 @@ async fn sole_owned_agent_id(
     backboard: &str,
     environment_id: &str,
 ) -> Result<Option<String>> {
-    use queries::cloud_agents::CloudAgentStatus as S;
+    // A failed or unknown observation still names an existing VM. Filtering it
+    // out would turn an inconclusive lookup into a new billed agent.
+    let agents = ca::list_in_environment(client, backboard, environment_id, true).await?;
 
-    let live: Vec<_> = post_graphql::<queries::CloudAgents, _>(
-        client,
-        backboard,
-        queries::cloud_agents::Variables {
-            environment_id: environment_id.to_owned(),
-            mine: Some(true),
-        },
-    )
-    .await?
-    .cloud_agents
-    .into_iter()
-    .filter(|a| matches!(a.status, S::RUNNING | S::SLEEPING | S::STARTING))
-    .collect();
-
-    match live.as_slice() {
+    match agents.as_slice() {
         [] => Ok(None),
         [only] => Ok(Some(only.id.clone())),
         many => bail!(
@@ -2403,7 +2355,7 @@ async fn resolve_agent(
     harness: Agent,
     progress: &dyn Progress,
     access: &RelayAccess,
-) -> Result<(CodeAgent, bool, Option<std::path::PathBuf>)> {
+) -> Result<(ca::Agent, bool, Option<std::path::PathBuf>)> {
     let environment_id = target.environment_id.as_str();
     let backboard = configs.get_backboard();
 
@@ -2418,23 +2370,21 @@ async fn resolve_agent(
             None => sole_owned_agent_id(client, &backboard, environment_id).await?,
         },
     };
-    // Re-read by id either way, so both paths carry the same shape and the
-    // stale-pointer case (agent deleted elsewhere) collapses into `None`.
-    let existing = match candidate {
-        Some(id) => fetch_agent(client, &backboard, environment_id, &id).await?,
-        None => None,
-    };
-    if let Some(agent) = existing {
-        if let Some((ready, probe_master)) =
+    // Once a target is selected, keep it even when its observation is missing
+    // or unusable. Creating is reserved for an empty inventory or explicit --new.
+    if let Some(id) = candidate {
+        let agent = ca::get(client, &backboard, environment_id, &id)
+            .await?
+            .ok_or_else(|| anyhow!(
+                "Agent {id} is unavailable in this environment. Check `railway ca list`, or use `railway code --new` to create a separate agent."
+            ))?;
+        let (ready, probe_master) =
             ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
-                .await?
-        {
-            warn_ignored_variables(args, progress);
-            configs.set_code_agent(environment_id, &ready.id);
-            configs.write()?;
-            return Ok((ready, false, probe_master));
-        }
-        configs.remove_code_agent(environment_id);
+                .await?;
+        warn_ignored_variables(args, progress);
+        configs.set_code_agent(environment_id, &ready.id);
+        configs.write()?;
+        return Ok((ready, false, probe_master));
     }
 
     let mut variables = variables_to_input(&args.env_files, &args.variables)?
@@ -2532,7 +2482,7 @@ async fn destroy_agent(
         println!("No agent recorded for this environment.");
         return Ok(());
     };
-    let name = fetch_agent(client, &backboard, environment_id, &id)
+    let name = ca::get(client, &backboard, environment_id, &id)
         .await?
         .map(|a| a.name);
     // Forget the pointer either way: a delete that reports failure on an
@@ -3553,7 +3503,122 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::MockBackboard;
     use clap::Parser;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn an_unusable_selected_vm_is_never_replaced() {
+        for selection in ["explicit", "remembered", "sole"] {
+            for status in [
+                "FAILED",
+                "CRASHED",
+                "DELETING",
+                "FUTURE_STATE",
+                "missing",
+                "lookup_error",
+            ] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                let mut args = LaunchArgs::default();
+                if selection == "explicit" {
+                    args.agent_id = Some("existing".into());
+                } else if selection == "remembered" {
+                    configs.set_code_agent("env", "existing");
+                }
+                configs.write().unwrap();
+                let saved = std::fs::read(dir.path().join("config.json")).unwrap();
+                let node = json!({
+                    "id": "existing", "name": "my-agent", "status": status,
+                    "projectId": "project", "environmentId": "env",
+                    "createdAt": "2026-09-10T00:00:00Z"
+                });
+                server.stub("CloudAgents", json!({"cloudAgents": [node.clone()]}));
+                match status {
+                    "missing" => server.stub("CloudAgent", json!({"cloudAgent": null})),
+                    "lookup_error" => {
+                        server.stub_graphql_error("CloudAgent", "temporarily unavailable")
+                    }
+                    _ => server.stub("CloudAgent", json!({"cloudAgent": node})),
+                }
+                let error = resolve_agent(
+                    &mut configs,
+                    &reqwest::Client::new(),
+                    &args,
+                    &names::Target::new(("project".into(), "env".into()), false),
+                    Agent::Claude,
+                    &CliProgress::default(),
+                    &RelayAccess {
+                        identity: None,
+                        relay_opts: vec![],
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    !error.to_string().contains("no scripted response"),
+                    "{selection}/{status}: {error}"
+                );
+                let operations: Vec<_> = server
+                    .requests()
+                    .iter()
+                    .map(|r| r["operationName"].as_str().unwrap().to_owned())
+                    .collect();
+                let expected = if selection == "sole" {
+                    vec!["CloudAgents", "CloudAgent"]
+                } else {
+                    vec!["CloudAgent"]
+                };
+                assert_eq!(operations, expected, "{selection}/{status}");
+                assert_eq!(
+                    std::fs::read(dir.path().join("config.json")).unwrap(),
+                    saved
+                );
+                if selection == "remembered" {
+                    assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_is_reached_only_for_new_or_an_empty_inventory() {
+        for new in [false, true] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            if new {
+                configs.set_code_agent("env", "existing");
+            }
+            server.stub("CloudAgents", json!({"cloudAgents": []}));
+            // Stop at creation so the test never opens SSH or provisions a VM.
+            server.stub_graphql_error("CloudAgentCreate", "creation reached");
+            let args = LaunchArgs {
+                new,
+                name: Some("fresh-agent".into()),
+                ..Default::default()
+            };
+            let error = resolve_agent(
+                &mut configs,
+                &reqwest::Client::new(),
+                &args,
+                &names::Target::new(("project".into(), "env".into()), false),
+                Agent::Claude,
+                &CliProgress::default(),
+                &RelayAccess {
+                    identity: None,
+                    relay_opts: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("creation reached"), "{error}");
+            assert_eq!(server.variables_for("CloudAgentCreate").len(), 1);
+            assert!(server.variables_for("CloudAgent").is_empty());
+            assert_eq!(server.variables_for("CloudAgents").len(), usize::from(!new));
+        }
+    }
 
     /// The shapes someone types at a prompt open in the pane. Nothing about a
     /// target, a harness or a variable changes that — they all describe a
