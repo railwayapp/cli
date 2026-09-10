@@ -433,7 +433,7 @@ pub async fn resolve(
 
 /// [`resolve`], with the empty account handed back instead of an error.
 ///
-/// `None` means exactly "no agents in scope, and no name was given" —
+/// `None` means exactly "no agents or remembered targets in scope, and no name was given" —
 /// the one case where a caller can reasonably do something other than fail,
 /// e.g. a connect command creating the first agent. Every other outcome
 /// (a named agent missing, more than one candidate) is still an error here,
@@ -452,6 +452,24 @@ pub async fn resolve_or_none(
 
     if let Some(selector) = selector {
         return match_selector(candidates, selector).map(|agent| Some((agent, Resolution::Named)));
+    }
+
+    // Missing from inventory is not permission to forget a selected VM or
+    // redirect a bare command to somebody else. Naming a target above is an
+    // explicit override; scoping to another environment also excludes this pointer.
+    for env in configs.code_agent_environments() {
+        if environment_id.is_some_and(|scope| scope != env) {
+            continue;
+        }
+        if let Some(id) = configs.get_code_agent(&env)
+            && !candidates
+                .iter()
+                .any(|a| a.environment_id == env && a.id == id)
+        {
+            bail!(
+                "Remembered agent {id} is unavailable in this scope. Check `railway ca list` and name an agent explicitly, or use `railway ca create` to create a separate agent."
+            );
+        }
     }
 
     // The pointer is what makes bare `railway ca ssh` mean "the agent I was
@@ -549,6 +567,67 @@ mod tests {
     use super::*;
     use crate::testkit::MockBackboard;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_missing_remembered_target_never_redirects_or_permits_creation() {
+        for scoped in [None, Some("env")] {
+            for has_other in [false, true] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                configs.set_code_agent("env", "remembered");
+                let nodes = if has_other {
+                    json!([{
+                        "id": "other", "name": "other-agent", "status": "RUNNING",
+                        "projectId": "project", "environmentId": "env",
+                        "createdAt": "2026-09-10T00:00:00Z"
+                    }])
+                } else {
+                    json!([])
+                };
+                server.stub("MyCloudAgents", json!({"myCloudAgents": nodes}));
+                server.stub("CloudAgents", json!({"cloudAgents": nodes}));
+                let result = resolve_or_none(&configs, &reqwest::Client::new(), None, scoped).await;
+                assert!(
+                    result.is_err(),
+                    "missing identity must not select another VM or allow creation"
+                );
+                assert_eq!(configs.get_code_agent("env").as_deref(), Some("remembered"));
+                if has_other {
+                    let (agent, _) =
+                        resolve_or_none(&configs, &reqwest::Client::new(), Some("other"), scoped)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        agent.id, "other",
+                        "an explicit target can override a missing pointer"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn remembered_targets_outside_the_requested_scope_do_not_block_selection() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs.set_code_agent("other-env", "old-target");
+        server.stub(
+            "CloudAgents",
+            json!({"cloudAgents": [{
+                "id": "in-scope", "name": "my-agent", "status": "RUNNING",
+                "projectId": "project", "environmentId": "env",
+                "createdAt": "2026-09-10T00:00:00Z"
+            }]}),
+        );
+        let (agent, _) = resolve_or_none(&configs, &reqwest::Client::new(), None, Some("env"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(agent.id, "in-scope");
+    }
 
     #[tokio::test]
     async fn failed_observations_remain_candidates_and_keep_the_remembered_target() {

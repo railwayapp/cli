@@ -1071,6 +1071,8 @@ pub struct App {
     pub ops: std::collections::HashMap<String, &'static str>,
     /// Agents whose state is still on its way. See [`AgentWatch`].
     pub watching: std::collections::HashMap<String, AgentWatch>,
+    /// Round-robin cursor so a slow operation cannot monopolize watch polling.
+    last_watched_environment: Option<String>,
     /// A refresh is in flight. Coalescing: a held ⌥r, or several actions
     /// finishing at once, must not stack account-wide queries.
     pub refreshing: bool,
@@ -1092,10 +1094,10 @@ pub struct App {
     /// Someone pressed a key for the refresh in flight, so its result is worth
     /// a line when it lands. See [`App::refreshed`].
     pub refresh_announce: bool,
-    /// Environment id → when its agent list last came back from the platform.
-    /// Keeps a slower account-wide reply from overwriting fresher per-environment
-    /// news; see [`App::my_agents_loaded`].
-    pub answered_at: std::collections::HashMap<String, std::time::Instant>,
+    /// Environment id → minimum request-start time of an acceptable snapshot.
+    /// Advanced by applied snapshots and successful mutations. This orders local
+    /// requests, not FactoryVM generations or the backend's projection freshness.
+    pub agent_snapshot_floor: std::collections::HashMap<String, std::time::Instant>,
     /// `myCloudAgents` is not available to this caller, so a refresh has to ask
     /// per environment. True for a workspace-scoped `RAILWAY_TOKEN` — the field
     /// requires an authenticated user — and for a backboard old enough not to
@@ -1177,13 +1179,14 @@ impl App {
             ssh_gate: None,
             ops: std::collections::HashMap::new(),
             watching: std::collections::HashMap::new(),
+            last_watched_environment: None,
             refreshing: false,
             last_refresh: None,
             refresh_paused_until: None,
             last_thread_refresh: None,
             thread_polls: std::collections::HashSet::new(),
             refresh_announce: false,
-            answered_at: std::collections::HashMap::new(),
+            agent_snapshot_floor: std::collections::HashMap::new(),
             account_query_unavailable: false,
             prompt_focused: true,
             prompt: String::new(),
@@ -1793,14 +1796,29 @@ impl App {
         }
     }
 
-    /// Record a finished agent fetch. Ignores paths that no longer exist, so a
-    /// response arriving after the tree changed can't panic or mis-file.
-    pub fn agents_loaded(
+    /// Apply a scoped response only to its original environment, and only if
+    /// the request follows the latest applied snapshot or mutation acceptance.
+    pub fn agents_loaded_at(
         &mut self,
         path: (usize, usize, usize),
+        environment_id: &str,
         result: Result<Vec<Agent>, String>,
+        asked_at: std::time::Instant,
     ) {
         let (w, p, e) = path;
+        if self
+            .tree
+            .get(w)
+            .and_then(|ws| ws.projects.get(p))
+            .and_then(|project| project.envs.get(e))
+            .is_none_or(|env| env.id != environment_id)
+            || self
+                .agent_snapshot_floor
+                .get(environment_id)
+                .is_some_and(|at| *at > asked_at)
+        {
+            return;
+        }
         // A load can change the order — a project that gains its first agent
         // moves up — so the cursor is put back by row identity rather than
         // left on whatever index it was.
@@ -1835,12 +1853,10 @@ impl App {
                 (Err(err), _) => Load::Failed(err),
             };
         }
-        // When this environment last heard from the platform, so an
-        // account-wide snapshot taken before it cannot overwrite it. See
-        // [`Self::my_agents_loaded`].
+        // Request time, not response time: a newer overlapping request can
+        // still deliver a newer observation after this reply arrives.
         if let Some(id) = &answered {
-            self.answered_at
-                .insert(id.clone(), std::time::Instant::now());
+            self.agent_snapshot_floor.insert(id.clone(), asked_at);
         }
         if let Some(err) = refresh_failed {
             self.toast_error(format!("Couldn't refresh: {err}"));
@@ -1856,6 +1872,22 @@ impl App {
         self.adopt_pane_sessions();
     }
 
+    /// Synchronous fixture loads represent a fresh request for the current tree.
+    #[cfg(test)]
+    fn agents_loaded(&mut self, path: (usize, usize, usize), result: Result<Vec<Agent>, String>) {
+        let (w, p, e) = path;
+        let Some(environment_id) = self
+            .tree
+            .get(w)
+            .and_then(|ws| ws.projects.get(p))
+            .and_then(|project| project.envs.get(e))
+            .map(|env| env.id.clone())
+        else {
+            return;
+        };
+        self.agents_loaded_at(path, &environment_id, result, std::time::Instant::now());
+    }
+
     /// The whole account's agents arrived in one `myCloudAgents` request.
     ///
     /// Every unanswered environment becomes loaded: one absent from the
@@ -1867,15 +1899,10 @@ impl App {
     /// else. (Skipping environments that already had a list is why `shift+r`
     /// used to report "already loaded" and change nothing.)
     ///
-    /// One rule keeps that from undoing fresher news: a snapshot may not
-    /// overwrite an answer that arrived *after* it was asked for. `asked_at` is
-    /// when this request went out, and [`Self::answered_at`] is when each
-    /// environment last heard from the platform. Without the comparison, a
-    /// refresh already in flight when you delete an agent would put the row
-    /// back — the snapshot was taken while the agent still existed — and it
-    /// would stay back until the next refresh. Environments still `Loading` are
-    /// skipped for the same reason, one step earlier: their reply has not landed
-    /// to be compared, and it is newer than this.
+    /// A snapshot may not overwrite a newer request's answer or settle a
+    /// mutation accepted after the request began. Both fetch paths compare
+    /// request-start times with [`Self::agent_snapshot_floor`]. Environments
+    /// still `Loading` await their dedicated reply.
     pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>, asked_at: std::time::Instant) {
         let anchor = self.selected_row().map(|row| row.kind);
         let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
@@ -1887,7 +1914,7 @@ impl App {
             for project in &mut ws.projects {
                 for env in &mut project.envs {
                     if self
-                        .answered_at
+                        .agent_snapshot_floor
                         .get(&env.id)
                         .is_some_and(|at| *at > asked_at)
                     {
@@ -1906,9 +1933,8 @@ impl App {
                 }
             }
         }
-        let now = std::time::Instant::now();
         for id in &answered {
-            self.answered_at.insert(id.clone(), now);
+            self.agent_snapshot_floor.insert(id.clone(), asked_at);
         }
         self.settle_watched_agents(&answered);
         self.restore_cursor(anchor);
@@ -4874,6 +4900,10 @@ impl App {
             self.status = err;
             return;
         }
+        // An already-in-flight refresh describes the world before this
+        // acknowledgement. It cannot complete this watch or resurrect a delete.
+        self.agent_snapshot_floor
+            .insert(environment_id.to_string(), std::time::Instant::now());
         let (want, patience) = match op {
             AgentOp::Wake => ("running", WAKE_PATIENCE),
             AgentOp::Sleep => ("sleeping", SLEEP_PATIENCE),
@@ -4921,11 +4951,30 @@ impl App {
         open
     }
 
-    /// Ask again. One environment per tick — in practice there is one agent
-    /// waking at a time, and the loop comes back here in a moment anyway.
+    /// Ask one environment per tick, rotating fairly through concurrent watches.
     pub fn watch_tick(&mut self) -> Option<Effect> {
         self.give_up_on_stale_watches();
-        let environment_id = self.watching.values().next()?.environment_id.clone();
+        if self
+            .refresh_paused_until
+            .is_some_and(|until| until > std::time::Instant::now())
+        {
+            return None;
+        }
+        let environments: std::collections::BTreeSet<_> = self
+            .watching
+            .values()
+            .map(|watch| watch.environment_id.clone())
+            .collect();
+        let environment_id = environments
+            .iter()
+            .find(|env| {
+                self.last_watched_environment
+                    .as_ref()
+                    .is_none_or(|last| *env > last)
+            })
+            .or_else(|| environments.first())?
+            .clone();
+        self.last_watched_environment = Some(environment_id.clone());
         self.reveal_environment(&environment_id)
     }
 
@@ -5124,6 +5173,9 @@ impl App {
         }
         if !failures.is_empty() {
             failures.sort();
+            // The account-wide refresh handler's generic completion message
+            // must not erase the operation failure this snapshot just revealed.
+            self.refresh_announce = false;
             self.status = failures.join("; ");
         }
     }
@@ -5598,6 +5650,160 @@ mod tests {
             Ok(vec![agent("ca_1", "nimble-otter", "running")]),
         );
         a
+    }
+
+    #[test]
+    fn pre_mutation_snapshot_cannot_settle_a_new_operation() {
+        for scoped in [false, true] {
+            for op in [AgentOp::Wake, AgentOp::Sleep] {
+                for status in [
+                    "running",
+                    "sleeping",
+                    "failed",
+                    "crashed",
+                    "future_state",
+                    "missing",
+                ] {
+                    let mut a = loaded_app();
+                    let asked_at = std::time::Instant::now();
+                    a.ops.insert("ca_1".into(), op.pending_label());
+                    a.agent_op_finished("ca_1", "env_prod", op, None);
+                    let agents = if status == "missing" {
+                        vec![]
+                    } else {
+                        vec![agent("ca_1", "nimble-otter", status)]
+                    };
+                    if scoped {
+                        a.agents_loaded_at((0, 0, 0), "env_prod", Ok(agents), asked_at);
+                    } else {
+                        a.my_agents_loaded(
+                            agents
+                                .into_iter()
+                                .map(|agent| ("env_prod".into(), agent))
+                                .collect(),
+                            asked_at,
+                        );
+                    }
+                    assert!(
+                        a.watching_agents(),
+                        "{op:?}/{status}: response predates acceptance"
+                    );
+                    assert_eq!(a.agent_by_id("ca_1").unwrap().status, "running");
+                    let target = if op == AgentOp::Wake {
+                        "running"
+                    } else {
+                        "sleeping"
+                    };
+                    a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "nimble-otter", target)]));
+                    assert!(
+                        !a.watching_agents(),
+                        "a post-acceptance snapshot can settle it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_snapshots_keep_the_newest_request_in_every_arrival_order() {
+        // All 6 arrival orders x all 8 mixtures of account/scoped responses.
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            for sources in 0..8 {
+                let mut a = loaded_app();
+                let start = std::time::Instant::now();
+                let states = ["sleeping", "starting", "failed"];
+                let mut newest = 0;
+                for index in order {
+                    let asked_at = start + std::time::Duration::from_millis(index as u64);
+                    let node = agent("ca_1", "nimble-otter", states[index]);
+                    if sources & (1 << index) == 0 {
+                        a.agents_loaded_at((0, 0, 0), "env_prod", Ok(vec![node]), asked_at);
+                    } else {
+                        a.my_agents_loaded(vec![("env_prod".into(), node)], asked_at);
+                    }
+                    newest = newest.max(index);
+                    assert_eq!(
+                        a.agent_by_id("ca_1").unwrap().status,
+                        states[newest],
+                        "{order:?}, sources {sources}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scoped_responses_cannot_be_misfiled_after_tree_reordering() {
+        let mut a = loaded_app();
+        a.tree[0].projects[0].envs.swap(0, 1);
+        a.agents_loaded_at(
+            (0, 0, 0),
+            "env_prod",
+            Ok(vec![agent("ca_1", "nimble-otter", "failed")]),
+            std::time::Instant::now(),
+        );
+        assert_eq!(a.agent_by_id("ca_1").unwrap().status, "running");
+        assert!(a.tree[0].projects[0].envs[0].agents_vec().is_empty());
+    }
+
+    #[test]
+    fn announced_account_refresh_keeps_the_operation_failure_visible() {
+        let mut a = loaded_app();
+        a.ops.insert("ca_1".into(), AgentOp::Wake.pending_label());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.refresh_announce = true;
+        a.my_agents_loaded(
+            vec![("env_prod".into(), agent("ca_1", "nimble-otter", "crashed"))],
+            std::time::Instant::now(),
+        );
+        a.refreshed(1);
+        assert!(a.status.contains("crashed"), "{}", a.status);
+        assert!(!a.watching_agents());
+    }
+
+    #[test]
+    fn concurrent_operation_watches_poll_every_environment() {
+        let mut a = loaded_app();
+        a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_2", "other", "sleeping")]));
+        let other_env = a.tree[0].projects[0].envs[1].id.clone();
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Sleep, None);
+        a.agent_op_finished("ca_2", &other_env, AgentOp::Wake, None);
+        let mut polled = std::collections::HashSet::new();
+        for _ in 0..4 {
+            let Some(Effect::LoadAgents { environment_id, .. }) = a.watch_tick() else {
+                panic!("a watch should poll");
+            };
+            polled.insert(environment_id);
+        }
+        assert_eq!(
+            polled.len(),
+            2,
+            "one pending VM must not starve another environment"
+        );
+    }
+
+    #[test]
+    fn operation_polling_honors_retry_after_and_still_expires() {
+        let mut a = loaded_app();
+        a.ops.insert("ca_1".into(), AgentOp::Wake.pending_label());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.rate_limited(Some(30));
+        assert!(
+            a.watch_tick().is_none(),
+            "Retry-After also applies to operation polls"
+        );
+        assert!(a.watching_agents());
+        a.watching.get_mut("ca_1").unwrap().until = std::time::Instant::now();
+        assert!(a.watch_tick().is_none());
+        assert!(!a.watching_agents());
+        assert!(a.ops.is_empty());
     }
 
     #[test]

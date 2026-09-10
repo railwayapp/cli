@@ -260,7 +260,9 @@ pub struct FullScreenRequest {
 enum Message {
     AgentsLoaded {
         path: (usize, usize, usize),
+        environment_id: String,
         result: Result<Vec<Agent>, String>,
+        asked_at: std::time::Instant,
     },
     /// The whole account's agents in one request, keyed by environment — or
     /// why that wasn't possible, in which case startup degrades to the
@@ -1425,11 +1427,14 @@ fn spawn_env_agents_fetch(
     tokio::spawn(async move {
         // A closed receiver just means the TUI already handed back;
         // the next entry re-requests, so the drop is harmless.
+        let asked_at = std::time::Instant::now();
         match fetch_agents(&client, &backboard, &environment_id).await {
             Ok(agents) => {
                 let _ = tx.send(Message::AgentsLoaded {
                     path,
+                    environment_id,
                     result: Ok(agents),
+                    asked_at,
                 });
             }
             // The same classification the background fetches do:
@@ -1443,7 +1448,9 @@ fn spawn_env_agents_fetch(
                 None => {
                     let _ = tx.send(Message::AgentsLoaded {
                         path,
+                        environment_id,
                         result: Err(err.to_string()),
+                        asked_at,
                     });
                 }
             },
@@ -1464,8 +1471,13 @@ fn handle_message(
             app.rate_limited(retry_after_secs);
             None
         }
-        Message::AgentsLoaded { path, result } => {
-            app.agents_loaded(path, result);
+        Message::AgentsLoaded {
+            path,
+            environment_id,
+            result,
+            asked_at,
+        } => {
+            app.agents_loaded_at(path, &environment_id, result, asked_at);
             // Fill in each running agent's session count without waiting for
             // someone to expand it. Bounded: one environment usually holds a
             // handful of agents, but nothing guarantees it.
@@ -1888,11 +1900,14 @@ fn spawn_sweep(
             let backboard = backboard.clone();
             let stop = stop.clone();
             tokio::spawn(async move {
+                let asked_at = std::time::Instant::now();
                 match fetch_agents(&client, &backboard, &environment_id).await {
                     Ok(agents) => {
                         let _ = tx.send(Message::AgentsLoaded {
                             path,
+                            environment_id,
                             result: Ok(agents),
+                            asked_at,
                         });
                     }
                     Err(err) => match rate_limit_from(&err) {
@@ -1903,7 +1918,9 @@ fn spawn_sweep(
                         None => {
                             let _ = tx.send(Message::AgentsLoaded {
                                 path,
+                                environment_id,
                                 result: Err(err.to_string()),
+                                asked_at,
                             });
                         }
                     },
