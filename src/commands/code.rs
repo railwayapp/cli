@@ -248,8 +248,9 @@ your local client. Missing clients can be installed after confirmation.
 `connect [agent]` reconnects locally; `remote` runs the client inside Railway CA.
 `--dir` selects the remote directory (default /app). `--connection-json`
 returns credentials as JSON for Codex or OpenCode2.
-Codex setup and connect also register and verify its SSH host, save its remote
-project, and send Codex Desktop the apply-config link to import it live.
+Codex setup and connect also register and verify its SSH host and save its remote
+project in the background. Codex Desktop imports it on its next startup;
+setup never launches or activates the app.
 `railway code --codex desktop-only` prepares the same backend and Desktop
 connection, then exits without prompting for or launching a local terminal client.
 `railway ca desktop --codex` is an alias for this setup.

@@ -199,8 +199,9 @@ railway code --codex desktop-only --agent my-box --dir /app
 ```
 
 This prepares the VM, starts or reuses the authenticated backend App Server,
-verifies its public endpoint, registers SSH, and imports the remote project into
-Codex Desktop. It then exits, leaving the backend running. It never prompts to
+verifies its public endpoint, registers SSH, and saves the remote project for
+Codex Desktop to import at its next startup. It then exits, leaving the backend
+running. It never prompts to
 install or launch a local terminal client. The results panel shows backend
 credentials, the SSH configuration file location, the Desktop project name, and
 commands to reconnect or retrieve the configuration.
@@ -212,6 +213,13 @@ on the VM. Use `/resume` in Codex to reopen a remote thread. `connect` discovers
 running Codex servers; an explicit agent also wakes and restarts a previously
 configured server as needed.
 
+The remote terminal client uses a separate, persistent `CODEX_HOME` under
+`~/.railway/codex-client/<backend-id>/`. The VM owns its tools and sessions;
+local-only MCP servers, plugins, and hooks must not participate in remote
+startup. This also keeps the terminal's busy indicator and cancellation state
+consistent with the backend. Ctrl+C interrupts active work and exits when idle;
+Ctrl+D on an empty prompt detaches even during startup.
+
 The terminal connection uses `wss://` through the agent's public domain. Its
 bearer token is passed to the local client through an environment variable.
 The remote server's token, PID, version, directory, and logs live under
@@ -222,7 +230,8 @@ Setup and `connect` also register and verify the agent's SSH host in
 `~/.ssh/config`, using the same registration as `railway ca desktop --codex`.
 They merge the connection and remote project into
 `~/.codex/codex-app/config.json` (`$CODEX_HOME/codex-app/config.json` when set)
-and open `codex://codex-app/apply-config` to import it into the running app.
+in the background. Setup never launches or activates Codex Desktop; the app
+imports the saved configuration when you next start it.
 Find `Railway: <name>` in Codex Desktop's project sidebar. An existing custom SSH
 alias and project label are preserved. `connect` imports the server's actual
 working directory. You can use the same VM from the terminal and Desktop.
@@ -302,12 +311,11 @@ creates one. `--new` always creates a fresh agent, including when several app
 flags are combined. It cannot be combined with `--agent` or `--remove`.
 
 Codex setup registers the SSH host and named remote project using Codex Desktop's
-version-1 app configuration, then sends its apply-config deep link. On macOS the
-app is located by bundle ID, including installations named ChatGPT.app. Other
-platforms use the registered URL handler. If Desktop cannot be opened, the config
-is saved for its next startup. Existing connections and retry/timeout preferences
+version-1 app configuration, entirely in the background. It never launches or
+activates the app. Codex Desktop imports the configuration on its next startup.
+Existing connections and retry/timeout preferences
 are retained; changed configuration is backed up to `config.json.railway-backup`.
-`--dry-run` previews the merged config and import link. `--remove` removes the SSH
+`--dry-run` previews the merged config. `--remove` removes the SSH
 block and that alias's import declaration; remove already-imported connections
 and projects inside Codex, since its import mechanism does not delete them.
 

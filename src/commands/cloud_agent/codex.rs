@@ -201,6 +201,10 @@ async fn verify_websocket(client: &reqwest::Client, endpoint: &str, token: &str)
 
 pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
     vec![
+        // Railway pins the local client to its server. Codex's global-update
+        // prompt can steal startup input and would break that version match.
+        "-c".into(),
+        "check_for_update_on_startup=false".into(),
         "--remote".into(),
         connection.url.clone(),
         "--remote-auth-token-env".into(),
@@ -212,12 +216,16 @@ pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
 
 pub(crate) fn attach_command(connection: &Connection) -> Result<String> {
     validate_url(&connection.url)?;
+    let home = local::client_home(connection)?
+        .to_string_lossy()
+        .into_owned();
     let mut args = vec!["codex".into()];
     args.extend(attach_args(connection));
     if cfg!(windows) {
         let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
         Ok(format!(
-            "$env:{TOKEN_ENV} = {}; & {}",
+            "$env:CODEX_HOME = {}; [System.IO.Directory]::CreateDirectory($env:CODEX_HOME) | Out-Null; $env:{TOKEN_ENV} = {}; & {}",
+            quote(&home),
             quote(&connection.token),
             args.iter()
                 .map(|arg| quote(arg))
@@ -226,7 +234,9 @@ pub(crate) fn attach_command(connection: &Connection) -> Result<String> {
         ))
     } else {
         Ok(format!(
-            "{TOKEN_ENV}={} {}",
+            "mkdir -p -m 700 {} && CODEX_HOME={} {TOKEN_ENV}={} {}",
+            shell_join(std::slice::from_ref(&home)),
+            shell_join(std::slice::from_ref(&home)),
             shell_join(std::slice::from_ref(&connection.token)),
             shell_join(&args)
         ))

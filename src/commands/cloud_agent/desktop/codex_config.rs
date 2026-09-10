@@ -1,6 +1,7 @@
 //! Codex Desktop's declarative SSH/project import, verified in 26.901.51231 (8109).
-//! The app reads $CODEX_HOME/codex-app/config.json at startup and on
-//! codex://codex-app/apply-config. It owns the resulting global-state writes.
+//! The app reads $CODEX_HOME/codex-app/config.json at startup and owns the
+//! resulting global-state writes. Setup only saves configuration, never launches
+//! or activates Desktop.
 use std::{
     fs,
     io::Write,
@@ -187,7 +188,7 @@ pub(super) fn preview(alias: &str, name: &str, directory: &str) -> Result<()> {
         path.display(),
         serde_json::to_string_pretty(&config)?
     );
-    println!("Would open {APPLY_URL} to import the connection and project into Codex Desktop.");
+    println!("Codex Desktop will import the connection and project on its next startup.");
     Ok(())
 }
 
@@ -250,20 +251,13 @@ pub(super) async fn configure(
             .unwrap_or_else(|| normalized_path(directory));
         Ok(())
     })?;
-    // Retry the import even on an identical write: Desktop may have been absent
-    // or the host asleep when the previous setup ran. Keep JSON stdout clean.
+    // Codex imports this declaration at startup. Keep setup entirely in the
+    // background, including when Desktop is already running. JSON stdout stays clean.
     eprintln!(
         "Saved Codex Desktop connection {alias} and project {} in {}",
         normalized_path(directory),
         path.display()
     );
-    let applied = apply().await;
-    match &applied {
-        Ok(()) => eprintln!("Sent the configuration to Codex Desktop ({APPLY_URL})"),
-        Err(error) => eprintln!(
-            "Codex Desktop configuration saved; automatic import could not be opened: {error:#}. Open {APPLY_URL} or start Codex Desktop to apply it."
-        ),
-    }
     Ok(super::CodexDesktop {
         ssh_alias: alias.into(),
         ssh_config_path: ssh_config.into(),
@@ -271,29 +265,9 @@ pub(super) async fn configure(
         project_label: label,
         remote_path: normalized_path(directory),
         apply_url: APPLY_URL.into(),
-        apply_sent: applied.is_ok(),
-        apply_error: applied.err().map(|error| format!("{error:#}")),
+        apply_sent: false,
+        apply_error: None,
     })
-}
-
-async fn apply() -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        // Bundle identity survives the app being renamed to ChatGPT.app.
-        let output = tokio::process::Command::new("/usr/bin/open")
-            .args(["-b", "com.openai.codex", APPLY_URL])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await?;
-        if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    tokio::task::spawn_blocking(|| ::open::that(APPLY_URL))
-        .await?
-        .map_err(Into::into)
 }
 
 pub(super) fn remove(alias: &str) -> Result<bool> {

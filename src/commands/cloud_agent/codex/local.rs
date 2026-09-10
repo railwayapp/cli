@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 
 use super::{Connection, TOKEN_ENV, attach_args};
 use crate::commands::cloud_agent::opencode::local::confirm;
@@ -85,11 +86,26 @@ pub(crate) async fn ensure_client(version: &str) -> Result<Option<PathBuf>> {
     Ok(Some(installed))
 }
 
-fn client_command(binary: &Path, connection: &Connection) -> Command {
+/// Do not mix the local harness's MCP servers, plugins, and hooks into the remote
+/// TUI. Their startup state can keep Codex busy even after the remote tools are
+/// ready, trapping Ctrl+C in interrupt handling. Retain the client's UI state
+/// between attaches, scoped to the backend rather than its rotating token.
+pub(super) fn client_home(connection: &Connection) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Unable to get home directory")?;
+    Ok(client_home_at(&home, connection))
+}
+
+fn client_home_at(home: &Path, connection: &Connection) -> PathBuf {
+    let id = format!("{:x}", Sha256::digest(connection.url.as_bytes()));
+    home.join(".railway/codex-client").join(&id[..16])
+}
+
+fn client_command(binary: &Path, connection: &Connection, home: &Path) -> Command {
     let mut command = Command::new(binary);
     command
         .args(attach_args(connection))
         .env(TOKEN_ENV, &connection.token)
+        .env("CODEX_HOME", home)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -97,7 +113,18 @@ fn client_command(binary: &Path, connection: &Connection) -> Command {
 }
 
 pub(crate) fn run_client(binary: &Path, connection: &Connection) -> Result<ExitStatus> {
-    client_command(binary, connection)
+    let home = client_home(connection)?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&home)
+        .with_context(|| format!("Creating remote Codex client home {}", home.display()))?;
+    client_command(binary, connection, &home)
         .status()
         .with_context(|| format!("Could not launch local Codex client {}", binary.display()))
 }
@@ -130,7 +157,7 @@ mod tests {
         let binary = root.path().join("fake codex");
         std::fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s\\n' \"$RAILWAY_CODEX_SERVER_TOKEN\" \"$@\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$RAILWAY_CODEX_SERVER_TOKEN\" \"$CODEX_HOME\" \"$@\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -141,7 +168,8 @@ mod tests {
             version: "0.153.4".into(),
             reused: true,
         };
-        let output = client_command(&binary, &connection)
+        let home = client_home_at(root.path(), &connection);
+        let output = client_command(&binary, &connection, &home)
             .stdout(Stdio::piped())
             .output()
             .unwrap();
@@ -149,7 +177,14 @@ mod tests {
         let output = String::from_utf8(output.stdout).unwrap();
         let lines: Vec<_> = output.lines().collect();
         assert_eq!(lines[0], connection.token);
-        assert_eq!(lines[1..], attach_args(&connection));
+        assert_eq!(Path::new(lines[1]), home);
+        assert_ne!(home, root.path().join(".codex"));
+        assert_eq!(lines[2..], attach_args(&connection));
         assert!(!attach_args(&connection).contains(&connection.token));
+        let mut reconnected = connection.clone();
+        reconnected.token = "rotated-token".into();
+        assert_eq!(client_home_at(root.path(), &reconnected), home);
+        reconnected.url = "wss://another-agent.example.com".into();
+        assert_ne!(client_home_at(root.path(), &reconnected), home);
     }
 }
