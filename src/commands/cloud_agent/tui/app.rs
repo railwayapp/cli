@@ -243,7 +243,10 @@ impl ConsoleSession {
                 .snapshot
                 .as_ref()
                 .and_then(|s| s.prompt.clone())
-                .unwrap_or_else(|| format!("New {harness} conversation"));
+                .unwrap_or_else(|| match harness {
+                    "opencode" | "opencode2" => format!("{harness} home"),
+                    _ => format!("New {harness} conversation"),
+                });
         }
         match self.harness_slug() {
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
@@ -292,7 +295,7 @@ impl ConsoleSession {
     }
 
     /// The harness this session runs, read off its launch line's binary.
-    fn harness_slug(&self) -> Option<&'static str> {
+    pub(super) fn harness_slug(&self) -> Option<&'static str> {
         let summary = self.command_summary();
         if summary == self.name {
             return None;
@@ -2074,6 +2077,91 @@ impl App {
         })
     }
 
+    /// A partial discovery failure keeps the affected harness's previous rows.
+    pub(super) fn preserve_failed_threads(
+        &self,
+        agent_id: &str,
+        failed: &[String],
+        rows: &mut Vec<ConsoleSession>,
+    ) {
+        if failed.is_empty() {
+            return;
+        }
+        for ws in &self.tree {
+            for project in &ws.projects {
+                for env in &project.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter().find(|a| a.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(previous) = &agent.sessions else {
+                        continue;
+                    };
+                    for row in previous {
+                        if super::super::client_sessions::parse_name(&row.name)
+                            .is_some_and(|(h, _, _)| failed.iter().any(|f| f == h))
+                            && !rows.iter().any(|r| r.name == row.name)
+                        {
+                            rows.push(row.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adopt only an exact, unambiguous live-process/console association. Two
+    /// Grok dashboard tabs can share one PID; their order is not a focus signal.
+    pub(super) fn remote_threads_loaded(
+        &mut self,
+        agent_id: &str,
+        threads: &[super::super::remote_threads::RemoteThread],
+    ) {
+        let mut updates = Vec::new();
+        for (index, pane) in self.sessions.iter().enumerate() {
+            if pane.agent_id != agent_id || pane.ended() {
+                continue;
+            }
+            let matches: Vec<_> = threads
+                .iter()
+                .filter(|row| {
+                    (row.pane_id.is_some() && row.pane_id == pane.client_id)
+                        || row.console_name.as_ref().is_some_and(|name| {
+                            pane.console_name.as_ref() == Some(name) || &pane.durable_name == name
+                        })
+                })
+                .collect();
+            if let [row] = matches.as_slice() {
+                updates.push((index, (*row).clone()));
+            }
+        }
+        for (index, row) in updates {
+            let pane = &mut self.sessions[index];
+            let old = pane.durable_name.clone();
+            let name = row.name(agent_id);
+            pane.harness = row.harness;
+            pane.client_thread = Some(row.thread);
+            if row.console_name.is_some() {
+                pane.console_name = row.console_name;
+            }
+            pane.durable_name = name.clone();
+            if name != old {
+                self.connecting.remove(&old);
+                self.auto_attempted.insert(name.clone());
+                if self.active == Some(index)
+                    || self.pending_select_session.as_deref() == Some(&old)
+                {
+                    self.pending_select_session = Some(name);
+                }
+                if !super::super::client_sessions::is_client(&old) {
+                    self.remove_session_row(agent_id, &old);
+                }
+            }
+        }
+    }
+
     /// Record a finished session fetch.
     pub fn sessions_loaded(
         &mut self,
@@ -3176,6 +3264,9 @@ impl App {
                 // The listed name is attached now, whatever it was minted as —
                 // auto-connect must treat it as already tried.
                 self.auto_attempted.insert(real.clone());
+                if self.sessions[i].console_name.is_some() {
+                    self.sessions[i].console_name = Some(real.clone());
+                }
                 self.sessions[i].durable_name = real;
             }
         }
@@ -6269,6 +6360,64 @@ mod tests {
     }
 
     #[test]
+    fn remote_threads_adopt_the_exact_pane_and_resume_from_the_left_list() {
+        use super::super::super::remote_threads::tests::thread;
+        for harness in ["claude", "grok"] {
+            let mut a = loaded_app();
+            let mut pane = session("ca_1", "box");
+            pane.durable_name = "relay-one".into();
+            pane.console_name = Some("relay-one".into());
+            pane.client_id = Some("our-pane".into());
+            a.attach_session(pane, "ca_1".into());
+            let mut first = thread(harness, "first");
+            first.pane_id = Some("our-pane".into());
+            first.console_name = Some("relay-one".into());
+            first.thread.title = "First task".into();
+            a.remote_threads_loaded("ca_1", &[first.clone()]);
+            a.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![ConsoleSession::client_thread(
+                    "ca_1",
+                    harness,
+                    Some(&first.thread),
+                )]),
+            );
+            assert_eq!(a.sessions[0].durable_name, first.name("ca_1"));
+            assert_eq!(a.sessions[0].console_name.as_deref(), Some("relay-one"));
+            assert_eq!(a.selected_row().unwrap().label, "First task");
+            let mut second = first.clone();
+            second.thread.id = "second".into();
+            second.thread.title = "Second task".into();
+            first.pane_id = None;
+            first.console_name = None;
+            a.remote_threads_loaded("ca_1", &[first.clone(), second.clone()]);
+            let rows = vec![
+                ConsoleSession::client_thread("ca_1", harness, Some(&first.thread)),
+                ConsoleSession::client_thread("ca_1", harness, Some(&second.thread)),
+            ];
+            a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+            assert_eq!(a.sessions[0].durable_name, second.name("ca_1"));
+            assert_eq!(a.selected_row().unwrap().label, "Second task");
+            assert!(a.take_auto_connects().is_empty());
+            let mut partial = Vec::new();
+            a.preserve_failed_threads("ca_1", &[harness.into()], &mut partial);
+            assert_eq!(partial.len(), 2);
+            drop(a.take_session(0));
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|row| row.label == "First task")
+                .unwrap();
+            a.focus = ManageFocus::Tree;
+            assert!(
+                matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, agent_id, .. })
+                if session_name == first.name("ca_1") && agent_id == "ca_1")
+            );
+        }
+    }
+
+    #[test]
     fn native_thread_selection_and_title_refresh_follow_ids_not_row_positions() {
         use super::super::super::client_sessions::{self, Thread};
         let mut a = loaded_app();
@@ -6842,15 +6991,18 @@ mod tests {
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
         session.resize(6, 60);
         session.send(b"see https://railway.com/deploy now\r\n");
-        for _ in 0..40 {
-            if session
-                .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("railway.com"))
-            {
+        // ConPTY can deliver the echoed URL in several reads on a busy runner.
+        // Wait for the complete link, rather than clicking a partial hostname.
+        for _ in 0..500 {
+            if session.url_at(0, 8).as_deref() == Some("https://railway.com/deploy") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert_eq!(
+            session.url_at(0, 8).as_deref(),
+            Some("https://railway.com/deploy")
+        );
         a.attach_session(session, "ca_1".into());
         a.panes.session = PaneBox {
             x: 34,

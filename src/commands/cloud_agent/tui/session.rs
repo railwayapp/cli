@@ -343,6 +343,8 @@ pub struct Session {
     pub harness: String,
     /// The durable session this pane is attached to.
     pub durable_name: String,
+    /// SSH transport identity for a pane whose visible identity is a thread.
+    pub console_name: Option<String>,
     pub client_id: Option<String>,
     pub client_thread: Option<client_sessions::Thread>,
     pub client_bridge: Option<codex::bridge::Bridge>,
@@ -648,6 +650,7 @@ impl Session {
         }
 
         Ok(Self {
+            console_name: None,
             client_id: None,
             client_thread: None,
             client_bridge: None,
@@ -1142,6 +1145,7 @@ impl Session {
             });
         }
         Ok(Self {
+            console_name: None,
             client_id: None,
             client_thread: None,
             client_bridge: None,

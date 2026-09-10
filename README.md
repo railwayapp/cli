@@ -286,11 +286,33 @@ uses `--auto`. These settings also apply on reconnect. Codex records trust for
 the remote project directory, including a different repository selected when
 resuming a thread.
 
-The CA sidebar shows native conversation titles for Codex, OpenCode, and
-OpenCode2 and resumes the selected conversation by its native ID. Titles refresh
-without opening clients for saved history. Codex's native `/new` and `/resume`
-also update the pane's conversation identity. Connection details are shown
+Fresh OpenCode and OpenCode2 launches open the native home/splash screen. A
+conversation is created when you submit a prompt; a launch with an initial
+prompt starts directly in that conversation. Connection details are shown
 before launch and again after the local client exits.
+
+## Cloud agent conversation history
+
+In `railway ca` and the `railway code` frame, expand a cloud agent in the left
+list to browse its **Claude, Grok, Codex, OpenCode, and OpenCode2 conversations**.
+Select a title and press Enter to reopen that exact thread. Saved conversations
+remain available after their terminal exits; opening the list does not launch
+clients for them. Titles refresh and selection follows the conversation ID.
+
+Claude and Grok history is discovered directly on the VM over SSH, including
+conversations started outside Railway's launcher. Claude uses a pinned official
+Agent SDK, cached automatically on the VM when history is first discovered;
+Grok uses its saved `summary.json` metadata. Discovery respects
+`CLAUDE_CONFIG_DIR` and `GROK_HOME`, and filters hidden subagents and empty
+startup records. A temporary discovery failure retains previously loaded rows.
+
+Selecting a Claude or Grok thread reconnects to its verified live terminal when
+available, or resumes its native UI from the recorded project and configuration
+directory. Claude background jobs use `claude attach`. Live metadata and hooks
+update thread status and associate native panes with their conversation IDs.
+Codex's native `/new` and `/resume` also update the pane's conversation identity.
+History belongs to the VM where it was saved; wake a sleeping agent before
+opening one of its threads.
 
 ## SSH shells and conversation resume
 

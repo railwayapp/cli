@@ -26,6 +26,7 @@ use std::io::{Write, stdout};
 use std::panic;
 
 use super::client_sessions::{self, Connection as ClientConnection, Thread as ClientThread};
+use super::remote_threads::{self, RemoteThread};
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
@@ -260,6 +261,11 @@ pub struct FullScreenRequest {
 
 /// Everything the loop reacts to besides keystrokes.
 enum Message {
+    RemoteThreadReady {
+        connect: app::AutoConnect,
+        info: Box<code::ConnectInfo>,
+        thread: Box<RemoteThread>,
+    },
     ClientThreadSelected {
         client_id: String,
         thread: ClientThread,
@@ -295,7 +301,7 @@ enum Message {
         /// environment can be refetched while sessions are in flight, and a
         /// new agent shifting the list would attach these to the wrong row.
         agent_id: String,
-        result: Result<Vec<ConsoleSession>, String>,
+        result: Result<SessionInventory, String>,
     },
     LaunchStep(String),
     LaunchReady(Box<Prepared>, Box<LaunchRequest>),
@@ -520,6 +526,65 @@ fn reconnect_client(
         };
         let _ = tx.send(message);
     });
+}
+
+fn reconnect_remote_thread(
+    connect: app::AutoConnect,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_owned();
+    tokio::spawn(async move {
+        let result = async {
+            let inventory = fetch_sessions(
+                &client,
+                &backboard,
+                &connect.agent_id,
+                &connect.environment_id,
+            )
+            .await?;
+            let thread = inventory
+                .remote
+                .into_iter()
+                .find(|row| row.name(&connect.agent_id) == connect.session_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Conversation is no longer available on this VM{}",
+                        if inventory.warnings.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", inventory.warnings.join("; "))
+                        }
+                    )
+                })?;
+            let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+            Ok::<_, anyhow::Error>((info, thread))
+        }
+        .await;
+        let message = match result {
+            Ok((info, thread)) => Message::RemoteThreadReady {
+                connect,
+                info: Box::new(info),
+                thread: Box::new(thread),
+            },
+            Err(error) => Message::ReattachFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(message);
+    });
+}
+
+#[derive(Default)]
+struct SessionInventory {
+    rows: Vec<ConsoleSession>,
+    remote: Vec<RemoteThread>,
+    warnings: Vec<String>,
+    failed: Vec<String>,
 }
 
 impl Progress for ChannelProgress {
@@ -804,37 +869,35 @@ fn start_refresh(
     spawn_my_agents_fetch(tx, client, backboard);
 }
 
-/// The reattachable shell and exec sessions on one agent's VM.
-///
-/// These are the platform's own record of what is running in there, so they
-/// survive our disconnects — and each other's. Attaching is by name, which the
-/// relay resolves.
+/// Real conversations on the VM, plus console transports for other harnesses.
 async fn fetch_sessions(
     client: &reqwest::Client,
     backboard: &str,
     cloud_agent_id: &str,
     environment_id: &str,
-) -> Result<Vec<ConsoleSession>> {
-    if let Some(connection) = code::saved_config::client_connection(cloud_agent_id, environment_id)
-    {
-        return Ok(connection
-            .list()
-            .await?
-            .iter()
-            .map(|thread| {
-                ConsoleSession::client_thread(cloud_agent_id, connection.harness(), Some(thread))
-            })
-            .collect());
-    }
-    let res = post_graphql::<queries::CloudAgentSessionThreads, _>(
+) -> Result<SessionInventory> {
+    let discovery = async {
+        let info = code::connect_info(environment_id, cloud_agent_id).await?;
+        remote_threads::discover(&info).await
+    };
+    let native = async {
+        let Some(connection) =
+            code::saved_config::client_connection(cloud_agent_id, environment_id)
+        else {
+            return (None, Ok(Vec::new()));
+        };
+        (Some(connection.harness()), connection.list().await)
+    };
+    let platform = post_graphql::<queries::CloudAgentSessionThreads, _>(
         client,
         backboard,
         queries::cloud_agent_session_threads::Variables {
             cloud_agent_id: cloud_agent_id.to_owned(),
             environment_id: environment_id.to_owned(),
         },
-    )
-    .await?;
+    );
+    let (res, discovery, (native_harness, native)) = tokio::join!(platform, discovery, native);
+    let res = res?;
     // The harness snapshots that label the console sessions, joined by the
     // durable session name a report carries. Newest per name wins: one
     // console session can host several runs over its life.
@@ -894,7 +957,132 @@ async fn fetch_sessions(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(sessions)
+    let discovery = discovery.unwrap_or_else(|error| remote_threads::Discovery {
+        warnings: vec![format!("Couldn't read VM conversation history: {error:#}")],
+        failed: vec!["claude".into(), "grok".into()],
+        ..Default::default()
+    });
+    let mut inventory = merge_remote_threads(cloud_agent_id, sessions, discovery);
+    if let Some(harness) = native_harness {
+        match native {
+            Ok(threads) => {
+                inventory
+                    .rows
+                    .retain(|row| row.snapshot.as_ref().is_none_or(|s| s.harness != harness));
+                inventory.rows.extend(threads.iter().map(|thread| {
+                    ConsoleSession::client_thread(cloud_agent_id, harness, Some(thread))
+                }));
+            }
+            Err(error) => {
+                inventory.failed.push(harness.into());
+                inventory
+                    .warnings
+                    .push(format!("Couldn't read {harness} history: {error:#}"));
+            }
+        }
+    }
+    inventory.rows.sort_by(|a, b| {
+        b.snapshot
+            .as_ref()
+            .map(|s| &s.updated_at)
+            .cmp(&a.snapshot.as_ref().map(|s| &s.updated_at))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(inventory)
+}
+
+fn merge_remote_threads(
+    agent_id: &str,
+    mut consoles: Vec<ConsoleSession>,
+    discovery: remote_threads::Discovery,
+) -> SessionInventory {
+    let mut remote = discovery.threads;
+    let mut claimed = std::collections::HashSet::new();
+    for console in &consoles {
+        if !console.running {
+            continue;
+        }
+        // A process's pane marker outranks an older hook report after /resume.
+        let direct: Vec<_> = remote
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.active
+                    && (row.console_name.as_deref() == Some(console.name.as_str())
+                        || row.pane_id.as_ref().is_some_and(|id| {
+                            console.command.as_ref().is_some_and(|cmd| {
+                                cmd.contains(&format!("RAILWAY_THREAD_PANE_ID={id};"))
+                            })
+                        }))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let selected = if direct.len() == 1 {
+            direct.first().copied()
+        } else if direct.is_empty() {
+            console.snapshot.as_ref().and_then(|snapshot| {
+                remote.iter().position(|row| {
+                    // A durable terminal can survive as a shell after its
+                    // harness exits. A historical hook alone cannot prove
+                    // that attaching it will reopen this conversation.
+                    row.active
+                        && row.harness == snapshot.harness
+                        && row.thread.id == snapshot.session_id
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(index) = selected {
+            let row = &mut remote[index];
+            row.console_name = Some(console.name.clone());
+            if let Some(snapshot) = &console.snapshot
+                && snapshot.session_id == row.thread.id
+                && snapshot.harness == row.harness
+                && (!row.active || row.harness == "grok")
+            {
+                row.thread.state = snapshot.state.clone();
+            }
+            claimed.insert(console.name.clone());
+        }
+    }
+    // Only a currently running, verified console may be reattached by name.
+    for row in &mut remote {
+        if row
+            .console_name
+            .as_ref()
+            .is_some_and(|name| !claimed.contains(name))
+        {
+            row.console_name = None;
+        }
+    }
+    consoles.retain(|row| {
+        let harness = row
+            .snapshot
+            .as_ref()
+            .map(|s| s.harness.as_str())
+            .or_else(|| row.harness_slug());
+        let has_history = harness.is_some_and(|h| {
+            matches!(h, "claude" | "grok") && !discovery.failed.iter().any(|failed| failed == h)
+        });
+        !claimed.contains(&row.name)
+            && !has_history
+            && !row
+                .command
+                .as_ref()
+                .is_some_and(|command| command.contains("RAILWAY_THREAD_DISCOVERY=1"))
+    });
+    consoles.extend(
+        remote
+            .iter()
+            .map(|row| ConsoleSession::client_thread(agent_id, &row.harness, Some(&row.thread))),
+    );
+    SessionInventory {
+        rows: consoles,
+        remote,
+        warnings: discovery.warnings,
+        failed: discovery.failed,
+    }
 }
 
 pub async fn run(
@@ -1175,6 +1363,22 @@ pub async fn run(
                 // The spinner goes on now — connect_info takes a beat, and a
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
+                if client_sessions::parse_name(&session_name)
+                    .is_some_and(|(h, _, _)| matches!(h, "claude" | "grok"))
+                {
+                    reconnect_remote_thread(
+                        app::AutoConnect {
+                            agent_id,
+                            agent_name,
+                            environment_id,
+                            session_name,
+                        },
+                        &tx,
+                        &client,
+                        &backboard,
+                    );
+                    continue;
+                }
                 if client_sessions::is_client(&session_name) {
                     reconnect_client(
                         app::AutoConnect {
@@ -1201,13 +1405,23 @@ pub async fn run(
                     // attaches anyway, the benefit of the doubt.
                     let (info, listed) = tokio::join!(
                         code::connect_info(&environment_id, &agent_id),
-                        fetch_sessions(&client, &backboard, &agent_id, &environment_id),
+                        post_graphql::<queries::CloudAgentSessionThreads, _>(
+                            &client,
+                            &backboard,
+                            queries::cloud_agent_session_threads::Variables {
+                                cloud_agent_id: agent_id.clone(),
+                                environment_id: environment_id.clone(),
+                            },
+                        ),
                     );
+                    // This is a console transport check. Thread discovery can
+                    // hide its row and need first-time SDK setup; neither says
+                    // whether the relay can still attach this console.
                     let gone = matches!(
                         &listed,
-                        Ok(sessions) if !sessions
-                            .iter()
-                            .any(|s| s.name == session_name && s.running)
+                        Ok(sessions) if !sessions.cloud_agent_console_sessions.as_ref()
+                            .is_some_and(|sessions| sessions.edges.iter()
+                                .any(|s| s.node.name == session_name && s.node.run_state.running))
                     );
                     let message = match info {
                         Ok(_) if gone => {
@@ -1701,6 +1915,54 @@ fn handle_message(
     stop_fetching: &StopFlag,
 ) -> Option<Effect> {
     match message {
+        Message::RemoteThreadReady {
+            connect,
+            info,
+            thread,
+        } => {
+            app.connecting.remove(&connect.session_name);
+            let pane_id = super::opencode::generate_password();
+            let result = thread.resume_command(&pane_id).and_then(|command| {
+                let console_name = thread
+                    .console_name
+                    .clone()
+                    .unwrap_or_else(|| session::durable_name(&thread.harness));
+                let notify = tx.clone();
+                let mut pane = session::Session::spawn(
+                    connect.agent_id.clone(),
+                    connect.agent_name,
+                    thread.harness.clone(),
+                    &info.ssh_target,
+                    info.identity.as_deref(),
+                    &info.relay_opts,
+                    &command,
+                    thread.console_name.is_some(),
+                    &console_name,
+                    24,
+                    80,
+                    move || {
+                        let _ = notify.send(Message::SessionOutput);
+                    },
+                )?;
+                pane.console_name = Some(console_name);
+                pane.client_id = Some(if thread.console_name.is_some() {
+                    thread.pane_id.clone().unwrap_or(pane_id)
+                } else {
+                    pane_id
+                });
+                pane.durable_name = connect.session_name.clone();
+                pane.client_thread = Some(thread.thread.clone());
+                Ok::<_, anyhow::Error>(pane)
+            });
+            match result {
+                Ok(pane) => {
+                    app.attach_session(pane, connect.agent_id.clone());
+                    schedule_session_refresh(connect.agent_id, tx);
+                }
+                Err(error) => app.toast_error(format!("Couldn't open conversation: {error:#}")),
+            }
+            None
+        }
         Message::ClientThreadSelected { client_id, thread } => {
             if let Some(agent_id) = app.client_thread_selected(&client_id, thread) {
                 schedule_session_refresh(agent_id, tx);
@@ -1809,7 +2071,17 @@ fn handle_message(
             agent_id,
             result,
         } => {
-            app.sessions_loaded(path, &agent_id, result);
+            match result {
+                Ok(mut inventory) => {
+                    app.remote_threads_loaded(&agent_id, &inventory.remote);
+                    app.preserve_failed_threads(&agent_id, &inventory.failed, &mut inventory.rows);
+                    app.sessions_loaded(path, &agent_id, Ok(inventory.rows));
+                    if !inventory.warnings.is_empty() {
+                        app.status = inventory.warnings.join("; ");
+                    }
+                }
+                Err(error) => app.sessions_loaded(path, &agent_id, Err(error)),
+            }
             None
         }
         Message::LaunchStep(text) => {
@@ -2040,6 +2312,15 @@ fn open_session(
     // A placeholder size: the next frame measures the real pane and resizes
     // both the pty and the emulator before anything is drawn from it.
     let (rows, cols) = (24u16, 80u16);
+    let pane_id =
+        matches!(prepared.harness, "claude" | "grok").then(super::opencode::generate_password);
+    let remote_cmd = match &pane_id {
+        Some(id) => format!(
+            "export RAILWAY_THREAD_PANE_ID={id}; {}",
+            prepared.remote_cmd
+        ),
+        None => prepared.remote_cmd.clone(),
+    };
     match session::Session::spawn(
         prepared.agent_id.clone(),
         prepared.agent_name.clone(),
@@ -2047,7 +2328,7 @@ fn open_session(
         &prepared.ssh_target,
         prepared.identity.as_deref(),
         &prepared.relay_opts,
-        &prepared.remote_cmd,
+        &remote_cmd,
         req.session_name.is_some(),
         &durable_session,
         rows,
@@ -2056,7 +2337,11 @@ fn open_session(
             let _ = notify_tx.send(Message::SessionOutput);
         },
     ) {
-        Ok(session) => {
+        Ok(mut session) => {
+            if let Some(id) = pane_id {
+                session.client_id = Some(id);
+                session.console_name = Some(durable_session);
+            }
             app.attach_session(session, prepared.agent_id.clone());
             schedule_session_refresh(prepared.agent_id.clone(), tx);
             // Refetch the environment so a newly created agent appears, and
@@ -2559,6 +2844,116 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_survives_console_exit_and_native_switches_replace_the_console_row() {
+        let old = remote_threads::tests::thread("claude", "old");
+        let mut current = remote_threads::tests::thread("claude", "current");
+        current.active = true;
+        current.pane_id = Some("pane-id".into());
+        let console = ConsoleSession {
+            name: "relay-name".into(),
+            kind: "SHELL".into(),
+            running: true,
+            attached: true,
+            created_at: None,
+            command: Some("export RAILWAY_THREAD_PANE_ID=pane-id; claude".into()),
+            snapshot: Some(app::ThreadSnapshot {
+                harness: "claude".into(),
+                session_id: "old".into(),
+                state: "working".into(),
+                prompt: Some("stale prompt".into()),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: "2026-09-10T09:00:00Z".into(),
+            }),
+        };
+        let stale = merge_remote_threads(
+            "vm",
+            vec![console.clone()],
+            remote_threads::Discovery {
+                threads: vec![old.clone()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            stale.remote[0].console_name.is_none(),
+            "a stale hook on a running shell must resume by ID"
+        );
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![console.clone()],
+            remote_threads::Discovery {
+                threads: vec![old.clone(), current.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(inventory.rows.len(), 2);
+        assert!(inventory.rows.iter().all(|row| row.kind == "THREAD"));
+        assert!(
+            inventory.remote[0].console_name.is_none(),
+            "old hook must not attach the wrong conversation"
+        );
+        assert_eq!(
+            inventory.remote[1].console_name.as_deref(),
+            Some("relay-name")
+        );
+        let mut exited = console;
+        exited.running = false;
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![exited],
+            remote_threads::Discovery {
+                threads: vec![old, current],
+                ..Default::default()
+            },
+        );
+        assert!(
+            inventory
+                .remote
+                .iter()
+                .all(|row| row.console_name.is_none())
+        );
+        assert_eq!(
+            inventory
+                .rows
+                .iter()
+                .filter(|row| row.is_interesting())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn multiple_grok_tabs_in_one_process_do_not_guess_the_focused_conversation() {
+        let mut first = remote_threads::tests::thread("grok", "first");
+        first.active = true;
+        first.console_name = Some("relay".into());
+        let mut second = first.clone();
+        second.thread.id = "second".into();
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![ConsoleSession {
+                name: "relay".into(),
+                kind: "SHELL".into(),
+                running: true,
+                attached: true,
+                created_at: None,
+                command: Some("grok".into()),
+                snapshot: None,
+            }],
+            remote_threads::Discovery {
+                threads: vec![first, second],
+                ..Default::default()
+            },
+        );
+        assert!(
+            inventory
+                .remote
+                .iter()
+                .all(|row| row.console_name.is_none())
+        );
+    }
 
     fn request() -> LaunchRequest {
         LaunchRequest {

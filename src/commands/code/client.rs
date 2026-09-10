@@ -173,7 +173,9 @@ pub(crate) async fn prepare_pane(
             Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
             Connection::OpenCode(_, beta) => local::ensure_client_quiet(*beta).await?,
         };
-        let thread = connection.new_thread().await?;
+        let thread = connection
+            .new_thread(args.initial_prompt.as_deref())
+            .await?;
         let prompt = connection
             .initial_prompt(thread.as_ref(), args.initial_prompt)
             .await?;
@@ -392,7 +394,7 @@ async fn launch(
         return connection.show(saved, persisted);
     };
     println!("Launching local {}…", harness.edition());
-    let thread = connection.new_thread().await?;
+    let thread = connection.new_thread(prompt.as_deref()).await?;
     let prompt = connection.initial_prompt(thread.as_ref(), prompt).await?;
     let result = crate::commands::cloud_agent::launch_client_in_pane(
         crate::commands::cloud_agent::tui::ClientPane {

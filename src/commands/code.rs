@@ -1125,6 +1125,12 @@ pub enum SessionStyle {
 /// Bypass the login-profile autostart on VMs prepared by `railway code`.
 pub(crate) const LOGIN_SHELL_COMMAND: &str = "export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l";
 
+pub(crate) fn harness_env_prefix() -> String {
+    format!(
+        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
+    )
+}
+
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -1186,11 +1192,9 @@ fn remote_command(
     // the pane closes before the user can read the error.
     let reset = format!("railway_code_status=$?; {}", terminal_reset_printf());
     // Resuming reopens an existing conversation, so it takes the id instead of
-    // a prompt (the conversation already has its task). Claude only: it's the
-    // one harness with a verified resume-by-id CLI (`claude --resume <id>`
-    // reopens under the same session id). The id is platform-reported text,
-    // quoted so it can't grow shell syntax.
-    if agent == Agent::Claude
+    // a prompt (the conversation already has its task). Both native harnesses
+    // accept --resume <id>; the id is quoted as a single shell argument.
+    if matches!(agent, Agent::Claude | Agent::Grok)
         && let Some(id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty())
     {
         return format!(
@@ -3534,9 +3538,7 @@ async fn prepare_inner(
     };
     ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
-    let env_prefix = format!(
-        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
-    );
+    let env_prefix = harness_env_prefix();
     let remote_cmd = remote_command(
         agent,
         &env_prefix,

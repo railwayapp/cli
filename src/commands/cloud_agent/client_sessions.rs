@@ -12,7 +12,7 @@ pub(crate) enum Connection {
     OpenCode(opencode::Connection, bool),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub(crate) struct Thread {
     pub id: String,
     pub title: String,
@@ -32,7 +32,10 @@ pub(crate) fn name(harness: &str, agent: &str, thread: Option<&str>) -> String {
 pub(crate) fn parse_name(name: &str) -> Option<(&str, &str, Option<&str>)> {
     let mut fields = name.strip_prefix("client-thread:")?.splitn(3, ':');
     let harness = fields.next()?;
-    if !matches!(harness, "codex" | "opencode" | "opencode2") {
+    if !matches!(
+        harness,
+        "codex" | "opencode" | "opencode2" | "claude" | "grok"
+    ) {
         return None;
     }
     let agent = fields.next()?;
@@ -185,9 +188,12 @@ impl Connection {
         }
     }
 
-    /// OpenCode can persist an empty session before attaching. Codex persists
-    /// only after the first turn; its native client must start that conversation.
-    pub(crate) async fn new_thread(&self) -> Result<Option<Thread>> {
+    /// Only pre-create a conversation when seeding a prompt. A bare launch
+    /// belongs on the native home screen, without a forced --session argument.
+    pub(crate) async fn new_thread(&self, prompt: Option<&str>) -> Result<Option<Thread>> {
+        if prompt.is_none_or(|prompt| prompt.trim().is_empty()) {
+            return Ok(None);
+        }
         match self {
             Self::Codex(_) => Ok(None),
             Self::OpenCode(c, beta) => {
@@ -228,7 +234,7 @@ impl Connection {
     }
 }
 
-fn validate_id(id: &str) -> Result<()> {
+pub(super) fn validate_id(id: &str) -> Result<()> {
     if id.is_empty()
         || !id
             .bytes()
@@ -344,6 +350,31 @@ async fn opencode_request(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn bare_opencode_launch_opens_home_without_creating_a_session() {
+        for beta in [false, true] {
+            let connection = super::Connection::OpenCode(
+                super::opencode::Connection {
+                    url: "http://127.0.0.1:1".into(),
+                    username: "opencode".into(),
+                    password: "secret".into(),
+                    directory: "/app".into(),
+                    reused: false,
+                },
+                beta,
+            );
+            for prompt in [None, Some(" \n ")] {
+                assert!(connection.new_thread(prompt).await.unwrap().is_none());
+            }
+            assert!(!connection.args(None).iter().any(|arg| arg == "--session"));
+            assert!(
+                connection
+                    .args(Some("chosen-thread"))
+                    .windows(2)
+                    .any(|args| args == ["--session", "chosen-thread"])
+            );
+        }
+    }
     use super::*;
 
     #[test]

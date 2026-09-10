@@ -17,6 +17,7 @@ pub mod mcp_sync;
 pub(crate) mod opencode;
 pub(crate) mod opencode2;
 pub mod prefs;
+pub(crate) mod remote_threads;
 pub mod setup;
 pub mod skills_sync;
 pub mod telemetry;
