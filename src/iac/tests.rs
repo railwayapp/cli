@@ -149,6 +149,27 @@ fn emits_change_set_wire_version() {
 }
 
 #[test]
+fn reasserts_a_custom_database_image_during_creation() {
+    let current = graph_from(vec![]);
+    let mut database = postgres("Postgres", Some("us-west2"));
+    let pinned_image = "ghcr.io/railwayapp-templates/postgres-ssl:17";
+    database["image"] = json!(pinned_image);
+    database["source"] = image(pinned_image);
+    let desired = graph_from(vec![database]);
+
+    let change_set = diff(&current, &desired);
+    let changes = &change_set.changes;
+
+    assert_eq!(
+        kinds(&change_set),
+        vec!["resource.create", "resource.update"]
+    );
+    assert_eq!(changes[1]["address"], "database.Postgres");
+    assert_eq!(changes[1]["field"], "source");
+    assert_eq!(changes[1]["after"], image(pinned_image));
+}
+
+#[test]
 fn numeric_replicas_are_count_only() {
     let graph = graph_from(vec![service(
         "web",
