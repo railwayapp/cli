@@ -297,12 +297,6 @@ impl SavedConfig {
                 c.directory,
                 c.version
             )?;
-            writeln!(
-                out,
-                "\n{}\n  {}",
-                "Connect from your computer:".bold(),
-                codex::attach_command(c)?
-            )?;
             if let Some(d) = &codex.desktop {
                 writeln!(
                     out,
@@ -339,12 +333,6 @@ impl SavedConfig {
                 c.username,
                 c.password,
                 c.directory
-            )?;
-            writeln!(
-                out,
-                "\n{}\n  {}",
-                "Connect from your computer:".bold(),
-                opencode::attach_command(c, o.beta)?
             )?;
             if o.desktop_configured {
                 writeln!(
@@ -700,13 +688,13 @@ mod tests {
         for expected in [
             "My custom label",
             "SSH configuration written to /home/user/custom ssh",
-            "--remote-auth-token-env RAILWAY_CODEX_SERVER_TOKEN",
             "railway code --codex connect id",
             "railway code get-config id",
             "live server status has not been checked",
         ] {
             assert!(panel.contains(expected), "missing {expected}");
         }
+        assert!(!panel.contains("Connect from your computer:"));
         let home = tempfile::tempdir().unwrap();
         let failed = saved("id", "box").with_codex(
             &codex("still-usable"),

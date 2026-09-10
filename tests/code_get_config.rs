@@ -81,6 +81,17 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
             assert!(text.contains("Host railway-agent-my-box"));
         }
         assert_eq!(text.matches("Connect with the Railway CLI:").count(), 1);
+        for removed in [
+            "Connect from your computer:",
+            "CODEX_HOME=",
+            "RAILWAY_CODEX_SERVER_TOKEN=",
+            "OPENCODE_SERVER_PASSWORD=",
+        ] {
+            assert!(
+                !text.contains(removed),
+                "unexpected native command: {removed}"
+            );
+        }
         assert!(!text.contains("Launch ") && !text.contains('\x1b'));
         if harness == "codex" {
             for expected in [
@@ -89,13 +100,13 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
                 "SSH configuration written to /home/user/.ssh/config",
                 "wss://example.up.railway.app:443",
                 "Codex App Server Configuration:",
-                "--remote-auth-token-env RAILWAY_CODEX_SERVER_TOKEN",
                 "railway code --codex connect agent-123",
                 "railway code get-config agent-123",
             ] {
                 assert!(text.contains(expected), "missing {expected}");
             }
         } else if harness.starts_with("opencode") {
+            assert!(text.contains(&format!("railway code --{harness} connect agent-123")));
             assert!(
                 text.contains("fixture-password") && text.contains("Desktop configuration updated")
             );

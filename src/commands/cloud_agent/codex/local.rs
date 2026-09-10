@@ -90,7 +90,7 @@ pub(crate) async fn ensure_client(version: &str) -> Result<Option<PathBuf>> {
 /// TUI. Their startup state can keep Codex busy even after the remote tools are
 /// ready, trapping Ctrl+C in interrupt handling. Retain the client's UI state
 /// between attaches, scoped to the backend rather than its rotating token.
-pub(super) fn client_home(connection: &Connection) -> Result<PathBuf> {
+fn client_home(connection: &Connection) -> Result<PathBuf> {
     let home = dirs::home_dir().context("Unable to get home directory")?;
     Ok(client_home_at(&home, connection))
 }

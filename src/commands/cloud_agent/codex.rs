@@ -214,35 +214,6 @@ pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
     ]
 }
 
-pub(crate) fn attach_command(connection: &Connection) -> Result<String> {
-    validate_url(&connection.url)?;
-    let home = local::client_home(connection)?
-        .to_string_lossy()
-        .into_owned();
-    let mut args = vec!["codex".into()];
-    args.extend(attach_args(connection));
-    if cfg!(windows) {
-        let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-        Ok(format!(
-            "$env:CODEX_HOME = {}; [System.IO.Directory]::CreateDirectory($env:CODEX_HOME) | Out-Null; $env:{TOKEN_ENV} = {}; & {}",
-            quote(&home),
-            quote(&connection.token),
-            args.iter()
-                .map(|arg| quote(arg))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ))
-    } else {
-        Ok(format!(
-            "mkdir -p -m 700 {} && CODEX_HOME={} {TOKEN_ENV}={} {}",
-            shell_join(std::slice::from_ref(&home)),
-            shell_join(std::slice::from_ref(&home)),
-            shell_join(std::slice::from_ref(&connection.token)),
-            shell_join(&args)
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

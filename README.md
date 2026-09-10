@@ -128,7 +128,8 @@ Configuration failures are non-fatal and reported alongside the connection
 details; rerun the command to retry.
 
 The CLI also prints the server URL, username, password, and project directory
-for manual setup, plus a shell command to connect directly.
+for manual setup, plus a Railway reconnect command:
+`railway code --opencode connect <agent>` (or `--opencode2` for Beta).
 After successful setup in an interactive terminal, it clears the setup messages
 and shows the connection details, with the Desktop update confirmation inside
 the result panel. Failed setup keeps its diagnostic output visible.
