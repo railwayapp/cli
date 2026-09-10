@@ -697,7 +697,7 @@ fn sanitize_alias(input: &str) -> String {
     }
 }
 
-fn quote_ssh_config_value(value: &str) -> String {
+pub(crate) fn quote_ssh_config_value(value: &str) -> String {
     if !value
         .chars()
         .any(|c| c.is_whitespace() || matches!(c, '"' | '\\'))

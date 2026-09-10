@@ -12,7 +12,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use super::herdr_cli::{Herdr, Machine};
-use super::state::State;
+use super::state::{State, Store};
 use super::target;
 use crate::client::GQLClient;
 use crate::config::Configs;
@@ -101,7 +101,7 @@ impl Op {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Plan {
     pub ops: Vec<Op>,
     /// agent id → herdr profile id, for every agent that has a machine
@@ -121,10 +121,8 @@ pub(super) fn machine_for<'a>(agent: &ca::Agent, machines: &'a [Machine]) -> Opt
     machines.iter().find(|m| is_machine_for(agent, m))
 }
 
-/// `known` is agent id → profile id from the last sync: only machines this
-/// plugin has seen attached to an agent are ever removed, so a login to another
-/// account, a different `RAILWAY_ENV`, or a machine pointed at a teammate's
-/// agent cannot wipe the catalog.
+/// `known` is agent id → profile id from a previous sync in the SAME account
+/// and backend. Store discards this evidence on a scope change.
 pub(super) fn reconcile(
     agents: &[ca::Agent],
     machines: &[Machine],
@@ -168,25 +166,42 @@ pub(super) fn reconcile(
     plan
 }
 
+fn plan_for(agents: &[ca::Agent], machines: &[Machine], state: &State) -> Plan {
+    let mut plan = reconcile(agents, machines, &state.agent_status, &state.machines);
+    plan.ops.retain(|op| {
+        !matches!(op, Op::Enable(_) | Op::Kick(_))
+            || !op
+                .profile_id()
+                .and_then(|id| plan.agents.get(id))
+                .is_some_and(|agent| state.sleep_pending(&agent.id, Utc::now()))
+    });
+    for agent in agents
+        .iter()
+        .filter(|a| state.sleep_pending(&a.id, Utc::now()))
+    {
+        if let Some(machine) = machine_for(agent, machines)
+            && machine.enabled
+            && !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Disable(id) if id == &machine.id))
+        {
+            plan.ops.push(Op::Disable(machine.id.clone()));
+        }
+    }
+    plan
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Outcome {
     pub applied: Vec<Op>,
     pub failed: Vec<(Op, String)>,
 }
 
-/// `wait` holds Enable and Kick until the agent's ssh relay executes commands;
-/// enabling earlier is exactly what parks herdr in Attention.
-pub(super) async fn apply(herdr: &Herdr, plan: &Plan, wait: bool) -> Outcome {
+/// Apply only after relay readiness and the state revision have been checked.
+fn apply(herdr: &Herdr, ops: &[Op]) -> Outcome {
     let mut outcome = Outcome::default();
-    for op in &plan.ops {
-        if wait
-            && matches!(op, Op::Enable(_) | Op::Kick(_))
-            && let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id))
-            && let Err(e) = super::relay::wait_until_ready(agent).await
-        {
-            outcome.failed.push((op.clone(), format!("{e:#}")));
-            continue;
-        }
+    for op in ops {
         let result = match op {
             Op::Remove(id) => herdr.machine_remove(id),
             Op::Disable(id) => herdr.machine_disable(id),
@@ -208,34 +223,24 @@ pub async fn command(args: Args) -> Result<()> {
     if args.spawn_watch {
         super::watch::spawn_detached();
     }
-    if let Some(secs) = args.debounce
-        && let Ok(state) = State::load()
-        && synced_within(&state, secs, Utc::now())
-    {
-        return Ok(());
-    }
-    super::watch::nudge();
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
     let herdr = Herdr::from_env();
-
-    let agents = ca::list_mine(&client, &backboard).await?;
-    let machines = herdr.machines()?;
-    let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status, &state.machines);
-
-    let outcome = if args.dry_run {
-        Outcome::default()
-    } else {
-        // Claim the window before the relay waits, so debounced hook runs
-        // started meanwhile back off instead of stacking up.
-        state.last_sync = Some(Utc::now().to_rfc3339());
-        state.save()?;
-        let outcome = apply(&herdr, &plan, true).await;
-        remember(&mut state, &plan, &outcome)?;
-        outcome
+    let store = Store::new(&configs)?;
+    let Some(report) = run_sync(&client, &backboard, &herdr, &store, &args, relay_ready).await?
+    else {
+        return Ok(());
     };
+    if !args.dry_run {
+        super::watch::nudge();
+    }
+    let Report {
+        agents,
+        machines,
+        plan,
+        outcome,
+    } = report;
 
     if args.json {
         println!(
@@ -364,15 +369,20 @@ pub(super) async fn resync(
     client: &reqwest::Client,
     backboard: &str,
     herdr: &Herdr,
+    store: &Store,
 ) -> Result<Vec<String>> {
-    let agents = ca::list_mine(client, backboard).await?;
-    let machines = herdr.machines()?;
-    let mut state = State::load().unwrap_or_default();
-    let plan = reconcile(&agents, &machines, &state.agent_status, &state.machines);
-    state.last_sync = Some(Utc::now().to_rfc3339());
-    state.save()?;
-    let outcome = apply(herdr, &plan, true).await;
-    remember(&mut state, &plan, &outcome)?;
+    let args = Args {
+        dry_run: false,
+        json: false,
+        debounce: None,
+        spawn_watch: false,
+    };
+    let report = run_sync(client, backboard, herdr, store, &args, relay_ready)
+        .await?
+        .expect("an undebounced sync always runs");
+    let Report {
+        machines, outcome, ..
+    } = report;
     if let Some((op, err)) = outcome.failed.first() {
         bail!("{} failed: {err}", op.describe(&machines));
     }
@@ -381,6 +391,92 @@ pub(super) async fn resync(
         .iter()
         .map(|op| op.describe(&machines))
         .collect())
+}
+
+struct Report {
+    agents: Vec<ca::Agent>,
+    machines: Vec<Machine>,
+    plan: Plan,
+    outcome: Outcome,
+}
+
+async fn relay_ready(agent: ca::Agent) -> Result<()> {
+    super::relay::wait_until_ready(&agent).await
+}
+
+/// One sync at a time, but never hold the state lock during a relay wait:
+/// sleep/wake and registration can proceed while a machine is unresponsive.
+/// Their writes advance the revision, so a waiting sync must refetch before
+/// applying its old plan. Both CLI and watcher take this same path.
+async fn run_sync<F, Fut>(
+    client: &reqwest::Client,
+    backboard: &str,
+    herdr: &Herdr,
+    store: &Store,
+    args: &Args,
+    mut ready: F,
+) -> Result<Option<Report>>
+where
+    F: FnMut(ca::Agent) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let _sync = super::state::lock_file(&store.path.with_extension("sync.lock")).await?;
+    let mut applied = Vec::new();
+    'retry: for _ in 0..3 {
+        let baseline = store.load()?;
+        if args
+            .debounce
+            .is_some_and(|secs| synced_within(&baseline, secs, Utc::now()))
+        {
+            return Ok(None);
+        }
+        let agents = ca::list_mine(client, backboard).await?;
+        let machines = herdr.machines()?;
+        let plan = plan_for(&agents, &machines, &baseline);
+        if args.dry_run {
+            return Ok(Some(Report {
+                agents,
+                machines,
+                plan,
+                outcome: Outcome::default(),
+            }));
+        }
+
+        let mut outcome = Outcome::default();
+        for op in &plan.ops {
+            if matches!(op, Op::Enable(_) | Op::Kick(_))
+                && let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id))
+                && let Err(e) = ready(agent.clone()).await
+            {
+                outcome.failed.push((op.clone(), format!("{e:#}")));
+                continue;
+            }
+            let locked = store.lock().await?;
+            if !locked.state.same_revision(&baseline) {
+                continue 'retry;
+            }
+            // Apply in plan order without delaying earlier disables behind
+            // later relay probes. Keep the lock only for the catalog edit.
+            let change = apply(herdr, std::slice::from_ref(op));
+            applied.extend(change.applied);
+            outcome.failed.extend(change.failed);
+        }
+
+        let mut locked = store.lock().await?;
+        if !locked.state.same_revision(&baseline) {
+            continue;
+        }
+        outcome.applied = applied;
+        remember(&mut locked.state, &plan, &outcome);
+        locked.save()?;
+        return Ok(Some(Report {
+            agents,
+            machines,
+            plan,
+            outcome,
+        }));
+    }
+    bail!("Agent actions changed while syncing; retry `railway ca herdr sync`.")
 }
 
 /// `Some(true)` when a toast is due, `Some(false)` for a quiet hook run,
@@ -400,7 +496,7 @@ fn plain(s: &str) -> String {
 
 /// A failed Enable or Kick keeps the agent's previous status, so the next run
 /// plans it again instead of believing the machine already followed.
-fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) -> Result<()> {
+fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) {
     let mut statuses = plan.statuses.clone();
     for (op, _) in &outcome.failed {
         if let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id)) {
@@ -412,8 +508,10 @@ fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) -> Result<()> {
     }
     state.machines = plan.matches.clone();
     state.agent_status = statuses;
+    state.sleep_until.retain(|id, until| {
+        *until > Utc::now() && plan.statuses.get(id).is_none_or(|s| s != "sleeping")
+    });
     state.last_sync = Some(Utc::now().to_rfc3339());
-    state.save()
 }
 
 pub(super) fn synced_within(state: &State, secs: u64, now: chrono::DateTime<Utc>) -> bool {
@@ -692,7 +790,7 @@ mod tests {
         // Never recorded by a previous sync: someone else's agent, or a hand-added machine.
         let plan = reconcile(
             &[agent("a1", Status::Running)],
-            &[orphan.clone()],
+            std::slice::from_ref(&orphan),
             &BTreeMap::new(),
             &BTreeMap::new(),
         );
@@ -700,7 +798,7 @@ mod tests {
         // Recorded before, but the agent list came back empty (wrong account, API blip).
         let mut known = BTreeMap::new();
         known.insert("nobody".to_string(), "p9".to_string());
-        let plan = reconcile(&[], &[orphan.clone()], &BTreeMap::new(), &known);
+        let plan = reconcile(&[], std::slice::from_ref(&orphan), &BTreeMap::new(), &known);
         assert_eq!(removals(&plan), 0, "{:?}", plan.ops);
         // Recorded before and the account still has agents: the agent is really gone.
         let plan = reconcile(
@@ -726,22 +824,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let mut state = State {
-            agent_status: previous.clone(),
-            ..Default::default()
-        };
-        // remember() saves to State::path(); exercise the status logic via a copy.
-        let _ = &path;
-        let before = state.agent_status.clone();
-        let mut statuses = plan.statuses.clone();
-        for (op, _) in &outcome.failed {
-            if let Some(agent) = op.profile_id().and_then(|id| plan.agents.get(id)) {
-                if let Some(old) = before.get(&agent.id) {
-                    statuses.insert(agent.id.clone(), old.clone());
-                }
-            }
-        }
-        state.agent_status = statuses;
+        let mut state = State::default();
+        state.agent_status = previous.clone();
+        remember(&mut state, &plan, &outcome);
+        state.save_to(&path).unwrap();
+        let state = State::load_from(&path).unwrap();
         assert_eq!(
             state.agent_status.get("a1").map(String::as_str),
             Some("sleeping")
@@ -783,7 +870,7 @@ mod tests {
             &BTreeMap::new(),
             &known(&agents, &machines),
         );
-        let outcome = apply(&herdr, &plan, false).await;
+        let outcome = apply(&herdr, &plan.ops);
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(outcome.applied.len(), 3);
         assert_eq!(
@@ -807,7 +894,7 @@ mod tests {
             ops: vec![Op::Disable("p1".into()), Op::Remove("p2".into())],
             ..Default::default()
         };
-        let outcome = apply(&herdr, &plan, false).await;
+        let outcome = apply(&herdr, &plan.ops);
         assert!(outcome.applied.is_empty());
         assert_eq!(outcome.failed.len(), 2);
         assert!(matches!(outcome.failed[0].0, Op::Disable(_)));
@@ -840,5 +927,123 @@ mod tests {
         assert!(!synced_within(&state, 30, now));
         state.last_sync = Some("not a date".into());
         assert!(!synced_within(&state, 30, now));
+    }
+
+    #[test]
+    fn pending_sleep_overrides_lagging_running_inventory() {
+        let agents = [agent("a1", Status::Running)];
+        let mut state = State::default();
+        state
+            .sleep_until
+            .insert("a1".into(), Utc::now() + chrono::Duration::seconds(60));
+        assert!(
+            plan_for(&agents, &[ours("p1", "a1", false)], &state)
+                .ops
+                .is_empty()
+        );
+        assert_eq!(
+            ops_of(&plan_for(&agents, &[ours("p1", "a1", true)], &state)),
+            ["disable p1"]
+        );
+        let asleep = plan_for(
+            &[agent("a1", Status::Sleeping)],
+            &[ours("p1", "a1", false)],
+            &state,
+        );
+        remember(&mut state, &asleep, &Outcome::default());
+        assert!(state.sleep_until.is_empty());
+        assert_eq!(
+            ops_of(&plan_for(&agents, &[ours("p1", "a1", false)], &state)),
+            ["enable p1"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_switch_does_not_remove_the_previous_accounts_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = crate::testkit::MockBackboard::spawn();
+        let path = dir.path().join("state.json");
+        let old = Store::at(path.clone(), &api.url(), "account-a");
+        old.update(|s| {
+            s.machines.insert("a1".into(), "p1".into());
+        })
+        .await
+        .unwrap();
+        let new = Store::at(path, &api.url(), "account-b");
+        api.stub(
+            "MyCloudAgents",
+            serde_json::json!({"myCloudAgents": [{
+                "id": "a2", "name": "other-account", "status": "RUNNING",
+                "projectId": "p", "environmentId": "e", "createdAt": Utc::now(),
+            }]}),
+        );
+        let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines(&format!(
+            r#"[{{"id":"p1","label":"first","target":"{}","enabled":true}}]"#,
+            target::target_for("env", "a1")
+        ));
+        resync(&reqwest::Client::new(), &api.url(), &fake.herdr(), &new)
+            .await
+            .unwrap();
+        assert_eq!(fake.calls(), ["machine list --json"]);
+        assert!(!new.load().unwrap().machines.contains_key("a1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sleep_during_relay_wait_invalidates_the_enable_plan_without_blocking_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = crate::testkit::MockBackboard::spawn();
+        let store = Store::at(dir.path().join("state.json"), &api.url(), "account");
+        api.stub(
+            "MyCloudAgents",
+            serde_json::json!({"myCloudAgents": [{
+                "id": "a1", "name": "first", "status": "RUNNING",
+                "projectId": "p", "environmentId": "env", "createdAt": Utc::now(),
+            }]}),
+        );
+        let fake = super::super::herdr_cli::fake::FakeHerdr::with_machines(&format!(
+            r#"[{{"id":"p1","label":"first","target":"{}","enabled":false}}]"#,
+            target::target_for("env", "a1")
+        ));
+        let args = Args {
+            dry_run: false,
+            json: false,
+            debounce: None,
+            spawn_watch: false,
+        };
+        let report = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_sync(
+                &reqwest::Client::new(),
+                &api.url(),
+                &fake.herdr(),
+                &store,
+                &args,
+                |_| async {
+                    // Represents a successful sleep acknowledgement while SSH is
+                    // being probed. This would deadlock if sync held the state lock.
+                    store
+                        .update(|s| {
+                            s.sleep_until
+                                .insert("a1".into(), Utc::now() + chrono::Duration::seconds(60));
+                        })
+                        .await?;
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert!(report.outcome.applied.is_empty());
+        assert_eq!(fake.calls(), ["machine list --json", "machine list --json"]);
+        assert_eq!(
+            api.requests().len(),
+            2,
+            "the old observation must be refetched"
+        );
+        assert!(store.load().unwrap().sleep_pending("a1", Utc::now()));
     }
 }

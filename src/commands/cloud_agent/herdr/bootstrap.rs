@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
 
+use super::state::Store;
 use crate::client::GQLClient;
 use crate::commands::code;
 use crate::commands::code::{HARNESS_PATH, LaunchArgs, Progress};
@@ -26,12 +27,42 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
     let harness = super::harness::choose(&args.harness, false)?;
-    run(&agent, harness).await
+    run(&agent, harness, &Store::new(&configs)?).await
 }
 
 /// Prepare a running agent's VM for herdr. Idempotent; `new` calls this right
 /// after `herdr machine add`.
-pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
+pub(super) async fn run(agent: &ca::Agent, harness: &str, store: &Store) -> Result<()> {
+    track_bootstrap(store, &agent.id, harness, run_inner(agent, harness)).await.with_context(|| format!(
+        "Herdr setup is incomplete for {}. Connect again, or retry `railway ca herdr bootstrap {} --{harness}`",
+        agent.name, agent.id,
+    ))
+}
+
+async fn track_bootstrap(
+    store: &Store,
+    agent_id: &str,
+    harness: &str,
+    run: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    store
+        .update(|s| {
+            s.bootstrap_pending
+                .insert(agent_id.to_owned(), harness.to_owned());
+        })
+        .await?;
+    let result = run.await;
+    if result.is_ok() {
+        store
+            .update(|s| {
+                s.bootstrap_pending.remove(agent_id);
+            })
+            .await?;
+    }
+    result
+}
+
+async fn run_inner(agent: &ca::Agent, harness: &str) -> Result<()> {
     if !matches!(agent.status, ca::Status::Running) {
         bail!(
             "Agent {} is {}. Wake it first: {}",
@@ -92,13 +123,10 @@ pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
             )
         }
         Outcome::HerdrMissing => {
-            println!(
-                "{} herdr is not installed on agent {}; `herdr machine add` installs it. Re-run {} afterwards.",
-                "!".yellow(),
-                agent.name.cyan(),
-                format!("railway ca herdr bootstrap {}", agent.name).cyan()
-            );
-            Ok(())
+            bail!(
+                "herdr is not installed on agent {}; connect it with `railway ca herdr agents` first",
+                agent.name
+            )
         }
         Outcome::NoMarker => bail!(
             "Bootstrap of agent {} produced no status marker (ssh exit {code}).\n{}\n{}",
@@ -224,7 +252,7 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
     echo "workspace app: FAILED to create"; fail=1
   fi
 else
-  echo "workspace app: skipped (no herdr server running; connecting starts one)"
+  echo "workspace app: FAILED (no herdr server running; connecting starts one)"; fail=1
 fi
 "##;
 
@@ -370,6 +398,32 @@ fn script(remote: &Remote) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn failed_bootstrap_preserves_the_selected_harness_for_connect_to_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("state.json"), "backboard", "account");
+        store
+            .update(|s| {
+                s.machines.insert("agent".into(), "profile".into());
+            })
+            .await
+            .unwrap();
+        let result = track_bootstrap(&store, "agent", "codex", async {
+            bail!("provisioning failed")
+        })
+        .await;
+        assert!(result.is_err());
+        let state = store.load().unwrap();
+        assert_eq!(state.machines["agent"], "profile");
+        // The same persisted value the existing-profile Connect path reads.
+        let harness = &state.bootstrap_pending["agent"];
+        assert_eq!(harness, "codex");
+        track_bootstrap(&store, "agent", harness, async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(store.load().unwrap().bootstrap_pending.is_empty());
+    }
+
     #[test]
     fn outcome_reads_markers() {
         assert!(matches!(outcome("HERDR-MISSING\n"), Outcome::HerdrMissing));
@@ -425,6 +479,15 @@ mod tests {
                 vm.install_herdr(&format!(
                     "#!/bin/bash\necho \"$*\" >> \"$HOME/herdr.log\"\nif [ \"$1 $2\" = \"workspace list\" ]; then cat <<'EOF'\n{workspaces}\nEOF\nfi\nif [ \"$1 $2\" = \"workspace create\" ]; then echo '{{\"result\":{{\"root_pane\":{{\"pane_id\":\"w9:p1\"}}}}}}'; fi\n"
                 ));
+                // Never discover or upgrade the host's real Railway CLI. The
+                // script prepends this directory to PATH just as it does on a VM.
+                for tool in ["railway", "curl"] {
+                    use std::os::unix::fs::PermissionsExt;
+                    let path = vm.home.path().join(".local/bin").join(tool);
+                    std::fs::write(&path, "#!/bin/sh\nexit 127\n").unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
                 vm
             }
 
@@ -631,14 +694,14 @@ mod tests {
         }
 
         #[test]
-        fn no_server_skips_the_workspace() {
+        fn no_server_reports_incomplete_bootstrap() {
             let vm = Vm::new("");
             vm.install_herdr(
                 "#!/bin/bash\necho \"$*\" >> \"$HOME/herdr.log\"\n[ \"$1\" = workspace ] && exit 1\nexit 0\n",
             );
             let out = vm.run();
-            assert!(out.contains("workspace app: skipped"), "{out}");
-            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            assert!(out.contains("workspace app: FAILED"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
         }
 
         #[test]

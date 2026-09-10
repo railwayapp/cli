@@ -3,8 +3,8 @@
 //! reconnect can park it in Attention, and a wake re-enables it once the
 //! relay answers. The signal is backboard's `cloudAgentInvalidation`
 //! subscription, one per environment holding one of the user's agents, on the
-//! unpublished internal graph the web and mobile apps use. No polling: a
-//! refused subscription is retried with backoff and said so. One watcher per
+//! unpublished internal graph the web and mobile apps use. Reconnects refetch,
+//! and a periodic sweep covers missed events or an unavailable subscription. One watcher per
 //! herdr session, started by `install` and the plugin's startup hook, told to
 //! re-list environments by SIGUSR1 (`nudge`), gone when the session's socket is.
 
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use super::herdr_cli::Herdr;
-use super::state::State;
+use super::state::{State, Store};
 use super::sync;
 use crate::client::GQLClient;
 use crate::config::Configs;
@@ -107,6 +107,7 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
     let mut tasks: JoinSet<()> = JoinSet::new();
     let mut watched: BTreeSet<String> = BTreeSet::new();
     let mut liveness = tokio::time::interval(LIVENESS);
+    liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut nudged = nudge_signal()?;
     let mut relist = true;
 
@@ -132,9 +133,10 @@ async fn run(socket: &Path, verbose: bool) -> Result<()> {
                     say(true, "herdr session gone; exiting");
                     return Ok(());
                 }
-                if watched.is_empty() {
-                    relist = true;
-                }
+                // Also discovers agents created in a previously empty
+                // environment, even when no local pane produces hook events.
+                relist = true;
+                resync(verbose, "periodic reconciliation").await;
             }
             _ = nudge_recv(&mut nudged) => {
                 say(verbose, "nudged: re-listing environments");
@@ -160,12 +162,27 @@ async fn watched_environments() -> Result<BTreeSet<String>> {
 }
 
 async fn subscribe(environment_id: String, tx: mpsc::Sender<Signal>, verbose: bool) {
+    subscribe_with(environment_id, tx, verbose, |environment_id| {
+        subscribe_graphql_internal::<CloudAgentInvalidation>(Variables { environment_id })
+    })
+    .await;
+}
+
+async fn subscribe_with<F, Fut, S>(
+    environment_id: String,
+    tx: mpsc::Sender<Signal>,
+    verbose: bool,
+    mut connect: F,
+) where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<S>>,
+    S: futures::Stream<
+            Item = Result<graphql_client::Response<ResponseData>, graphql_ws_client::Error>,
+        > + Unpin,
+{
     let mut backoff = RESUBSCRIBE_MIN;
     loop {
-        let stream = subscribe_graphql_internal::<CloudAgentInvalidation>(Variables {
-            environment_id: environment_id.clone(),
-        })
-        .await;
+        let stream = connect(environment_id.clone()).await;
         let mut stream = match stream {
             Ok(s) => s,
             Err(e) => {
@@ -183,6 +200,15 @@ async fn subscribe(environment_id: String, tx: mpsc::Sender<Signal>, verbose: bo
         };
         backoff = RESUBSCRIBE_MIN;
         say(true, &format!("subscribed {environment_id}"));
+        if tx
+            .send(Signal::Changed(format!(
+                "subscribed {environment_id}: refetching"
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
         while let Some(item) = stream.next().await {
             let what = match item {
                 Ok(response) => match response.data {
@@ -213,7 +239,14 @@ async fn resync(verbose: bool, cause: &str) {
     let run = async {
         let configs = Configs::new()?;
         let client = GQLClient::new_authorized(&configs)?;
-        sync::resync(&client, &configs.get_backboard(), &Herdr::from_env()).await
+        let store = Store::new(&configs)?;
+        sync::resync(
+            &client,
+            &configs.get_backboard(),
+            &Herdr::from_env(),
+            &store,
+        )
+        .await
     };
     match run.await {
         Ok(applied) if applied.is_empty() => say(verbose, "synced, nothing to change"),
@@ -378,6 +411,26 @@ pub fn spawn_detached() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reconnect_refetches_even_when_no_invalidation_is_replayed() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let task = tokio::spawn(subscribe_with("env".into(), tx, false, |_| async {
+            // Each successful subscription closes without replaying any event.
+            Ok(futures::stream::empty())
+        }));
+        let result = tokio::time::timeout(RESUBSCRIBE_MIN + Duration::from_secs(2), async {
+            for _ in 0..2 {
+                let Some(Signal::Changed(cause)) = rx.recv().await else {
+                    panic!("watcher exited")
+                };
+                assert!(cause.contains("refetching"), "{cause}");
+            }
+        })
+        .await;
+        task.abort();
+        result.expect("both the initial subscription and reconnect must refetch");
+    }
 
     #[test]
     fn the_query_is_the_one_the_apps_send() {
