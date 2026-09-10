@@ -9,6 +9,7 @@
 //! browse first. `railway ca start` is the one that skips the TUI entirely.
 
 pub mod access;
+pub(crate) mod codex;
 pub mod desktop;
 pub mod lifecycle;
 pub mod mcp_sync;

@@ -80,19 +80,36 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
+mod client;
 /// `railway code` is the launcher: it answers "where, and which harness"
 /// from flags and preferences, then opens that session. On a terminal it opens
 /// it inside `railway ca`'s manage screen with the tree collapsed, so the
 /// session has the whole window and the rest of the tool is one key away;
 /// everywhere else it hands the terminal straight to ssh.
 mod names;
-mod opencode;
 mod plumbing;
 mod saved_config;
 
 pub(crate) fn clear_saved_config() {
     if let Some(home) = dirs::home_dir() {
         saved_config::clear_in(&home);
+    }
+}
+
+pub(crate) fn save_desktop_configuration(
+    prepared: &Prepared,
+    connection: Option<&crate::commands::cloud_agent::opencode::Connection>,
+    beta: bool,
+    desktop: &Result<bool>,
+) {
+    let result = saved_config::SavedConfig::from_prepared(prepared)
+        .map(|saved| match connection {
+            Some(connection) => saved.with_opencode(connection, beta, desktop),
+            None => saved,
+        })
+        .and_then(|saved| saved.save());
+    if let Err(error) = result {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
     }
 }
 
@@ -109,7 +126,7 @@ pub struct Args {
 
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Show the connection details saved by the last successful launch or reconnect
+    /// Show locally saved connection details for the latest or a named agent
     GetConfig(saved_config::Args),
 }
 
@@ -118,24 +135,55 @@ pub async fn command(args: Args) -> Result<()> {
         return saved_config::command(args);
     }
     let mut args = args.launch;
-    if let Some(action) = args.opencode_action()? {
-        let beta = args.opencode2;
+    if let Some(action) = args.client_action()? {
+        let harness = if args.codex {
+            client::Harness::Codex
+        } else if args.opencode2 {
+            client::Harness::OpenCode2
+        } else {
+            client::Harness::OpenCode
+        };
         match action {
-            OpenCodeAction::Local => return opencode::start(args, beta).await,
-            OpenCodeAction::Connect(selector) => {
-                return opencode::connect(args, beta, selector).await;
+            ClientAction::Local => {
+                return client::start(args, harness, client::LaunchMode::LocalClient).await;
             }
-            OpenCodeAction::Remote => {
+            ClientAction::DesktopOnly => {
+                return codex_desktop_only(args, Default::default()).await;
+            }
+            ClientAction::Connect(selector) => {
+                return client::connect(args, harness, selector).await;
+            }
+            ClientAction::Remote => {
                 args.agent_args.clear();
-                opencode::pin_agent(&mut args).await?;
+                client::pin_agent(&mut args).await?;
             }
         }
     }
     launch_in_cloud(args).await
 }
 
-/// CA's launch flags and OpenCode's `remote` action keep the in-agent UI.
+/// Canonical Codex Desktop setup, also used by `railway ca desktop --codex`.
+pub(crate) async fn codex_desktop_only(
+    mut args: LaunchArgs,
+    options: crate::commands::cloud_agent::desktop::CodexOptions,
+) -> Result<()> {
+    if args.client_action()? != Some(ClientAction::DesktopOnly) {
+        bail!("Expected railway code --codex desktop-only");
+    }
+    args.agent_args.clear();
+    client::start(
+        args,
+        client::Harness::Codex,
+        client::LaunchMode::DesktopOnly(options),
+    )
+    .await
+}
+
+/// CA's launch flags and the clients' `remote` action keep the in-agent UI.
 pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
+    if args.connection_json {
+        bail!("--connection-json requires railway code --codex or --opencode2 [connect].");
+    }
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
     // never what someone typing it meant, and the failure is invisible — the
@@ -162,10 +210,75 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --opencode           # prepare a server, offer to open your local client\n  railway code --opencode2          # same, with OpenCode2 Beta\n  railway code --opencode remote    # run client and server inside railway ca\n  railway code --opencode2 --new\n  railway code --opencode2 connect  # choose an existing server, connect locally\n  railway code --opencode connect my-box\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\n`--opencode` and `--opencode2` prepare a server and offer to open your local\nclient. Missing clients can be installed after confirmation. `connect [agent]`\nreconnects locally; `remote` runs the client inside Railway CA.\nLaunch and connect automatically save the connection in the matching Desktop\nedition when its settings file or database is detected. The final output\nreports success or a non-fatal configuration failure. You may need to restart\nOpenCode Desktop to load the updated configuration.\n\nSessions running inside `railway ca` open in its manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2"]).multiple(true)),
+    after_help = r#"Examples:
+
+  railway ca                        # launch your configured default
+  railway ca setup                  # choose the default agent and skills
+  railway code --codex              # remote Codex server + local terminal client
+  railway code --codex connect      # choose a running Codex server
+  railway code --codex connect my-box
+  railway code --codex desktop-only # backend + Desktop configuration, then exit
+  railway code --codex desktop-only --agent my-box --dir /app
+  railway code get-config           # replay the latest saved connection
+  railway code get-config my-box    # replay a specific agent (name or ID)
+  railway code get-config my-box --json
+  railway code --codex remote       # run the Codex UI inside Railway CA
+  railway code --claude             # agent VM + your Claude setup-token
+  railway code --grok               # agent VM + your local Grok sign-in
+  railway code --opencode           # remote OpenCode server + local client
+  railway code --opencode2          # same, with OpenCode2 Beta
+  railway code --opencode remote    # run client and server inside Railway CA
+  railway code --opencode2 --new
+  railway code --opencode2 connect
+  railway code --opencode connect my-box
+  railway code --railway            # Railway's own agent, no sign-in needed
+  railway code --codex --new        # force a fresh agent instead of reusing
+  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL
+  railway code --codex --new --env-file .env
+  railway code --codex -- exec "explain this codebase"
+
+With no agent flag, the default saved by `railway ca setup` is used
+(RAILWAY_CA_AGENT overrides it for one run). With no project or environment
+flag, this directory's linked project is used, and your default project when
+the directory has no link.
+
+`--codex`, `--opencode`, and `--opencode2` prepare a server and offer to open
+your local client. Missing clients can be installed after confirmation.
+`connect [agent]` reconnects locally; `remote` runs the client inside Railway CA.
+`--dir` selects the remote directory (default /app). `--connection-json`
+returns credentials as JSON for Codex or OpenCode2.
+Codex setup and connect also register and verify its SSH host, save its remote
+project, and send Codex Desktop the apply-config link to import it live.
+`railway code --codex desktop-only` prepares the same backend and Desktop
+connection, then exits without prompting for or launching a local terminal client.
+`railway ca desktop --codex` is an alias for this setup.
+OpenCode launch and connect automatically save the connection in the matching
+Desktop edition when its settings file or database is detected. The final output
+reports success or a non-fatal configuration failure. You may need to restart
+OpenCode Desktop to load the updated configuration.
+
+Sessions running inside `railway ca` open in its manage screen with the
+tree collapsed, so it has the whole window and the other agents are one key
+away — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`
+passthrough, and piped in-VM sessions take the terminal directly instead;
+so does `railway ca start`, which never draws the TUI.
+
+Agents persist between runs and stay running when you disconnect, so your
+sessions survive to reattach to. `railway ca sleep <agent>` stops the compute
+bill; `railway code --rm` destroys it.
+
+Claude auth is minted once (`claude setup-token`), cached locally, and reused —
+including the copy already on a reused agent. `--refresh-auth` clears both
+caches and re-mints.
+
+Carrying a sign-in from this machine is optional. With no local credential,
+sign in on the agent using the harness's login flow.
+
+Note: requires the CLOUD_AGENTS feature to be enabled."#
 )]
 pub struct LaunchArgs {
-    /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
+    /// Prepare a Codex server and offer to launch your local client, carrying your ChatGPT sign-in
     /// (~/.codex/auth.json) when there is one to carry
     #[clap(long)]
     codex: bool,
@@ -177,6 +290,11 @@ pub struct LaunchArgs {
     /// Launch the latest OpenCode2 Beta, downloaded onto the agent at startup
     #[clap(long)]
     opencode2: bool,
+
+    /// Return Codex or OpenCode2 connection details as JSON, including credentials,
+    /// without launching a local client. Progress is written to stderr.
+    #[clap(long, requires = "client_json_harness")]
+    connection_json: bool,
 
     /// Launch Claude Code — runs `claude setup-token` for you to mint a
     /// token for the VM (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
@@ -248,14 +366,14 @@ pub struct LaunchArgs {
     #[clap(long, short)]
     pub project: Option<String>,
 
-    /// OpenCode action: local client by default, `remote` for CA, or `connect [AGENT]`
+    /// Client action: `remote`, `connect [AGENT]`, or Codex `desktop-only`
     agent_args: Vec<String>,
 
-    /// Remote project directory for OpenCode serve mode (default: /app)
+    /// Remote project directory for Codex/OpenCode server mode (default: /app)
     #[clap(long = "dir", value_name = "PATH")]
     remote_dir: Option<String>,
 
-    /// Existing cloud agent for OpenCode, by name or ID
+    /// Existing cloud agent for a local Codex/OpenCode client, by name or ID
     #[clap(long = "agent", value_name = "NAME_OR_ID", conflicts_with = "new")]
     remote_agent: Option<String>,
 
@@ -288,36 +406,51 @@ pub struct LaunchArgs {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum OpenCodeAction {
+enum ClientAction {
     Local,
+    DesktopOnly,
     Remote,
     Connect(Option<String>),
 }
 
 impl LaunchArgs {
-    /// Dispatch only the public OpenCode client commands; explicit harness
+    /// Dispatch only the public local-client commands; explicit harness
     /// arguments and CA's internal prepare/launch paths keep their VM semantics.
-    fn opencode_action(&self) -> Result<Option<OpenCodeAction>> {
+    fn client_action(&self) -> Result<Option<ClientAction>> {
         let verb = self.agent_args.first().map(String::as_str);
-        let reserved = matches!(verb, Some("remote" | "connect"));
-        let selected = self.opencode || self.opencode2;
+        if self.connection_json
+            && ((!self.codex && !self.opencode2)
+                || self.rm
+                || self.app_mode
+                || !(matches!(verb, None | Some("connect"))
+                    || (self.codex && verb == Some("desktop-only"))))
+        {
+            bail!(
+                "--connection-json requires railway code --codex or --opencode2 [connect], or --codex desktop-only."
+            );
+        }
+        let reserved = matches!(verb, Some("remote" | "connect" | "desktop-only"));
+        let selected = self.codex || self.opencode || self.opencode2;
         if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
             if self.remote_dir.is_some() || self.remote_agent.is_some() {
-                bail!("--dir and --agent require an OpenCode client command.");
+                bail!("--dir and --agent require a Codex or OpenCode client command.");
             }
             return Ok(None);
         }
-        if self.opencode == self.opencode2
-            || self.codex
+        if [self.codex, self.opencode, self.opencode2]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count()
+            != 1
             || self.claude
             || self.grok
             || self.railway
             || self.shell
         {
-            bail!("Pick exactly one OpenCode edition: --opencode or --opencode2.");
+            bail!("Pick exactly one client: --codex, --opencode, or --opencode2.");
         }
         if self.rm || self.initial_prompt.is_some() {
-            bail!("OpenCode client commands cannot be combined with --rm or an initial prompt.");
+            bail!("Local-client commands cannot be combined with --rm or an initial prompt.");
         }
         if self
             .remote_dir
@@ -327,14 +460,22 @@ impl LaunchArgs {
             bail!("--dir must name a directory on the agent.");
         }
         match verb {
-            None => Ok(Some(OpenCodeAction::Local)),
+            None => Ok(Some(ClientAction::Local)),
+            Some("desktop-only") => {
+                if !self.codex || self.agent_args.len() != 1 || self.app_mode {
+                    bail!(
+                        "Use railway code --codex desktop-only [--agent NAME_OR_ID] [--dir PATH] [--new]."
+                    );
+                }
+                Ok(Some(ClientAction::DesktopOnly))
+            }
             Some("remote") => {
                 if self.agent_args.len() != 1 || self.remote_dir.is_some() {
                     bail!(
-                        "Use railway code --opencode remote to open OpenCode inside the cloud agent; --dir is for local clients."
+                        "Use railway code --codex remote (or --opencode/--opencode2) to open the UI inside the cloud agent; --dir is for local clients."
                     );
                 }
-                Ok(Some(OpenCodeAction::Remote))
+                Ok(Some(ClientAction::Remote))
             }
             Some("connect") => {
                 if self.agent_args.len() > 2
@@ -346,7 +487,7 @@ impl LaunchArgs {
                     || self.remote_dir.is_some()
                 {
                     bail!(
-                        "connect uses an existing server. Use railway code --opencode [--new] to set one up."
+                        "connect uses an existing server. Use railway code --codex, --opencode, or --opencode2 [--new] to set one up."
                     );
                 }
                 let positional = self.agent_args.get(1).cloned();
@@ -360,7 +501,7 @@ impl LaunchArgs {
                 {
                     bail!("The cloud agent name cannot be empty.");
                 }
-                Ok(Some(OpenCodeAction::Connect(selector)))
+                Ok(Some(ClientAction::Connect(selector)))
             }
             _ => unreachable!("other harness arguments returned above"),
         }
@@ -372,6 +513,7 @@ impl LaunchArgs {
         !self.codex
             && !self.opencode
             && !self.opencode2
+            && !self.connection_json
             && !self.claude
             && !self.grok
             && !self.railway
@@ -498,6 +640,25 @@ impl LaunchArgs {
         };
         args.set_harness(harness);
         args
+    }
+
+    pub(crate) fn for_codex_desktop(
+        project: Option<String>,
+        environment: Option<String>,
+        agent: Option<String>,
+        directory: String,
+        new: bool,
+    ) -> Self {
+        Self {
+            codex: true,
+            project,
+            environment,
+            remote_agent: agent,
+            remote_dir: Some(directory),
+            new,
+            agent_args: vec!["desktop-only".into()],
+            ..Self::default()
+        }
     }
 }
 
@@ -2437,6 +2598,12 @@ async fn resolve_agent(
         configs.remove_code_agent(environment_id);
     }
 
+    if args.connection_json && args.agent_id.is_some() {
+        bail!(
+            "The selected cloud agent is unavailable. Refresh the agent list before reconnecting."
+        );
+    }
+
     let mut variables = variables_to_input(&args.env_files, &args.variables)?
         .map(serde_json::to_value)
         .transpose()?
@@ -2756,6 +2923,10 @@ pub async fn resolve_launch(
 
 pub async fn launch(args: LaunchArgs) -> Result<()> {
     use colored::Colorize;
+
+    if args.connection_json {
+        bail!("--connection-json requires railway code --codex or --opencode2 [connect].");
+    }
 
     // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
     // no credential, so it resolves the environment and returns.
@@ -3761,24 +3932,107 @@ mod tests {
     }
 
     #[test]
-    fn opencode_actions_separate_local_clients_from_cloud_terminal_sessions() {
-        for flag in ["--opencode", "--opencode2"] {
+    fn connection_json_only_accepts_server_connection_actions() {
+        for flag in ["--codex", "--opencode2"] {
+            for extra in [vec![], vec!["connect", "box"], vec!["--new"]] {
+                let args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--connection-json"], extra].concat(),
+                )
+                .unwrap();
+                assert!(args.connection_json);
+                assert!(args.client_action().unwrap().is_some());
+            }
+            for extra in [vec!["remote"], vec!["--rm"], vec!["--", "run", "hello"]] {
+                let args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--connection-json"], extra].concat(),
+                )
+                .unwrap();
+                assert!(args.client_action().is_err());
+            }
+        }
+        assert!(LaunchArgs::try_parse_from(["code", "--connection-json"]).is_err());
+    }
+
+    #[test]
+    fn codex_desktop_only_accepts_backend_setup_flags_and_json() {
+        for argv in [
+            vec!["code", "--codex", "desktop-only"],
+            vec![
+                "code",
+                "--codex",
+                "desktop-only",
+                "--agent",
+                "box",
+                "--dir",
+                "/app/project",
+            ],
+            vec![
+                "code",
+                "--codex",
+                "--new",
+                "desktop-only",
+                "--name",
+                "desktop-box",
+                "--variable",
+                "A=B",
+                "--env-file",
+                ".env",
+            ],
+            vec![
+                "code",
+                "--codex",
+                "--connection-json",
+                "desktop-only",
+                "-p",
+                "project",
+                "-e",
+                "env",
+            ],
+        ] {
+            let args = LaunchArgs::try_parse_from(argv).unwrap();
+            assert_eq!(
+                args.client_action().unwrap(),
+                Some(ClientAction::DesktopOnly)
+            );
+            assert!(!args.pane_shaped());
+        }
+    }
+
+    #[test]
+    fn desktop_only_rejects_other_harnesses_and_session_arguments() {
+        for argv in [
+            vec!["code", "desktop-only"],
+            vec!["code", "--opencode", "desktop-only"],
+            vec!["code", "--opencode2", "desktop-only"],
+            vec!["code", "--grok", "desktop-only"],
+            vec!["code", "--claude", "desktop-only"],
+            vec!["code", "--codex", "--claude", "desktop-only"],
+            vec!["code", "--codex", "desktop-only", "box"],
+            vec!["code", "--codex", "desktop-only", "connect"],
+            vec!["code", "--codex", "desktop-only", "--rm"],
+            vec!["code", "--codex", "desktop-only", "--dir", " "],
+        ] {
+            let args = LaunchArgs::try_parse_from(argv).unwrap();
+            assert!(args.client_action().is_err(), "{args:?}");
+        }
+        let mut args = LaunchArgs::try_parse_from(["code", "--codex", "desktop-only"]).unwrap();
+        args.initial_prompt = Some("run tests".into());
+        assert!(args.client_action().is_err());
+    }
+
+    #[test]
+    fn client_actions_separate_local_clients_from_cloud_terminal_sessions() {
+        for flag in ["--codex", "--opencode", "--opencode2"] {
             let local =
                 LaunchArgs::try_parse_from(["code", flag, "--new", "--dir", "/app/project"])
                     .unwrap();
-            assert_eq!(
-                local.opencode_action().unwrap(),
-                Some(OpenCodeAction::Local)
-            );
+            assert_eq!(local.client_action().unwrap(), Some(ClientAction::Local));
             for argv in [
                 vec!["code", flag, "remote", "--new"],
                 vec!["code", flag, "--new", "remote"],
             ] {
                 let mut remote = LaunchArgs::try_parse_from(argv).unwrap();
-                assert_eq!(
-                    remote.opencode_action().unwrap(),
-                    Some(OpenCodeAction::Remote)
-                );
+                assert_eq!(remote.client_action().unwrap(), Some(ClientAction::Remote));
                 remote.agent_args.clear();
                 assert!(remote.pane_shaped());
             }
@@ -3793,8 +4047,8 @@ mod tests {
                 let args =
                     LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
                 assert_eq!(
-                    args.opencode_action().unwrap(),
-                    Some(OpenCodeAction::Connect(expected))
+                    args.client_action().unwrap(),
+                    Some(ClientAction::Connect(expected))
                 );
             }
         }
@@ -3803,7 +4057,9 @@ mod tests {
     #[test]
     fn opencode_rejects_ambiguous_or_destructive_client_actions() {
         for argv in [
-            vec!["code", "--codex", "connect"],
+            vec!["code", "--codex", "--opencode", "connect"],
+            vec!["code", "--codex", "connect", "--new"],
+            vec!["code", "--codex", "remote", "--dir", "/app"],
             vec!["code", "remote"],
             vec!["code", "--opencode", "--opencode2"],
             vec!["code", "--opencode", "remote", "extra"],
@@ -3818,7 +4074,7 @@ mod tests {
             assert!(
                 LaunchArgs::try_parse_from(argv)
                     .unwrap()
-                    .opencode_action()
+                    .client_action()
                     .is_err()
             );
         }
@@ -3828,7 +4084,7 @@ mod tests {
         assert_eq!(
             LaunchArgs::try_parse_from(["code", "--opencode", "--rm"])
                 .unwrap()
-                .opencode_action()
+                .client_action()
                 .unwrap(),
             None
         );
@@ -3857,7 +4113,7 @@ mod tests {
                 "/project"
             ]
         );
-        assert_eq!(args.opencode_action().unwrap(), None);
+        assert_eq!(args.client_action().unwrap(), None);
         assert_eq!(args.remote_dir, None);
     }
 
