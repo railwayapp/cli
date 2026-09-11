@@ -53,36 +53,6 @@ RAILWAY_TOKEN=xxx railway up
 
 See [Tokens](https://docs.railway.com/integrations/api#creating-a-token) for more information.
 
-## Sandbox public domains
-
-Publish an HTTP server on a Railway-provided HTTPS domain when creating a sandbox:
-
-```bash
-railway sandbox create --private-network --domain 8080 --domain api:3000
-```
-
-Repeat `--domain [PREFIX:]PORT` for up to 10 domains. Omit the prefix to generate
-one from the project name. Each port and explicit prefix must be unique. Servers
-must listen on `0.0.0.0` and the requested port.
-
-Creation can return `CREATING` while routes are still publishing. Run
-`railway sandbox list` to see the published URLs. Creation prints URLs when available, or a
-publishing message otherwise. Both commands' `--json` output includes `domains`
-with `prefix`, `port`, and `domain` fields; the array can be empty until routes
-are published.
-
-Domains require `--private-network` and are configured only at creation. Forks
-don't inherit the source's domains; request routes for the fork explicitly:
-
-```bash
-railway sandbox fork --private-network --domain preview:8080
-```
-
-The same `--domain` option works with `create --template` and `create --checkpoint`.
-For a server that must not idle out, also pass `--idle-timeout-minutes 0` on Hobby
-or Pro. Destroy it with `railway sandbox destroy` when finished to stop billing
-and remove its routes.
-
 ## Agent Setup
 
 Configure Railway agent support for AI coding tools:
