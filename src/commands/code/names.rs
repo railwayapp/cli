@@ -10,7 +10,7 @@ use crate::{
     controllers::{cloud_agent, project::get_project},
 };
 
-pub(super) struct Target {
+pub(crate) struct Target {
     pub project_id: String,
     pub environment_id: String,
     pub use_local_name: bool,

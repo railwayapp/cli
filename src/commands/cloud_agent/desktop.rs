@@ -295,7 +295,14 @@ pub async fn command(args: Args) -> Result<()> {
 
     if apps.contains(&App::Codex) {
         require_codex_checks(&checks)?;
-        codex_config::configure(&alias, &prepared.agent_name, &args.dir, &ssh_config_path).await?;
+        codex_config::configure(
+            &alias,
+            &prepared.agent_name,
+            &args.dir,
+            &ssh_config_path,
+            &code::CliProgress::default(),
+        )
+        .await?;
     }
 
     let connection = if let Some(password) = &opencode_password {
@@ -532,6 +539,7 @@ pub(crate) async fn configure_codex(
     identity: Option<&Path>,
     directory: &str,
     options: &CodexOptions,
+    progress: &dyn code::Progress,
 ) -> Result<CodexDesktop> {
     let path = options.config_path()?;
     let alias = register_ssh(
@@ -546,13 +554,13 @@ pub(crate) async fn configure_codex(
         require_codex_checks(&verify(&alias, &[App::Codex], &path).await)?;
     }
     if path != default_ssh_config_path()? {
-        eprintln!(
+        progress.note(&format!(
             "Codex reads {}. Make sure it contains: Include {}",
             default_ssh_config_path()?.display(),
             path.display()
-        );
+        ));
     }
-    codex_config::configure(&alias, agent_name, directory, &path).await
+    codex_config::configure(&alias, agent_name, directory, &path, progress).await
 }
 
 fn require_codex_checks(checks: &[Check]) -> Result<()> {

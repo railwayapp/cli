@@ -81,6 +81,7 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
+pub(crate) mod bootstrap_setup;
 pub(crate) mod client;
 /// `railway code` is the launcher: it answers "where, and which harness"
 /// from flags and preferences, then opens that session. On a terminal it opens
@@ -330,6 +331,14 @@ pub struct LaunchArgs {
     #[clap(long)]
     pub new: bool,
 
+    /// Create a VM from this named bootstrap instead of your local environment default
+    #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"])]
+    bootstrap: Option<String>,
+
+    /// Create a clean VM without your local environment default bootstrap
+    #[clap(long, conflicts_with_all = ["remote_agent", "rm"])]
+    no_bootstrap: bool,
+
     /// Accepted for compatibility; agents now always stay running on
     /// disconnect. `railway ca sleep` stops the compute bill
     #[clap(long, hide = true)]
@@ -425,6 +434,9 @@ pub struct LaunchArgs {
     /// prepare an agent and then do nothing with it.
     #[clap(skip)]
     pub app_mode: bool,
+    /// Temporary bootstrap setup VMs never become remembered launch targets.
+    #[clap(skip)]
+    pub(crate) bootstrap_setup: bool,
     /// Explicit `remote` mode keeps both client and server inside the VM.
     #[clap(skip)]
     pub client_on_agent: bool,
@@ -453,6 +465,11 @@ impl LaunchArgs {
     /// use when opening sessions on an existing VM.
     fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
         let action = self.client_action()?;
+        if matches!(action, Some(ClientAction::Connect(_)))
+            && (self.bootstrap.is_some() || self.no_bootstrap)
+        {
+            bail!("Bootstrap options create a new VM and cannot be used with connect.");
+        }
         let harness_selected = self.codex
             || self.opencode
             || self.opencode2
@@ -576,6 +593,8 @@ impl LaunchArgs {
             && !self.grok
             && !self.railway
             && !self.new
+            && self.bootstrap.is_none()
+            && !self.no_bootstrap
             && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
@@ -650,6 +669,11 @@ impl LaunchArgs {
             prompt,
             agent_id,
         )
+    }
+
+    pub(crate) fn set_bootstrap_choice(&mut self, name: Option<String>, none: bool) {
+        self.bootstrap = name;
+        self.no_bootstrap = none;
     }
 
     /// [`Self::for_target`] over an existing set of flags instead of an empty
@@ -2365,7 +2389,7 @@ async fn sole_owned_agent_id(
 /// With nothing to go on, this runs `railway ca setup` rather than the
 /// workspace → project → environment picker. The picker answers one launch; the
 /// setup flow answers every launch after it, and asks the same question.
-async fn resolve_target(
+pub(crate) async fn resolve_target(
     configs: &mut Configs,
     client: &reqwest::Client,
     args: &LaunchArgs,
@@ -2605,7 +2629,15 @@ async fn resolve_agent(
     // An explicit agent wins over everything: the caller is looking at the one
     // it means. Inferring from the stored pointer instead is how "new session
     // on this agent" turned into a second VM.
-    let candidate = match (&args.agent_id, args.new) {
+    if args.agent_id.is_some() && (args.bootstrap.is_some() || args.no_bootstrap) {
+        bail!(
+            "Bootstrap options create a new VM and cannot be used when connecting to an existing agent."
+        );
+    }
+    let candidate = match (
+        &args.agent_id,
+        args.new || args.bootstrap.is_some() || args.no_bootstrap,
+    ) {
         (Some(id), _) => Some(id.clone()),
         (None, true) => None,
         (None, false) => match configs.get_code_agent(environment_id) {
@@ -2625,8 +2657,10 @@ async fn resolve_agent(
             ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
                 .await?;
         warn_ignored_variables(args, progress);
-        configs.set_code_agent(environment_id, &ready.id);
-        configs.write()?;
+        if !args.bootstrap_setup {
+            configs.set_code_agent(environment_id, &ready.id);
+            configs.write()?;
+        }
         return Ok((ready, false, probe_master));
     }
 
@@ -2636,13 +2670,26 @@ async fn resolve_agent(
         );
     }
 
+    let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        configs,
+        client,
+        &backboard,
+        environment_id,
+        args.bootstrap.as_deref(),
+        args.no_bootstrap,
+    )
+    .await?;
     let variables = create_variables(args)?;
     let name = names::for_launch(client, configs, args, harness, target).await?;
-    progress.step("Creating a cloud agent");
+    if let Some(b) = &bootstrap {
+        progress.step(&format!("Restoring bootstrap '{}'", b.name));
+    } else {
+        progress.step("Creating a cloud agent");
+    }
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
-        &backboard,
+        crate::controllers::agent_bootstrap::internal_url(&backboard),
         mutations::cloud_agent_create::Variables {
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
@@ -2650,6 +2697,7 @@ async fn resolve_agent(
                 variables,
                 code_endpoint: create_code_endpoint(args),
                 cloud_agent_checkpoint_id: None,
+                agent_bootstrap_id: bootstrap.map(|b| b.id),
             },
         },
     )
@@ -3205,6 +3253,11 @@ async fn prepare_inner(
         // plain shell has nothing to sign in to.
         Agent::Railway | Agent::Shell => PendingAuth::None,
     };
+    if args.bootstrap_setup && matches!(pending, PendingAuth::MintClaude) {
+        bail!(
+            "Claude sign-in was not cached. Sign in with `railway code --claude`, then retry bootstrap setup."
+        );
+    }
     match pending {
         PendingAuth::Ready { ref source, .. } => progress.note(&format!(
             "Using your {} credential ({source}) on the agent",
@@ -3223,7 +3276,7 @@ async fn prepare_inner(
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
     let packed_skills = ssh_tel::timed_for("cloud_agent_launch", "skills_pack", async {
-        skills_sync::pack(&prefs, home)
+        skills_sync::pack(&prefs, home, &|note| progress.note(note))
     })
     .await?;
     if let Some(packed) = &packed_skills {
@@ -3241,6 +3294,9 @@ async fn prepare_inner(
     let packed_mcp = match std::env::current_dir().map(|cwd| mcp_sync::pack(&prefs, &cwd)) {
         Ok(Ok(packed)) => packed,
         Ok(Err(err)) => {
+            if args.bootstrap_setup {
+                return Err(err.context("Could not copy project MCP configuration"));
+            }
             progress.note(&format!("Skipping MCP import: {err:#}"));
             None
         }
@@ -3285,6 +3341,7 @@ async fn prepare_inner(
     let environment_id = launch_target.environment_id.clone();
     let identity = match identity {
         Ok(identity) => identity,
+        Err(err) if args.bootstrap_setup => return Err(err),
         Err(_) => {
             let key_configs = Configs::new()?;
             ssh_tel::timed_for(
@@ -3316,8 +3373,10 @@ async fn prepare_inner(
         ),
     )
     .await?;
-    configs.set_code_agent(&environment_id, &cloud_agent.id);
-    configs.write()?;
+    if !args.bootstrap_setup {
+        configs.set_code_agent(&environment_id, &cloud_agent.id);
+        configs.write()?;
+    }
 
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
@@ -3557,8 +3616,15 @@ async fn prepare_inner(
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-        for line in skills_note.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let notes = skills_note.lock().unwrap_or_else(|e| e.into_inner());
+        for line in notes.iter() {
             progress.note(line);
+        }
+        if args.bootstrap_setup && !notes.is_empty() {
+            bail!(
+                "Bootstrap configuration sync was incomplete: {}",
+                notes.join("; ")
+            );
         }
         result
     };
@@ -3772,6 +3838,151 @@ mod tests {
     use crate::testkit::MockBackboard;
     use clap::Parser;
     use serde_json::json;
+
+    #[test]
+    fn bootstrap_flags_require_a_new_vm_and_survive_tui_retargeting() {
+        let args = LaunchArgs::try_parse_from(["code", "--codex", "--bootstrap", "dev"]).unwrap();
+        assert!(!args.is_bare());
+        let args = args.retargeted("project".into(), "env".into(), "codex", true, None, None);
+        assert_eq!(args.bootstrap.as_deref(), Some("dev"));
+        let mut connect = LaunchArgs::try_parse_from([
+            "code",
+            "--codex",
+            "--bootstrap",
+            "dev",
+            "connect",
+            "existing",
+        ])
+        .unwrap();
+        assert!(
+            connect
+                .prepare_code_launch()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used with connect")
+        );
+        for flags in [
+            vec!["code", "--bootstrap", "dev", "--no-bootstrap"],
+            vec![
+                "code",
+                "--codex",
+                "--agent",
+                "existing",
+                "--bootstrap",
+                "dev",
+            ],
+            vec!["code", "--codex", "--agent", "existing", "--no-bootstrap"],
+        ] {
+            assert!(LaunchArgs::try_parse_from(flags).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_launch_passes_selected_bootstrap_to_create() {
+        for harness in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::OpenCode2,
+            Agent::Claude,
+            Agent::Grok,
+            Agent::Railway,
+            Agent::Shell,
+        ] {
+            for (override_name, clean, expected) in [
+                (None, false, Some("default")),
+                (Some("dev"), false, Some("dev")),
+                (None, true, None),
+            ] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                let row = |name| {
+                    json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
+                "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z",
+                "activeVersion": {"sourceCloudAgentId": "codex-source", "checkpoint": {"id": "disk-checkpoint"}}})
+                };
+                configs
+                    .set_agent_bootstrap_default("env", "default", false)
+                    .await
+                    .unwrap();
+                server.stub(
+                    "AgentBootstraps",
+                    json!({"agentBootstraps": [row("default"), row("dev")]}),
+                );
+                server.stub_graphql_error("CloudAgentCreate", "creation reached");
+                let args = LaunchArgs {
+                    new: true,
+                    name: Some("fresh".into()),
+                    bootstrap: override_name.map(str::to_owned),
+                    no_bootstrap: clean,
+                    ..Default::default()
+                }
+                .retargeted(
+                    "project".into(),
+                    "env".into(),
+                    harness.slug(),
+                    true,
+                    None,
+                    None,
+                );
+                let error = resolve_agent(
+                    &mut configs,
+                    &reqwest::Client::new(),
+                    &args,
+                    &names::Target::new(("project".into(), "env".into()), false),
+                    harness,
+                    &CliProgress::default(),
+                    &RelayAccess {
+                        identity: None,
+                        relay_opts: vec![],
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(error.to_string().contains("creation reached"), "{error}");
+                let request = &server.variables_for("CloudAgentCreate")[0]["input"];
+                assert_eq!(request["agentBootstrapId"].as_str(), expected);
+                assert_eq!(request["environmentId"], "env");
+                if clean {
+                    assert!(server.variables_for("AgentBootstraps").is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_setup_does_not_remember_its_temporary_vm() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs.set_code_agent("env", "existing");
+        configs.write().unwrap();
+        server.stub("CloudAgent", json!({"cloudAgent": {"id": "setup", "name": "setup", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+        let args = LaunchArgs {
+            agent_id: Some("setup".into()),
+            bootstrap_setup: true,
+            app_mode: true,
+            ..Default::default()
+        };
+        let (agent, created, _) = resolve_agent(
+            &mut configs,
+            &reqwest::Client::new(),
+            &args,
+            &names::Target::new(("project".into(), "env".into()), false),
+            Agent::Railway,
+            &CliProgress::default(),
+            &RelayAccess {
+                identity: None,
+                relay_opts: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.id, "setup");
+        assert!(!created);
+        configs.reload().unwrap();
+        assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+    }
 
     #[tokio::test]
     async fn an_unusable_selected_vm_is_never_replaced() {

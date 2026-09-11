@@ -1,0 +1,18 @@
+fragment BootstrapFields on AgentBootstrap {
+  id
+  name
+  environmentId
+  status
+  failureReason
+  updatedAt
+  activeVersion { sourceCloudAgentId checkpoint { id } }
+}
+query AgentBootstraps($environmentId: ID!) {
+  agentBootstraps(environmentId: $environmentId) { ...BootstrapFields }
+}
+query AgentBootstrap($id: ID!) {
+  agentBootstrap(id: $id) { ...BootstrapFields }
+}
+mutation AgentBootstrapSave($input: AgentBootstrapSaveInput!) {
+  agentBootstrapSave(input: $input) { ...BootstrapFields }
+}
