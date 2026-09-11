@@ -257,6 +257,7 @@ async fn prompt(home: &Path, existing: Option<AgentPrefs>) -> Result<AgentPrefs>
         default_project,
         theme: Some(theme),
         hide_tabs: previous.hide_tabs,
+        sidebar_width: previous.sidebar_width,
     })
 }
 

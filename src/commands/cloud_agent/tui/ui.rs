@@ -1,18 +1,21 @@
 //! Rendering for the `railway ca` TUI. Pure draw code — every decision it
 //! needs has already been made in [`super::app`].
 
+mod bootstrap;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 
 use super::app::{
     App, KEY_HELP, Load, LoadSessions, ManageFocus, PaneBox, PaneRects, Row, RowKind, Screen,
 };
 use super::theme::Theme;
+use crate::vt100;
 
 /// Drawn only when the terminal is wide and tall enough for it; below that the
 /// screen still has to be usable, so a one-line wordmark stands in.
@@ -31,8 +34,14 @@ const BANNER: &str = r#"██████   █████  ██████
 const BANNER_W: u16 = 55;
 const BANNER_H: u16 = 5;
 
-/// Width of the tree column in Manage, borders included.
+/// Default width of the tree column in Manage, borders included.
 const TREE_W: u16 = 32;
+
+/// Keep both panes usable without changing the saved width on window resize.
+pub(super) fn sidebar_width(available: u16, preferred: Option<u16>) -> u16 {
+    let maximum = available.saturating_sub(32);
+    preferred.unwrap_or(TREE_W).clamp(20.min(maximum), maximum)
+}
 
 /// What a dialog spends on chrome: its two border cells. The breathing room
 /// lives *outside* the boxes — see [`page`] — not between a border and its
@@ -102,9 +111,7 @@ fn dialog_block(theme: &Theme) -> Block<'static> {
         .style(Style::default().bg(theme.surface).fg(theme.fg))
 }
 
-/// One inverse-styled key badge, e.g. ` ^t `. The building block of
-/// [`chord_spans`], and also used solo wherever a shortcut sits beside the
-/// thing it acts on instead of in the footer's own chord list.
+/// Shortcut keys use the same compact filled badge throughout the TUI.
 fn chord_badge(theme: &Theme, chord: &str) -> Span<'static> {
     Span::styled(
         format!(" {chord} "),
@@ -115,7 +122,7 @@ fn chord_badge(theme: &Theme, chord: &str) -> Span<'static> {
     )
 }
 
-/// Footer chords: an inverse badge for the key, dim text for what it does.
+/// Footer chords: a filled key badge, then dim text for what it does.
 /// Shared so the launcher and the manage screen read as the same product.
 fn chord_spans(theme: &Theme, chords: &[(&str, &str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(chords.len() * 2);
@@ -303,6 +310,10 @@ fn render_toast(app: &App, f: &mut Frame, rects: &PaneRects) {
 
 fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     match app.screen {
+        Screen::BootstrapSetup | Screen::BootstrapPick => {
+            render_manage(app, f, rects);
+            bootstrap::render(app, f, rects);
+        }
         Screen::Setup => {
             render_manage(app, f, rects);
             render_wizard(app, f);
@@ -318,7 +329,7 @@ fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         }
         Screen::HarnessPick => {
             render_manage(app, f, rects);
-            render_harness_pick(app, f);
+            render_harness_pick(app, f, rects);
         }
         Screen::ManagePrompt => {
             render_manage(app, f, rects);
@@ -358,15 +369,31 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
+/// Keep one column of padding where the sidebar meets the terminal, without
+/// drawing a second vertical rule. Full-screen and narrow layouts stay framed.
+fn terminal_block(app: &App, frame_width: u16) -> Block<'static> {
+    let split = !app.pane_is_full() && frame_width.saturating_sub(PAGE_MARGIN_X * 2) >= 70;
+    Block::default()
+        .borders(if split {
+            Borders::TOP | Borders::BOTTOM | Borders::RIGHT
+        } else {
+            Borders::ALL
+        })
+        .padding(if split {
+            Padding::left(1)
+        } else {
+            Padding::ZERO
+        })
+        .border_type(BorderType::Rounded)
+}
+
 /// The launcher, in the session pane: the wordmark and the prompt box that
 /// used to be their own screen, now living beside the tree. Drawn whenever
 /// the cursor stands on the pinned New Session row.
 fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
     let theme = app.theme;
     let focused = app.new_session_selected();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    let block = terminal_block(app, f.area().width)
         .border_style(Style::default().fg(if focused {
             theme.accent
         } else {
@@ -387,7 +414,8 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
     // the title from the prompt box, whatever the pane's height.
     let prompt_gap = if area.height >= 26 { 2 } else { 1 };
     // banner, gap, CLOUD AGENTS, title, status, gap, prompt, gap, target.
-    let panel_h = banner_h + 4 + 1 + prompt_h + prompt_gap + 1;
+    let bootstrap_h = if app.target.is_some() { 2 } else { 0 };
+    let panel_h = banner_h + 4 + 1 + prompt_h + prompt_gap + 1 + bootstrap_h;
     let panel = centered(panel_w, panel_h.min(area.height), area);
 
     let rows = Layout::vertical([
@@ -400,6 +428,7 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
         Constraint::Length(prompt_h),
         Constraint::Length(prompt_gap), // the prompt's room below its outline
         Constraint::Length(1),          // target
+        Constraint::Length(bootstrap_h), // bootstrap for the selected project
     ])
     .split(panel);
 
@@ -450,16 +479,49 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
         Paragraph::new(target_line(app)).alignment(Alignment::Center),
         rows[8],
     );
+    if let Some(target) = &app.target {
+        use super::bootstrap_setup::DefaultState;
+        let text = match app.bootstrap_defaults.get(&target.environment_id) {
+            Some(DefaultState::Ready(name)) => format!("Select Bootstrap  {name} (default)"),
+            Some(DefaultState::Available) => "Select Bootstrap".into(),
+            Some(DefaultState::Failed(error)) => format!(
+                "Bootstrap unavailable: {} — configure a new one",
+                error.lines().next().unwrap_or("retry")
+            ),
+            Some(DefaultState::Missing) => "No bootstrap configured — set one up".into(),
+            _ => "Checking bootstrap…".into(),
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                chord_badge(theme, "⌥b"),
+                Span::raw(" "),
+                Span::styled(text, Style::default().fg(theme.accent)),
+            ]))
+            .alignment(Alignment::Center),
+            Rect::new(
+                rows[9].x,
+                rows[9].y + 1,
+                rows[9].width,
+                rows[9].height.saturating_sub(1),
+            ),
+        );
+        rects.bootstrap = whole(Rect::new(
+            rows[9].x,
+            rows[9].y + 1,
+            rows[9].width,
+            rows[9].height.saturating_sub(1),
+        ));
+    }
 }
 
-/// `^t  Target Project  name (environment)`, or an invitation to set one.
+/// `⌥t  Target Project  name (environment)`, or an invitation to set one.
 /// The shortcut sits right on the field it changes rather than in the
 /// footer's own chord list, which otherwise says nothing about what "target"
 /// even refers to.
 fn target_line(app: &App) -> Line<'static> {
     let theme = app.theme;
     let mut spans = vec![
-        chord_badge(theme, "^t"),
+        chord_badge(theme, "⌥t"),
         Span::raw(" "),
         Span::styled(
             "Target Project  ",
@@ -490,9 +552,7 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     // The pane it is about to become: same border, same title bar, so the
     // session appearing in it reads as the same thing finishing rather than a
     // different screen replacing it.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    let block = terminal_block(app, f.area().width)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
             format!(" {} · starting ", loading.harness),
@@ -506,97 +566,58 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
         inner
     };
 
-    const STEP_ROWS: u16 = 9;
-    // The echoed prompt reuses the main screen's box wholesale — same width,
-    // same height — so the transition reads as the box you typed in coming
-    // along, not a different card summarizing what you wrote.
-    let (task_w, task_h) = match loading.prompt.as_deref() {
-        Some(_) => prompt_box_size(area),
-        None => (0, 0),
-    };
-    // Size the panel to its content and centre *that*, rather than letting it
-    // span the pane: the steps read as a left-aligned block, and a block the
-    // full width of the pane is a block pinned to its left border. The widest
-    // line decides, so the group stays centred as steps arrive.
-    let content_w = loading
-        .steps
-        .iter()
-        .map(|step| step.chars().count() + 2)
-        .chain(std::iter::once(loading.target.chars().count()))
-        // The task is deliberately absent: it is a whole sentence, and letting
-        // it set the width stretched the panel across the pane and pushed the
-        // steps out to the left margin. It wraps inside a fixed box instead.
-        .max()
-        .unwrap_or(0)
-        // A floor only so an empty panel is not a sliver; anything larger pads
-        // the panel past its content and the centring visibly drifts left.
-        .clamp(20, area.width.max(1) as usize) as u16;
-    // A prompt box brings a row of air below it, so the steps don't sit
-    // against its border.
-    let task_gap = if task_h > 0 { 1 } else { 0 };
-    let panel = centered(
-        content_w,
-        (STEP_ROWS + task_h + task_gap + 4).min(area.height),
-        area,
-    );
+    // A stable width keeps verbose preparation details from moving the panel.
+    // Only the current stage is shown; prior stages are not a scrolling log.
+    let width = 56.min(area.width.saturating_sub(2));
+    let prompt_h = if loading.prompt.is_some() { 4 } else { 0 };
+    let gap = u16::from(prompt_h > 0);
+    let panel = centered(width, 10 + prompt_h + gap, area);
     let rows = Layout::vertical([
-        Constraint::Length(1), // title
-        Constraint::Length(1), // target
-        Constraint::Length(1), // gap
-        Constraint::Length(task_h),
-        Constraint::Length(task_gap),
-        Constraint::Length(STEP_ROWS),
-        Constraint::Min(0),
-        Constraint::Length(1), // hint
+        Constraint::Length(prompt_h),
+        Constraint::Length(gap),
+        Constraint::Min(3),
     ])
     .split(panel);
-
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{} ", spinner_frame(loading.tick)),
-                Style::default().fg(theme.accent),
-            ),
-            Span::styled(
-                loading.target.clone(),
-                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-            ),
-        ]))
-        .alignment(Alignment::Center),
-        rows[0],
-    );
-    f.render_widget(
-        Paragraph::new("preparing the agent")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(theme.dim)),
-        rows[1],
-    );
-
-    if let Some(prompt) = loading.prompt.as_deref() {
-        // Centered in the pane, not in the (narrower) steps panel: the box is
-        // the pane-wide element the steps sit under.
-        let task_area = Rect {
-            x: area.x + area.width.saturating_sub(task_w) / 2,
-            y: rows[3].y,
-            width: task_w.min(area.width),
-            height: rows[3].height,
-        };
+    if let Some(prompt) = &loading.prompt {
         f.render_widget(
-            Paragraph::new(prompt.to_string())
+            Paragraph::new(prompt.clone())
                 .block(
                     dialog_block(theme)
-                        .border_style(Style::default().fg(theme.accent_dim))
-                        .title(Span::styled(" Prompt ", Style::default().fg(theme.dim))),
+                        .title(" Prompt ")
+                        .border_style(Style::default().fg(theme.accent_dim)),
                 )
                 .style(Style::default().fg(theme.fg))
                 .wrap(Wrap { trim: true }),
-            task_area,
+            rows[0],
         );
     }
-
+    let block = dialog_block(theme)
+        .title(" Preparing agent ")
+        .padding(ratatui::widgets::Padding::new(2, 2, 1, 1));
+    let inner = block.inner(rows[2]);
+    f.render_widget(block, rows[2]);
+    let lines = vec![
+        Line::styled(loading.target.clone(), Style::default().fg(theme.dim)),
+        Line::raw(""),
+        Line::styled(
+            spinner_frame(loading.tick).to_string(),
+            Style::default().fg(theme.accent),
+        ),
+        Line::raw(""),
+        Line::styled(
+            loading
+                .steps
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "Preparing the agent".into()),
+            Style::default().fg(theme.accent),
+        ),
+    ];
     f.render_widget(
-        Paragraph::new(step_lines(app, rows[5].width)).wrap(Wrap { trim: false }),
-        rows[5],
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
     );
 }
 
@@ -604,50 +625,6 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
 fn spinner_frame(tick: usize) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     FRAMES[tick % FRAMES.len()]
-}
-
-/// Steps as lines: everything finished is ticked and dimmed, the newest is
-/// live. Only the tail is kept, so the block never outgrows its box even on a
-/// launch that reports a dozen things.
-fn step_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let theme = app.theme;
-    let steps = &app.loading.steps;
-    const STEP_ROWS: usize = 9;
-
-    // Each wrapped step costs more than one row; budget by estimated height so
-    // the tail that is kept actually fits.
-    let usable = width.saturating_sub(2).max(20) as usize;
-    let mut budget = STEP_ROWS;
-    let mut start = steps.len();
-    for (i, step) in steps.iter().enumerate().rev() {
-        let rows = step.chars().count().div_ceil(usable).max(1);
-        if rows > budget {
-            break;
-        }
-        budget -= rows;
-        start = i;
-    }
-
-    let last = steps.len().saturating_sub(1);
-    steps[start..]
-        .iter()
-        .enumerate()
-        .map(|(offset, step)| {
-            let i = start + offset;
-            let (marker, style) = if i == last {
-                (
-                    format!("{} ", spinner_frame(app.loading.tick)),
-                    Style::default().fg(theme.accent),
-                )
-            } else {
-                ("✓ ".to_string(), Style::default().fg(theme.dim))
-            };
-            Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(step.clone(), style),
-            ])
-        })
-        .collect()
 }
 
 fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
@@ -793,6 +770,7 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
 pub fn session_pane_size(
     area: Option<ratatui::layout::Size>,
     maximized: bool,
+    preferred_sidebar_width: Option<u16>,
 ) -> Option<(u16, u16)> {
     let area = area?;
     // The same inset the renderer applies — see `page_size` for why the two
@@ -806,7 +784,11 @@ pub fn session_pane_size(
     // Rows: header, gap, panes, hint. Columns: the tree, then what is left.
     // Both minus the pane's own border.
     let rows = height.saturating_sub(3).saturating_sub(2).max(1);
-    let tree = if maximized { 0 } else { TREE_W };
+    let tree = if maximized {
+        0
+    } else {
+        sidebar_width(width, preferred_sidebar_width)
+    };
     let cols = width.saturating_sub(tree).saturating_sub(2).max(1);
     Some((rows, cols))
 }
@@ -876,17 +858,17 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     }
     f.render_widget(Paragraph::new(Line::from(header)), chunks[0]);
 
-    // Detail is fixed-width so the tree keeps the space it needs on a narrow
-    // terminal; below that there is no room for two panes at all.
-    // The tree is a fixed, narrow column and the right pane takes everything
-    // else — the detail (and, later, a live session) is what you are actually
-    // looking at, and a tree that grows with the window just pads names with
-    // whitespace.
+    // The tree keeps the user's preferred width; narrow windows clamp it so
+    // the terminal remains usable without overwriting that preference.
     // ⌥f hands the whole width to the session: the tree is navigation, and
     // once you are working in a session there is nothing to navigate.
     let two_pane = !full && chunks[2].width >= 70;
     let panes = if two_pane {
-        Layout::horizontal([Constraint::Length(TREE_W), Constraint::Min(20)]).split(chunks[2])
+        Layout::horizontal([
+            Constraint::Length(sidebar_width(chunks[2].width, app.sidebar_width)),
+            Constraint::Min(32),
+        ])
+        .split(chunks[2])
     } else {
         Layout::horizontal([Constraint::Min(0)]).split(chunks[2])
     };
@@ -921,7 +903,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|r| ListItem::new(tree_line(theme, r, app)))
+        .map(|r| ListItem::new(tree_line(theme, r, app, panes[0].width.saturating_sub(2))))
         .collect();
     let mut state = ListState::default();
     state.select(if rows.is_empty() {
@@ -931,6 +913,7 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     });
     f.render_stateful_widget(
         List::new(items)
+            .style(Style::default().bg(theme.sidebar))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -956,6 +939,12 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     if two_pane {
         rects.session = interior(panes[1]);
         rects.session_outer = whole(panes[1]);
+        rects.sidebar_divider = PaneBox {
+            x: panes[0].right() - 1,
+            y: panes[0].y + 1,
+            w: 2,
+            h: panes[0].height.saturating_sub(2),
+        };
         // What the right pane shows follows the selection, not merely whether a
         // session happens to be open: standing on an agent should show that
         // agent's cards even while one of its sessions is running in the
@@ -964,14 +953,13 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         // so instead. Typing in a session is the exception — the pane it has
         // the keyboard in cannot vanish from under it.
         let selected_kind = app.selected_row().map(|row| row.kind);
-        let show_session = app.focus == ManageFocus::Session
-            || selected_kind.is_some_and(|kind| {
-                matches!(kind, RowKind::Session(..)) && app.pane_for_row(kind).is_some()
-            });
         if app.loading.active {
             render_loading(app, f, panes[1]);
         } else {
-            match app.active_session().filter(|_| show_session) {
+            match app
+                .displayed_session_index()
+                .and_then(|i| app.sessions.get(i))
+            {
                 Some(session) => render_session(app, session, f, panes[1]),
                 // The New Session row's pane is the launcher: the wordmark
                 // and the prompt, where a session is about to be.
@@ -989,10 +977,12 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                     };
                     f.render_widget(
                         Paragraph::new(detail_lines(app)).block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_type(BorderType::Rounded)
-                                .border_style(Style::default().fg(theme.accent_dim))
+                            terminal_block(app, f.area().width)
+                                .border_style(Style::default().fg(if tree_focused {
+                                    theme.accent_dim
+                                } else {
+                                    theme.accent
+                                }))
                                 .title(Span::styled(title, Style::default().fg(theme.dim))),
                         ),
                         panes[1],
@@ -1002,6 +992,16 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         }
     }
 
+    if two_pane {
+        f.render_widget(
+            Paragraph::new("↔").style(Style::default().fg(if app.resizing_sidebar() {
+                theme.accent
+            } else {
+                theme.dim
+            })),
+            Rect::new(panes[0].right() - 1, panes[0].y + panes[0].height / 2, 1, 1),
+        );
+    }
     render_manage_footer(app, f, chunks[3], rects);
 }
 
@@ -1012,6 +1012,34 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 /// footer and the same drag-to-copy.
 fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects) {
     let theme = app.theme;
+    if matches!(app.screen, Screen::BootstrapSetup | Screen::BootstrapPick) {
+        bootstrap::footer(app, f, area);
+        return;
+    }
+    if app.screen == Screen::HarnessPick {
+        let mut hints = vec![
+            ("↑↓", "choose agent"),
+            (
+                "enter",
+                if app.harness_pick_connect {
+                    "connect"
+                } else if app.harness_pick_agent.is_some() {
+                    "new session"
+                } else {
+                    "create VM"
+                },
+            ),
+            ("esc", "back"),
+        ];
+        if app
+            .harness_pick
+            .is_some_and(|h| super::app::opencode_alternate(h).is_some())
+        {
+            hints.push(("tab", "version"));
+        }
+        f.render_widget(Paragraph::new(Line::from(chord_spans(theme, &hints))), area);
+        return;
+    }
     // A held action replaces the hint line: it is the only thing that matters
     // until it is answered, and it must not be missable.
     if let Some(confirm) = app.confirm.as_ref() {
@@ -1063,13 +1091,22 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     let hint: Vec<(&str, &str)> = if app.pane_is_full() {
         vec![
             ("⌥f", "restore the tree"),
-            ("⌥b", "SSH shell"),
-            ("⌥⇧esc / ^]", "stop typing"),
+            ("⌥o", "SSH shell"),
+            ("⌥esc", "stop typing"),
         ]
     } else if app.focus == ManageFocus::Session {
         // A dead pane's keys are recovery, not typing — the hint has to say
         // so, or "stop typing" advertises an input nothing is reading.
-        if app
+        if app.active_session().is_none() {
+            let mut keys = vec![("esc", "back to the tree")];
+            if app
+                .selected_row()
+                .is_some_and(|row| matches!(row.kind, RowKind::Session(..) | RowKind::Agent(..)))
+            {
+                keys.insert(0, ("enter", "connect"));
+            }
+            keys
+        } else if app
             .active_session()
             .is_some_and(|s| s.ended() || s.stalled())
         {
@@ -1080,9 +1117,9 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             ]
         } else {
             let mut keys = vec![
-                ("⌥⇧esc / ^]", "stop typing"),
+                ("⌥esc", "stop typing"),
                 ("⌥f", "maximize"),
-                ("⌥b", "SSH shell"),
+                ("⌥o", "SSH shell"),
             ];
             // The agent is taking the clicks, so say how to take one back — this is
             // the terminal's own convention, but nobody guesses it.
@@ -1116,7 +1153,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                     .is_some_and(|s| super::super::client_sessions::is_client(&s.name));
                 vec![
                     ("enter", if conversation { "resume" } else { "connect" }),
-                    ("⌥b", "SSH shell"),
+                    ("⌥o", "SSH shell"),
                     ("⌥f", "maximize"),
                     (
                         "⌥enter",
@@ -1145,19 +1182,41 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             }
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
-                ("⌥b", "SSH shell"),
-                ("c", "copy shell"),
-                ("n", "new agent"),
+                ("⌥o", "shell"),
+                ("n", "new VM"),
+                ("⌥n", "new session"),
                 if sleeping {
                     ("w", "wake")
                 } else {
                     ("s", "sleep")
                 },
-                ("d", "delete agent"),
+                ("⌥b", "save bootstrap"),
+                ("d", "delete"),
+            ],
+            Some(RowKind::Project(..) | RowKind::Environment(..)) => vec![
+                ("enter", "open"),
+                ("n", "new VM"),
+                (
+                    "⌥b",
+                    if app.bootstrap_target().is_some_and(|t| {
+                        matches!(
+                            app.bootstrap_defaults.get(&t.environment_id),
+                            Some(
+                                super::bootstrap_setup::DefaultState::Ready(_)
+                                    | super::bootstrap_setup::DefaultState::Available
+                            )
+                        )
+                    }) {
+                        "Select Bootstrap"
+                    } else {
+                        "Create Bootstrap"
+                    },
+                ),
+                ("⌥r", "refresh"),
             ],
             _ => vec![
                 ("enter", "open"),
-                ("n", "new agent"),
+                ("n", "new VM"),
                 ("⌥r", "refresh"),
                 ("shift+r", "find agents"),
             ],
@@ -1175,13 +1234,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     // the same place — drawn second so it wins if the row ever fills up.
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ? ",
-                Style::default()
-                    .fg(theme.on_accent)
-                    .bg(theme.accent_dim)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            chord_badge(theme, "?"),
             Span::styled(" keys ", Style::default().fg(theme.dim)),
         ]))
         .alignment(Alignment::Right),
@@ -1397,7 +1450,11 @@ fn render_settings(app: &App, f: &mut Frame) {
         let rows: Vec<PanelRow> = settings
             .picker_options()
             .into_iter()
-            .map(|(label, tag, detail)| PanelRow { label, tag, detail })
+            .map(|(label, tag, _)| PanelRow {
+                label,
+                tag,
+                detail: String::new(),
+            })
             .collect();
         let footer = if let Some(busy) = settings.busy.as_deref() {
             Line::from(vec![
@@ -1439,7 +1496,7 @@ fn render_settings(app: &App, f: &mut Frame) {
         .options()
         .into_iter()
         .enumerate()
-        .map(|(i, (label, value, detail))| PanelRow {
+        .map(|(i, (label, value, _))| PanelRow {
             // Padded so the values read as a column.
             label: format!("{label:<19}"),
             // The highlighted value grows arrows when ←/→ changes it in
@@ -1449,7 +1506,7 @@ fn render_settings(app: &App, f: &mut Frame) {
             } else {
                 value
             },
-            detail,
+            detail: String::new(),
         })
         .collect();
     let footer = Line::from(chord_spans(
@@ -1476,55 +1533,141 @@ fn render_settings(app: &App, f: &mut Frame) {
     );
 }
 
-/// Choosing which agent a new session goes on. Only drawn when there is more
-/// than one to choose between.
-/// ⌥n's picker: which agent runs the new session. The wizard's agent step,
-/// floated over the tree the launch is aimed at.
-fn render_harness_pick(app: &App, f: &mut Frame) {
+/// Choose a harness for a new VM or a session on an existing VM.
+fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
+    use super::bootstrap_setup::{DefaultState, LaunchChoice};
     let Some(cursor) = app.harness_pick else {
         return;
     };
     let theme = app.theme;
     let indices = super::app::harness_picker_indices(cursor);
-    let rows: Vec<PanelRow> = indices
+    let existing = app.harness_pick_agent.is_some();
+    let target = app.harness_pick_target.as_ref().or(app.target.as_ref());
+    let host = if rects.session.w > 0 {
+        let r = rects.session;
+        Rect::new(r.x, r.y, r.w, r.h)
+    } else {
+        page(f)
+    };
+    f.render_widget(Clear, host);
+    let area = centered(
+        64,
+        indices.len() as u16 + if existing { 7 } else { 11 },
+        host,
+    );
+    f.render_widget(Clear, area);
+    let block = dialog_block(theme)
+        .title(if existing {
+            if app.harness_pick_connect {
+                " Connect cloud agent "
+            } else {
+                " New session "
+            }
+        } else {
+            " New Cloud Agent "
+        })
+        .padding(ratatui::widgets::Padding::horizontal(2));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(indices.len() as u16),
+        Constraint::Length(1),
+        Constraint::Length(if existing { 0 } else { 1 }),
+        Constraint::Length(if existing { 0 } else { 2 }),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    f.render_widget(
+        Paragraph::new(if app.harness_pick_connect {
+            "Choose the agent to open on this VM"
+        } else if existing {
+            "Choose an agent for this VM"
+        } else {
+            "Choose an agent for the new VM"
+        })
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(theme.fg)),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(target.map(|t| t.label()).unwrap_or_default())
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.dim)),
+        rows[1],
+    );
+    let items: Vec<_> = indices
         .iter()
-        .map(|i| super::app::HARNESSES[*i])
-        .map(|slug| PanelRow {
-            label: match slug {
+        .map(|i| {
+            let label = match super::app::HARNESSES[*i] {
                 "railway" => "Railway",
                 "grok" => "Grok Build",
-                "codex" => "ChatGPT",
+                "codex" => "ChatGPT Codex",
                 "claude" => "Claude Code",
                 "opencode" => "OpenCode",
                 "opencode2" => "OpenCode2 [Beta]",
                 "shell" => "Shell",
                 other => other,
-            }
-            .to_string(),
-            tag: String::new(),
-            detail: String::new(),
+            };
+            ListItem::new(label)
         })
         .collect();
-    let mut shortcuts = vec![("↑↓", "choose")];
-    if super::app::opencode_alternate(cursor).is_some() {
-        shortcuts.push(("tab", "OpenCode version"));
-    }
-    shortcuts.extend([("enter", "new agent"), ("esc", "cancel")]);
-    let footer = Line::from(chord_spans(theme, &shortcuts));
-
-    render_panel(
-        f,
-        theme,
-        page(f),
-        Panel {
-            title: "new agent",
-            heading: "Which agent should the new Cloud Agent run?",
-            position: None,
-            rows: &rows,
-            cursor: indices.iter().position(|i| *i == cursor).unwrap_or(0),
-            footer,
-        },
+    let mut state = ListState::default();
+    state.select(indices.iter().position(|i| *i == cursor));
+    f.render_stateful_widget(
+        List::new(items).highlight_symbol("› ").highlight_style(
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.selection)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[3],
+        &mut state,
     );
+    rects.harness_list = whole(rows[3]);
+    if !existing {
+        // List text starts after its two-column selection marker.
+        let controls =
+            |row: Rect| Rect::new(row.x + 2, row.y, row.width.saturating_sub(2), row.height);
+        let checkbox = controls(rows[5]);
+        let selector = controls(rows[6]);
+        let default_name = target.and_then(|t| app.bootstrap_defaults.get(&t.environment_id));
+        let selected = match &app.harness_bootstrap {
+            LaunchChoice::Named(name) => name.clone(),
+            LaunchChoice::None => "none".into(),
+            LaunchChoice::Default => match default_name {
+                Some(DefaultState::Ready(name)) => format!("{name} (project default)"),
+                Some(DefaultState::Loading) | None => "checking project default…".into(),
+                _ => "project default: none".into(),
+            },
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                chord_badge(theme, "space"),
+                Span::raw(if app.harness_use_bootstrap {
+                    " [✓] Use bootstrap"
+                } else {
+                    " [ ] Use bootstrap · clean VM"
+                }),
+            ])),
+            checkbox,
+        );
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    chord_badge(theme, "⌥b"),
+                    Span::raw(" Select Bootstrap"),
+                ]),
+                Line::from(selected).style(Style::default().fg(theme.dim)),
+            ]),
+            selector,
+        );
+        rects.harness_use_bootstrap = whole(checkbox);
+        rects.harness_bootstrap = whole(selector);
+    }
 }
 
 /// ⌥p's composer: the launcher's prompt box, floated over the tree so a new
@@ -1718,9 +1861,7 @@ fn render_session(app: &App, session: &super::session::Session, f: &mut Frame, a
     let focused = app.focus == ManageFocus::Session;
     // The title reads like a project reference: project / agent / session.
     let title = format!(" {} ", app.pane_breadcrumb(session));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+    let block = terminal_block(app, f.area().width)
         .border_style(Style::default().fg(if focused {
             theme.accent
         } else {
@@ -1966,9 +2107,17 @@ fn status_glyph(status: &str) -> &'static str {
     }
 }
 
-fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
+fn tree_line(theme: &Theme, row: &Row, app: &App, width: u16) -> Line<'static> {
     let tick = app.loading.tick;
     let indent = "  ".repeat(row.depth);
+    let label_width = usize::from(width).saturating_sub(indent.len() + 2);
+    let label = if label_width == 0 {
+        String::new()
+    } else if console::measure_text_width(&row.label) > label_width {
+        console::truncate_str(&row.label, label_width, "…").into_owned()
+    } else {
+        row.label.clone()
+    };
     let mut spans = vec![Span::raw(indent)];
 
     match (&row.kind, row.expanded) {
@@ -1977,7 +2126,7 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
         (RowKind::NewSession, _) => {
             spans.push(Span::styled("+ ", Style::default().fg(theme.accent)));
             spans.push(Span::styled(
-                row.label.clone(),
+                label.clone(),
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
@@ -1989,10 +2138,7 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
                 format!("{glyph} "),
                 Style::default().fg(color),
             ));
-            spans.push(Span::styled(
-                row.label.clone(),
-                Style::default().fg(theme.fg),
-            ));
+            spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
         }
         (RowKind::Session(..), _) => {
             // The marker is the state: a spinner while the attach is in
@@ -2008,17 +2154,14 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
                 None => ("↳ ".to_string(), theme.dim),
             };
             spans.push(Span::styled(glyph, Style::default().fg(color)));
-            spans.push(Span::styled(
-                row.label.clone(),
-                Style::default().fg(theme.fg),
-            ));
+            spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
         }
         (RowKind::Separator, _) => spans.push(Span::styled(
-            "─".repeat(TREE_W.saturating_sub(4) as usize),
+            "─".repeat(width.saturating_sub(2) as usize),
             Style::default().fg(theme.accent_dim),
         )),
         (RowKind::Note(..) | RowKind::Hint, _) => spans.push(Span::styled(
-            row.label.clone(),
+            label.clone(),
             Style::default()
                 .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
@@ -2041,9 +2184,9 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
                     .add_modifier(Modifier::BOLD),
                 _ => Style::default().fg(theme.fg),
             };
-            spans.push(Span::styled(row.label.clone(), style));
+            spans.push(Span::styled(label.clone(), style));
         }
-        _ => spans.push(Span::raw(row.label.clone())),
+        _ => spans.push(Span::raw(label.clone())),
     }
 
     // Every thread row carries its context as a dim note: the project for a
@@ -2388,6 +2531,436 @@ mod tests {
             None,
             true,
         )
+    }
+
+    #[test]
+    fn bootstrap_setup_row_is_below_project_and_only_visible_with_target() {
+        let mut app = app_with_tree();
+        app.bootstrap_defaults.insert(
+            "env_prod".into(),
+            super::super::bootstrap_setup::DefaultState::Missing,
+        );
+        let screen = draw(&app, 120, 40);
+        let lines: Vec<_> = screen.lines().collect();
+        let project = lines
+            .iter()
+            .position(|l| l.contains("Target Project"))
+            .unwrap();
+        let bootstrap = lines
+            .iter()
+            .position(|l| l.contains("No bootstrap configured"))
+            .unwrap();
+        assert!(bootstrap >= project + 2);
+        assert!(lines[bootstrap].contains("⌥b"));
+        app.target = None;
+        let screen = draw(&app, 120, 40);
+        assert!(!screen.contains("No bootstrap configured"));
+        assert!(!screen.contains("Checking bootstrap"));
+    }
+
+    #[test]
+    fn bootstrap_setup_form_and_progress_keep_the_prompt_draft() {
+        let mut app = app_with_tree();
+        app.prompt = "Fix the CLI".into();
+        app.start_bootstrap_setup();
+        let screen = draw(&app, 120, 40);
+        for text in [
+            "Create bootstrap",
+            "Repository (optional)",
+            "Coding agent",
+            "Name",
+        ] {
+            assert!(screen.contains(text), "{screen}");
+        }
+        let form = app.bootstrap_form.as_mut().unwrap();
+        form.running = true;
+        form.steps = vec!["Creating setup VM".into(), "Saving checkpoint".into()];
+        let screen = draw(&app, 120, 40);
+        assert!(screen.contains("Creating bootstrap"));
+        assert!(screen.contains("Saving checkpoint"));
+        assert_eq!(app.prompt, "Fix the CLI");
+        // The form also renders in small terminals without panicking.
+        draw(&app, 60, 18);
+    }
+
+    fn layout(app: &mut App, width: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|f| app.panes = render_with_layout(app, f).0)
+            .unwrap();
+        if let Some((rows, cols)) = session_pane_size(
+            Some(ratatui::layout::Size::new(width, 40)),
+            app.pane_is_full(),
+            app.sidebar_width,
+        ) {
+            assert_eq!((app.panes.session.h, app.panes.session.w), (rows, cols));
+        }
+    }
+
+    #[test]
+    fn sidebar_drag_resizes_both_panes_and_keeps_the_preferred_width() {
+        use crate::commands::cloud_agent::tui::app::{Effect, MouseAction};
+        let mut app = app_with_tree();
+        app.focus = ManageFocus::Session;
+        layout(&mut app, 120);
+        assert_eq!(app.panes.tree_outer.w, TREE_W);
+        let cursor = app.cursor;
+        let divider = app.panes.sidebar_divider;
+        assert_eq!(
+            app.on_mouse(MouseAction::Down, divider.x + 1, divider.y),
+            None
+        );
+        assert!(app.resizing_sidebar());
+        assert_eq!(
+            app.on_mouse(MouseAction::Drag, divider.x + 27, divider.y),
+            None
+        );
+        assert_eq!(app.sidebar_width, Some(58));
+        layout(&mut app, 120);
+        assert_eq!(app.panes.tree_outer.w, 58);
+        assert_eq!(
+            app.on_mouse(MouseAction::Up, divider.x + 27, divider.y),
+            Some(Effect::SaveSidebarWidth(58))
+        );
+        assert!(!app.resizing_sidebar());
+        assert_eq!(app.focus, ManageFocus::Session);
+        assert_eq!(app.cursor, cursor);
+        assert!(app.selection.is_none() && app.pending_copy.is_none());
+
+        layout(&mut app, 80);
+        assert_eq!(app.panes.tree_outer.w, 44);
+        assert_eq!(
+            app.sidebar_width,
+            Some(58),
+            "shrinking the window must not overwrite the preference"
+        );
+        layout(&mut app, 120);
+        assert_eq!(app.panes.tree_outer.w, 58);
+        let divider = app.panes.sidebar_divider;
+        app.on_mouse(MouseAction::Down, divider.x, divider.y);
+        app.on_mouse(MouseAction::Drag, u16::MAX, divider.y);
+        assert_eq!(
+            app.sidebar_width,
+            Some(84),
+            "leave at least 32 columns for the terminal"
+        );
+        app.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(app.sidebar_width, Some(58), "Escape cancels the resize");
+        app.on_mouse(MouseAction::Down, divider.x, divider.y);
+        app.on_mouse(MouseAction::Drag, 0, divider.y);
+        assert_eq!(app.sidebar_width, Some(20));
+        assert_eq!(
+            app.on_mouse(MouseAction::Up, 0, divider.y),
+            Some(Effect::SaveSidebarWidth(20))
+        );
+        layout(&mut app, 120);
+        let divider = app.panes.sidebar_divider;
+        app.on_mouse(MouseAction::Down, divider.x, divider.y);
+        assert_eq!(
+            app.on_mouse(MouseAction::Up, divider.x, divider.y),
+            None,
+            "clicking without a drag does not save"
+        );
+        app.maximized = true;
+        app.loading.active = true;
+        layout(&mut app, 120);
+        assert_eq!(app.panes.sidebar_divider, PaneBox::default());
+        assert_eq!(app.sidebar_width, Some(20));
+    }
+
+    #[test]
+    fn clicking_rendered_panels_switches_focus_without_activating_blank_rows() {
+        use crate::commands::cloud_agent::tui::{app::MouseAction, session::Session};
+        let mut app = app_with_tree();
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        for width in [None, Some(58)] {
+            app.sidebar_width = width;
+            layout(&mut app, 120);
+            let panes = app.panes;
+            let cursor = app.cursor;
+            let active = app.active;
+            let blank_row = panes.tree.y + app.rows().len() as u16 + 1;
+            assert!(panes.tree.contains(panes.tree.x, blank_row));
+            let separator = app
+                .rows()
+                .iter()
+                .position(|row| matches!(row.kind, RowKind::Separator))
+                .unwrap();
+            for (col, row) in [
+                (panes.tree.x, blank_row),
+                (panes.tree.x, panes.tree.y + separator as u16),
+                (panes.tree_outer.x, panes.tree.y),
+                (panes.tree.x, panes.tree_outer.y),
+                (panes.sidebar_divider.x, panes.sidebar_divider.y),
+            ] {
+                // Repeating a blank/border click must not double-click the
+                // previously selected session or toggle a selected folder.
+                for _ in 0..2 {
+                    app.focus = ManageFocus::Session;
+                    assert_eq!(app.on_mouse(MouseAction::Down, col, row), None);
+                    assert_eq!(app.on_mouse(MouseAction::Up, col, row), None);
+                    assert_eq!(app.focus, ManageFocus::Tree, "click at {col},{row}");
+                    assert_eq!(app.cursor, cursor);
+                    assert_eq!(app.active, active);
+                    assert_eq!(app.sidebar_width, width);
+                    assert!(!app.resizing_sidebar());
+                }
+            }
+            for (col, row) in [
+                (panes.session.x + 3, panes.session.y + 3),
+                (panes.session.x, panes.session_outer.y),
+                (panes.sidebar_divider.x + 1, panes.sidebar_divider.y),
+            ] {
+                app.focus = ManageFocus::Tree;
+                assert_eq!(app.on_mouse(MouseAction::Down, col, row), None);
+                assert_eq!(app.on_mouse(MouseAction::Up, col, row), None);
+                assert_eq!(app.focus, ManageFocus::Session, "click at {col},{row}");
+                assert_eq!(app.sidebar_width, width);
+                assert!(!app.resizing_sidebar());
+            }
+        }
+    }
+
+    #[test]
+    fn focusing_an_unconnected_thread_keeps_its_card_and_background_sessions_separate() {
+        use crate::commands::cloud_agent::tui::{
+            app::{ConsoleSession, Effect, MouseAction},
+            session::Session,
+        };
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let remote_thread = |name: &str| ConsoleSession {
+            name: name.into(),
+            kind: "SHELL".into(),
+            command: None,
+            running: true,
+            attached: true,
+            created_at: None,
+            snapshot: None,
+        };
+        let mut app = app_with_tree();
+        if let Load::Loaded(agents) = &mut app.tree[0].projects[0].envs[0].agents {
+            agents[0].expanded = true;
+            agents[0].sessions = LoadSessions::Loaded(vec![remote_thread("same-vm-thread")]);
+            agents.push(Agent {
+                id: "ca_2".into(),
+                name: "quiet-harbor".into(),
+                status: "running".into(),
+                sessions: LoadSessions::Loaded(vec![remote_thread("other-vm-thread")]),
+                expanded: true,
+            });
+        }
+        let mut open = Session::for_test("ca_1", "nimble-otter").unwrap();
+        open.durable_name = "open-thread".into();
+        app.attach_session(open, "ca_1".into());
+
+        for width in [None, Some(58)] {
+            app.sidebar_width = width;
+            for (name, agent_id) in [("same-vm-thread", "ca_1"), ("other-vm-thread", "ca_2")] {
+                for on_edge in [false, true] {
+                    app.focus = ManageFocus::Tree;
+                    app.active = Some(0);
+                    let cursor = app
+                        .rows()
+                        .iter()
+                        .position(|row| row.label == format!("[S] {name}"))
+                        .unwrap();
+                    layout(&mut app, 140);
+                    // Select a remote thread using the sidebar, as in the
+                    // reported interaction, then click its displayed card.
+                    let tree = app.panes.tree;
+                    app.on_mouse(MouseAction::Down, tree.x + 2, tree.y + cursor as u16);
+                    app.on_mouse(MouseAction::Up, tree.x + 2, tree.y + cursor as u16);
+                    assert_eq!(app.cursor, cursor);
+                    layout(&mut app, 140);
+                    let pane = app.panes.session;
+                    let col = if on_edge {
+                        app.panes.sidebar_divider.x + 1
+                    } else {
+                        pane.x + 3
+                    };
+                    let row = pane.y + 2;
+                    assert_eq!(app.on_mouse(MouseAction::Down, col, row), None);
+                    assert_eq!(app.on_mouse(MouseAction::Up, col, row), None);
+                    assert_eq!(app.focus, ManageFocus::Session);
+                    assert_eq!(app.active, None, "no fallback to the open thread");
+                    assert_eq!(app.cursor, cursor);
+                    assert_eq!(app.sessions.len(), 1, "the open session stays connected");
+                    assert_eq!(app.sessions[0].durable_name, "open-thread");
+                    let screen = draw(&app, 140, 40);
+                    assert!(
+                        screen.contains("not connected — its output isn't shown here"),
+                        "{screen}"
+                    );
+                    assert!(
+                        !screen.contains("devtools / nimble-otter / open-thread"),
+                        "{screen}"
+                    );
+                    assert!(!last_drawn_line(&screen).contains("stop typing"));
+                    assert_eq!(
+                        app.on_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+                        None
+                    );
+                    assert_eq!(app.on_paste("do not send to the other VM".into()), None);
+                    assert!(!app.sessions[0].input_within(std::time::Duration::from_secs(60)));
+                    // Repeated clicks stay on the card; connecting still
+                    // requires the explicit Enter action.
+                    assert_eq!(app.on_mouse(MouseAction::Down, col, row), None);
+                    assert_eq!(app.on_mouse(MouseAction::Up, col, row), None);
+                    assert!(matches!(
+                        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                        Some(Effect::Reattach { agent_id: id, session_name, .. })
+                            if id == agent_id && session_name == name
+                    ));
+                    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                    assert_eq!(app.focus, ManageFocus::Tree);
+                    // Keyboard focus changes follow the same rule.
+                    app.active = Some(0);
+                    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                    assert_eq!(app.focus, ManageFocus::Session);
+                    assert_eq!(app.active, None);
+                    app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+                    assert_eq!(app.focus, ManageFocus::Tree);
+                }
+            }
+        }
+        // Returning to the connected thread still focuses its existing pane.
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|row| row.label == "[S] open-thread")
+            .unwrap();
+        layout(&mut app, 140);
+        let pane = app.panes.session;
+        app.on_mouse(MouseAction::Down, pane.x + 3, pane.y + 2);
+        app.on_mouse(MouseAction::Up, pane.x + 3, pane.y + 2);
+        assert_eq!(app.active, Some(0));
+        assert_eq!(app.focus, ManageFocus::Session);
+    }
+
+    #[test]
+    fn wheel_scrolls_the_visible_terminal_after_focus_and_resize_gestures() {
+        use crate::commands::cloud_agent::tui::{app::MouseAction, session::Session};
+        let mut app = app_with_tree();
+        let mut session = Session::for_test("ca_1", "nimble-otter").unwrap();
+        session.resize(12, 80);
+        for i in 0..100 {
+            session.send(format!("scroll-line-{i:03}\r\n").as_bytes());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !session
+            .with_screen(|s| s.contents().contains("scroll-line-099"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture output must arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        app.attach_session(session, "ca_1".into());
+        for width in [None, Some(58)] {
+            app.sidebar_width = width;
+            layout(&mut app, 140);
+            let pane = app.panes.session;
+            for focus in [ManageFocus::Tree, ManageFocus::Session] {
+                app.focus = focus;
+                app.sessions[0].scroll_by(isize::MIN);
+                let live = app.sessions[0].with_screen(|s| s.contents()).unwrap();
+                assert_eq!(
+                    app.on_mouse(MouseAction::ScrollUp, pane.x + 4, pane.y + 4),
+                    None
+                );
+                assert!(app.sessions[0].scrolled_back());
+                assert_ne!(app.sessions[0].with_screen(|s| s.contents()).unwrap(), live);
+                assert_eq!(app.focus, focus, "scrolling must not take focus");
+                app.on_mouse(MouseAction::ScrollDown, pane.x + 4, pane.y + 4);
+                assert!(!app.sessions[0].scrolled_back());
+            }
+            // Mouse-up can be lost outside the window. A subsequent wheel
+            // gesture must recover instead of being swallowed by resizing.
+            let divider = app.panes.sidebar_divider;
+            app.on_mouse(MouseAction::Down, divider.x, divider.y);
+            app.on_mouse(MouseAction::Drag, divider.x + 4, divider.y);
+            assert!(app.resizing_sidebar());
+            layout(&mut app, 140);
+            let pane = app.panes.session;
+            app.on_mouse(MouseAction::ScrollUp, pane.x + 4, pane.y + 4);
+            assert!(!app.resizing_sidebar());
+            assert_eq!(app.sidebar_width, width);
+            assert!(app.sessions[0].scrolled_back());
+
+            // A displayed, connected row can be populated in the background
+            // without changing active. The wheel follows what was drawn.
+            app.focus = ManageFocus::Tree;
+            app.active = None;
+            app.sessions[0].scroll_by(isize::MIN);
+            layout(&mut app, 140);
+            let pane = app.panes.session;
+            assert!(draw(&app, 140, 40).contains("scroll-line-099"));
+            app.on_mouse(MouseAction::ScrollUp, pane.x + 4, pane.y + 4);
+            assert!(app.sessions[0].scrolled_back());
+            assert_eq!(
+                app.active, None,
+                "scrolling does not change the active connection"
+            );
+            app.active = Some(0);
+            // The launcher shows no terminal: wheel input over it must not
+            // scroll a hidden session.
+            app.cursor = 0;
+            app.sessions[0].scroll_by(isize::MIN);
+            layout(&mut app, 140);
+            app.on_mouse(MouseAction::ScrollUp, pane.x + 4, pane.y + 4);
+            assert!(!app.sessions[0].scrolled_back());
+            app.cursor = app
+                .rows()
+                .iter()
+                .position(|row| matches!(row.kind, RowKind::Session(..)))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_fresh_panel_click_recovers_from_a_lost_resize_release() {
+        use crate::commands::cloud_agent::tui::{app::MouseAction, session::Session};
+        let mut app = app_with_tree();
+        app.attach_session(
+            Session::for_test("ca_1", "nimble-otter").unwrap(),
+            "ca_1".into(),
+        );
+        for width in [None, Some(58)] {
+            for target in [ManageFocus::Tree, ManageFocus::Session] {
+                app.sidebar_width = width;
+                app.focus = if target == ManageFocus::Tree {
+                    ManageFocus::Session
+                } else {
+                    ManageFocus::Tree
+                };
+                layout(&mut app, 120);
+                let divider = app.panes.sidebar_divider;
+                app.on_mouse(MouseAction::Down, divider.x, divider.y);
+                app.on_mouse(MouseAction::Drag, divider.x + 5, divider.y);
+                assert!(app.resizing_sidebar());
+                assert_ne!(app.sidebar_width, width);
+                layout(&mut app, 120);
+                let pane = if target == ManageFocus::Tree {
+                    app.panes.tree_outer
+                } else {
+                    app.panes.session_outer
+                };
+                // No Up: simulate releasing outside the terminal window.
+                assert_eq!(app.on_mouse(MouseAction::Down, pane.x + 3, pane.y), None);
+                assert_eq!(app.on_mouse(MouseAction::Up, pane.x + 3, pane.y), None);
+                assert!(!app.resizing_sidebar());
+                assert_eq!(app.sidebar_width, width, "unfinished resize is canceled");
+                assert_eq!(app.focus, target);
+            }
+        }
     }
 
     pub(super) fn draw(app: &App, w: u16, h: u16) -> String {
@@ -2805,7 +3378,7 @@ mod tests {
             .lines()
             .find(|l| l.contains("Target Project"))
             .expect("the target indicator");
-        let chord_at = target.find("^t").expect("the chord badge: {target}");
+        let chord_at = target.find("⌥t").expect("the chord badge: {target}");
         let label_at = target.find("Target Project").unwrap();
         assert!(
             chord_at < label_at,
@@ -2817,7 +3390,7 @@ mod tests {
             .rfind(|l| l.contains("settings"))
             .expect("the menu footer");
         assert!(
-            !footer.contains("^t"),
+            !footer.contains("⌥t"),
             "the chord moved out of the footer: {footer}"
         );
     }
@@ -2937,7 +3510,7 @@ mod tests {
             })
             .unwrap();
         let (rows, cols) =
-            session_pane_size(Some(ratatui::layout::Size::new(100, 40)), false).unwrap();
+            session_pane_size(Some(ratatui::layout::Size::new(100, 40)), false, None).unwrap();
         assert_eq!(
             (cols, rows),
             (rects.session.w, rects.session.h),
@@ -3193,8 +3766,8 @@ mod tests {
             width: 100,
             height: 30,
         });
-        let (_, split) = session_pane_size(size, false).unwrap();
-        let (_, full) = session_pane_size(size, true).unwrap();
+        let (_, split) = session_pane_size(size, false, None).unwrap();
+        let (_, full) = session_pane_size(size, true, None).unwrap();
         // Inside the page margin, like the panes it must agree with.
         assert_eq!(split, 100 - PAGE_MARGIN_X * 2 - TREE_W - 2);
         assert_eq!(full, 100 - PAGE_MARGIN_X * 2 - 2);
@@ -3204,8 +3777,8 @@ mod tests {
             width: 50,
             height: 20,
         });
-        assert!(session_pane_size(narrow, false).is_none());
-        assert!(session_pane_size(narrow, true).is_some());
+        assert!(session_pane_size(narrow, false, None).is_none());
+        assert!(session_pane_size(narrow, true, None).is_some());
     }
 
     /// A terminal too narrow for anything else still keeps the launcher
@@ -3453,8 +4026,9 @@ mod tests {
         let footer = last_drawn_line(&out);
         let footer = footer.as_str();
         assert!(footer.contains("connect"), "{footer}");
-        assert!(footer.contains("new agent"), "{footer}");
-        assert!(footer.contains("delete agent"), "{footer}");
+        assert!(footer.contains("new VM"), "{footer}");
+        assert!(footer.contains("delete"), "{footer}");
+        assert!(footer.contains("save bootstrap"), "{footer}");
         // The agent is running, so it offers sleep and not wake.
         assert!(footer.contains("sleep"), "{footer}");
         assert!(!footer.contains("wake"), "{footer}");
@@ -3511,7 +4085,7 @@ mod tests {
             .position(|r| r.label == "sandbox")
             .unwrap();
         let footer = last_drawn_line(&draw(&app, 120, 30));
-        assert!(footer.contains("new agent"), "{footer}");
+        assert!(footer.contains("new VM"), "{footer}");
         assert!(!footer.contains("delete"), "{footer}");
         assert!(footer.trim_end().ends_with("keys"), "{footer}");
     }
@@ -3527,7 +4101,7 @@ mod tests {
         let out = draw(&app, 100, 34);
         assert!(out.contains("keys"));
         assert!(out.contains("refresh"), "{out}");
-        assert!(out.contains("⌥⇧esc / ^]"), "{out}");
+        assert!(out.contains("⌥esc"), "{out}");
         assert!(out.contains("any key closes"));
     }
 
@@ -3609,7 +4183,7 @@ mod tests {
         // border — not down in whatever half-line ssh's goodbye landed on.
         let title_line = out
             .lines()
-            .position(|l| l.contains("╭ devtools / nimble-otter"))
+            .position(|l| l.contains("devtools / nimble-otter"))
             .unwrap();
         let banner_line = out
             .lines()
@@ -3906,6 +4480,25 @@ mod tests {
             out.contains("not set"),
             "no default project reads as such:\n{out}"
         );
+        let lines: Vec<_> = out.lines().collect();
+        let positions: Vec<_> = [
+            "Coding agent",
+            "Default project",
+            "Skills sync",
+            "Theme",
+            "Full-screen tabs",
+            "Run first-time setup again",
+        ]
+        .iter()
+        .map(|label| lines.iter().position(|line| line.contains(label)).unwrap())
+        .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[1] == pair[0] + 1),
+            "one line per setting: {out}"
+        );
+        assert!(!out.contains("Previews as you cycle"));
+        assert!(!out.contains("Copied to the agent at launch"));
+        assert!(!out.contains("Where new cloud agents are created"));
     }
 
     /// The project row opens the wizard's question as a sub-card and comes

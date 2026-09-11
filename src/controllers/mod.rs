@@ -1,4 +1,5 @@
 pub mod adoption_eligibility;
+pub mod agent_bootstrap;
 pub mod chat;
 pub mod cloud_agent;
 pub mod cluster_probe;

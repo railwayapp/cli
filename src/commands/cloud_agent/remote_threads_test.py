@@ -26,6 +26,16 @@ class DiscoveryTest(unittest.TestCase):
         path.write_text(json.dumps(row))
         return path
 
+    def test_primary_agent_comes_from_vm_metadata_not_user_preferences(self):
+        with patch.object(threads.Path, "home", return_value=self.root):
+            self.assertIsNone(threads.primary_harness())
+            marker = self.root / ".railway-code-agent"
+            for value, expected in [("codex\n", "codex"), ("railway-agent-tui", "railway"),
+                                    ("opencode2", "opencode2"), ("unknown", None),
+                                    ("codex; touch /tmp/never-run", None)]:
+                marker.write_text(value)
+                self.assertEqual(threads.primary_harness(), expected)
+
     def test_grok_history_includes_exited_threads_and_visible_forks(self):
         self.grok("renamed", generated_title="My renamed thread", title_is_manual=True)
         self.grok("hidden-child", session_kind="subagent_fork")

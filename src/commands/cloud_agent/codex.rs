@@ -353,10 +353,9 @@ pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
         TOKEN_ENV.into(),
         "--cd".into(),
         connection.directory.clone(),
-        "--ask-for-approval".into(),
-        "never".into(),
-        "--sandbox".into(),
-        "danger-full-access".into(),
+        // Permission policy belongs to the remote app-server. Passing client
+        // overrides makes Codex reject resumed remote tasks, including a
+        // prompt-created thread that the pane reconnects to.
     ]
 }
 

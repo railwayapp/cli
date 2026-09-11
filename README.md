@@ -268,6 +268,111 @@ when finished.
 Put harness-specific arguments after `--`, for example:
 `railway code --opencode2 -- run --standalone "explain this project"`.
 
+## Cloud agent bootstraps
+
+Save a configured, running cloud agent as a reusable starting point:
+
+```bash
+railway ca bootstrap save dev --agent configured-vm
+railway ca bootstrap list
+railway ca bootstrap save updated --agent another-vm --default
+railway ca bootstrap default dev
+
+railway code --codex                         # uses your local environment default
+railway code --codex --bootstrap updated     # selects a named bootstrap
+railway code --codex --no-bootstrap          # starts with a clean VM
+railway ca create scratch --bootstrap dev
+```
+
+On the `railway ca` launcher, click the bootstrap row below **Target Project**
+or press **Option+B**. If bootstraps exist, the row says **Select Bootstrap** and
+opens a compact, one-line-per-bootstrap list. Choose a bootstrap to make it your local default, **Create New** to create
+one, or **No Default** to start future Cloud Agents without a bootstrap. Select
+a project or environment in the sidebar and press **b** to open the same list;
+this opens on **Create New** at the end of the list and uses that row's environment without changing
+the launcher's prompt target.
+
+Press **n** in the tree or bootstrap list to choose an agent for a **new VM**.
+The picker includes **ChatGPT Codex**, a **Use bootstrap** checkbox, and an **Option+B**
+shortcut to use the project default, select another bootstrap, or start clean.
+These launch choices do not change the stored default. Press **Option+N** on
+a VM, its session, or inside its focused terminal to choose an agent for a
+**new session on that same VM**.
+
+Failed captures are hidden from the TUI bootstrap pickers. Ready bootstraps and
+captures still saving appear before **No Default**, with **Create New** last.
+
+App shortcuts use **Option** (**Alt** on other keyboards): **Option+B** for
+bootstraps, **Option+T** for the target project, and **Option+O** for an SSH shell.
+**Option+Esc** returns keyboard focus to the tree. Ctrl+B, Ctrl+T, and Ctrl+]
+remain compatibility shortcuts; Ctrl+C keeps its standard interrupt behavior.
+
+Press **Enter** on an existing VM to reopen its primary coding agent terminal.
+The CLI uses that VM's configuration and session history to identify the agent;
+when it cannot, it asks you to choose without using or changing your default.
+Clicking the terminal pane only changes focus; connecting to an unopened thread
+still requires Enter or a double-click on that thread.
+
+Drag the edge between the sidebar and terminal to resize the sidebar. Thread
+text and horizontal separators use the full available width. The sidebar has
+a solid dark grey background and a right border that defines its raised edge. The
+width is saved when you release the mouse and restored next time you open the
+CLI. A narrower terminal temporarily limits the displayed width without
+changing that preference. Press Escape during a drag to cancel it.
+
+The **Create bootstrap** form stays centered in the terminal pane. It has bordered
+fields for a name, an optional repository (`owner/repo` or an HTTPS URL), and a
+coding agent, plus a **Make default** checkbox. Click fields and the **Create
+bootstrap** button, or use Tab/Shift+Tab to move between fields, left/right to
+edit text or choose the agent, and Enter to activate a control. The footer shows
+the available shortcuts.
+
+Creation shows the current stage in a compact progress card while the CLI
+creates a temporary VM, copies the selected harness's available local sign-in,
+skills, MCP configuration and settings, optionally clones the repository into
+`/app`, and saves a checkpoint. Existing Railway-managed harness settings take
+precedence over imported settings. Private repositories use the VM's GitHub
+access. Once capture is ready, the CLI applies your default choice and deletes
+the setup VM. Provisioning or capture failures attempt cleanup and preserve the
+previous default. Cleanup failures name the remaining VM.
+
+The launcher returns to your unchanged prompt after completion. Creating from
+the sidebar returns to the tree. Launching a real VM also shows only its current
+preparation stage, in a fixed-width panel.
+
+Highlight an existing running VM and press **b** to open a Name form inside the
+TUI. Saving captures its disk without stopping, deleting, or disconnecting the
+source VM. **Make default** starts checked when no default exists, and unchecked
+when one is already selected; you can change it before creating. A failed disk
+capture is not a usable bootstrap even though its name has been reserved. Retry
+with the same name from the same VM to reuse that failed capture record; if it
+is still saving, the TUI waits for that capture instead of submitting a duplicate.
+Ready bootstraps and names captured from other VMs cannot be overwritten by
+this form. A server-side snapshot timeout is reported with its failure reason,
+and the default changes only after a successful capture. The flat
+`railway ca bootstrap save` command still supports saving a new version of an
+existing name and selecting it with `--default`. Default changes wait for capture
+to succeed.
+
+Bootstraps are shared within a project/environment pair. The default selection
+is stored only in your local Railway CLI config, keyed by Railway host and
+environment ID (which also identifies the project). It does not change the
+dashboard or teammates’ defaults. Without a local default, new VMs start clean.
+Explicit `--project` and `--environment` flags take precedence, followed by the
+directory's Railway link, then the saved CA project preference. Bootstrap names
+are resolved only within that environment. `list`, `save`, and `default` support
+`--json`; `save` accepts `--env-file` and `--variable` for stored bootstrap
+variables. Launch-time variables override stored bootstrap variables.
+
+Only new VMs use bootstraps. Connecting to an existing VM preserves its disk.
+A deleted, saving, or degraded local default produces an error; `--no-bootstrap` explicitly
+bypasses it. `ca create --from-checkpoint` also bypasses the default and cannot
+be combined with bootstrap flags.
+
+The snapshot includes files and installed tools. Use an idempotent,
+non-blocking `/etc/railway/bootstrap/startup.sh` to restart local services on
+boot/wake, and `/etc/railway/bootstrap/AGENTS.md` for setup notes.
+
 ## Codex with local terminal or Desktop clients
 
 Run the native Codex terminal UI on your computer, connected to Codex App Server
@@ -425,7 +530,7 @@ railway ca ssh my-box --resume        # resume the latest Claude conversation
 
 Plain SSH bypasses harness autostart. When opening a durable session after its
 terminal has ended, interactive users can choose a recent Claude conversation.
-In the CA frame, Option+B / Alt+B opens a shell on the selected VM and returns
+In the CA frame, Option+O / Alt+O opens a shell on the selected VM and returns
 to the frame on exit. The sidebar's `c` action copies the shell command.
 
 ## Retrieve saved connection configuration

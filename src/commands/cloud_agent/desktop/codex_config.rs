@@ -280,8 +280,19 @@ pub(super) async fn configure(
     name: &str,
     directory: &str,
     ssh_config: &Path,
+    progress: &dyn crate::commands::code::Progress,
 ) -> Result<super::CodexDesktop> {
-    let path = config_path()?;
+    configure_at(config_path()?, alias, name, directory, ssh_config, progress).await
+}
+
+async fn configure_at(
+    path: PathBuf,
+    alias: &str,
+    name: &str,
+    directory: &str,
+    ssh_config: &Path,
+    progress: &dyn crate::commands::code::Progress,
+) -> Result<super::CodexDesktop> {
     let mut label = format!("Railway: {name}");
     update(&path, |config| {
         config.upsert(alias, name, directory)?;
@@ -295,13 +306,12 @@ pub(super) async fn configure(
             .unwrap_or_else(|| normalized_path(directory));
         Ok(())
     })?;
-    // Codex imports this declaration at startup. Keep setup entirely in the
-    // background, including when Desktop is already running. JSON stdout stays clean.
-    eprintln!(
+    // The caller owns the terminal: TUI launches must not print over its frame.
+    progress.note(&format!(
         "Saved Codex Desktop connection {alias} and project {} in {}",
         normalized_path(directory),
         path.display()
-    );
+    ));
     Ok(super::CodexDesktop {
         ssh_alias: alias.into(),
         ssh_config_path: ssh_config.into(),
@@ -337,6 +347,100 @@ fn remove_at(path: &Path, alias: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn configuration_output_respects_the_terminal_owner() {
+        use crate::commands::code::{CliProgress, Progress};
+        const CHILD: &str = "RAILWAY_TEST_CONFIG_OUTPUT_DIR";
+        const MODE: &str = "RAILWAY_TEST_CONFIG_OUTPUT_MODE";
+        if let Some(root) = std::env::var_os(CHILD) {
+            #[derive(Default)]
+            struct Notes(std::sync::Mutex<Vec<String>>);
+            impl Progress for Notes {
+                fn step(&self, _: &str) {}
+                fn note(&self, text: &str) {
+                    self.0.lock().unwrap().push(text.into());
+                }
+                fn finish(&self) {}
+            }
+            let root = PathBuf::from(root);
+            let notes = Notes::default();
+            let cli = CliProgress::default();
+            let terminal_mode = std::env::var(MODE).unwrap() == "cli";
+            let progress: &dyn Progress = if terminal_mode { &cli } else { &notes };
+            let path = root.join("codex-app/config.json");
+            let saved = configure_at(
+                path.clone(),
+                "railway-test-vm",
+                "test-vm",
+                "/app",
+                &root.join("ssh/config"),
+                progress,
+            )
+            .await
+            .unwrap();
+            assert_eq!(saved.ssh_alias, "railway-test-vm");
+            let config = read(&path).unwrap();
+            assert_eq!(config.remote_connections[0].projects[0].remote_path, "/app");
+            let prefs = crate::commands::cloud_agent::prefs::AgentPrefs {
+                skills: crate::commands::cloud_agent::prefs::SkillsPrefs {
+                    enabled: true,
+                    source: Some("claude".into()),
+                    exclude: vec![],
+                },
+                ..Default::default()
+            };
+            assert!(
+                crate::commands::cloud_agent::skills_sync::pack(&prefs, &root, &|note| progress
+                    .note(note))
+                .unwrap()
+                .is_none()
+            );
+            if !terminal_mode {
+                let captured = notes.0.lock().unwrap();
+                assert!(
+                    captured
+                        .iter()
+                        .any(|n| n.starts_with("Saved Codex Desktop connection"))
+                );
+                assert!(
+                    captured
+                        .iter()
+                        .any(|n| n.starts_with("Skipping skills sync"))
+                );
+            }
+            return;
+        }
+        // Capture real process stdout/stderr, including accidental println! calls.
+        // A memory-only progress test would miss writes that bypass its callback.
+        for mode in ["tui", "cli"] {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "commands::cloud_agent::desktop::codex_config::tests::configuration_output_respects_the_terminal_owner", "--nocapture"])
+                .env(CHILD, root.path()).env(MODE, mode).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!stdout.contains("Saved Codex Desktop"), "{stdout}");
+            assert!(!stdout.contains("Skipping skills sync"), "{stdout}");
+            if mode == "tui" {
+                assert!(
+                    stderr.is_empty(),
+                    "background setup printed over the TUI: {stderr}"
+                );
+            } else {
+                assert!(
+                    stderr.contains("Saved Codex Desktop connection"),
+                    "{stderr}"
+                );
+                assert!(stderr.contains("Skipping skills sync"), "{stderr}");
+            }
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

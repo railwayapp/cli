@@ -9,6 +9,7 @@
 //! browse first. `railway ca start` is the one that skips the TUI entirely.
 
 pub mod access;
+pub mod bootstrap;
 pub(crate) mod client_sessions;
 pub(crate) mod codex;
 pub mod desktop;
@@ -56,6 +57,8 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Command {
+    /// Save and select reusable cloud-agent bootstraps
+    Bootstrap(bootstrap::Args),
     /// Configure how cloud agents are launched (default agent, skills)
     Setup(setup::Args),
 
@@ -117,6 +120,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Bootstrap(a)) => tracked("bootstrap", bootstrap::command(a)).await,
         Some(Command::Setup(a)) => setup::command(a).await,
         Some(Command::Desktop(a)) => tracked("desktop", desktop::command(a)).await,
         Some(Command::Manage) => browse_into(Some(tui::Screen::Manage)).await,
@@ -423,6 +427,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
     app.hide_tabs = saved.hide_tabs;
+    app.sidebar_width = saved.sidebar_width;
     // What the key check learned. Connects gate on this in-frame: an
     // unregistered key raises a register question instead of a hung prompt.
     app.ssh_key = ssh_key;

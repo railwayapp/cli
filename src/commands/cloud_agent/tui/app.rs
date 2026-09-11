@@ -83,7 +83,10 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓", "up and down"),
             ("→ ←", "open and close"),
             ("enter", "open · connect to a session"),
-            ("click", "select · double-click connects"),
+            (
+                "click / drag",
+                "select · double-click connects · resize divider",
+            ),
         ],
     ),
     (
@@ -93,7 +96,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
             ("⌥⇧[ ⌥⇧]", "previous / next session"),
-            ("⌥⇧esc / ^]", "stop typing in it"),
+            ("⌥esc", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
@@ -104,16 +107,16 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "agents",
         &[
-            ("⌥b", "open an SSH shell outside the TUI"),
+            ("⌥o", "open an SSH shell outside the TUI"),
             ("c", "copy an SSH shell command"),
+            ("⌥b / b", "project bootstraps · save selected VM"),
             ("n", "new agent — pick its harness first"),
-            ("⌥n", "new agent now, on the selected harness"),
+            ("⌥n", "new session on this VM · choose its agent"),
             (
                 "⌥p",
                 "new session from a prompt, on the selected row's agent",
             ),
-            ("s", "sleep"),
-            ("w", "wake"),
+            ("s / w", "sleep / wake"),
             ("d", "delete, with a confirmation"),
             ("⌥r", "refresh everything, from anywhere"),
             ("r", "refresh this environment"),
@@ -123,7 +126,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "elsewhere",
         &[
-            ("t", "set the prompt's target"),
+            ("⌥t / t", "change project / use highlighted target"),
             ("esc", "step back — clear the draft, then home"),
             ("q", "quit, from home"),
             ("^c", "quit"),
@@ -295,10 +298,15 @@ impl ConsoleSession {
     }
 
     /// The native title names a thread throughout its lifecycle. Only direct
-    /// VM shells use a transport name and the `[S]` marker.
+    /// VM shells use a transport name and the `[S]` marker. Keep the full title;
+    /// the renderer truncates it to the current sidebar width.
     pub fn thread_label(&self) -> String {
         if super::super::client_sessions::is_client(&self.name) {
-            return truncate(&self.short_name(), 28);
+            return self
+                .short_name()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
         }
         if let Some(snapshot) = &self.snapshot {
             fn clean(text: Option<&str>) -> Option<&str> {
@@ -317,7 +325,7 @@ impl ConsoleSession {
                 reply.or(prompt)
             };
             if let Some(text) = text {
-                return truncate(text, 28);
+                return text.split_whitespace().collect::<Vec<_>>().join(" ");
             }
         }
         if self.is_shell() {
@@ -448,6 +456,8 @@ impl Target {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
+    BootstrapPick,
+    BootstrapSetup,
     /// First-run setup, over the tree.
     Setup,
     /// The ⌥s settings card, over the tree: every preference setup collects,
@@ -619,12 +629,21 @@ impl PaneBox {
 /// selection may cover.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct PaneRects {
+    pub sidebar_divider: PaneBox,
     pub tree: PaneBox,
     pub session: PaneBox,
     pub tree_outer: PaneBox,
     pub session_outer: PaneBox,
     /// The new-session prompt box, borders included.
     pub prompt: PaneBox,
+    pub bootstrap: PaneBox,
+    pub bootstrap_card: PaneBox,
+    pub bootstrap_fields: [PaneBox; 5],
+    pub bootstrap_list: PaneBox,
+    pub bootstrap_list_offset: usize,
+    pub harness_list: PaneBox,
+    pub harness_bootstrap: PaneBox,
+    pub harness_use_bootstrap: PaneBox,
     /// The header's session tabs, drawn only while the pane is maximized. A
     /// fixed array so this stays `Copy`; sessions past the cap keep their
     /// ⌥⇧[ ⌥⇧] keys but aren't clickable.
@@ -633,6 +652,15 @@ pub struct PaneRects {
 
 /// How many maximized-header tabs get a clickable box.
 pub const MAX_TABS: usize = 8;
+
+#[derive(Clone, Copy)]
+struct SidebarDrag {
+    start_column: u16,
+    start_row: u16,
+    start_width: u16,
+    original: Option<u16>,
+    moved: bool,
+}
 
 /// A drag in progress, confined to one pane. Copying out of the session must
 /// not pick up tree rows sitting at the same screen rows.
@@ -815,6 +843,7 @@ pub struct SshKeyOffer {
 /// A connect held back until the SSH key question is answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeldConnect {
+    Bootstrap(super::bootstrap_setup::Request),
     Launch(LaunchRequest),
     OpenShell {
         agent_id: String,
@@ -833,6 +862,7 @@ impl HeldConnect {
     pub fn into_effect(self) -> Effect {
         match self {
             HeldConnect::Launch(req) => Effect::Launch(req),
+            HeldConnect::Bootstrap(req) => Effect::CreateBootstrap(req),
             HeldConnect::OpenShell {
                 agent_id,
                 agent_name,
@@ -896,6 +926,15 @@ pub enum MouseAction {
 /// What the event loop must do after a key. At most one per keystroke.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
+    SaveSidebarWidth(u16),
+    CreateBootstrap(super::bootstrap_setup::Request),
+    LoadBootstraps {
+        environment_id: String,
+    },
+    SelectBootstrap {
+        environment_id: String,
+        id: Option<String>,
+    },
     /// Fetch this environment's agents; the result comes back via
     /// [`App::agents_loaded`].
     LoadAgents {
@@ -1053,11 +1092,21 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
-    /// The agent `n` was pressed on, when it was: the picked harness launches
-    /// a new session on that box rather than minting a fresh agent.
+    pub bootstrap_form: Option<super::bootstrap_setup::Form>,
+    pub bootstrap_picker: Option<super::bootstrap_setup::Picker>,
+    pub bootstrap_defaults:
+        std::collections::BTreeMap<String, super::bootstrap_setup::DefaultState>,
+    /// The VM selected for an Option+n session; None creates a fresh VM.
     pub harness_pick_agent: Option<String>,
+    pub harness_pick_connect: bool,
+    /// VM-specific discovery, never the user's default coding agent.
+    pub primary_harnesses: HashMap<String, String>,
+    pending_agent_connect: Option<String>,
     /// ⌥n's picker cursor while [`Screen::HarnessPick`] is up.
     pub harness_pick: Option<usize>,
+    pub harness_pick_target: Option<Target>,
+    pub harness_bootstrap: super::bootstrap_setup::LaunchChoice,
+    pub harness_use_bootstrap: bool,
     /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
     pub manage_prompt: Option<String>,
     /// The session pane has the whole screen: no tree, no detail column.
@@ -1143,6 +1192,8 @@ pub struct App {
     /// Hide the maximized layout's header tabs (⌥s settings): ⌥⇧[ ⌥⇧] stay
     /// the way between sessions, and the header keeps its status line.
     pub hide_tabs: bool,
+    pub sidebar_width: Option<u16>,
+    sidebar_drag: Option<SidebarDrag>,
     /// The key overlay is open.
     pub keys_open: bool,
     /// A drag in progress or a completed selection.
@@ -1270,8 +1321,17 @@ impl App {
             configured,
             known_environments: Vec::new(),
             target_pick: None,
+            bootstrap_form: None,
+            bootstrap_picker: None,
+            bootstrap_defaults: Default::default(),
             harness_pick: None,
+            harness_pick_target: None,
+            harness_bootstrap: Default::default(),
+            harness_use_bootstrap: true,
             harness_pick_agent: None,
+            harness_pick_connect: false,
+            primary_harnesses: HashMap::new(),
+            pending_agent_connect: None,
             manage_prompt: None,
             maximized: false,
             autostart: None,
@@ -1304,6 +1364,8 @@ impl App {
             skills_source: None,
             skills_enabled: false,
             hide_tabs: false,
+            sidebar_width: None,
+            sidebar_drag: None,
             keys_open: false,
             selection: None,
             last_click: None,
@@ -1352,6 +1414,245 @@ impl App {
     pub fn set_harness(&mut self, slug: Option<&str>) {
         if let Some(i) = slug.and_then(|s| HARNESSES.iter().position(|x| *x == s)) {
             self.harness = i;
+        }
+    }
+
+    /// A project action uses that row's environment, never an unrelated prompt target.
+    pub fn bootstrap_target(&self) -> Option<Target> {
+        let kind = self.selected_row()?.kind;
+        if let RowKind::Project(w, p) = kind {
+            let project = self.tree.get(w)?.projects.get(p)?;
+            let e = self
+                .target
+                .as_ref()
+                .filter(|t| t.project_id == project.id)
+                .and_then(|t| project.envs.iter().position(|e| e.id == t.environment_id))
+                .or_else(|| project.envs.iter().position(|e| e.name == "production"))
+                .or_else(|| (!project.envs.is_empty()).then_some(0))?;
+            return self.target_at((w, p, e));
+        }
+        if let Some(path) = self.env_of(kind) {
+            return self.target_at(path);
+        }
+        if kind == RowKind::NewSession {
+            return self.target.clone();
+        }
+        None
+    }
+
+    pub fn start_bootstrap_setup(&mut self) {
+        if self.loading.active {
+            return;
+        }
+        if let Some(target) = self.bootstrap_target() {
+            let mut form = super::bootstrap_setup::Form::new(target, self.harness);
+            form.return_to_prompt = self.launcher_selected();
+            self.bootstrap_form = Some(form);
+            self.screen = Screen::BootstrapSetup;
+        }
+    }
+
+    pub fn start_bootstrap_picker(&mut self) -> Option<Effect> {
+        if self.loading.active {
+            return None;
+        }
+        let target = self.bootstrap_target()?;
+        let env = target.environment_id.clone();
+        self.bootstrap_picker = Some(super::bootstrap_setup::Picker::new(
+            target,
+            self.launcher_selected(),
+        ));
+        self.screen = Screen::BootstrapPick;
+        Some(Effect::LoadBootstraps {
+            environment_id: env,
+        })
+    }
+
+    fn save_vm_bootstrap(&mut self, w: usize, p: usize, e: usize, a: usize) -> Option<Effect> {
+        let env = &self.tree[w].projects[p].envs[e];
+        let agent = env.agents_vec().get(a)?;
+        if agent.status != "running" {
+            self.status = "Wake the VM before saving a bootstrap".into();
+            return None;
+        }
+        let mut form = super::bootstrap_setup::Form::new(self.target_at((w, p, e))?, self.harness);
+        form.snapshot = Some(super::bootstrap_setup::Snapshot {
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+        });
+        form.return_to_prompt = false;
+        form.defaults_loading = true;
+        let environment_id = env.id.clone();
+        self.bootstrap_form = Some(form);
+        self.screen = Screen::BootstrapSetup;
+        Some(Effect::LoadBootstraps { environment_id })
+    }
+
+    fn open_bootstraps(&mut self) -> Option<Effect> {
+        if self.loading.active {
+            return None;
+        }
+        if self.focus == ManageFocus::Session
+            && self.screen == Screen::Manage
+            && self.active.is_some()
+        {
+            let id = self.active_session()?.agent_id.clone();
+            let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
+                ws.projects.iter().enumerate().find_map(|(p, project)| {
+                    project.envs.iter().enumerate().find_map(|(e, env)| {
+                        env.agents_vec()
+                            .iter()
+                            .position(|agent| agent.id == id)
+                            .map(|a| (w, p, e, a))
+                    })
+                })
+            });
+            if let Some((w, p, e, a)) = path {
+                return self.save_vm_bootstrap(w, p, e, a);
+            }
+            self.toast_error("The VM's project is unavailable. Refresh the tree and try again.");
+            return None;
+        }
+        if let Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) =
+            self.selected_row().map(|row| row.kind)
+        {
+            return self.save_vm_bootstrap(w, p, e, a);
+        }
+        if self.launcher_selected()
+            && self.target.as_ref().is_some_and(|t| {
+                matches!(
+                    self.bootstrap_defaults.get(&t.environment_id),
+                    Some(super::bootstrap_setup::DefaultState::Missing)
+                )
+            })
+        {
+            self.start_bootstrap_setup();
+            None
+        } else {
+            self.start_bootstrap_picker()
+        }
+    }
+
+    fn choose_bootstrap(&mut self) -> Option<Effect> {
+        use super::bootstrap_setup::LaunchChoice;
+        let picker = self.bootstrap_picker.as_mut()?;
+        if picker.loading || picker.saving {
+            return None;
+        }
+        let none = picker.cursor == picker.no_default_index();
+        if picker.for_launch {
+            self.harness_bootstrap = if picker.cursor == 0 {
+                LaunchChoice::Default
+            } else if none {
+                LaunchChoice::None
+            } else {
+                let b = picker.entry_at(picker.cursor)?;
+                if let Err(error) = b.require_ready() {
+                    picker.error = Some(error.to_string());
+                    return None;
+                }
+                LaunchChoice::Named(b.name.clone())
+            };
+            self.harness_use_bootstrap = !matches!(self.harness_bootstrap, LaunchChoice::None);
+            self.bootstrap_picker = None;
+            self.screen = Screen::HarnessPick;
+            return None;
+        }
+        if picker.cursor == picker.create_index() {
+            let mut form = super::bootstrap_setup::Form::new(picker.target.clone(), self.harness);
+            form.return_to_prompt = picker.return_to_prompt;
+            form.back_to_picker = true;
+            self.bootstrap_form = Some(form);
+            self.screen = Screen::BootstrapSetup;
+            return None;
+        }
+        let id = if none {
+            None
+        } else {
+            let b = picker.entry_at(picker.cursor)?;
+            if let Err(error) = b.require_ready() {
+                picker.error = Some(error.to_string());
+                return None;
+            }
+            Some(b.id.clone())
+        };
+        picker.saving = true;
+        picker.error = None;
+        Some(Effect::SelectBootstrap {
+            environment_id: picker.target.environment_id.clone(),
+            id,
+        })
+    }
+
+    fn open_launch_bootstraps(&mut self) -> Option<Effect> {
+        if self.harness_pick_agent.is_some() {
+            return None;
+        }
+        let target = self.harness_pick_target.clone()?;
+        let env = target.environment_id.clone();
+        let mut picker = super::bootstrap_setup::Picker::new(target, false);
+        picker.for_launch = true;
+        self.bootstrap_picker = Some(picker);
+        self.screen = Screen::BootstrapPick;
+        Some(Effect::LoadBootstraps {
+            environment_id: env,
+        })
+    }
+
+    fn on_key_bootstrap_picker(&mut self, key: KeyEvent) -> Option<Effect> {
+        let picker = self.bootstrap_picker.as_mut()?;
+        if picker.saving {
+            return None;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.screen = if picker.for_launch {
+                    Screen::HarnessPick
+                } else {
+                    Screen::Manage
+                };
+                self.bootstrap_picker = None;
+            }
+            KeyCode::Char('n') if !picker.for_launch => {
+                let target = picker.target.clone();
+                self.bootstrap_picker = None;
+                self.begin_harness_pick(target, None);
+            }
+            KeyCode::Down | KeyCode::Char('j') if !picker.loading => {
+                picker.cursor = (picker.cursor + 1) % (picker.entries.len() + 2);
+            }
+            KeyCode::Up | KeyCode::Char('k') if !picker.loading => {
+                picker.cursor =
+                    (picker.cursor + picker.entries.len() + 1) % (picker.entries.len() + 2);
+            }
+            KeyCode::Char('r') if !picker.loading => {
+                picker.loading = true;
+                picker.error = None;
+                return Some(Effect::LoadBootstraps {
+                    environment_id: picker.target.environment_id.clone(),
+                });
+            }
+            KeyCode::Enter => return self.choose_bootstrap(),
+            _ => {}
+        }
+        None
+    }
+
+    fn on_key_bootstrap_setup(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::bootstrap_setup::Action;
+        match self.bootstrap_form.as_mut()?.on_key(key) {
+            Action::None => None,
+            Action::Close => {
+                let form = self.bootstrap_form.take()?;
+                if form.back_to_picker && !form.finished {
+                    self.screen = Screen::BootstrapPick;
+                } else {
+                    self.bootstrap_picker = None;
+                    self.screen = Screen::Manage;
+                }
+                None
+            }
+            Action::Submit(req) => Some(Effect::CreateBootstrap(*req)),
         }
     }
 
@@ -2408,6 +2709,13 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Option<Effect> {
+        if key.code == KeyCode::Esc
+            && let Some(drag) = self.sidebar_drag.take()
+        {
+            self.sidebar_width = drag.original;
+            return None;
+        }
+
         // The SSH gate owns the keyboard until its question is answered.
         // Anything other than yes cancels: a mistyped key must never register
         // a credential on the account.
@@ -2418,6 +2726,15 @@ impl App {
                     then: gate.then,
                 }),
                 _ => {
+                    if matches!(&gate.then, Some(HeldConnect::Bootstrap(_)))
+                        && let Some(form) = self.bootstrap_form.as_mut()
+                    {
+                        form.running = false;
+                        form.error = Some(
+                            "Setup cancelled before creating a VM: an SSH key must be registered."
+                                .into(),
+                        );
+                    }
                     if gate.then.is_some() {
                         self.toast_error("Cancelled — connecting needs a registered SSH key");
                     }
@@ -2426,10 +2743,24 @@ impl App {
             };
         }
 
+        // Creation owns the screen until checkpoint capture and VM cleanup finish.
+        if self.screen == Screen::BootstrapSetup {
+            return self.on_key_bootstrap_setup(key);
+        }
+        if self.screen == Screen::BootstrapPick {
+            return self.on_key_bootstrap_picker(key);
+        }
+        if self.screen == Screen::Manage
+            && self.focus == ManageFocus::Tree
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
+        {
+            return self.open_bootstraps();
+        }
+
         // A focused session owns the keyboard: Ctrl-C must interrupt the agent,
         // Esc must reach its editor, and ⌥/^ chords belong to whatever is
-        // running in there. Only one chord is reserved, and it is one no agent
-        // binds: ^o hands focus back to the tree.
+        // running in there, apart from the app shortcuts handled below.
         //
         // Only while the session is the frontmost thing, though. A card
         // floated over it — the ⌥n picker, the ⌥p composer — is what the
@@ -2475,17 +2806,31 @@ impl App {
             // Meta-f (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
             // non-incremental history searches, which few people bind and
             // both harnesses ignore), and ⌥r is Meta-r (revert-line). ⌥b
-            // opens a full SSH shell on this pane's VM; it takes Meta-b
-            // (backward-word) while a pane owns the keyboard.
+            // saves this VM as a bootstrap; ⌥o opens its SSH shell, and ⌥t
+            // selects a target project for new work.
             // Readline leaves Meta-] and Meta-[ unbound, bash binds Meta-{
             // only to the rarely-reached complete-into-braces, and `^]`
             // (character-search) is untouched because only the Meta forms are
             // claimed. Nothing else is intercepted — ⌥s still reaches the
             // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'b' | 'f' | 'n' | 'p' | 'r' | ']' | '[')
+                && matches!(chord, 'b' | 'o' | 't' | 'f' | 'n' | 'p' | 'r' | ']' | '[')
             {
                 return self.alt_action(chord);
+            }
+            // Focusing an unconnected thread's card does not attach it or
+            // give another open session the keyboard. Enter is an explicit
+            // connect; Escape and Tab return to browsing.
+            if self.active.is_none() {
+                return match key.code {
+                    KeyCode::Esc | KeyCode::Tab => {
+                        self.focus = ManageFocus::Tree;
+                        None
+                    }
+                    KeyCode::Enter => self.on_key_manage(key),
+                    KeyCode::Char('c') | KeyCode::Char('C') if ctrl => Some(Effect::Quit),
+                    _ => None,
+                };
             }
             // Scrollback, before the agent sees the key. Shifted so an
             // unshifted PageUp still belongs to whatever is running.
@@ -2532,7 +2877,7 @@ impl App {
         {
             return Some(Effect::Quit);
         }
-        // Ctrl-T retargets from anywhere. Deliberately not plain `t`: the
+        // Ctrl-T remains an alias for Option+T. Deliberately not plain `t`: the
         // prompt has focus by default, where `t` is a letter someone is typing.
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T'))
@@ -2549,6 +2894,8 @@ impl App {
         }
         self.status.clear();
         match self.screen {
+            Screen::BootstrapSetup => self.on_key_bootstrap_setup(key),
+            Screen::BootstrapPick => self.on_key_bootstrap_picker(key),
             Screen::Setup => self.on_key_wizard(key),
             Screen::Settings => self.on_key_settings(key),
             Screen::TargetPick => self.on_key_target_pick(key),
@@ -2593,6 +2940,11 @@ impl App {
             .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         match self.screen {
+            Screen::BootstrapSetup => {
+                if let Some(form) = self.bootstrap_form.as_mut() {
+                    form.paste(&text);
+                }
+            }
             Screen::Manage if self.new_session_selected() && !self.shell_selected() => {
                 self.prompt_insert_str(&text);
             }
@@ -2735,6 +3087,24 @@ impl App {
         }
     }
 
+    /// Move focus onto the content already displayed in a panel. A thread
+    /// without a local connection stays a detail card, even if another VM
+    /// has a session open in the background.
+    fn focus_panel(&mut self, pane: ManageFocus) {
+        if pane == ManageFocus::Session && self.focus == ManageFocus::Tree && !self.pane_is_full() {
+            let selected = self.selected_row().map(|row| row.kind);
+            // The launcher's input belongs to the tree's prompt handler.
+            if selected == Some(RowKind::NewSession) {
+                return;
+            }
+            self.active = selected.and_then(|kind| match kind {
+                RowKind::Session(..) => self.pane_for_row(kind),
+                _ => None,
+            });
+        }
+        self.focus = pane;
+    }
+
     /// Handle a mouse event, returning any work it implies — expanding a row
     /// can need its children fetched, the same as the keyboard.
     ///
@@ -2758,6 +3128,154 @@ impl App {
         row: u16,
         shift: bool,
     ) -> Option<Effect> {
+        if let Some(drag) = self.sidebar_drag {
+            match kind {
+                // A fresh press or wheel gesture means the previous release
+                // was lost (for example outside the window). Cancel that
+                // unfinished resize and let the event reach its panel.
+                MouseAction::Down | MouseAction::ScrollUp | MouseAction::ScrollDown => {
+                    self.sidebar_drag = None;
+                    self.sidebar_width = drag.original;
+                }
+                MouseAction::Drag => {
+                    self.drag_sidebar_to(col);
+                    return None;
+                }
+                MouseAction::Up => {
+                    self.drag_sidebar_to(col);
+                    let drag = self.sidebar_drag.take()?;
+                    if !drag.moved
+                        && row == drag.start_row
+                        && self.screen == Screen::Manage
+                        && let Some(pane) = self.pane_at(col, row)
+                    {
+                        self.focus_panel(pane);
+                    }
+                    if self.sidebar_width != drag.original {
+                        return self.sidebar_width.map(Effect::SaveSidebarWidth);
+                    }
+                    return None;
+                }
+            }
+        }
+        if self.ssh_gate.is_some() {
+            return None;
+        }
+        if kind == MouseAction::Down
+            && !shift
+            && !self.keys_open
+            && self.confirm.is_none()
+            && matches!(
+                self.screen,
+                Screen::Manage
+                    | Screen::BootstrapSetup
+                    | Screen::BootstrapPick
+                    | Screen::HarnessPick
+            )
+            && self.panes.sidebar_divider.contains(col, row)
+        {
+            self.sidebar_drag = Some(SidebarDrag {
+                start_column: col,
+                start_row: row,
+                start_width: self.panes.tree_outer.w,
+                original: self.sidebar_width,
+                moved: false,
+            });
+            self.selection = None;
+            self.pending_copy = None;
+            self.last_click = None;
+            return None;
+        }
+        if self.screen == Screen::HarnessPick {
+            if kind == MouseAction::Down {
+                if self.panes.harness_use_bootstrap.contains(col, row) {
+                    self.toggle_launch_bootstrap();
+                } else if self.panes.harness_bootstrap.contains(col, row) {
+                    return self.open_launch_bootstraps();
+                } else if self.panes.harness_list.contains(col, row) {
+                    let visible = harness_picker_indices(self.harness_pick?);
+                    if let Some(index) = visible.get((row - self.panes.harness_list.y) as usize) {
+                        self.harness_pick = Some(*index);
+                    }
+                }
+            }
+            return None;
+        }
+        if self.screen == Screen::BootstrapSetup {
+            let form = self.bootstrap_form.as_mut()?;
+            if form.running {
+                return None;
+            }
+            if form.finished {
+                if kind == MouseAction::Down && self.panes.bootstrap_fields[0].contains(col, row) {
+                    return self
+                        .on_key_bootstrap_setup(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+                return None;
+            }
+            if kind == MouseAction::Down {
+                if let Some(index) = self
+                    .panes
+                    .bootstrap_fields
+                    .iter()
+                    .position(|r| r.contains(col, row))
+                {
+                    form.field = index;
+                    if index == form.default_field() || index == form.submit_field() {
+                        return self.on_key_bootstrap_setup(KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        ));
+                    }
+                    if index == 2 && form.snapshot.is_none() {
+                        return self.on_key_bootstrap_setup(KeyEvent::new(
+                            KeyCode::Right,
+                            KeyModifiers::NONE,
+                        ));
+                    }
+                    let field_box = self.panes.bootstrap_fields[index];
+                    if let Some((value, cursor)) = form.text() {
+                        let width = field_box.w.saturating_sub(4) as usize;
+                        let start = super::bootstrap_setup::text_start(value, *cursor, width);
+                        let clicked = col.saturating_sub(field_box.x + 2) as usize;
+                        let mut used = 0;
+                        *cursor = value.len();
+                        for (i, c) in value[start..].char_indices() {
+                            used += console::measure_text_width(&c.to_string());
+                            if used > clicked {
+                                *cursor = start + i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        if self.screen == Screen::BootstrapPick {
+            let picker = self.bootstrap_picker.as_mut()?;
+            if picker.loading || picker.saving {
+                return None;
+            }
+            if self.panes.bootstrap_list.contains(col, row) {
+                match kind {
+                    MouseAction::Down => {
+                        let index = self.panes.bootstrap_list_offset
+                            + (row - self.panes.bootstrap_list.y) as usize;
+                        if index < picker.entries.len() + 2 {
+                            picker.cursor = index;
+                            return self.choose_bootstrap();
+                        }
+                    }
+                    MouseAction::ScrollUp => picker.cursor = picker.cursor.saturating_sub(1),
+                    MouseAction::ScrollDown => {
+                        picker.cursor = (picker.cursor + 1).min(picker.entries.len() + 1)
+                    }
+                    _ => {}
+                }
+            }
+            return None;
+        }
         if self.screen != Screen::Manage {
             return None;
         }
@@ -2768,7 +3286,7 @@ impl App {
             MouseAction::ScrollUp | MouseAction::ScrollDown => {
                 let up = kind == MouseAction::ScrollUp;
                 if self.panes.session_outer.contains(col, row)
-                    && let Some(index) = self.active
+                    && let Some(index) = self.displayed_session_index()
                 {
                     // Where the pointer is, in the pane's own coordinates —
                     // a wheel report carries a position, and an application
@@ -2786,6 +3304,9 @@ impl App {
                 None
             }
             MouseAction::Down => {
+                if self.panes.bootstrap.contains(col, row) {
+                    return self.open_bootstraps();
+                }
                 // A click clears the status line, the same as a keypress
                 // (see on_key): the message answered the previous gesture,
                 // and whatever this click means sets a fresh one — clicking
@@ -2829,19 +3350,11 @@ impl App {
                     self.selection = None;
                     return None;
                 }
-                // Clicking the session panel means "let me type here". A tree
-                // click lands on Tree first; `click_tree_row` hands the
-                // keyboard on to the session when the row clicked is one with
-                // an open pane. With no session open the
-                // right pane is the launcher (or an empty detail card):
-                // focusing it would send every key into a pane nothing is
-                // reading, so the keyboard stays where the prompt reads it —
-                // a drag there is still a selection.
+                // Focus the displayed content. A disconnected thread's card
+                // can take focus without opening a connection.
                 let double = self.is_double_click(col, row);
-                if pane != ManageFocus::Session || self.active.is_some() {
-                    self.focus = pane;
-                }
-                let effect = (pane == ManageFocus::Tree)
+                self.focus_panel(pane);
+                let effect = (pane == ManageFocus::Tree && self.panes.tree.contains(col, row))
                     .then(|| self.click_tree_row(row, double))
                     .flatten();
                 self.selection = Some(Selection {
@@ -2895,6 +3408,33 @@ impl App {
         }
     }
 
+    pub fn resizing_sidebar(&self) -> bool {
+        self.sidebar_drag.is_some()
+    }
+
+    fn drag_sidebar_to(&mut self, column: u16) {
+        let Some(drag) = self.sidebar_drag else {
+            return;
+        };
+        if column != drag.start_column
+            && let Some(drag) = self.sidebar_drag.as_mut()
+        {
+            drag.moved = true;
+        }
+        if column == drag.start_column && self.sidebar_width == drag.original {
+            return;
+        }
+        let requested = (i32::from(drag.start_width) + i32::from(column)
+            - i32::from(drag.start_column))
+        .clamp(0, i32::from(u16::MAX)) as u16;
+        let available = self
+            .panes
+            .tree_outer
+            .w
+            .saturating_add(self.panes.session_outer.w);
+        self.sidebar_width = Some(super::ui::sidebar_width(available, Some(requested)));
+    }
+
     /// Two clicks on the same row inside the double-click window.
     fn is_double_click(&mut self, col: u16, row: u16) -> bool {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
@@ -2908,14 +3448,13 @@ impl App {
 
     /// Move the tree cursor to the row that was clicked.
     ///
-    /// Clicking a session row with an open pane shows it AND hands the keyboard
-    /// over: the click says "that one", and typing next should go into the
-    /// session — leaving the keys in the tree turned the first keystroke into
-    /// a shortcut instead. Agent and folder rows keep the keyboard in the tree
-    /// (there is nothing on the right to type into yet); a double click on a
-    /// disconnected row connects, the same as enter.
+    /// A single click keeps the keyboard in the tree and shows the selected
+    /// session. A double click focuses an open session or connects a
+    /// disconnected one, the same as enter.
     fn click_tree_row(&mut self, row: u16, double: bool) -> Option<Effect> {
-        self.click_tree_row_inner(row);
+        if !self.click_tree_row_inner(row) {
+            return None;
+        }
         self.sync_active_to_cursor();
         let clicked = self.selected_row()?;
         // Clicking the launcher row is clicking the prompt.
@@ -2943,10 +3482,8 @@ impl App {
                 .map(|s| s.name.clone())
                 .and_then(|name| self.pane_for(&name))
             {
-                // One click selects the pane and hands it the keyboard: the
-                // next thing typed is meant for the session. One click only
-                // selects — with the sidebar listing threads, most rows are
-                // connected sessions, and a single click that handed the
+                // One click only selects — with the sidebar listing threads,
+                // most rows are connected sessions, and a single click that handed the
                 // keyboard over made the tree impossible to browse from a
                 // focused pane. A double click (or enter) steps in.
                 Some(index) => {
@@ -2981,47 +3518,157 @@ impl App {
     /// Connecting also retargets: the place you just opened is almost
     /// certainly where the next prompt should go.
     fn connect_agent_row(&mut self, w: usize, p: usize, e: usize, a: usize) -> Option<Effect> {
+        let agent = self.tree[w].projects[p].envs[e].agents_vec().get(a)?;
+        let id = agent.id.clone();
+        if agent.status != "running" {
+            self.status = format!(
+                "{} is {} — press w to wake it first",
+                agent.name, agent.status
+            );
+            return None;
+        }
+        let target = self.target_at((w, p, e))?;
+        if matches!(
+            agent.sessions,
+            LoadSessions::NotLoaded | LoadSessions::Loading
+        ) || self.thread_polls.contains(&id)
+        {
+            let fetching =
+                matches!(agent.sessions, LoadSessions::Loading) || self.thread_polls.contains(&id);
+            self.pending_agent_connect = Some(id.clone());
+            self.status = "Finding this VM's coding agent…".into();
+            if !fetching {
+                self.thread_polls.insert(id.clone());
+                if let Load::Loaded(agents) = &mut self.tree[w].projects[p].envs[e].agents {
+                    agents[a].sessions = LoadSessions::Loading;
+                }
+                return Some(Effect::LoadSessions {
+                    agent_id: id,
+                    environment_id: target.environment_id,
+                    path: (w, p, e, a),
+                });
+            }
+            return None;
+        }
+        let primary = self
+            .primary_harnesses
+            .get(&id)
+            .filter(|h| HARNESSES.contains(&h.as_str()))
+            .cloned()
+            .or_else(|| {
+                let mut candidates: Vec<_> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| s.agent_id == id && s.harness != "shell")
+                    .map(|s| s.harness.clone())
+                    .collect();
+                if let LoadSessions::Loaded(rows) = &agent.sessions {
+                    candidates.extend(
+                        rows.iter()
+                            .filter_map(ConsoleSession::harness_slug)
+                            .map(str::to_owned),
+                    );
+                }
+                candidates.retain(|h| HARNESSES.contains(&h.as_str()));
+                candidates.sort_unstable();
+                candidates.dedup();
+                (candidates.len() == 1).then(|| candidates[0].to_owned())
+            });
+        self.target = Some(target.clone());
+        self.status.clear();
+        let Some(primary) = primary else {
+            self.begin_harness_pick(target, Some(id));
+            self.harness_pick_connect = true;
+            self.harness_pick = Some(0);
+            return None;
+        };
+        self.connect_primary_agent(w, p, e, a, primary)
+    }
+
+    fn connect_primary_agent(
+        &mut self,
+        w: usize,
+        p: usize,
+        e: usize,
+        a: usize,
+        primary: String,
+    ) -> Option<Effect> {
         let id = self.tree[w].projects[p].envs[e]
             .agents_vec()
             .get(a)?
             .id
             .clone();
-        self.target = self.target_at((w, p, e));
-        // Already open: show that session rather than starting a second ssh
-        // to the same agent, which would leave two panes fighting over one
-        // terminal.
-        if self.activate_session(&id) {
+        let target = self.target_at((w, p, e))?;
+        if let Some(index) = self
+            .sessions
+            .iter()
+            .position(|s| s.agent_id == id && s.harness == primary && !s.ended())
+        {
+            self.active = Some(index);
+            self.focus = ManageFocus::Session;
             self.status = "Switched to the open session".into();
             return None;
         }
-        // A drafted prompt is new work and gets a session of its own. A plain
-        // connect reattaches to what is already running: launching here made
-        // a NEW durable session each time, which for a harness like
-        // `railway-agent-tui` is another window onto the same conversation
-        // under yet another name.
-        if self.shell_selected() || self.prompt.trim().is_empty() {
-            if let Some(i) = self.first_live_session(w, p, e, a) {
-                return self.reattach_row(RowKind::Session(w, p, e, a, i));
-            }
+        if let Some(i) = self.first_live_session(w, p, e, a, &primary) {
+            return self.reattach_row(RowKind::Session(w, p, e, a, i));
         }
-        self.launch(Some(id), false)
+        Some(Effect::Launch(LaunchRequest {
+            project_id: target.project_id.clone(),
+            environment_id: target.environment_id.clone(),
+            agent_id: Some(id),
+            session_name: None,
+            force_new: false,
+            new_session: false,
+            harness: primary,
+            prompt: None,
+            label: target.label(),
+            base: Default::default(),
+        }))
     }
 
-    /// The first still-running session on an agent, by index — the one a
-    /// plain "connect" should land in.
-    fn first_live_session(&self, w: usize, p: usize, e: usize, a: usize) -> Option<usize> {
+    /// Complete Enter only while the user is still on the VM they chose.
+    pub(super) fn finish_agent_connect(&mut self, agent_id: &str) -> Option<Effect> {
+        if self.pending_agent_connect.as_deref() != Some(agent_id) {
+            return None;
+        }
+        self.pending_agent_connect = None;
+        if self.screen != Screen::Manage || self.focus != ManageFocus::Tree {
+            return None;
+        }
+        let RowKind::Agent(w, p, e, a) = self.selected_row()?.kind else {
+            return None;
+        };
+        if self.tree[w].projects[p].envs[e].agents_vec().get(a)?.id != agent_id {
+            return None;
+        }
+        self.connect_agent_row(w, p, e, a)
+    }
+
+    /// Resume a thread belonging to this VM's primary agent.
+    fn first_live_session(
+        &self,
+        w: usize,
+        p: usize,
+        e: usize,
+        a: usize,
+        harness: &str,
+    ) -> Option<usize> {
         let Load::Loaded(agents) = &self.tree.get(w)?.projects.get(p)?.envs.get(e)?.agents else {
             return None;
         };
         let LoadSessions::Loaded(sessions) = &agents.get(a)?.sessions else {
             return None;
         };
-        sessions
-            .iter()
-            .position(|session| session.is_interesting() && !self.ending.contains(&session.name))
+        sessions.iter().position(|session| {
+            session.running
+                && matches!(session.kind.as_str(), "SHELL" | "THREAD")
+                && (session.harness_slug() == Some(harness)
+                    || (harness == "shell" && session.is_shell()))
+                && !self.ending.contains(&session.name)
+        })
     }
 
-    fn click_tree_row_inner(&mut self, row: u16) {
+    fn click_tree_row_inner(&mut self, row: u16) -> bool {
         let offset = row.saturating_sub(self.panes.tree.y) as usize;
         let rows = self.rows();
         // The list scrolls, so the clicked line is an offset from whatever is
@@ -3033,7 +3680,9 @@ impl App {
             && rows[index].selectable()
         {
             self.cursor = index;
+            return true;
         }
+        false
     }
 
     /// The first visible tree row, mirroring ratatui's scroll behaviour.
@@ -3092,6 +3741,22 @@ impl App {
 
     pub fn active_session(&self) -> Option<&super::session::Session> {
         self.active.and_then(|i| self.sessions.get(i))
+    }
+
+    /// The connection whose terminal output is actually visible. Tree
+    /// navigation can show a detail card while another connection stays open.
+    pub fn displayed_session_index(&self) -> Option<usize> {
+        if self.loading.active {
+            return None;
+        }
+        if self.focus == ManageFocus::Session || self.pane_is_full() {
+            return self.active;
+        }
+        let kind = self.selected_row()?.kind;
+        match kind {
+            RowKind::Session(..) => self.pane_for_row(kind),
+            _ => None,
+        }
     }
 
     /// Show the pane belonging to the session row under the cursor, if it has
@@ -3782,12 +4447,19 @@ impl App {
             return None;
         }
         let session = self.sessions.remove(index);
-        self.active = if self.sessions.is_empty() {
-            None
-        } else {
-            Some(self.active.unwrap_or(0).min(self.sessions.len() - 1))
-        };
-        if self.sessions.is_empty() && self.focus != ManageFocus::Tree {
+        let had_active = self.active.is_some();
+        self.active = self.active.and_then(|active| {
+            if self.sessions.is_empty() {
+                None
+            } else {
+                Some(if active > index {
+                    active - 1
+                } else {
+                    active.min(self.sessions.len() - 1)
+                })
+            }
+        });
+        if self.sessions.is_empty() && had_active && self.focus != ManageFocus::Tree {
             self.focus = ManageFocus::Tree;
         }
         self.unmaximize_without_a_session();
@@ -4061,7 +4733,7 @@ impl App {
     /// Choose the VM the user is looking at, never the default launch target
     /// or a different pane when the tree has focus.
     fn shell_agent(&self) -> Option<(String, String)> {
-        if self.focus == ManageFocus::Session {
+        if self.focus == ManageFocus::Session && self.active.is_some() {
             let session = self.active_session()?;
             return Some((session.agent_id.clone(), session.agent_name.clone()));
         }
@@ -4225,10 +4897,10 @@ impl App {
     /// Cycle focus: tree → sessions → the pane → tree, skipping what isn't
     /// there. One key to move between the three things on this screen.
     fn cycle_focus(&mut self) {
-        self.focus = match self.focus {
-            ManageFocus::Tree if self.active.is_some() => ManageFocus::Session,
-            _ => ManageFocus::Tree,
-        };
+        self.focus_panel(match self.focus {
+            ManageFocus::Tree => ManageFocus::Session,
+            ManageFocus::Session => ManageFocus::Tree,
+        });
     }
 
     /// Move the cursor onto the agent a launch just opened, if its row exists
@@ -4489,14 +5161,20 @@ impl App {
     }
 
     /// The chords that work everywhere. Settings is worth one because it is
-    /// only reachable by chord — and it is where the
-    /// theme now cycles, which is why there is no ⌥t any more: two chords to
-    /// the same preference was how they drifted apart.
+    /// only reachable by chord. Option+T selects a target; themes live in settings.
     fn alt_action(&mut self, action: char) -> Option<Effect> {
         self.status.clear();
         match action {
-            'b' if self.screen == Screen::Manage && self.confirm.is_none() && !self.keys_open => {
+            'o' if self.screen == Screen::Manage && self.confirm.is_none() && !self.keys_open => {
                 self.open_shell()
+            }
+            'b' if self.screen == Screen::Manage && self.confirm.is_none() && !self.keys_open => {
+                self.open_bootstraps()
+            }
+            'b' if self.screen == Screen::HarnessPick => self.open_launch_bootstraps(),
+            't' => {
+                self.start_target_pick();
+                None
             }
             's' => {
                 self.start_settings();
@@ -4519,9 +5197,8 @@ impl App {
             }
             // The launchers float over the tree the launch aims at; the
             // New Session row's own prompt box covers the plain case.
-            // ⌥n skips the picker: a new agent right now, on whatever
-            // harness is already selected.
-            'n' if self.screen == Screen::Manage => self.launch_new_agent(),
+            // Option+n chooses a harness for a new session on the current VM.
+            'n' if self.screen == Screen::Manage => self.pick_new_session(),
             'p' if self.screen == Screen::Manage => {
                 self.manage_prompt = Some(String::new());
                 self.screen = Screen::ManagePrompt;
@@ -4831,7 +5508,7 @@ impl App {
     }
 
     /// A new agent in the target project, carrying the prompt draft if one is
-    /// written: `n`'s picker, ⌥n's quick create, and the prompt box all end
+    /// written: the new-VM picker and the prompt box all end
     /// here.
     fn launch_new_agent(&mut self) -> Option<Effect> {
         if self.target.is_none() {
@@ -4967,19 +5644,14 @@ impl App {
             // On an agent (or one of its threads) the box already exists, so
             // the pick starts a new session ON it instead.
             KeyCode::Char('n') => {
-                if let Some(path) = row.as_ref().map(|r| r.kind).and_then(|k| self.env_of(k))
-                    && let Some(target) = self.target_at(path)
-                {
-                    self.target = Some(target);
+                if self.loading.active {
+                    return None;
                 }
-                self.harness_pick_agent = match row.as_ref().map(|r| r.kind) {
-                    Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => {
-                        self.agent_at(w, p, e, a).map(|(id, _)| id)
-                    }
-                    _ => None,
-                };
-                self.harness_pick = Some(self.harness);
-                self.screen = Screen::HarnessPick;
+                if let Some(target) = self.bootstrap_target().or_else(|| self.target.clone()) {
+                    self.begin_harness_pick(target, None);
+                } else {
+                    self.start_target_pick();
+                }
                 None
             }
             KeyCode::Char('t') => {
@@ -5034,6 +5706,7 @@ impl App {
             }
             // Lifecycle. Sleep and wake are reversible and act immediately;
             // delete takes the disk with it, so it asks first.
+            KeyCode::Char('b') => self.open_bootstraps(),
             KeyCode::Char('s') => self.agent_op(AgentOp::Sleep),
             KeyCode::Char('w') => self.agent_op(AgentOp::Wake),
             KeyCode::Char('d') => self.agent_op(AgentOp::Delete),
@@ -5078,18 +5751,8 @@ impl App {
         }
     }
 
-    /// What `n` makes, which depends on what is selected.
-    ///
-    /// On an agent (or one of its sessions) another session on that same
-    /// agent — the agent is already there, and a second one would be a second
-    /// VM nobody asked for. On a project, an environment, or a group, a whole
-    /// new agent, because that is the only thing "new" can mean there.
-    /// Anywhere else — the tail header, an empty tree — it falls back to the
-    /// target: the empty state advertises `n`, so `n` has to work from where
-    /// the cursor starts.
-    /// [`Self::new_here`], carrying a prompt from the ⌥p composer. `None`
-    /// keeps `n`'s behavior exactly: the agent-row launch sends no prompt,
-    /// and the create-an-agent paths fall back to the launcher box's draft.
+    /// The Option+p composer creates a session on the selected VM, or a VM
+    /// in the selected project/environment when no VM is selected.
     fn new_here_prompted(&mut self, prompt: Option<String>) -> Option<Effect> {
         let kind = self.selected_row().map(|row| row.kind);
         match kind {
@@ -5142,9 +5805,68 @@ impl App {
         }
     }
 
-    /// Keys while the ⌥n picker is up: choose the agent, then the same new
-    /// session `n` would have made where the cursor points.
+    fn begin_harness_pick(&mut self, target: Target, agent_id: Option<String>) {
+        self.harness_pick_connect = false;
+        self.harness_pick_target = Some(target);
+        self.harness_pick_agent = agent_id;
+        self.harness_pick = Some(self.harness);
+        self.harness_bootstrap = Default::default();
+        self.harness_use_bootstrap = true;
+        self.screen = Screen::HarnessPick;
+    }
+
+    fn pick_new_session(&mut self) -> Option<Effect> {
+        if self.loading.active {
+            return None;
+        }
+        let selected = if self.focus == ManageFocus::Session && self.active.is_some() {
+            self.active_session()
+                .and_then(|s| s.environment_id().map(|e| (s.agent_id.clone(), e)))
+        } else {
+            match self.selected_row().map(|r| r.kind) {
+                Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => self
+                    .agent_at(w, p, e, a)
+                    .map(|(id, _)| (id, self.tree[w].projects[p].envs[e].id.clone())),
+                _ => None,
+            }
+        };
+        let Some((id, env)) = selected else {
+            self.toast_error("Select a VM to start a new session. Press n for a new VM.");
+            return None;
+        };
+        let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
+            ws.projects
+                .iter()
+                .enumerate()
+                .find_map(|(p, pr)| pr.envs.iter().position(|e| e.id == env).map(|e| (w, p, e)))
+        });
+        let Some(target) = path.and_then(|p| self.target_at(p)) else {
+            self.toast_error("The VM's project is unavailable. Refresh the tree and try again.");
+            return None;
+        };
+        self.begin_harness_pick(target, Some(id));
+        None
+    }
+
+    fn toggle_launch_bootstrap(&mut self) {
+        use super::bootstrap_setup::LaunchChoice;
+        self.harness_use_bootstrap = !self.harness_use_bootstrap;
+        if self.harness_use_bootstrap && self.harness_bootstrap == LaunchChoice::None {
+            self.harness_bootstrap = LaunchChoice::Default;
+        }
+    }
+
+    /// Choose an agent for a new VM (`n`) or a session on the current VM (`⌥n`).
     fn on_key_harness_pick(&mut self, key: KeyEvent) -> Option<Effect> {
+        if self.harness_pick_agent.is_none() {
+            if key.code == KeyCode::Char('b') {
+                return self.open_launch_bootstraps();
+            }
+            if key.code == KeyCode::Char(' ') {
+                self.toggle_launch_bootstrap();
+                return None;
+            }
+        }
         let cursor = self.harness_pick?;
         let visible = harness_picker_indices(cursor);
         let row = visible.iter().position(|index| *index == cursor)?;
@@ -5162,19 +5884,76 @@ impl App {
                 None
             }
             KeyCode::Enter => {
-                self.harness = cursor.min(HARNESSES.len() - 1);
+                use super::bootstrap_setup::LaunchChoice;
+                let picked = cursor.min(HARNESSES.len() - 1);
+                let connecting = std::mem::take(&mut self.harness_pick_connect);
+                if !connecting {
+                    self.harness = picked;
+                }
+                let target = self
+                    .harness_pick_target
+                    .take()
+                    .or_else(|| self.target.clone())?;
+                let agent_id = self.harness_pick_agent.take();
+                let existing = agent_id.is_some();
+                if connecting && let Some(id) = &agent_id {
+                    let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
+                        ws.projects.iter().enumerate().find_map(|(p, project)| {
+                            project.envs.iter().enumerate().find_map(|(e, env)| {
+                                env.agents_vec()
+                                    .iter()
+                                    .position(|agent| &agent.id == id)
+                                    .map(|a| (w, p, e, a))
+                            })
+                        })
+                    })?;
+                    self.harness_pick = None;
+                    self.screen = Screen::Manage;
+                    self.target = Some(target);
+                    return self.connect_primary_agent(
+                        path.0,
+                        path.1,
+                        path.2,
+                        path.3,
+                        HARNESSES[picked].into(),
+                    );
+                }
+                let mut base = crate::commands::code::LaunchArgs::default();
+                if !existing {
+                    let choice = if self.harness_use_bootstrap {
+                        self.harness_bootstrap.clone()
+                    } else {
+                        LaunchChoice::None
+                    };
+                    base.set_bootstrap_choice(
+                        match &choice {
+                            LaunchChoice::Named(name) => Some(name.clone()),
+                            _ => None,
+                        },
+                        matches!(choice, LaunchChoice::None),
+                    );
+                }
                 self.harness_pick = None;
                 self.screen = Screen::Manage;
-                // Picked from an agent's row: a new session on that box, not
-                // a new box.
-                match self.harness_pick_agent.take() {
-                    Some(agent_id) => self.launch(Some(agent_id), true),
-                    None => self.launch_new_agent(),
-                }
+                Some(Effect::Launch(LaunchRequest {
+                    project_id: target.project_id.clone(),
+                    environment_id: target.environment_id.clone(),
+                    agent_id,
+                    session_name: None,
+                    force_new: !existing,
+                    new_session: existing && !connecting,
+                    harness: self.harness_name().into(),
+                    prompt: (!existing && !self.shell_selected() && !self.prompt.trim().is_empty())
+                        .then(|| self.prompt.trim().into()),
+                    label: target.label(),
+                    base: Box::new(base),
+                }))
             }
             KeyCode::Esc => {
                 self.harness_pick = None;
                 self.harness_pick_agent = None;
+                self.harness_pick_target = None;
+                self.harness_pick_connect = false;
                 self.screen = Screen::Manage;
                 None
             }
@@ -5862,7 +6641,7 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// Everywhere else the unshifted chord is simply absent — it can go dead, but
 /// never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['b', 'f', 's', 'n', 'p', 'r', ']', '['];
+    const ACTIONS: &[char] = &['b', 'o', 't', 'f', 's', 'n', 'p', 'r', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = match c.to_ascii_lowercase() {
@@ -5883,6 +6662,8 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     // exist — the same trade ⌥[ documents above.
     match key.code {
         KeyCode::Char('∫') => Some('b'),
+        KeyCode::Char('ø') | KeyCode::Char('Ø') => Some('o'),
+        KeyCode::Char('†') | KeyCode::Char('‡') => Some('t'),
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
         KeyCode::Char('π') => Some('p'),
@@ -5991,6 +6772,81 @@ mod tests {
 
     fn app() -> App {
         App::new(tree(), None, Some("claude"), None, None, true)
+    }
+
+    #[test]
+    fn bootstrap_shortcut_reopens_picker_and_create_preserves_the_prompt() {
+        let mut a = app();
+        a.target = a.target_at((0, 0, 0));
+        a.prompt = "Keep this draft".into();
+        a.bootstrap_defaults.insert(
+            "env_prod".into(),
+            super::super::bootstrap_setup::DefaultState::Ready("dev".into()),
+        );
+        assert_eq!(
+            a.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+            Some(Effect::LoadBootstraps {
+                environment_id: "env_prod".into()
+            })
+        );
+        assert_eq!(a.screen, Screen::BootstrapPick);
+        let picker = a.bootstrap_picker.as_mut().unwrap();
+        picker.loaded(Ok(vec![]));
+        picker.cursor = picker.create_index();
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::BootstrapSetup);
+        assert!(a.bootstrap_form.as_ref().unwrap().return_to_prompt);
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.screen, Screen::BootstrapPick);
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.screen, Screen::Manage);
+        assert_eq!(a.prompt, "Keep this draft");
+    }
+
+    #[test]
+    fn bootstrap_setup_preserves_prompt_harness_and_target_until_finished() {
+        let mut a = app();
+        a.target = Some(Target {
+            project_id: "proj_1".into(),
+            project_name: "Demo".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.prompt = "Fix the bug".into();
+        let harness = a.harness;
+        a.start_bootstrap_setup();
+        let form = a.bootstrap_form.as_mut().unwrap();
+        form.name = "dev".into();
+        form.repo = "railwayapp/cli".into();
+        form.harness = 0;
+        form.field = form.submit_field();
+        let Some(Effect::CreateBootstrap(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected setup");
+        };
+        assert_eq!(req.harness, "railway");
+        assert_eq!(req.target.environment_id, "env_prod");
+        for event in [
+            key(KeyCode::Enter),
+            key(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert!(a.on_key(event).is_none());
+            assert_eq!(a.screen, Screen::BootstrapSetup);
+        }
+        let form = a.bootstrap_form.as_mut().unwrap();
+        form.running = false;
+        form.finished = true;
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        assert_eq!(a.prompt, "Fix the bug");
+        assert_eq!(a.harness, harness);
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected launch");
+        };
+        assert_eq!(req.harness, "claude");
+        assert_eq!(req.prompt.as_deref(), Some("Fix the bug"));
+        assert!(req.force_new);
     }
 
     /// One workspace, four projects, deliberately out of alphabetical order.
@@ -6254,6 +7110,11 @@ mod tests {
     #[test]
     fn enter_on_an_agent_connects_to_that_agent_and_retargets() {
         let mut a = loaded_app();
+        a.primary_harnesses.insert("ca_1".into(), "codex".into());
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions = LoadSessions::Loaded(Vec::new());
+        }
+        a.prompt = "a draft for later".into();
         a.cursor = a
             .rows()
             .iter()
@@ -6266,6 +7127,12 @@ mod tests {
         assert!(!req.force_new);
         assert_eq!(req.environment_id, "env_prod");
         assert_eq!(req.project_id, "proj_1");
+        assert_eq!(req.harness, "codex", "the VM wins over the default");
+        assert_eq!(
+            req.prompt, None,
+            "connecting must not submit a leftover draft"
+        );
+        assert_eq!(a.harness_name(), "claude");
         assert_eq!(a.target.unwrap().label(), "devtools/production");
     }
 
@@ -6280,7 +7147,7 @@ mod tests {
             agents[0].sessions = LoadSessions::Loaded(vec![ConsoleSession {
                 name: "claude-one".into(),
                 kind: "SHELL".into(),
-                command: None,
+                command: Some("claude".into()),
                 running: true,
                 attached: false,
                 created_at: None,
@@ -6301,18 +7168,148 @@ mod tests {
             "a plain connect must not mint a session: {effect:?}"
         );
 
-        // A drafted prompt is new work, and does get a session of its own.
+        // Enter connects to the VM even when the launcher holds a draft.
         a.prompt = "fix the tests".into();
         a.cursor = a
             .rows()
             .iter()
             .position(|r| r.label == "nimble-otter")
             .unwrap();
-        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("a prompt seeds a fresh session");
-        };
-        assert_eq!(req.prompt.as_deref(), Some("fix the tests"));
-        assert!(req.wants_new_session());
+        assert!(
+            matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, .. }) if session_name == "claude-one")
+        );
+        assert_eq!(a.prompt, "fix the tests");
+    }
+
+    #[test]
+    fn an_unknown_vm_asks_for_its_agent_without_using_or_changing_the_default() {
+        for sessions in [
+            LoadSessions::Loaded(Vec::new()),
+            LoadSessions::Failed("unavailable".into()),
+        ] {
+            let mut a = loaded_app();
+            if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+                agents[0].sessions = sessions;
+            }
+            a.set_harness(Some("codex"));
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.label == "nimble-otter")
+                .unwrap();
+            assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+            assert_eq!(a.screen, Screen::HarnessPick);
+            assert!(a.harness_pick_connect);
+            assert_eq!(a.harness_pick_agent.as_deref(), Some("ca_1"));
+            assert_ne!(a.harness_pick, Some(a.harness), "no default preselection");
+            a.harness_pick = HARNESSES.iter().position(|h| *h == "opencode2");
+            let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+                panic!("chosen agent launches on the existing VM");
+            };
+            assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+            assert_eq!(req.harness, "opencode2");
+            assert!(!req.force_new && !req.new_session);
+            assert_eq!(
+                a.harness_name(),
+                "codex",
+                "connection choice does not change the launch default"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_uses_the_primary_agent_among_multiple_open_harnesses() {
+        let mut a = loaded_app();
+        let mut secondary = session("ca_1", "nimble-otter");
+        secondary.harness = "claude".into();
+        secondary.durable_name = "secondary".into();
+        a.attach_session(secondary, "ca_1".into());
+        let mut primary = session("ca_1", "nimble-otter");
+        primary.harness = "codex".into();
+        primary.durable_name = "primary".into();
+        a.attach_session(primary, "ca_1".into());
+        a.primary_harnesses.insert("ca_1".into(), "codex".into());
+        a.active = Some(0);
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.active, Some(1));
+        assert_eq!(a.focus, ManageFocus::Session);
+        // Without VM metadata these two harnesses are ambiguous: ask.
+        a.primary_harnesses.clear();
+        a.focus = ManageFocus::Tree;
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        a.harness_pick = HARNESSES.iter().position(|h| *h == "claude");
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            None,
+            "reuse the chosen open session"
+        );
+        assert_eq!(a.active, Some(0));
+        assert_eq!(a.sessions.len(), 2);
+    }
+
+    #[test]
+    fn enter_waits_for_vm_discovery_and_ignores_it_after_navigation() {
+        for navigate in [false, true] {
+            let mut a = loaded_app();
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.label == "nimble-otter")
+                .unwrap();
+            assert!(
+                matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::LoadSessions { agent_id, .. }) if agent_id == "ca_1")
+            );
+            assert_eq!(
+                a.on_key(key(KeyCode::Enter)),
+                None,
+                "coalesce an in-flight lookup"
+            );
+            a.primary_harnesses.insert("ca_1".into(), "grok".into());
+            a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(Vec::new()));
+            if navigate {
+                a.cursor = 0;
+            }
+            let effect = a.finish_agent_connect("ca_1");
+            if navigate {
+                assert_eq!(effect, None);
+            } else {
+                assert!(
+                    matches!(effect, Some(Effect::Launch(req)) if req.harness == "grok" && req.agent_id.as_deref() == Some("ca_1"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_threads_do_not_override_primary_discovery_in_flight() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].sessions =
+                LoadSessions::Loaded(vec![ConsoleSession::client_thread("ca_1", "claude", None)]);
+        }
+        a.thread_polls.insert("ca_1".into());
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            None,
+            "wait for the existing discovery request"
+        );
+        a.primary_harnesses.insert("ca_1".into(), "codex".into());
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(Vec::new()));
+        assert!(
+            matches!(a.finish_agent_connect("ca_1"), Some(Effect::Launch(req)) if req.harness == "codex")
+        );
     }
 
     /// A tab names the session, not the agent: the seeded task once the
@@ -7090,7 +8087,7 @@ mod tests {
         assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
         assert_eq!(a.screen, Screen::HarnessPick);
         assert_eq!(
-            a.target.as_ref().map(|t| t.label()),
+            a.harness_pick_target.as_ref().map(|t| t.label()),
             Some("devtools/production".to_string()),
             "the new agent goes where the cursor points"
         );
@@ -8320,23 +9317,22 @@ mod tests {
         assert!(a.prompt.is_empty(), "a chord is not text");
     }
 
-    /// ⌥t went with the theme chord: the theme now cycles on the settings
-    /// card, and the key falls through like any other unclaimed letter.
     #[test]
-    fn alt_t_is_no_longer_a_chord() {
-        let mut a = app();
-        let first = a.theme.slug;
-        assert_eq!(a.on_key(alt('t')), None);
-        assert_eq!(a.theme.slug, first, "the theme is ⌥s territory now");
-        assert_eq!(a.screen, Screen::Manage);
-
-        // And its composed form is plain text again, like any other
-        // Option-composed character the TUI has no claim on.
-        let mut b = app();
-        let theme = b.theme.slug;
-        b.on_key(key(KeyCode::Char('†')));
-        assert_eq!(b.theme.slug, theme);
-        assert_eq!(b.prompt, "†", "unclaimed, the character is text");
+    fn option_t_opens_the_target_picker_without_changing_the_draft_or_theme() {
+        for chord in [
+            alt('t'),
+            alt('T'),
+            key(KeyCode::Char('†')),
+            key(KeyCode::Char('‡')),
+        ] {
+            let mut a = app();
+            a.prompt = "keep this draft".into();
+            let theme = a.theme.slug;
+            assert_eq!(a.on_key(chord), None);
+            assert_eq!(a.screen, Screen::TargetPick);
+            assert_eq!(a.theme.slug, theme);
+            assert_eq!(a.prompt, "keep this draft");
+        }
     }
 
     /// ⌥r asks for everything again, from wherever you are: the tree, the menu
@@ -8397,8 +9393,7 @@ mod tests {
         );
     }
 
-    /// ^t keeps the target picker to itself now that ⌥t is gone — the two
-    /// were different chords on the same letter.
+    /// Ctrl+T remains a compatibility alias for Option+T.
     #[test]
     fn ctrl_t_still_opens_the_target_picker() {
         let mut a = app();
@@ -8730,6 +9725,39 @@ mod tests {
         );
         assert_eq!(a.selected_row().unwrap().label, "second");
         assert!(a.pending_select.is_none(), "consumed once it lands");
+    }
+
+    #[test]
+    fn bootstrap_form_targets_the_selected_vm() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('b'))),
+            Some(Effect::LoadBootstraps {
+                environment_id: "env_prod".into()
+            })
+        );
+        assert_eq!(a.screen, Screen::BootstrapSetup);
+        let form = a.bootstrap_form.as_ref().unwrap();
+        assert_eq!(form.snapshot.as_ref().unwrap().agent_id, "ca_1");
+        assert!(!form.return_to_prompt);
+        a.on_key(key(KeyCode::Esc));
+        assert!(a.ops.is_empty());
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Char('b'))), None);
+        assert!(a.status.contains("Wake"));
     }
 
     /// Delete asks first; anything but `y` cancels. A mistyped key must never
@@ -9276,6 +10304,21 @@ mod tests {
     }
 
     #[test]
+    fn closing_background_sessions_preserves_a_focused_disconnected_card() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "one"), "ca_1".into());
+        a.attach_session(session("ca_2", "two"), "ca_2".into());
+        a.active = None;
+        a.focus = ManageFocus::Session;
+        a.take_session(0).unwrap();
+        assert_eq!(a.active, None);
+        assert_eq!(a.focus, ManageFocus::Session);
+        a.take_session(0).unwrap();
+        assert_eq!(a.active, None);
+        assert_eq!(a.focus, ManageFocus::Session);
+    }
+
+    #[test]
     fn tab_moves_between_the_tree_and_the_pane() {
         let mut a = loaded_app();
         a.focus = ManageFocus::Tree;
@@ -9581,8 +10624,7 @@ mod tests {
         );
     }
 
-    /// ⌥n floats the agent picker over the tree; enter launches the same new
-    /// session `n` would have made, on the harness just chosen.
+    /// The new-VM picker creates a fresh VM with the chosen harness.
     #[test]
     fn n_picks_a_harness_then_makes_a_new_agent() {
         let mut a = app();
@@ -9622,24 +10664,117 @@ mod tests {
         assert_eq!(a.screen, Screen::Manage);
     }
 
-    /// ⌥n skips the picker: a new agent immediately, on whatever harness is
-    /// already selected — the quick create.
     #[test]
-    fn alt_n_quick_creates_a_new_agent() {
+    fn alt_n_chooses_a_new_session_on_the_selected_vm() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Agent(..)))
+            .unwrap();
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(a.harness_pick_agent.as_deref(), Some("ca_1"));
+        a.harness_pick = HARNESSES.iter().position(|h| *h == "codex");
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected a new session");
+        };
+        assert!(!req.force_new);
+        assert!(req.new_session);
+        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert_eq!(req.environment_id, "env_prod");
+        assert_eq!(req.harness, "codex");
+        assert_eq!(req.prompt, None);
+    }
+
+    #[test]
+    fn alt_n_without_a_selected_vm_does_not_create_one() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.target = Some(Target {
-            project_id: "p1".into(),
-            project_name: "devtools".into(),
-            environment_id: "env_prod".into(),
-            environment_name: "production".into(),
-        });
-        let Some(Effect::Launch(req)) = a.on_key(alt('n')) else {
-            panic!("expected a launch");
+        a.target = a.target_at((0, 0, 0));
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::Manage);
+        assert!(a.harness_pick.is_none());
+    }
+
+    #[test]
+    fn n_on_a_vm_creates_a_fresh_vm_and_supports_launch_bootstrap_overrides() {
+        use super::super::bootstrap_setup::LaunchChoice;
+        for choice in [
+            LaunchChoice::Default,
+            LaunchChoice::Named("dev".into()),
+            LaunchChoice::None,
+        ] {
+            let mut a = loaded_app();
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| matches!(r.kind, RowKind::Agent(..)))
+                .unwrap();
+            assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
+            assert_eq!(a.screen, Screen::HarnessPick);
+            assert_eq!(a.harness_pick_agent, None);
+            a.harness_bootstrap = choice.clone();
+            let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+                panic!("expected new VM")
+            };
+            assert!(req.force_new);
+            assert!(!req.new_session);
+            assert_eq!(req.agent_id, None);
+            assert_eq!(req.environment_id, "env_prod");
+            let mut expected = crate::commands::code::LaunchArgs::default();
+            expected.set_bootstrap_choice(
+                match &choice {
+                    LaunchChoice::Named(name) => Some(name.clone()),
+                    _ => None,
+                },
+                choice == LaunchChoice::None,
+            );
+            assert_eq!(*req.base, expected);
+        }
+    }
+
+    #[test]
+    fn project_bootstrap_picker_n_opens_new_vm_and_clean_vm_can_be_toggled() {
+        use super::super::bootstrap_setup::LaunchChoice;
+        let mut a = loaded_app();
+        a.tree[0].projects[0].envs[0].agents = Load::Loaded(vec![]);
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Project(..)))
+            .unwrap();
+        a.on_key(key(KeyCode::Char('b')));
+        let target = a.bootstrap_picker.as_ref().unwrap().target.clone();
+        a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(a.harness_pick_target, Some(target));
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('b'))),
+            Some(Effect::LoadBootstraps { .. })
+        ));
+        let picker = a.bootstrap_picker.as_mut().unwrap();
+        assert!(picker.for_launch);
+        picker.loaded(Ok(vec![]));
+        picker.cursor = 1; // clean VM is the final item
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            None,
+            "launch choice must not set the project default"
+        );
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert!(!a.harness_use_bootstrap);
+        assert_eq!(a.harness_bootstrap, LaunchChoice::None);
+        a.on_key(key(KeyCode::Char(' ')));
+        assert!(a.harness_use_bootstrap);
+        assert_eq!(a.harness_bootstrap, LaunchChoice::Default);
+        a.on_key(key(KeyCode::Char(' ')));
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected new VM")
         };
-        assert!(req.force_new);
-        assert_eq!(req.agent_id, None);
-        assert_eq!(req.harness, a.harness_name());
+        let mut expected = crate::commands::code::LaunchArgs::default();
+        expected.set_bootstrap_choice(None, true);
+        assert_eq!(*req.base, expected);
     }
 
     /// ⌥p floats the menu's prompt box over the tree: type, shift+tab to
@@ -9714,8 +10849,7 @@ mod tests {
         assert_eq!(req.prompt, None, "the abandoned draft must not ride along");
     }
 
-    /// ⌥n's picker offers shell like any agent — last in the list — and
-    /// picking it makes the same promptless session `n` would.
+    /// The agent picker offers shell last and launches it without a prompt.
     #[test]
     fn the_picker_offers_shell_last() {
         let mut a = app();
@@ -9786,8 +10920,16 @@ mod tests {
             "closing the card returns to typing in the session"
         );
 
-        // ⌥n reaches past the session too — straight to a new agent.
-        assert!(matches!(a.on_key(alt('n')), Some(Effect::Launch(_))));
+        // Option+n chooses a new session on the focused VM.
+        a.sessions[0].ssh_target = "agent:env_prod:ca_1".into();
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected new session")
+        };
+        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert!(req.new_session);
+        assert!(!req.force_new);
     }
 
     /// Releasing a focused session with ⇧esc also un-maximizes: focus moving
@@ -10237,8 +11379,97 @@ mod tests {
     }
 
     #[test]
-    fn option_b_opens_the_selected_vm_including_without_an_agent_session() {
-        for chord in [alt('b'), alt('B'), key(KeyCode::Char('∫'))] {
+    fn option_b_uses_the_bootstrap_action_in_each_context() {
+        for chord in [alt('b'), alt('B'), key(KeyCode::Char('∫')), ctrl('b')] {
+            let mut a = loaded_app();
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| matches!(r.kind, RowKind::Agent(..)))
+                .unwrap();
+            assert!(matches!(
+                a.on_key(chord),
+                Some(Effect::LoadBootstraps { .. })
+            ));
+            assert_eq!(a.screen, Screen::BootstrapSetup);
+            assert_eq!(
+                a.bootstrap_form
+                    .as_ref()
+                    .unwrap()
+                    .snapshot
+                    .as_ref()
+                    .unwrap()
+                    .agent_id,
+                "ca_1"
+            );
+
+            let mut a = loaded_app();
+            a.tree[0].projects[0].envs[0].agents = Load::Loaded(vec![]);
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| matches!(r.kind, RowKind::Project(..)))
+                .unwrap();
+            assert!(matches!(
+                a.on_key(chord),
+                Some(Effect::LoadBootstraps { .. })
+            ));
+            assert_eq!(a.screen, Screen::BootstrapPick);
+            assert!(!a.bootstrap_picker.as_ref().unwrap().for_launch);
+        }
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Agent(..)))
+            .unwrap();
+        a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert!(matches!(
+            a.on_key(alt('b')),
+            Some(Effect::LoadBootstraps { .. })
+        ));
+        assert!(a.bootstrap_picker.as_ref().unwrap().for_launch);
+    }
+
+    #[test]
+    fn option_b_captures_the_focused_vm_without_switching_to_the_selected_row() {
+        let mut a = loaded_app();
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![
+                agent("ca_1", "nimble-otter", "running"),
+                agent("ca_2", "other-vm", "running"),
+            ]),
+        );
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.cursor = a.rows().iter().position(|r| r.label == "other-vm").unwrap();
+        a.focus = ManageFocus::Session;
+        assert!(matches!(
+            a.on_key(alt('b')),
+            Some(Effect::LoadBootstraps { .. })
+        ));
+        assert_eq!(a.screen, Screen::BootstrapSetup);
+        assert_eq!(
+            a.bootstrap_form
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .agent_id,
+            "ca_1"
+        );
+        assert_eq!(a.sessions.len(), 1);
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.focus, ManageFocus::Session);
+        assert_eq!(a.on_key(alt('t')), None);
+        assert_eq!(a.screen, Screen::TargetPick);
+    }
+
+    #[test]
+    fn option_o_opens_the_selected_vm_including_without_an_agent_session() {
+        for chord in [alt('o'), alt('O'), key(KeyCode::Char('ø'))] {
             let mut a = loaded_app();
             a.cursor = a
                 .rows()
@@ -10257,7 +11488,7 @@ mod tests {
     }
 
     #[test]
-    fn option_b_uses_the_focused_panes_vm_and_keeps_the_session() {
+    fn option_o_uses_the_focused_panes_vm_and_keeps_the_session() {
         let mut a = loaded_app();
         a.attach_session(session("ca_other", "other-vm"), "ca_other".into());
         a.cursor = a
@@ -10267,7 +11498,7 @@ mod tests {
             .unwrap();
         a.focus = ManageFocus::Session;
         assert_eq!(
-            a.on_key(alt('b')),
+            a.on_key(alt('o')),
             Some(Effect::OpenShell {
                 agent_id: "ca_other".into(),
                 agent_name: "other-vm".into(),
@@ -10279,19 +11510,19 @@ mod tests {
         // With the tree focused, its row wins over that unrelated pane.
         a.focus = ManageFocus::Tree;
         assert_eq!(
-            a.on_key(alt('b')),
+            a.on_key(alt('o')),
             Some(Effect::OpenShell {
                 agent_id: "ca_1".into(),
                 agent_name: "nimble-otter".into(),
             })
         );
         a.cursor = 0;
-        assert_eq!(a.on_key(alt('b')), None);
+        assert_eq!(a.on_key(alt('o')), None);
         assert!(a.status.contains("Select a VM"));
     }
 
     #[test]
-    fn option_b_respects_dialogs_and_the_ssh_key_gate() {
+    fn option_o_respects_dialogs_and_the_ssh_key_gate() {
         let mut a = loaded_app();
         a.cursor = a
             .rows()
@@ -10299,11 +11530,11 @@ mod tests {
             .position(|r| r.label == "nimble-otter")
             .unwrap();
         a.on_key(key(KeyCode::Char('?')));
-        assert_eq!(a.on_key(alt('b')), None);
+        assert_eq!(a.on_key(alt('o')), None);
         a.keys_open = false;
         a.on_key(key(KeyCode::Char('d')));
         assert!(a.confirm.is_some());
-        assert_eq!(a.on_key(alt('b')), None);
+        assert_eq!(a.on_key(alt('o')), None);
         a.confirm = None;
 
         let held = HeldConnect::OpenShell {
@@ -11933,8 +13164,6 @@ mod tests {
         a.screen = Screen::Manage;
         a.on_key(key(KeyCode::Down));
         a.on_key(key(KeyCode::Char('n')));
-        assert_eq!(a.screen, Screen::HarnessPick);
-        a.on_key(key(KeyCode::Enter));
         assert_eq!(a.screen, Screen::TargetPick, "no target: ask for one");
     }
 
@@ -11999,6 +13228,47 @@ mod tests {
             prompt: None,
             label: "devtools/production".into(),
             base: Default::default(),
+        }
+    }
+
+    #[test]
+    fn bootstrap_setup_ssh_gate_can_register_or_cancel_before_spending_a_vm() {
+        for accept in [true, false] {
+            let mut a = app();
+            let target = Target {
+                project_id: "proj_1".into(),
+                project_name: "Demo".into(),
+                environment_id: "env_prod".into(),
+                environment_name: "production".into(),
+            };
+            a.target = Some(target.clone());
+            a.start_bootstrap_setup();
+            a.bootstrap_form.as_mut().unwrap().running = true;
+            let req = super::super::bootstrap_setup::Request {
+                target,
+                name: "dev".into(),
+                repo: None,
+                harness: "railway".into(),
+                snapshot: None,
+                make_default: true,
+            };
+            a.ssh_key = SshKeyState::NeedsRegistration(offer());
+            assert!(a.hold_for_ssh_key(HeldConnect::Bootstrap(req.clone())));
+            let effect = a.on_key(key(KeyCode::Char(if accept { 'y' } else { 'n' })));
+            if accept {
+                let Some(Effect::RegisterSshKey {
+                    then: Some(held), ..
+                }) = effect
+                else {
+                    panic!("registration");
+                };
+                assert_eq!(held.into_effect(), Effect::CreateBootstrap(req));
+            } else {
+                assert!(effect.is_none());
+                assert!(!a.bootstrap_form.as_ref().unwrap().running);
+                assert!(a.bootstrap_form.as_ref().unwrap().error.is_some());
+            }
+            assert_eq!(a.screen, Screen::BootstrapSetup);
         }
     }
 

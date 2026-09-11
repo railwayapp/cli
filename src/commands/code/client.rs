@@ -59,6 +59,7 @@ impl Connection {
         identity: Option<&std::path::Path>,
         options: &desktop::CodexOptions,
         desktop_only: bool,
+        progress: &dyn Progress,
     ) -> SavedConfig {
         match self {
             Self::Codex(connection) => {
@@ -68,6 +69,7 @@ impl Connection {
                     identity,
                     &connection.directory,
                     options,
+                    progress,
                 )
                 .await;
                 saved.with_codex(connection, desktop_only, &desktop)
@@ -160,12 +162,14 @@ pub(crate) async fn prepare_pane(
                 beta,
             )
         };
+        progress.step("Saving connection settings");
         let saved = connection
             .configure_snapshot(
                 SavedConfig::from_prepared(&prepared)?,
                 prepared.identity.as_deref(),
                 &desktop::CodexOptions::default(),
                 false,
+                progress,
             )
             .await;
         saved.save()?;
@@ -263,6 +267,7 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
             prepared.identity.as_deref(),
             &desktop_options,
             desktop_only,
+            &progress,
         )
         .await;
     let persisted = saved.save();
@@ -627,6 +632,7 @@ pub(super) async fn connect(
             relay.identity.as_deref(),
             &desktop::CodexOptions::default(),
             false,
+            &ConnectionProgress::new(json),
         )
         .await;
     let persisted = saved.save();

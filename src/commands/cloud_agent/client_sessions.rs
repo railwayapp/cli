@@ -408,6 +408,46 @@ async fn opencode_request(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn codex_prompt_launches_and_resumes_use_the_remote_permission_policy() {
+        let connection = Connection::Codex(codex::Connection {
+            url: "wss://agent.example.com".into(),
+            token: "fixture-token".into(),
+            directory: "/app/project".into(),
+            version: "0.153.4".into(),
+            reused: true,
+        });
+        let prompt = "Fix the startup error";
+        assert!(connection.new_thread(Some(prompt)).await.unwrap().is_none());
+        assert_eq!(
+            connection
+                .initial_prompt(None, Some(prompt.into()))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(prompt)
+        );
+        for thread in [None, Some("thread-123")] {
+            let args = connection.args(thread);
+            for forbidden in [
+                "--ask-for-approval",
+                "--sandbox",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--full-auto",
+            ] {
+                assert!(!args.iter().any(|arg| arg == forbidden), "{args:?}");
+            }
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--remote", "wss://agent.example.com"])
+            );
+            assert_eq!(args.iter().any(|arg| arg == "resume"), thread.is_some());
+            if let Some(thread) = thread {
+                assert_eq!(args.last().unwrap(), thread);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn deletion_rejects_non_native_ids_before_connecting() {
         for beta in [false, true] {
             for id in ["", "../neighbor", "id?all=true", "~draft", "id/child"] {
