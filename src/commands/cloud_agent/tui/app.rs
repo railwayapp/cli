@@ -106,14 +106,14 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("⌥b", "open an SSH shell outside the TUI"),
             ("c", "copy an SSH shell command"),
+            ("b", "save the selected VM as a bootstrap"),
             ("n", "new agent — pick its harness first"),
             ("⌥n", "new agent now, on the selected harness"),
             (
                 "⌥p",
                 "new session from a prompt, on the selected row's agent",
             ),
-            ("s", "sleep"),
-            ("w", "wake"),
+            ("s / w", "sleep / wake"),
             ("d", "delete, with a confirmation"),
             ("⌥r", "refresh everything, from anywhere"),
             ("r", "refresh this environment"),
@@ -896,6 +896,10 @@ pub enum MouseAction {
 /// What the event loop must do after a key. At most one per keystroke.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
+    ConfigureBootstrap {
+        agent_id: String,
+        environment_id: String,
+    },
     /// Fetch this environment's agents; the result comes back via
     /// [`App::agents_loaded`].
     LoadAgents {
@@ -5034,6 +5038,25 @@ impl App {
             }
             // Lifecycle. Sleep and wake are reversible and act immediately;
             // delete takes the disk with it, so it asks first.
+            KeyCode::Char('b') => {
+                let (w, p, e, a) = match row?.kind {
+                    RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+                    _ => {
+                        self.status = "Select a VM to save as a bootstrap".into();
+                        return None;
+                    }
+                };
+                let env = &self.tree[w].projects[p].envs[e];
+                let agent = env.agents_vec().get(a)?;
+                if agent.status != "running" {
+                    self.status = "Wake the VM before saving a bootstrap".into();
+                    return None;
+                }
+                Some(Effect::ConfigureBootstrap {
+                    agent_id: agent.id.clone(),
+                    environment_id: env.id.clone(),
+                })
+            }
             KeyCode::Char('s') => self.agent_op(AgentOp::Sleep),
             KeyCode::Char('w') => self.agent_op(AgentOp::Wake),
             KeyCode::Char('d') => self.agent_op(AgentOp::Delete),
@@ -8730,6 +8753,35 @@ mod tests {
         );
         assert_eq!(a.selected_row().unwrap().label, "second");
         assert!(a.pending_select.is_none(), "consumed once it lands");
+    }
+
+    #[test]
+    fn bootstrap_form_targets_the_selected_vm() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('b'))),
+            Some(Effect::ConfigureBootstrap {
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
+            })
+        );
+        assert!(a.ops.is_empty());
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(a.on_key(key(KeyCode::Char('b'))), None);
+        assert!(a.status.contains("Wake"));
     }
 
     /// Delete asks first; anything but `y` cancels. A mistyped key must never

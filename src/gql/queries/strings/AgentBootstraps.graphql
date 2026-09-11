@@ -1,0 +1,24 @@
+fragment BootstrapFields on AgentBootstrap {
+  id
+  name
+  environmentId
+  status
+  failureReason
+  updatedAt
+}
+query AgentBootstraps($environmentId: ID!) {
+  agentBootstraps(environmentId: $environmentId) { ...BootstrapFields }
+  agentBootstrapDefault(environmentId: $environmentId) { id }
+}
+query AgentBootstrap($id: ID!) {
+  agentBootstrap(id: $id) { ...BootstrapFields }
+}
+query AgentBootstrapDefault($environmentId: ID!) {
+  agentBootstrapDefault(environmentId: $environmentId) { ...BootstrapFields }
+}
+mutation AgentBootstrapSave($input: AgentBootstrapSaveInput!) {
+  agentBootstrapSave(input: $input) { ...BootstrapFields }
+}
+mutation AgentBootstrapSetDefault($id: ID!, $onlyIfUnset: Boolean) {
+  agentBootstrapSetDefault(id: $id, onlyIfUnset: $onlyIfUnset) { id }
+}

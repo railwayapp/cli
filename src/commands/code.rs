@@ -330,6 +330,14 @@ pub struct LaunchArgs {
     #[clap(long)]
     pub new: bool,
 
+    /// Create a VM from this named bootstrap instead of the environment default
+    #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"])]
+    bootstrap: Option<String>,
+
+    /// Create a clean VM without the environment default bootstrap
+    #[clap(long, conflicts_with_all = ["remote_agent", "rm"])]
+    no_bootstrap: bool,
+
     /// Accepted for compatibility; agents now always stay running on
     /// disconnect. `railway ca sleep` stops the compute bill
     #[clap(long, hide = true)]
@@ -453,6 +461,11 @@ impl LaunchArgs {
     /// use when opening sessions on an existing VM.
     fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
         let action = self.client_action()?;
+        if matches!(action, Some(ClientAction::Connect(_)))
+            && (self.bootstrap.is_some() || self.no_bootstrap)
+        {
+            bail!("Bootstrap options create a new VM and cannot be used with connect.");
+        }
         let harness_selected = self.codex
             || self.opencode
             || self.opencode2
@@ -576,6 +589,8 @@ impl LaunchArgs {
             && !self.grok
             && !self.railway
             && !self.new
+            && self.bootstrap.is_none()
+            && !self.no_bootstrap
             && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
@@ -2365,7 +2380,7 @@ async fn sole_owned_agent_id(
 /// With nothing to go on, this runs `railway ca setup` rather than the
 /// workspace → project → environment picker. The picker answers one launch; the
 /// setup flow answers every launch after it, and asks the same question.
-async fn resolve_target(
+pub(crate) async fn resolve_target(
     configs: &mut Configs,
     client: &reqwest::Client,
     args: &LaunchArgs,
@@ -2605,7 +2620,15 @@ async fn resolve_agent(
     // An explicit agent wins over everything: the caller is looking at the one
     // it means. Inferring from the stored pointer instead is how "new session
     // on this agent" turned into a second VM.
-    let candidate = match (&args.agent_id, args.new) {
+    if args.agent_id.is_some() && (args.bootstrap.is_some() || args.no_bootstrap) {
+        bail!(
+            "Bootstrap options create a new VM and cannot be used when connecting to an existing agent."
+        );
+    }
+    let candidate = match (
+        &args.agent_id,
+        args.new || args.bootstrap.is_some() || args.no_bootstrap,
+    ) {
         (Some(id), _) => Some(id.clone()),
         (None, true) => None,
         (None, false) => match configs.get_code_agent(environment_id) {
@@ -2636,6 +2659,17 @@ async fn resolve_agent(
         );
     }
 
+    let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        client,
+        &backboard,
+        environment_id,
+        args.bootstrap.as_deref(),
+        args.no_bootstrap,
+    )
+    .await?;
+    if let Some(b) = &bootstrap {
+        progress.note(&format!("Using bootstrap '{}'", b.name));
+    }
     let variables = create_variables(args)?;
     let name = names::for_launch(client, configs, args, harness, target).await?;
     progress.step("Creating a cloud agent");
@@ -2650,6 +2684,7 @@ async fn resolve_agent(
                 variables,
                 code_endpoint: create_code_endpoint(args),
                 cloud_agent_checkpoint_id: None,
+                agent_bootstrap_id: bootstrap.map(|b| b.id),
             },
         },
     )
@@ -3773,6 +3808,95 @@ mod tests {
     use clap::Parser;
     use serde_json::json;
 
+    #[test]
+    fn bootstrap_flags_require_a_new_vm_and_survive_tui_retargeting() {
+        let args = LaunchArgs::try_parse_from(["code", "--codex", "--bootstrap", "dev"]).unwrap();
+        assert!(!args.is_bare());
+        let args = args.retargeted("project".into(), "env".into(), "codex", true, None, None);
+        assert_eq!(args.bootstrap.as_deref(), Some("dev"));
+        let mut connect = LaunchArgs::try_parse_from([
+            "code",
+            "--codex",
+            "--bootstrap",
+            "dev",
+            "connect",
+            "existing",
+        ])
+        .unwrap();
+        assert!(
+            connect
+                .prepare_code_launch()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used with connect")
+        );
+        for flags in [
+            vec!["code", "--bootstrap", "dev", "--no-bootstrap"],
+            vec![
+                "code",
+                "--codex",
+                "--agent",
+                "existing",
+                "--bootstrap",
+                "dev",
+            ],
+            vec!["code", "--codex", "--agent", "existing", "--no-bootstrap"],
+        ] {
+            assert!(LaunchArgs::try_parse_from(flags).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_launch_passes_selected_bootstrap_to_create() {
+        for (override_name, clean, expected) in [
+            (None, false, Some("default")),
+            (Some("dev"), false, Some("dev")),
+            (None, true, None),
+        ] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            let row = |name| {
+                json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
+                "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
+            };
+            server.stub(
+                "AgentBootstrapDefault",
+                json!({"agentBootstrapDefault": row("default")}),
+            );
+            server.stub("AgentBootstraps", json!({"agentBootstraps": [row("dev")], "agentBootstrapDefault": {"id": "default"}}));
+            server.stub_graphql_error("CloudAgentCreate", "creation reached");
+            let args = LaunchArgs {
+                new: true,
+                name: Some("fresh".into()),
+                bootstrap: override_name.map(str::to_owned),
+                no_bootstrap: clean,
+                ..Default::default()
+            };
+            let error = resolve_agent(
+                &mut configs,
+                &reqwest::Client::new(),
+                &args,
+                &names::Target::new(("project".into(), "env".into()), false),
+                Agent::Claude,
+                &CliProgress::default(),
+                &RelayAccess {
+                    identity: None,
+                    relay_opts: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("creation reached"), "{error}");
+            let request = &server.variables_for("CloudAgentCreate")[0]["input"];
+            assert_eq!(request["agentBootstrapId"].as_str(), expected);
+            assert_eq!(request["environmentId"], "env");
+            if clean {
+                assert!(server.variables_for("AgentBootstrapDefault").is_empty());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn an_unusable_selected_vm_is_never_replaced() {
         for selection in ["explicit", "remembered", "sole"] {
@@ -3859,6 +3983,10 @@ mod tests {
             }
             server.stub("CloudAgents", json!({"cloudAgents": []}));
             // Stop at creation so the test never opens SSH or provisions a VM.
+            server.stub(
+                "AgentBootstrapDefault",
+                json!({"agentBootstrapDefault": null}),
+            );
             server.stub_graphql_error("CloudAgentCreate", "creation reached");
             let args = LaunchArgs {
                 new,

@@ -1146,13 +1146,13 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
                 ("⌥b", "SSH shell"),
-                ("c", "copy shell"),
                 ("n", "new agent"),
                 if sleeping {
                     ("w", "wake")
                 } else {
                     ("s", "sleep")
                 },
+                ("b", "save bootstrap"),
                 ("d", "delete agent"),
             ],
             _ => vec![
@@ -3455,6 +3455,7 @@ mod tests {
         assert!(footer.contains("connect"), "{footer}");
         assert!(footer.contains("new agent"), "{footer}");
         assert!(footer.contains("delete agent"), "{footer}");
+        assert!(footer.contains("save bootstrap"), "{footer}");
         // The agent is running, so it offers sleep and not wake.
         assert!(footer.contains("sleep"), "{footer}");
         assert!(!footer.contains("wake"), "{footer}");

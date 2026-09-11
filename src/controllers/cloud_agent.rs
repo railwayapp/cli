@@ -257,6 +257,7 @@ pub async fn create(
                     }
                 }),
                 cloud_agent_checkpoint_id: options.checkpoint_id,
+                agent_bootstrap_id: options.bootstrap_id,
             },
         },
     )
@@ -276,6 +277,7 @@ pub async fn create(
 pub struct CreateOptions {
     pub code_port: Option<u16>,
     pub checkpoint_id: Option<String>,
+    pub bootstrap_id: Option<String>,
 }
 
 pub fn parse_code_port(value: &str) -> std::result::Result<u16, String> {
@@ -664,6 +666,7 @@ mod tests {
                 CreateOptions {
                     code_port,
                     checkpoint_id,
+                    ..Default::default()
                 },
             )
             .await

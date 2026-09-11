@@ -268,6 +268,45 @@ when finished.
 Put harness-specific arguments after `--`, for example:
 `railway code --opencode2 -- run --standalone "explain this project"`.
 
+## Cloud agent bootstraps
+
+Save a configured, running cloud agent as a reusable starting point:
+
+```bash
+railway ca bootstrap save dev --agent configured-vm
+railway ca bootstrap list
+railway ca bootstrap save updated --agent another-vm --default
+railway ca bootstrap default dev
+
+railway code --codex                         # uses the environment default
+railway code --codex --bootstrap updated     # selects a named bootstrap
+railway code --codex --no-bootstrap          # starts with a clean VM
+railway ca create scratch --bootstrap dev
+```
+
+In `railway ca`, highlight a VM and press `b` to open the save form. Saving
+captures its disk without stopping or deleting the source VM. The first
+successful CLI save becomes the environment default if none is set; later saves
+replace the default only with `--default` or a selection in the form. Saving an
+existing name appends a version to that bootstrap, including when it is already
+the default. Save waits for capture completion before selecting a default.
+
+Bootstraps and their defaults are shared within a project/environment pair.
+Explicit `--project` and `--environment` flags take precedence, followed by the
+directory's Railway link, then the saved CA project preference. Bootstrap names
+are resolved only within that environment. `list`, `save`, and `default` support
+`--json`; `save` accepts `--env-file` and `--variable` for stored bootstrap
+variables. Launch-time variables override stored bootstrap variables.
+
+Only new VMs use bootstraps. Connecting to an existing VM preserves its disk.
+A saving or degraded default produces an error; `--no-bootstrap` explicitly
+bypasses it. `ca create --from-checkpoint` also bypasses the default and cannot
+be combined with bootstrap flags.
+
+The snapshot includes files and installed tools. Use an idempotent,
+non-blocking `/etc/railway/bootstrap/startup.sh` to restart local services on
+boot/wake, and `/etc/railway/bootstrap/AGENTS.md` for setup notes.
+
 ## Codex with local terminal or Desktop clients
 
 Run the native Codex terminal UI on your computer, connected to Codex App Server

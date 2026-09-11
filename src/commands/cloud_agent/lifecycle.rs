@@ -38,6 +38,26 @@ pub struct TargetArgs {
     project: Option<String>,
 }
 
+impl TargetArgs {
+    /// Resolve creation/bootstrap scope with the launcher's directory and preference precedence.
+    pub(crate) async fn resolve(
+        self,
+        configs: &mut Configs,
+        client: &reqwest::Client,
+    ) -> Result<String> {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+        let mut prefs = super::prefs::AgentPrefs::load_in(&home).unwrap_or_default();
+        let mut args = LaunchArgs::default();
+        args.project = self.project;
+        args.environment = self.environment;
+        Ok(
+            code::resolve_target(configs, client, &args, &mut prefs, &home)
+                .await?
+                .environment_id,
+        )
+    }
+}
+
 #[derive(Parser)]
 pub struct ListArgs {
     /// Include agents belonging to other members of the environment. Requires
@@ -71,6 +91,14 @@ pub struct CreateArgs {
     /// Restore this cloud-agent checkpoint into the new VM
     #[clap(long, value_name = "CHECKPOINT_ID")]
     from_checkpoint: Option<String>,
+
+    /// Start from this named bootstrap instead of the environment default
+    #[clap(long, conflicts_with_all = ["from_checkpoint", "no_bootstrap"])]
+    bootstrap: Option<String>,
+
+    /// Create a clean VM without the environment default bootstrap
+    #[clap(long, conflicts_with = "from_checkpoint")]
+    no_bootstrap: bool,
 
     /// Set a variable on the agent (repeatable, comma-separable). Values may
     /// reference other variables — `DB_URL=postgres.DATABASE_URL` or the full
@@ -295,14 +323,20 @@ pub async fn create(args: CreateArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let (configs, client) = (&mut configs, &client);
-    let (project, environment) = (args.target.project.clone(), args.target.environment.clone());
-    let (_, environment_id) =
-        resolve_project_and_env(configs, client, project, environment).await?;
+    let environment_id = args.target.resolve(configs, client).await?;
     let variables = variables_to_input(&args.env_files, &args.variables)?
         .map(serde_json::to_value)
         .transpose()?;
 
     let backboard = configs.get_backboard();
+    let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        client,
+        &backboard,
+        &environment_id,
+        args.bootstrap.as_deref(),
+        args.no_bootstrap || args.from_checkpoint.is_some(),
+    )
+    .await?;
     let spinner = (!args.json).then(|| create_spinner("Creating a cloud agent".to_string()));
     let agent = match ca::create(
         client,
@@ -313,6 +347,7 @@ pub async fn create(args: CreateArgs) -> Result<()> {
         ca::CreateOptions {
             code_port: args.code_port.or(args.code_endpoint.then_some(4096)),
             checkpoint_id: args.from_checkpoint,
+            bootstrap_id: bootstrap.map(|b| b.id),
         },
     )
     .await

@@ -240,6 +240,10 @@ const FLOOD_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// Why the TUI gave the terminal back.
 pub enum Outcome {
+    ConfigureBootstrap {
+        agent_id: String,
+        environment_id: String,
+    },
     /// A Claude credential has to be minted, which needs the real terminal.
     /// The caller mints and re-enters with the same request.
     NeedsCredential(LaunchRequest),
@@ -1430,6 +1434,15 @@ pub async fn run(
                     session_name,
                     agent_name,
                 }));
+            }
+            Some(Effect::ConfigureBootstrap {
+                agent_id,
+                environment_id,
+            }) => {
+                return Ok(Outcome::ConfigureBootstrap {
+                    agent_id,
+                    environment_id,
+                });
             }
             Some(Effect::OpenShell {
                 agent_id,
