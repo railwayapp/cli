@@ -135,6 +135,11 @@ impl Selections {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return;
         };
+        // The native TUI generates titles with an ephemeral thread/start on
+        // this same connection. That internal request never changes its view.
+        if value["params"]["ephemeral"].as_bool() == Some(true) {
+            return;
+        }
         if matches!(
             value["method"].as_str(),
             Some("thread/start" | "thread/resume" | "thread/fork")
@@ -174,6 +179,8 @@ mod tests {
         );
         assert_eq!(selections.response(&reply(1)).unwrap().id, "thread-1");
         assert!(selections.response(&reply(1)).is_none());
+        selections.request(r#"{"id":"title-generator","method":"thread/start","params":{"ephemeral":true,"threadSource":"system"}}"#);
+        assert!(selections.response(r#"{"id":"title-generator","result":{"thread":{"id":"internal-title-thread","cwd":"/app"}}}"#).is_none());
         selections.request(r#"{"id":"next","method":"thread/resume"}"#);
         assert!(
             selections

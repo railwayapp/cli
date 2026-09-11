@@ -1,4 +1,4 @@
-//! Persisted Claude/Grok conversations discovered on the VM over one bounded SSH call.
+//! Persisted harness conversations discovered on the VM over one bounded SSH call.
 use std::{process::Stdio, time::Duration};
 
 use anyhow::{Context, Result, bail};
@@ -20,6 +20,7 @@ pub(crate) struct RemoteThread {
     pub pane_id: Option<String>,
     pub console_name: Option<String>,
     pub background_id: Option<String>,
+    pub database: Option<String>,
 }
 
 impl RemoteThread {
@@ -30,8 +31,10 @@ impl RemoteThread {
     pub fn resume_command(&self, pane_id: &str) -> Result<String> {
         client_sessions::validate_id(&self.thread.id)?;
         let variable = match self.harness.as_str() {
-            "claude" => "CLAUDE_CONFIG_DIR",
-            "grok" => "GROK_HOME",
+            "claude" => Some("CLAUDE_CONFIG_DIR"),
+            "grok" => Some("GROK_HOME"),
+            "codex" => Some("CODEX_HOME"),
+            "opencode" | "opencode2" | "railway" => None,
             _ => bail!("Unsupported remote conversation harness"),
         };
         if !self.thread.directory.starts_with('/') || !self.config_dir.starts_with('/') {
@@ -43,17 +46,49 @@ impl RemoteThread {
             .filter(|_| self.harness == "claude")
         {
             Some(id) => vec!["claude".into(), "attach".into(), id.into()],
+            None if self.harness == "codex" => vec![
+                "codex".into(),
+                "--ask-for-approval".into(),
+                "never".into(),
+                "--sandbox".into(),
+                "danger-full-access".into(),
+                "resume".into(),
+                self.thread.id.clone(),
+            ],
+            None if self.harness.starts_with("opencode") => {
+                let mut args = vec![self.harness.clone()];
+                if self.harness == "opencode2" {
+                    args.extend(["--standalone".into(), "--auto".into()]);
+                }
+                args.extend(["--session".into(), self.thread.id.clone()]);
+                args
+            }
+            None if self.harness == "railway" => vec![
+                "railway-agent-tui".into(),
+                "--session".into(),
+                self.thread.id.clone(),
+            ],
             None => vec![
                 self.harness.clone(),
                 "--resume".into(),
                 self.thread.id.clone(),
             ],
         };
+        let config = format!(
+            "{}{}",
+            variable
+                .map(|variable| format!("export {variable}={}; ", quote(&self.config_dir)))
+                .unwrap_or_default(),
+            self.database
+                .as_ref()
+                .filter(|_| self.harness == "opencode2")
+                .map(|path| format!("export OPENCODE_DB={}; ", quote(path)))
+                .unwrap_or_default()
+        );
         Ok(format!(
-            "{}export RAILWAY_CODE_AUTOSTARTED=1; export RAILWAY_THREAD_PANE_ID={}; export {variable}={}; cd -- {} && exec {}",
+            "{}export RAILWAY_CODE_AUTOSTARTED=1; export RAILWAY_THREAD_PANE_ID={}; {config}cd -- {} && exec {}",
             code::harness_env_prefix(),
             quote(pane_id),
-            quote(&self.config_dir),
             quote(&self.thread.directory),
             crate::util::shell::shell_join(&invocation),
         ))
@@ -114,8 +149,10 @@ pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
     let mut result: Discovery =
         serde_json::from_str(json).context("Invalid conversation inventory")?;
     result.threads.retain(|row| {
-        matches!(row.harness.as_str(), "claude" | "grok")
-            && client_sessions::validate_id(&row.thread.id).is_ok()
+        matches!(
+            row.harness.as_str(),
+            "claude" | "grok" | "codex" | "opencode" | "opencode2" | "railway"
+        ) && client_sessions::validate_id(&row.thread.id).is_ok()
     });
     Ok(result)
 }
@@ -140,6 +177,7 @@ pub(crate) mod tests {
             pane_id: None,
             console_name: None,
             background_id: None,
+            database: None,
         }
     }
 

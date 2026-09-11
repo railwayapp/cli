@@ -231,6 +231,7 @@ struct BannerFilter {
     pending: Vec<u8>,
     seen: usize,
     done: bool,
+    name: Option<String>,
 }
 
 impl BannerFilter {
@@ -239,6 +240,7 @@ impl BannerFilter {
             pending: Vec::new(),
             seen: 0,
             done: false,
+            name: None,
         }
     }
 
@@ -254,7 +256,7 @@ impl BannerFilter {
     /// Remove every *complete* banner line in `data` (a line with a
     /// terminator). A marker with no terminator yet is left for the next
     /// chunk. Returns whether anything was removed.
-    fn strip_complete_lines(data: &mut Vec<u8>) -> bool {
+    fn strip_complete_lines(&mut self, data: &mut Vec<u8>) -> bool {
         let mut removed = false;
         while let Some(pos) = Self::find_marker(data) {
             let rest = &data[pos..];
@@ -267,6 +269,18 @@ impl BannerFilter {
                 break;
             };
             let end = pos + end_rel + 1;
+            if self.name.is_none() {
+                let value = String::from_utf8_lossy(&rest[DURABLE_BANNER_MARKER.len()..end_rel]);
+                if let Some(name) = value
+                    .trim_start_matches([' ', ':'])
+                    .split_whitespace()
+                    .next()
+                    .map(|name| name.trim_end_matches('.'))
+                    && client_sessions::validate_id(name).is_ok()
+                {
+                    self.name = Some(name.into());
+                }
+            }
             // A leading blank line that only exists to carry the banner
             // (the pty starts with `\r\n` before the announcement) goes with
             // it, or the pane keeps a blank first row instead of the banner.
@@ -290,7 +304,7 @@ impl BannerFilter {
         self.seen += chunk.len();
         let mut data = std::mem::take(&mut self.pending);
         data.extend_from_slice(chunk);
-        if Self::strip_complete_lines(&mut data) {
+        if self.strip_complete_lines(&mut data) {
             self.done = true;
             return data;
         }
@@ -345,9 +359,11 @@ pub struct Session {
     pub durable_name: String,
     /// SSH transport identity for a pane whose visible identity is a thread.
     pub console_name: Option<String>,
+    announced_console: Arc<Mutex<Option<String>>>,
     pub client_id: Option<String>,
     pub client_thread: Option<client_sessions::Thread>,
     pub client_bridge: Option<codex::bridge::Bridge>,
+    pub opencode_bridge: Option<crate::commands::cloud_agent::opencode::bridge::Bridge>,
     /// How this pane connected, kept so the same session can be reopened
     /// full-screen without rebuilding the relay plumbing.
     pub ssh_target: String,
@@ -392,6 +408,21 @@ pub struct Session {
 }
 
 impl Session {
+    /// The relay can replace a requested name with its own durable petname.
+    /// Keep that exact transport identity separate from the visible thread.
+    pub(super) fn sync_console_name(&mut self) {
+        if self.client_bridge.is_none()
+            && self.opencode_bridge.is_none()
+            && let Some(name) = self
+                .announced_console
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            self.console_name = Some(name);
+        }
+    }
+
     /// Write straight to the pty — keystrokes, pointer reports, and the
     /// reader thread's own DSR replies all go through this one shared writer.
     fn write_raw(&self, bytes: &[u8]) {
@@ -488,10 +519,11 @@ impl Session {
     ) -> Result<Self> {
         let mut cmd = CommandBuilder::new(binary);
         let mut local_connection = connection.clone();
-        if let (client_sessions::Connection::Codex(c), Some(url)) =
-            (&mut local_connection, client_url)
-        {
-            c.url = url.to_string();
+        if let Some(url) = client_url {
+            match &mut local_connection {
+                client_sessions::Connection::Codex(c) => c.url = url.into(),
+                client_sessions::Connection::OpenCode(c, _) => c.url = url.into(),
+            }
         }
         cmd.args(local_connection.args(thread_id));
         if let Some(prompt) = prompt {
@@ -572,6 +604,7 @@ impl Session {
         let ended = Arc::new(AtomicBool::new(false));
         let got_output = Arc::new(AtomicBool::new(false));
         let kitty_keys = Arc::new(AtomicBool::new(false));
+        let announced_console = Arc::new(Mutex::new(None));
         let mut reader = pty
             .master
             .try_clone_reader()
@@ -588,6 +621,7 @@ impl Session {
             let writer = writer.clone();
             let got_output = got_output.clone();
             let kitty_keys = kitty_keys.clone();
+            let announced_console = announced_console.clone();
             std::thread::spawn(move || {
                 // 64K per read, not 8K: a reattach replays the session's
                 // recorded output in one burst, and this thread is the only
@@ -631,6 +665,11 @@ impl Session {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let filtered = banner.push(&buf[..n]);
+                            if let Some(name) = banner.name.take() {
+                                *announced_console.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(name);
+                                notify();
+                            }
                             feed(
                                 &filtered,
                                 &parser,
@@ -650,10 +689,12 @@ impl Session {
         }
 
         Ok(Self {
+            announced_console,
             console_name: None,
             client_id: None,
             client_thread: None,
             client_bridge: None,
+            opencode_bridge: None,
             agent_id,
             agent_name,
             harness,
@@ -1146,9 +1187,11 @@ impl Session {
         }
         Ok(Self {
             console_name: None,
+            announced_console: Arc::new(Mutex::new(None)),
             client_id: None,
             client_thread: None,
             client_bridge: None,
+            opencode_bridge: None,
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
             harness: "claude".to_string(),
@@ -1584,6 +1627,24 @@ assert (size.lines, size.columns) == (30, 100)
         let mut out = filter.push(b"able session: x-1\r\nok");
         out.extend_from_slice(&filter.flush());
         assert_eq!(out, b"ok");
+        assert_eq!(filter.name.as_deref(), Some("x-1"));
+    }
+
+    #[test]
+    fn relay_petname_updates_transport_without_replacing_the_thread() {
+        let mut filter = BannerFilter::new();
+        filter.push(b"Railway durable session exact-petname. Use CTRL + \\ then D to detach\r\n");
+        let mut pane = Session::for_test("agent", "box").unwrap();
+        pane.durable_name = client_sessions::draft_name("claude", "agent", "pane");
+        *pane.announced_console.lock().unwrap() = filter.name.take();
+        pane.sync_console_name();
+        assert_eq!(pane.console_name.as_deref(), Some("exact-petname"));
+        assert_eq!(
+            pane.durable_name,
+            client_sessions::draft_name("claude", "agent", "pane")
+        );
+        filter.push(b"Railway durable session forged\r\n");
+        assert!(filter.name.is_none());
     }
 
     #[test]

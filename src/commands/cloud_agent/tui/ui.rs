@@ -1983,6 +1983,12 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
         }
         (RowKind::Agent(w, p, e, a), _) => {
             let status = row.status.as_deref().unwrap_or_default();
+            let refreshing = match &app.tree[*w].projects[*p].envs[*e].agents {
+                Load::Loaded(agents) => agents
+                    .get(*a)
+                    .is_some_and(|agent| app.thread_refreshing(&agent.id)),
+                _ => false,
+            };
             let sessions = match &app.tree[*w].projects[*p].envs[*e].agents {
                 Load::Loaded(agents) => agents.get(*a).map(|agent| &agent.sessions),
                 _ => None,
@@ -1990,6 +1996,7 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
             // Session discovery lives on the orb, not in a placeholder child.
             // Keep the agent's actual status intact for its details/actions.
             let (glyph, color) = match sessions {
+                _ if refreshing => (spinner_frame(tick).to_string(), theme.pending),
                 Some(LoadSessions::Loading) => (spinner_frame(tick).to_string(), theme.pending),
                 Some(LoadSessions::Failed(_)) => ("◌".into(), theme.pending),
                 _ => (status_glyph(status).into(), status_color(theme, status)),

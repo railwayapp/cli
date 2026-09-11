@@ -1,4 +1,4 @@
-"""VM-side conversation metadata. No prompts, transcript bodies, or agent launches.
+"""VM-side conversation metadata without transcript bodies or agent launches.
 
 Claude's versioned SDK owns transcript parsing; Grok's summary.json is its index.
 The SDK is installed lazily into an isolated cache only when Claude history exists.
@@ -13,6 +13,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import sqlite3
+import urllib.parse
+import urllib.request
+import base64
 
 SDK_VERSION = "0.2.152"
 RESULT_PREFIX = "RAILWAY-THREADS:"
@@ -173,7 +177,7 @@ def claude_threads(root, sdk):
             rows.append({
                 "harness": "claude", "config_dir": str(root),
                 "thread": {"id": session.session_id,
-                           "title": text(session.custom_title or session.summary or session.first_prompt) or "Claude conversation",
+                           "title": text(session.custom_title or session.summary or session.first_prompt) or "New Thread",
                            "directory": session.cwd, "created_at": timestamp(session.created_at),
                            "updated_at": timestamp(session.last_modified) or "", "state": state},
                 "background_id": current.get("id") if current.get("kind") == "background" else None,
@@ -215,12 +219,101 @@ def grok_threads(root):
         rows.append({
             "harness": "grok", "config_dir": str(root),
             "thread": {"id": info["id"], "directory": info["cwd"],
-                       "title": title or "Grok conversation", "created_at": iso_timestamp(row.get("created_at")),
+                       "title": title or "New Thread", "created_at": iso_timestamp(row.get("created_at")),
                        "updated_at": iso_timestamp(row.get("last_active_at")) or iso_timestamp(row.get("updated_at")) or "",
                        "state": "idle"},
             **active.get(info["id"], {}),
         })
     return rows
+
+
+def codex_threads():
+    root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    paths = sorted((p for p in root.glob("state_*.sqlite") if p.stem[6:].isdigit()),
+                   key=lambda p: int(p.stem[6:]), reverse=True)
+    if not paths:
+        return []
+    # Codex maintains a metadata index independently of App Server's lifetime.
+    with sqlite3.connect(paths[0].absolute().as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+        db.row_factory = sqlite3.Row
+        columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
+        required = {"id", "cwd", "title", "created_at", "updated_at", "archived", "source"}
+        if not required.issubset(columns):
+            raise ValueError("Unsupported Codex metadata schema")
+        fields = sorted(required | ({"name", "preview"} & columns))
+        rows = db.execute("SELECT " + ",".join(fields) + " FROM threads WHERE archived=0 ORDER BY updated_at DESC")
+        return [{"harness": "codex", "config_dir": str(root), "thread": {
+            "id": row["id"], "directory": row["cwd"],
+            "title": text((row["name"] if "name" in columns else None) or row["title"] or
+                          (row["preview"] if "preview" in columns else None)) or "New Thread",
+            "created_at": timestamp(row["created_at"] * 1000),
+            "updated_at": timestamp(row["updated_at"] * 1000) or "", "state": "idle",
+        }} for row in rows if row["source"] in ("cli", "vscode", "appServer", "exec")]
+
+
+def opencode_threads():
+    data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "opencode"
+    override = os.environ.get("OPENCODE_DB")
+    paths = [Path(override) if Path(override).is_absolute() else data / override] if override and override != ":memory:" else sorted(data.glob("*.db"))
+    rows = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        with sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+            db.row_factory = sqlite3.Row
+            for table, harness in (("session", "opencode"), ("session_v2", "opencode2")):
+                columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                if not columns:
+                    continue
+                if not {"id", "title", "directory", "parent_id", "time_created", "time_updated", "time_archived"}.issubset(columns):
+                    raise ValueError("Unsupported OpenCode metadata schema")
+                for row in db.execute(f"SELECT id,title,directory,time_created,time_updated FROM {table} WHERE parent_id IS NULL AND time_archived IS NULL ORDER BY time_updated DESC"):
+                    title = text(row["title"])
+                    rows.append({"harness": harness, "config_dir": str(Path.home() / ".config" / "opencode"),
+                        "database": str(path), "thread": {
+                            "id": row["id"], "directory": row["directory"],
+                            "title": "New Thread" if not title or title.startswith("New session - ") else title,
+                            "created_at": timestamp(row["time_created"]), "updated_at": timestamp(row["time_updated"]) or "", "state": "idle",
+                        }})
+    return rows if paths else opencode_server_threads()
+
+
+def opencode_server_threads():
+    root = Path.home() / ".railway" / "desktop" / "opencode"
+    state = read_json(root / "server.json")
+    if not isinstance(state, dict):
+        return []
+    harness = state.get("harness", "opencode")
+    if harness not in ("opencode", "opencode2"):
+        return []
+    beta = harness == "opencode2"
+    credentials = base64.b64encode((state["username"] + ":" + state["password"]).encode()).decode()
+    rows, cursor, seen = [], None, set()
+    while True:
+        query = {"limit": 100, "order": "desc"} if beta else {"directory": state["directory"]}
+        if cursor:
+            query["cursor"] = cursor
+        request = urllib.request.Request("http://127.0.0.1:8080/" + ("api/" if beta else "") +
+                                         "session?" + urllib.parse.urlencode(query),
+                                         headers={"Authorization": "Basic " + credentials})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+            page = json.load(response)
+        for row in page["data"] if beta else page:
+            if row.get("parentID") or (row.get("time") or {}).get("archived"):
+                continue
+            title = text(row.get("title"))
+            rows.append({"harness": harness, "config_dir": str(root), "thread": {
+                "id": row["id"], "title": "New Thread" if not title or title.startswith("New session - ") else title,
+                "directory": (row.get("location") or {}).get("directory") or row.get("directory") or state["directory"],
+                "created_at": timestamp(row["time"]["created"]),
+                "updated_at": timestamp(row["time"]["updated"]) or "", "state": "idle",
+            }})
+        cursor = (page.get("cursor") or {}).get("next") if beta else None
+        if not cursor:
+            return rows
+        if cursor in seen:
+            raise ValueError("Repeated conversation cursor")
+        seen.add(cursor)
 
 
 def discover():
@@ -236,6 +329,12 @@ def discover():
         except Exception as error:
             failed.append(harness)
             warnings.append(f"{harness} history unavailable ({type(error).__name__})")
+    for harnesses, read in ((["codex"], codex_threads), (["opencode", "opencode2"], opencode_threads)):
+        try:
+            rows.extend(read())
+        except Exception as error:
+            failed.extend(harnesses)
+            warnings.append(f"{'/'.join(harnesses)} history unavailable ({type(error).__name__})")
     # Relocations and restored histories can leave duplicate IDs in the tree.
     newest = {}
     for row in sorted(rows, key=lambda r: r["thread"]["updated_at"], reverse=True):

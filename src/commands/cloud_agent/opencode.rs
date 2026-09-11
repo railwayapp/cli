@@ -15,6 +15,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::util::shell::shell_join;
 
+pub(crate) mod bridge;
 pub(crate) mod local;
 
 const BOOTSTRAP: &str = include_str!("opencode.py");

@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sqlite3
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -76,12 +77,53 @@ class DiscoveryTest(unittest.TestCase):
     def test_provider_failure_preserves_other_history(self):
         self.grok("grok-thread")
         (self.root / "projects").mkdir()
-        with patch.object(threads, "config_roots", return_value={"claude": [self.root], "grok": [self.root]}), patch.object(
+        with patch.object(threads, "codex_threads", return_value=[]), patch.object(threads, "opencode_threads", return_value=[]), patch.object(threads, "config_roots", return_value={"claude": [self.root], "grok": [self.root]}), patch.object(
             threads, "claude_sdk", side_effect=RuntimeError("SDK unavailable")
         ):
             result = threads.discover()
         self.assertEqual(result["failed"], ["claude"])
         self.assertEqual(result["threads"][0]["thread"]["id"], "grok-thread")
+
+    def test_codex_metadata_works_without_a_running_backend_or_local_snapshot(self):
+        with sqlite3.connect(self.root / "state_5.sqlite") as db:
+            db.execute("CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, created_at INT, updated_at INT, archived INT, source TEXT)")
+            db.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)", [
+                ("real-id", "/app/other", "Original question", "Generated title", 100, 200, 0, "cli"),
+                ("archived", "/app", "Hidden", None, 100, 200, 1, "cli"),
+                ("child", "/app", "Subagent", None, 100, 200, 0, "subagent"),
+            ])
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            rows = threads.codex_threads()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["thread"]["id"], "real-id")
+        self.assertEqual(rows[0]["thread"]["title"], "Generated title")
+
+    def test_opencode_versions_are_read_only_and_keep_native_titles_and_directories(self):
+        data = self.root / "opencode"
+        data.mkdir()
+        database = data / "opencode.db"
+        with sqlite3.connect(database) as db:
+            for table in ("session", "session_v2"):
+                db.execute(f"CREATE TABLE {table} (id TEXT, title TEXT, directory TEXT, parent_id TEXT, time_created INT, time_updated INT, time_archived INT)")
+                db.executemany(f"INSERT INTO {table} VALUES (?,?,?,?,?,?,?)", [
+                    ("saved", "Sacramento weather", "/app/weather", None, 1000, 2000, None),
+                    ("draft", "New session - 2026-09-10", "/app", None, 1000, 1000, None),
+                    ("child", "Subagent", "/app", "saved", 1000, 2000, None),
+                    ("archived", "Hidden", "/app", None, 1000, 2000, 3000),
+                ])
+        before = database.read_bytes()
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root), "OPENCODE_DB": ""}):
+            rows = threads.opencode_threads()
+        self.assertEqual(database.read_bytes(), before)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({row["harness"] for row in rows}, {"opencode", "opencode2"})
+        for row in rows:
+            self.assertEqual(row["database"], str(database))
+            if row["thread"]["id"] == "saved":
+                self.assertEqual(row["thread"]["title"], "Sacramento weather")
+                self.assertEqual(row["thread"]["directory"], "/app/weather")
+            else:
+                self.assertEqual(row["thread"]["title"], "New Thread")
 
 
 if __name__ == "__main__":

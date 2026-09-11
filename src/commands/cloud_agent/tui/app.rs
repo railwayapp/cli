@@ -224,12 +224,47 @@ impl ConsoleSession {
     }
     /// Is this worth showing?
     ///
-    /// Only what is still running. Finished sessions are our own provisioning
-    /// execs and shells that have already ended — including one just killed,
-    /// which should leave the list rather than linger as "exited" and look like
-    /// the kill did not take.
+    /// Provider threads remain resumable after the harness exits; transport
+    /// rows are reserved for live interactive shells directly on the VM.
     pub fn is_interesting(&self) -> bool {
-        self.running
+        self.running && (self.kind == "THREAD" || self.is_shell())
+    }
+
+    pub(super) fn is_shell(&self) -> bool {
+        if self.kind != "SHELL" || self.snapshot.is_some() || self.harness_slug().is_some() {
+            return false;
+        }
+        let Some(command) = self
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            return true;
+        };
+        let command = command
+            .trim_end_matches(';')
+            .rsplit("; ")
+            .next()
+            .unwrap_or(command)
+            .trim_start_matches("exec ");
+        let words = shlex::split(command).unwrap_or_default();
+        if words
+            .iter()
+            .skip(1)
+            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+        {
+            return false;
+        }
+        matches!(
+            command
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next(),
+            Some("bash" | "sh" | "zsh" | "fish" | "-bash" | "-sh" | "-zsh")
+        )
     }
 
     /// The session's name, folded short and led by its harness:
@@ -238,15 +273,13 @@ impl ConsoleSession {
     /// already leads with its harness. The plain name when the harness is
     /// unknowable.
     pub fn short_name(&self) -> String {
-        if let Some((harness, _, _)) = super::super::client_sessions::parse_name(&self.name) {
+        if super::super::client_sessions::is_client(&self.name) {
             return self
                 .snapshot
                 .as_ref()
                 .and_then(|s| s.prompt.clone())
-                .unwrap_or_else(|| match harness {
-                    "opencode" | "opencode2" => format!("{harness} home"),
-                    _ => format!("New {harness} conversation"),
-                });
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| super::super::client_sessions::NEW_THREAD.into());
         }
         match self.harness_slug() {
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
@@ -261,12 +294,8 @@ impl ConsoleSession {
         }
     }
 
-    /// The thread list's label: what is happening in the thread, truncated to
-    /// the tree's width. While the harness works, the prompt names the work;
-    /// once the turn is over, what the agent last said is the news (known for
-    /// railway-agent threads, whose daemon serves the transcript). The short
-    /// name is the fallback for a session nothing has reported from (a plain
-    /// shell, a run that hasn't spoken yet).
+    /// The native title names a thread throughout its lifecycle. Only direct
+    /// VM shells use a transport name and the `[S]` marker.
     pub fn thread_label(&self) -> String {
         if super::super::client_sessions::is_client(&self.name) {
             return truncate(&self.short_name(), 28);
@@ -291,7 +320,11 @@ impl ConsoleSession {
                 return truncate(text, 28);
             }
         }
-        format!("[S] {}", self.short_name())
+        if self.is_shell() {
+            format!("[S] {}", self.short_name())
+        } else {
+            super::super::client_sessions::NEW_THREAD.into()
+        }
     }
 
     /// The harness this session runs, read off its launch line's binary.
@@ -1809,12 +1842,8 @@ impl App {
         self.auto_expand_agent()
     }
 
-    /// Open the agent the cursor just landed on, so its sessions are visible
-    /// without a second keypress.
-    ///
-    /// Not when we already know it has none: expanding then would replace the
-    /// sessions with a "no sessions" line, which is noise for the common case
-    /// of walking past an idle agent.
+    /// Discover an agent on first arrival. Once loaded, navigation respects
+    /// the user's expansion choice; only an explicit expand opens it again.
     fn auto_expand_agent(&mut self) -> Option<Effect> {
         let row = self.selected_row()?;
         let RowKind::Agent(w, p, e, a) = row.kind else {
@@ -1828,11 +1857,6 @@ impl App {
             return None;
         }
         match &agent.sessions {
-            LoadSessions::Loaded(sessions)
-                if sessions.iter().any(ConsoleSession::is_interesting) =>
-            {
-                self.set_agent_expanded((w, p, e, a), true)
-            }
             LoadSessions::NotLoaded => self.set_agent_expanded((w, p, e, a), true),
             _ => None,
         }
@@ -2067,9 +2091,14 @@ impl App {
         if !open {
             return None;
         }
-        // Always refetch on expand: sessions come and go while you are looking
-        // at something else, and a stale list is worse than a brief spinner.
-        agent.sessions = LoadSessions::Loading;
+        if self.thread_polls.contains(&agent.id) {
+            return None;
+        }
+        // Refresh only the icon. Loaded rows remain visible throughout the
+        // request, including when a user reopens an agent during a fast poll.
+        if !matches!(agent.sessions, LoadSessions::Loaded(_)) {
+            agent.sessions = LoadSessions::Loading;
+        }
         Some(Effect::LoadSessions {
             agent_id: agent.id.clone(),
             environment_id,
@@ -2119,6 +2148,9 @@ impl App {
         agent_id: &str,
         threads: &[super::super::remote_threads::RemoteThread],
     ) {
+        for pane in &mut self.sessions {
+            pane.sync_console_name();
+        }
         let mut updates = Vec::new();
         for (index, pane) in self.sessions.iter().enumerate() {
             if pane.agent_id != agent_id || pane.ended() {
@@ -2138,27 +2170,11 @@ impl App {
             }
         }
         for (index, row) in updates {
-            let pane = &mut self.sessions[index];
-            let old = pane.durable_name.clone();
-            let name = row.name(agent_id);
-            pane.harness = row.harness;
-            pane.client_thread = Some(row.thread);
+            self.sessions[index].harness = row.harness;
             if row.console_name.is_some() {
-                pane.console_name = row.console_name;
+                self.sessions[index].console_name = row.console_name;
             }
-            pane.durable_name = name.clone();
-            if name != old {
-                self.connecting.remove(&old);
-                self.auto_attempted.insert(name.clone());
-                if self.active == Some(index)
-                    || self.pending_select_session.as_deref() == Some(&old)
-                {
-                    self.pending_select_session = Some(name);
-                }
-                if !super::super::client_sessions::is_client(&old) {
-                    self.remove_session_row(agent_id, &old);
-                }
-            }
+            self.adopt_thread(index, row.thread);
         }
     }
 
@@ -2173,11 +2189,15 @@ impl App {
             let RowKind::Session(w, p, e, a, i) = row.kind else {
                 return None;
             };
-            let (id, _) = self.agent_at(w, p, e, a)?;
             let session = self.console_session(w, p, e, a, i)?;
-            (id == agent_id && super::super::client_sessions::is_client(&session.name))
-                .then(|| session.name.clone())
+            Some(session.name.clone())
         });
+        let open: std::collections::HashSet<_> = self
+            .sessions
+            .iter()
+            .filter(|pane| !pane.ended() && pane.agent_id == agent_id)
+            .map(|pane| pane.durable_name.clone())
+            .collect();
         // Whatever this reply says, its agent's fast poll is no longer in
         // flight (see `threads_to_poll`).
         self.thread_polls.remove(agent_id);
@@ -2214,6 +2234,27 @@ impl App {
         {
             let previous = std::mem::replace(&mut agent.sessions, LoadSessions::NotLoaded);
             agent.sessions = match (result, previous) {
+                (Ok(mut sessions), LoadSessions::Loaded(previous)) => {
+                    // Open drafts may not exist in the provider index yet.
+                    // Keep their slot across refreshes, alongside saved rows.
+                    for row in &previous {
+                        if super::super::client_sessions::is_client(&row.name)
+                            && open.contains(&row.name)
+                            && !sessions.iter().any(|s| s.name == row.name)
+                        {
+                            sessions.push(row.clone());
+                        }
+                    }
+                    // Provider recency and title updates change row content,
+                    // never its position while someone is navigating the list.
+                    let positions: HashMap<_, _> = previous
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| (&s.name, i))
+                        .collect();
+                    sessions.sort_by_key(|s| positions.get(&s.name).copied().unwrap_or(usize::MAX));
+                    LoadSessions::Loaded(sessions)
+                }
                 (Ok(sessions), _) => LoadSessions::Loaded(sessions),
                 // The same rule the agent list follows: a refresh that fails
                 // keeps what it had rather than replacing a good list with an
@@ -3342,23 +3383,66 @@ impl App {
             .sessions
             .iter()
             .position(|s| s.client_id.as_deref() == Some(client_id))?;
+        Some(self.adopt_thread(index, thread))
+    }
+
+    fn adopt_thread(
+        &mut self,
+        index: usize,
+        thread: super::super::client_sessions::Thread,
+    ) -> String {
+        let old = self.sessions[index].durable_name.clone();
+        let selected = self.selected_row().is_some_and(|row| {
+            if let RowKind::Session(w, p, e, a, i) = row.kind {
+                self.console_session(w, p, e, a, i)
+                    .is_some_and(|row| row.name == old)
+            } else {
+                false
+            }
+        });
         let pane = &mut self.sessions[index];
         let agent_id = pane.agent_id.clone();
-        let old = pane.durable_name.clone();
         let draft =
-            super::super::client_sessions::parse_name(&old).is_some_and(|(_, _, id)| id.is_none());
+            super::super::client_sessions::parse_name(&old).is_none_or(|(_, _, id)| id.is_none());
         let name = super::super::client_sessions::name(&pane.harness, &agent_id, Some(&thread.id));
+        let row = ConsoleSession::client_thread(&agent_id, &pane.harness, Some(&thread));
         pane.durable_name = name.clone();
         pane.client_thread = Some(thread);
-        if self.active == Some(index) || self.pending_select_session.as_deref() == Some(&old) {
+        if selected || self.pending_select_session.as_deref() == Some(&old) {
             self.pending_select_session = Some(name.clone());
         }
-        self.auto_attempted.insert(name);
-        if draft {
-            self.remove_session_row(&agent_id, &old);
+        self.connecting.remove(&old);
+        self.auto_attempted.insert(name.clone());
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    let Load::Loaded(agents) = &mut env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(rows) = &mut agent.sessions else {
+                        continue;
+                    };
+                    if let Some(i) = rows.iter().position(|r| r.name == old && draft) {
+                        rows[i] = row.clone();
+                        let mut index = 0;
+                        rows.retain(|r| {
+                            let keep = r.name != name || index == i;
+                            index += 1;
+                            keep
+                        });
+                    } else if let Some(existing) = rows.iter_mut().find(|r| r.name == name) {
+                        *existing = row.clone();
+                    } else {
+                        rows.push(row.clone());
+                    }
+                }
+            }
         }
         self.adopt_pane_sessions();
-        Some(agent_id)
+        agent_id
     }
 
     /// What a maximized-header tab says for the pane at `index`: the
@@ -3448,6 +3532,7 @@ impl App {
                         // Placeholders carry no timestamp; only platform
                         // records can be adopted as a pane's real name.
                         .filter(|s| s.created_at.is_some())
+                        .filter(|s| s.is_shell())
                         .map(|s| (s.name.clone(), s.attached, s.running, s.created_at))
                         .collect();
                 }
@@ -3495,6 +3580,9 @@ impl App {
     /// row, and refusing to refetch left that count wrong until the agent was
     /// expanded again.
     pub fn refresh_agent_sessions(&mut self, agent_id: &str) -> Option<Effect> {
+        if self.thread_polls.contains(agent_id) {
+            return None;
+        }
         let has_pane = self.sessions.iter().any(|s| s.agent_id == agent_id);
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
@@ -4015,6 +4103,7 @@ impl App {
                             continue;
                         }
                         agent.sessions = LoadSessions::Loading;
+                        self.thread_polls.insert(agent.id.clone());
                         out.push(Effect::LoadSessions {
                             agent_id: agent.id.clone(),
                             environment_id: environment_id.clone(),
@@ -4060,7 +4149,9 @@ impl App {
                         // runs — and which has already marked what it claimed
                         // as loading. Asking about those here as well would be
                         // two requests for one agent.
-                        if agent.sessions == LoadSessions::Loading {
+                        if agent.sessions == LoadSessions::Loading
+                            || self.thread_polls.contains(&agent.id)
+                        {
                             continue;
                         }
                         // A failed fetch retries on the refresh cadence,
@@ -5322,6 +5413,14 @@ impl App {
         self.last_thread_refresh = Some(std::time::Instant::now());
     }
 
+    pub(super) fn mark_thread_refresh(&mut self, agent_id: &str) {
+        self.thread_polls.insert(agent_id.into());
+    }
+
+    pub(super) fn thread_refreshing(&self, agent_id: &str) -> bool {
+        self.thread_polls.contains(agent_id)
+    }
+
     /// The fast tick's work: what [`Self::sessions_to_refresh`] names, minus
     /// agents whose previous ask is still in flight, marked as in flight.
     pub fn threads_to_poll(&mut self) -> Vec<Effect> {
@@ -6149,11 +6248,7 @@ mod tests {
             Ok(vec![ConsoleSession {
                 name: "merry-daisy-ld9".into(),
                 kind: "SHELL".into(),
-                command: Some(
-                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
-                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'ship the release notes today'; printf 'x'"
-                        .into(),
-                ),
+                command: Some("exec bash -l".into()),
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
@@ -6162,8 +6257,8 @@ mod tests {
         );
         assert_eq!(
             a.session_tab_label(0),
-            "railway-ld9",
-            "the tab takes the listed name, folded short"
+            "merry-daisy-ld9",
+            "a shell tab takes the listed transport name"
         );
     }
 
@@ -6360,6 +6455,152 @@ mod tests {
     }
 
     #[test]
+    fn all_harnesses_promote_and_rename_a_thread_in_place_without_stealing_navigation() {
+        use super::super::super::{client_sessions, remote_threads::tests::thread};
+        for harness in [
+            "claude",
+            "grok",
+            "codex",
+            "opencode",
+            "opencode2",
+            "railway",
+        ] {
+            let mut app = loaded_app();
+            let mut pane = session("ca_1", "box");
+            pane.harness = harness.into();
+            pane.durable_name = client_sessions::draft_name(harness, "ca_1", "our-pane");
+            pane.client_id = Some("our-pane".into());
+            app.attach_session(pane, "ca_1".into());
+            let draft_index = app.cursor;
+            assert_eq!(app.selected_row().unwrap().label, "New Thread");
+            let mut saved = thread(harness, "real-id").thread;
+            saved.title = "New Thread".into();
+            app.client_thread_selected("our-pane", saved.clone());
+            assert_eq!(app.cursor, draft_index);
+            assert_eq!(
+                app.sessions[0].durable_name,
+                client_sessions::name(harness, "ca_1", Some("real-id"))
+            );
+            // Move elsewhere while a title is generated in the active pane.
+            app.focus = ManageFocus::Tree;
+            app.cursor = 0;
+            saved.title = "Typical weather in Sacramento".into();
+            app.client_thread_selected("our-pane", saved.clone());
+            assert_eq!(
+                app.cursor, 0,
+                "{harness}: title updates must not move the cursor"
+            );
+            assert!(
+                app.rows()[draft_index]
+                    .label
+                    .starts_with("Typical weather in ")
+            );
+            assert_eq!(
+                app.sessions[0].client_thread.as_ref().unwrap().title,
+                "Typical weather in Sacramento"
+            );
+            let before: Vec<_> = app
+                .rows()
+                .iter()
+                .map(|r| (r.kind, r.label.clone()))
+                .collect();
+            app.set_agent_expanded((0, 0, 0, 0), true);
+            app.mark_thread_refresh("ca_1");
+            assert!(app.thread_refreshing("ca_1"));
+            assert_eq!(
+                before,
+                app.rows()
+                    .iter()
+                    .map(|r| (r.kind, r.label.clone()))
+                    .collect::<Vec<_>>()
+            );
+            app.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![ConsoleSession::client_thread(
+                    "ca_1",
+                    harness,
+                    Some(&saved),
+                )]),
+            );
+            assert_eq!(app.cursor, 0);
+            assert!(!app.thread_refreshing("ca_1"));
+            assert!(app.rows().iter().all(|r| !r.label.starts_with("[S]")));
+        }
+    }
+
+    #[test]
+    fn refresh_preserves_order_selection_and_an_explicitly_collapsed_agent() {
+        use super::super::super::remote_threads::tests::thread;
+        let mut app = loaded_app();
+        let mut first = thread("claude", "first").thread;
+        first.title = "First title".into();
+        let mut second = thread("claude", "second").thread;
+        second.title = "Second title".into();
+        let rows = |first: &super::super::super::client_sessions::Thread,
+                    second: &super::super::super::client_sessions::Thread| {
+            vec![
+                ConsoleSession::client_thread("ca_1", "claude", Some(first)),
+                ConsoleSession::client_thread("ca_1", "claude", Some(second)),
+            ]
+        };
+        app.set_agent_expanded((0, 0, 0, 0), true);
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows(&first, &second)));
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "Second title")
+            .unwrap();
+        let selected = app.cursor;
+        first.title = "Renamed first title".into();
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows(&second, &first)));
+        assert_eq!(app.cursor, selected);
+        assert_eq!(app.selected_row().unwrap().label, "Second title");
+        assert_eq!(app.rows()[selected - 1].label, "Renamed first title");
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Agent(0, 0, 0, 0)))
+            .unwrap();
+        app.set_agent_expanded((0, 0, 0, 0), false);
+        let collapsed = app.rows();
+        assert!(app.auto_expand_agent().is_none());
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("offline".into()));
+        assert_eq!(app.rows().len(), collapsed.len());
+        assert_eq!(app.selected_row().unwrap().expanded, Some(false));
+    }
+
+    #[test]
+    fn only_interactive_vm_shells_use_session_rows() {
+        let mut row = ConsoleSession {
+            name: "console".into(),
+            kind: "SHELL".into(),
+            command: Some("exec bash -l".into()),
+            running: true,
+            attached: false,
+            created_at: None,
+            snapshot: None,
+        };
+        assert!(row.is_interesting());
+        assert!(row.thread_label().starts_with("[S]"));
+        for harness in [
+            "claude",
+            "grok",
+            "codex",
+            "opencode",
+            "opencode2",
+            "railway-agent-tui",
+        ] {
+            row.command = Some(format!("export RAILWAY_CODE_AUTOSTARTED=1; {harness}"));
+            assert!(!row.is_interesting(), "{harness} is not a shell");
+            assert!(!row.thread_label().starts_with("[S]"));
+        }
+        row.kind = "EXEC".into();
+        row.command = Some("python3 -".into());
+        assert!(!row.is_interesting());
+    }
+
+    #[test]
     fn remote_threads_adopt_the_exact_pane_and_resume_from_the_left_list() {
         use super::super::super::remote_threads::tests::thread;
         for harness in ["claude", "grok"] {
@@ -6484,11 +6725,7 @@ mod tests {
             Ok(vec![ConsoleSession {
                 name: "merry-daisy-ld9".into(),
                 kind: "SHELL".into(),
-                command: Some(
-                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
-                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'My firs test'; printf 'x'"
-                        .into(),
-                ),
+                command: Some("exec bash -l".into()),
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
@@ -6506,7 +6743,10 @@ mod tests {
             .filter(|r| matches!(r.kind, RowKind::Session(..)))
             .collect();
         assert_eq!(threads.len(), 1, "one session, one row: {rows:#?}");
-        assert_eq!(threads[0].label, "[S] railway-ld9", "the name leads");
+        assert_eq!(
+            threads[0].label, "[S] merry-daisy-ld9",
+            "the shell name leads"
+        );
         assert!(threads[0].note.is_empty(), "the orb and name are the row");
         assert_eq!(
             threads[0].status.as_deref(),
@@ -6515,7 +6755,7 @@ mod tests {
         );
         assert_eq!(
             a.selected_row().unwrap().label,
-            "[S] railway-ld9",
+            "[S] merry-daisy-ld9",
             "the cursor followed the rename"
         );
     }
@@ -10492,7 +10732,7 @@ mod tests {
             "ca_1",
             Ok(vec![ConsoleSession {
                 name: "sess-7".into(),
-                command: Some("claude".into()),
+                command: Some("bash -l".into()),
                 kind: "SHELL".into(),
                 running: true,
                 attached: false,
@@ -10501,10 +10741,7 @@ mod tests {
             }]),
         );
         let rows = a.rows();
-        let session_row = rows
-            .iter()
-            .find(|r| r.label == "[S] claude-sess-7")
-            .unwrap();
+        let session_row = rows.iter().find(|r| r.label == "[S] sess-7").unwrap();
         assert!(matches!(session_row.kind, RowKind::Session(0, 0, 0, 0, 0)));
         assert_eq!(session_row.depth, 1, "a child of its agent");
         assert!(
@@ -10593,7 +10830,10 @@ mod tests {
             running: true,
             ..exec.clone()
         };
-        assert!(detached.is_interesting(), "a live exec is someone's work");
+        assert!(
+            !detached.is_interesting(),
+            "a provisioning exec is never a conversation"
+        );
 
         let dead_shell = ConsoleSession {
             kind: "SHELL".into(),

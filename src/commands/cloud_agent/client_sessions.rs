@@ -29,12 +29,18 @@ pub(crate) fn name(harness: &str, agent: &str, thread: Option<&str>) -> String {
     )
 }
 
+pub(crate) const NEW_THREAD: &str = "New Thread";
+
+pub(crate) fn draft_name(harness: &str, agent: &str, pane: &str) -> String {
+    name(harness, agent, Some(&format!("~{pane}")))
+}
+
 pub(crate) fn parse_name(name: &str) -> Option<(&str, &str, Option<&str>)> {
     let mut fields = name.strip_prefix("client-thread:")?.splitn(3, ':');
     let harness = fields.next()?;
     if !matches!(
         harness,
-        "codex" | "opencode" | "opencode2" | "claude" | "grok"
+        "codex" | "opencode" | "opencode2" | "claude" | "grok" | "railway"
     ) {
         return None;
     }
@@ -43,7 +49,11 @@ pub(crate) fn parse_name(name: &str) -> Option<(&str, &str, Option<&str>)> {
         return None;
     }
     let thread = fields.next()?;
-    Some((harness, agent, (!thread.is_empty()).then_some(thread)))
+    Some((
+        harness,
+        agent,
+        (!thread.is_empty() && !thread.starts_with('~')).then_some(thread),
+    ))
 }
 
 pub(crate) fn is_client(name: &str) -> bool {
@@ -136,9 +146,10 @@ impl Connection {
                             .await?;
                     let data = if *beta { &page["data"] } else { &page };
                     for row in data.as_array().context("Invalid OpenCode session list")? {
-                        if row["time"]["archived"]
-                            .as_i64()
-                            .is_some_and(|time| time > 0)
+                        if row["parentID"].as_str().is_some_and(|id| !id.is_empty())
+                            || row["time"]["archived"]
+                                .as_i64()
+                                .is_some_and(|time| time > 0)
                         {
                             continue;
                         }
@@ -265,7 +276,7 @@ pub(super) fn parse_codex(row: &Value) -> Result<Thread> {
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .or(row["preview"].as_str()),
-            "New Codex conversation",
+            NEW_THREAD,
         ),
         directory: row["cwd"]
             .as_str()
@@ -288,12 +299,17 @@ pub(super) fn parse_codex(row: &Value) -> Result<Thread> {
     })
 }
 
-fn parse_opencode(row: &Value, directory: &str) -> Result<Thread> {
+pub(super) fn parse_opencode(row: &Value, directory: &str) -> Result<Thread> {
     let id = row["id"].as_str().context("OpenCode session has no ID")?;
     validate_id(id)?;
     Ok(Thread {
         id: id.into(),
-        title: title(row["title"].as_str(), "New OpenCode conversation"),
+        title: title(
+            row["title"]
+                .as_str()
+                .filter(|title| !title.starts_with("New session - ")),
+            NEW_THREAD,
+        ),
         directory: row["location"]["directory"]
             .as_str()
             .or(row["directory"].as_str())

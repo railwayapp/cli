@@ -404,10 +404,11 @@ fn open_client(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<()> {
     let name = pane.name();
-    if let Some(index) = app
-        .sessions
-        .iter()
-        .position(|s| s.durable_name == name && !s.ended())
+    if pane.thread.is_some()
+        && let Some(index) = app
+            .sessions
+            .iter()
+            .position(|s| s.durable_name == name && !s.ended())
     {
         app.connecting.remove(&name);
         if !background {
@@ -431,12 +432,31 @@ fn open_client(
     } else {
         None
     };
+    let opencode_bridge = if let ClientConnection::OpenCode(connection, beta) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        Some(super::opencode::bridge::Bridge::start(
+            connection.clone(),
+            *beta,
+            move |thread| {
+                let _ = updates.send(Message::ClientThreadSelected {
+                    client_id: id.clone(),
+                    thread,
+                });
+            },
+        )?)
+    } else {
+        None
+    };
     let mut session = session::Session::spawn_client(
         pane.agent_id.clone(),
         pane.agent_name,
         &pane.binary,
         &pane.connection,
-        bridge.as_ref().map(|bridge| bridge.url.as_str()),
+        bridge
+            .as_ref()
+            .map(|bridge| bridge.url.as_str())
+            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str())),
         pane.thread.as_ref().map(|t| t.id.as_str()),
         pane.prompt.as_deref(),
         24,
@@ -448,9 +468,14 @@ fn open_client(
     // Keep the VM identity for reconnect/sleep actions. The local process uses
     // the provider's authenticated API, not the SSH console transport.
     session.ssh_target = format!("agent:{}:{}", pane.environment_id, pane.agent_id);
+    if pane.thread.is_none() {
+        session.durable_name =
+            client_sessions::draft_name(pane.connection.harness(), &pane.agent_id, &client_id);
+    }
     session.client_id = Some(client_id);
     session.client_thread = pane.thread;
     session.client_bridge = bridge;
+    session.opencode_bridge = opencode_bridge;
     if background {
         app.attach_session_background(session, pane.agent_id.clone());
     } else {
@@ -869,7 +894,7 @@ fn start_refresh(
     spawn_my_agents_fetch(tx, client, backboard);
 }
 
-/// Real conversations on the VM, plus console transports for other harnesses.
+/// Real conversations on the VM, plus directly reattachable VM shells.
 async fn fetch_sessions(
     client: &reqwest::Client,
     backboard: &str,
@@ -959,19 +984,23 @@ async fn fetch_sessions(
         .unwrap_or_default();
     let discovery = discovery.unwrap_or_else(|error| remote_threads::Discovery {
         warnings: vec![format!("Couldn't read VM conversation history: {error:#}")],
-        failed: vec!["claude".into(), "grok".into()],
+        failed: ["claude", "grok", "codex", "opencode", "opencode2"]
+            .map(str::to_owned)
+            .to_vec(),
         ..Default::default()
     });
     let mut inventory = merge_remote_threads(cloud_agent_id, sessions, discovery);
     if let Some(harness) = native_harness {
         match native {
             Ok(threads) => {
-                inventory
-                    .rows
-                    .retain(|row| row.snapshot.as_ref().is_none_or(|s| s.harness != harness));
-                inventory.rows.extend(threads.iter().map(|thread| {
-                    ConsoleSession::client_thread(cloud_agent_id, harness, Some(thread))
-                }));
+                for thread in &threads {
+                    let row = ConsoleSession::client_thread(cloud_agent_id, harness, Some(thread));
+                    if let Some(previous) = inventory.rows.iter_mut().find(|r| r.name == row.name) {
+                        *previous = row;
+                    } else {
+                        inventory.rows.push(row);
+                    }
+                }
             }
             Err(error) => {
                 inventory.failed.push(harness.into());
@@ -997,10 +1026,63 @@ fn merge_remote_threads(
     discovery: remote_threads::Discovery,
 ) -> SessionInventory {
     let mut remote = discovery.threads;
+    // Railway's hook uses the daemon's real conversation ID. Its console is
+    // only a transport, just as for the other harnesses.
+    for console in &consoles {
+        let Some(snapshot) = &console.snapshot else {
+            continue;
+        };
+        if snapshot.harness != "railway-agent" || snapshot.session_id.is_empty() {
+            continue;
+        }
+        remote.push(RemoteThread {
+            harness: "railway".into(),
+            config_dir: "/app".into(),
+            active: console.running,
+            pane_id: None,
+            console_name: console.running.then(|| console.name.clone()),
+            background_id: None,
+            database: None,
+            thread: ClientThread {
+                id: snapshot.session_id.clone(),
+                title: snapshot
+                    .prompt
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| client_sessions::NEW_THREAD.into()),
+                directory: "/app".into(),
+                created_at: console.created_at,
+                updated_at: snapshot.updated_at.clone(),
+                state: snapshot.state.clone(),
+            },
+        });
+    }
     let mut claimed = std::collections::HashSet::new();
     for console in &consoles {
         if !console.running {
             continue;
+        }
+        // SSH-hosted clients report their native ID through the hook. The
+        // pane marker can promote its draft even when that harness has no
+        // live-process registry; it does not authorize console reattachment.
+        if let Some(snapshot) = &console.snapshot
+            && let Some(marker) = console
+                .command
+                .as_deref()
+                .and_then(|c| c.split_once("RAILWAY_THREAD_PANE_ID="))
+                .map(|(_, tail)| tail.split(';').next().unwrap_or("").trim())
+            && client_sessions::validate_id(marker).is_ok()
+            && !remote.iter().any(|row| {
+                row.active
+                    && (row.pane_id.as_deref() == Some(marker)
+                        || row.console_name.as_deref() == Some(console.name.as_str()))
+            })
+            && let Some(row) = remote
+                .iter_mut()
+                .find(|row| row.harness == snapshot.harness && row.thread.id == snapshot.session_id)
+            && row.pane_id.is_none()
+        {
+            row.pane_id = Some(marker.into());
         }
         // A process's pane marker outranks an older hook report after /resume.
         let direct: Vec<_> = remote
@@ -1056,22 +1138,7 @@ fn merge_remote_threads(
             row.console_name = None;
         }
     }
-    consoles.retain(|row| {
-        let harness = row
-            .snapshot
-            .as_ref()
-            .map(|s| s.harness.as_str())
-            .or_else(|| row.harness_slug());
-        let has_history = harness.is_some_and(|h| {
-            matches!(h, "claude" | "grok") && !discovery.failed.iter().any(|failed| failed == h)
-        });
-        !claimed.contains(&row.name)
-            && !has_history
-            && !row
-                .command
-                .as_ref()
-                .is_some_and(|command| command.contains("RAILWAY_THREAD_DISCOVERY=1"))
-    });
+    consoles.retain(|row| !claimed.contains(&row.name) && row.is_shell());
     consoles.extend(
         remote
             .iter()
@@ -1363,9 +1430,11 @@ pub async fn run(
                 // The spinner goes on now — connect_info takes a beat, and a
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
-                if client_sessions::parse_name(&session_name)
-                    .is_some_and(|(h, _, _)| matches!(h, "claude" | "grok"))
-                {
+                if client_sessions::parse_name(&session_name).is_some_and(|(h, _, _)| {
+                    matches!(h, "claude" | "grok" | "railway")
+                        || code::saved_config::client_connection(&agent_id, &environment_id)
+                            .is_none_or(|c| c.harness() != h)
+                }) {
                     reconnect_remote_thread(
                         app::AutoConnect {
                             agent_id,
@@ -1638,6 +1707,7 @@ pub async fn run(
                 environment_id,
                 path,
             }) => {
+                app.mark_thread_refresh(&agent_id);
                 spawn_session_fetch(agent_id, environment_id, path, &tx, &client, &backboard);
             }
             Some(Effect::LoadAgents {
@@ -2016,7 +2086,7 @@ fn handle_message(
                 // What someone is looking at, asked about again — the counts and
                 // session rows are as able to go stale as the agents are. Narrow
                 // by design: see [`App::sessions_to_refresh`].
-                let watched = app.sessions_to_refresh();
+                let watched = app.threads_to_poll();
                 if !watched.is_empty() {
                     spawn_session_prefetch(watched, tx, client, backboard, stop_fetching.clone());
                 }
@@ -2278,7 +2348,12 @@ fn handle_message(
         // The draw at the top of the loop is the response.
         // Output also carries the end: the reader thread flips `ended` and
         // sends one last wake, which is when a finished pane gets closed.
-        Message::SessionOutput => app.reap_ended_sessions(),
+        Message::SessionOutput => {
+            for pane in &mut app.sessions {
+                pane.sync_console_name();
+            }
+            app.reap_ended_sessions()
+        }
     }
 }
 
@@ -2312,8 +2387,7 @@ fn open_session(
     // A placeholder size: the next frame measures the real pane and resizes
     // both the pty and the emulator before anything is drawn from it.
     let (rows, cols) = (24u16, 80u16);
-    let pane_id =
-        matches!(prepared.harness, "claude" | "grok").then(super::opencode::generate_password);
+    let pane_id = (prepared.harness != "shell").then(super::opencode::generate_password);
     let remote_cmd = match &pane_id {
         Some(id) => format!(
             "export RAILWAY_THREAD_PANE_ID={id}; {}",
@@ -2339,6 +2413,8 @@ fn open_session(
     ) {
         Ok(mut session) => {
             if let Some(id) = pane_id {
+                session.durable_name =
+                    client_sessions::draft_name(prepared.harness, &prepared.agent_id, &id);
                 session.client_id = Some(id);
                 session.console_name = Some(durable_session);
             }

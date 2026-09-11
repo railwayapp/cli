@@ -297,7 +297,11 @@ In `railway ca` and the `railway code` frame, expand a cloud agent in the left
 list to browse its **Claude, Grok, Codex, OpenCode, and OpenCode2 conversations**.
 Select a title and press Enter to reopen that exact thread. Saved conversations
 remain available after their terminal exits; opening the list does not launch
-clients for them. Titles refresh and selection follows the conversation ID.
+clients for them. A fresh harness pane starts as **New Thread**, then adopts the
+harness's generated title. **[S]** is reserved for direct VM shells; harness
+consoles, server processes, and provisioning commands do not get session rows.
+Refreshes animate the agent icon while preserving loaded rows, their order,
+expansion choices, and the selected conversation.
 
 Claude and Grok history is discovered directly on the VM over SSH, including
 conversations started outside Railway's launcher. Claude uses a pinned official
@@ -305,12 +309,15 @@ Agent SDK, cached automatically on the VM when history is first discovered;
 Grok uses its saved `summary.json` metadata. Discovery respects
 `CLAUDE_CONFIG_DIR` and `GROK_HOME`, and filters hidden subagents and empty
 startup records. A temporary discovery failure retains previously loaded rows.
+Codex and both OpenCode versions also expose their VM-local metadata indexes,
+so their history is available without a locally saved backend connection.
 
 Selecting a Claude or Grok thread reconnects to its verified live terminal when
 available, or resumes its native UI from the recorded project and configuration
 directory. Claude background jobs use `claude attach`. Live metadata and hooks
 update thread status and associate native panes with their conversation IDs.
-Codex's native `/new` and `/resume` also update the pane's conversation identity.
+Native Codex and OpenCode client actions update the pane's exact conversation
+identity through a per-pane authenticated bridge.
 History belongs to the VM where it was saved; wake a sleeping agent before
 opening one of its threads.
 
