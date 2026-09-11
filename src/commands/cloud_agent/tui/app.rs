@@ -448,6 +448,7 @@ impl Target {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
+    BootstrapSetup,
     /// First-run setup, over the tree.
     Setup,
     /// The ⌥s settings card, over the tree: every preference setup collects,
@@ -625,6 +626,7 @@ pub struct PaneRects {
     pub session_outer: PaneBox,
     /// The new-session prompt box, borders included.
     pub prompt: PaneBox,
+    pub bootstrap: PaneBox,
     /// The header's session tabs, drawn only while the pane is maximized. A
     /// fixed array so this stays `Copy`; sessions past the cap keep their
     /// ⌥⇧[ ⌥⇧] keys but aren't clickable.
@@ -815,6 +817,7 @@ pub struct SshKeyOffer {
 /// A connect held back until the SSH key question is answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeldConnect {
+    Bootstrap(super::bootstrap_setup::Request),
     Launch(LaunchRequest),
     OpenShell {
         agent_id: String,
@@ -833,6 +836,7 @@ impl HeldConnect {
     pub fn into_effect(self) -> Effect {
         match self {
             HeldConnect::Launch(req) => Effect::Launch(req),
+            HeldConnect::Bootstrap(req) => Effect::CreateBootstrap(req),
             HeldConnect::OpenShell {
                 agent_id,
                 agent_name,
@@ -896,6 +900,7 @@ pub enum MouseAction {
 /// What the event loop must do after a key. At most one per keystroke.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
+    CreateBootstrap(super::bootstrap_setup::Request),
     ConfigureBootstrap {
         agent_id: String,
         environment_id: String,
@@ -1057,6 +1062,9 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
+    pub bootstrap_form: Option<super::bootstrap_setup::Form>,
+    pub bootstrap_defaults:
+        std::collections::BTreeMap<String, super::bootstrap_setup::DefaultState>,
     /// The agent `n` was pressed on, when it was: the picked harness launches
     /// a new session on that box rather than minting a fresh agent.
     pub harness_pick_agent: Option<String>,
@@ -1274,6 +1282,8 @@ impl App {
             configured,
             known_environments: Vec::new(),
             target_pick: None,
+            bootstrap_form: None,
+            bootstrap_defaults: Default::default(),
             harness_pick: None,
             harness_pick_agent: None,
             manage_prompt: None,
@@ -1356,6 +1366,29 @@ impl App {
     pub fn set_harness(&mut self, slug: Option<&str>) {
         if let Some(i) = slug.and_then(|s| HARNESSES.iter().position(|x| *x == s)) {
             self.harness = i;
+        }
+    }
+
+    pub fn start_bootstrap_setup(&mut self) {
+        if self.loading.active {
+            return;
+        }
+        if let Some(target) = self.target.clone() {
+            self.bootstrap_form = Some(super::bootstrap_setup::Form::new(target, self.harness));
+            self.screen = Screen::BootstrapSetup;
+        }
+    }
+
+    fn on_key_bootstrap_setup(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::bootstrap_setup::Action;
+        match self.bootstrap_form.as_mut()?.on_key(key) {
+            Action::None => None,
+            Action::Close => {
+                self.bootstrap_form = None;
+                self.screen = Screen::Manage;
+                None
+            }
+            Action::Submit(req) => Some(Effect::CreateBootstrap(req)),
         }
     }
 
@@ -2422,12 +2455,34 @@ impl App {
                     then: gate.then,
                 }),
                 _ => {
+                    if matches!(&gate.then, Some(HeldConnect::Bootstrap(_)))
+                        && let Some(form) = self.bootstrap_form.as_mut()
+                    {
+                        form.running = false;
+                        form.error = Some(
+                            "Setup cancelled before creating a VM: an SSH key must be registered."
+                                .into(),
+                        );
+                    }
                     if gate.then.is_some() {
                         self.toast_error("Cancelled — connecting needs a registered SSH key");
                     }
                     None
                 }
             };
+        }
+
+        // Creation owns the screen until checkpoint capture and VM cleanup finish.
+        if self.screen == Screen::BootstrapSetup {
+            return self.on_key_bootstrap_setup(key);
+        }
+        if self.screen == Screen::Manage
+            && self.new_session_selected()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
+        {
+            self.start_bootstrap_setup();
+            return None;
         }
 
         // A focused session owns the keyboard: Ctrl-C must interrupt the agent,
@@ -2553,6 +2608,7 @@ impl App {
         }
         self.status.clear();
         match self.screen {
+            Screen::BootstrapSetup => self.on_key_bootstrap_setup(key),
             Screen::Setup => self.on_key_wizard(key),
             Screen::Settings => self.on_key_settings(key),
             Screen::TargetPick => self.on_key_target_pick(key),
@@ -2597,6 +2653,11 @@ impl App {
             .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         match self.screen {
+            Screen::BootstrapSetup => {
+                if let Some(form) = self.bootstrap_form.as_mut() {
+                    form.paste(&text);
+                }
+            }
             Screen::Manage if self.new_session_selected() && !self.shell_selected() => {
                 self.prompt_insert_str(&text);
             }
@@ -2790,6 +2851,10 @@ impl App {
                 None
             }
             MouseAction::Down => {
+                if self.panes.bootstrap.contains(col, row) {
+                    self.start_bootstrap_setup();
+                    return None;
+                }
                 // A click clears the status line, the same as a keypress
                 // (see on_key): the message answered the previous gesture,
                 // and whatever this click means sets a fresh one — clicking
@@ -6014,6 +6079,52 @@ mod tests {
 
     fn app() -> App {
         App::new(tree(), None, Some("claude"), None, None, true)
+    }
+
+    #[test]
+    fn bootstrap_setup_preserves_prompt_harness_and_target_until_finished() {
+        let mut a = app();
+        a.target = Some(Target {
+            project_id: "proj_1".into(),
+            project_name: "Demo".into(),
+            environment_id: "env_prod".into(),
+            environment_name: "production".into(),
+        });
+        a.prompt = "Fix the bug".into();
+        let harness = a.harness;
+        a.start_bootstrap_setup();
+        let form = a.bootstrap_form.as_mut().unwrap();
+        form.name = "dev".into();
+        form.repo = "railwayapp/cli".into();
+        form.harness = 0;
+        form.field = 3;
+        let Some(Effect::CreateBootstrap(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected setup");
+        };
+        assert_eq!(req.harness, "railway");
+        assert_eq!(req.target.environment_id, "env_prod");
+        for event in [
+            key(KeyCode::Enter),
+            key(KeyCode::Esc),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert!(a.on_key(event).is_none());
+            assert_eq!(a.screen, Screen::BootstrapSetup);
+        }
+        let form = a.bootstrap_form.as_mut().unwrap();
+        form.running = false;
+        form.finished = true;
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::Manage);
+        assert_eq!(a.prompt, "Fix the bug");
+        assert_eq!(a.harness, harness);
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected launch");
+        };
+        assert_eq!(req.harness, "claude");
+        assert_eq!(req.prompt.as_deref(), Some("Fix the bug"));
+        assert!(req.force_new);
     }
 
     /// One workspace, four projects, deliberately out of alphabetical order.
@@ -12051,6 +12162,45 @@ mod tests {
             prompt: None,
             label: "devtools/production".into(),
             base: Default::default(),
+        }
+    }
+
+    #[test]
+    fn bootstrap_setup_ssh_gate_can_register_or_cancel_before_spending_a_vm() {
+        for accept in [true, false] {
+            let mut a = app();
+            let target = Target {
+                project_id: "proj_1".into(),
+                project_name: "Demo".into(),
+                environment_id: "env_prod".into(),
+                environment_name: "production".into(),
+            };
+            a.target = Some(target.clone());
+            a.start_bootstrap_setup();
+            a.bootstrap_form.as_mut().unwrap().running = true;
+            let req = super::super::bootstrap_setup::Request {
+                target,
+                name: "dev".into(),
+                repo: None,
+                harness: "railway".into(),
+            };
+            a.ssh_key = SshKeyState::NeedsRegistration(offer());
+            assert!(a.hold_for_ssh_key(HeldConnect::Bootstrap(req.clone())));
+            let effect = a.on_key(key(KeyCode::Char(if accept { 'y' } else { 'n' })));
+            if accept {
+                let Some(Effect::RegisterSshKey {
+                    then: Some(held), ..
+                }) = effect
+                else {
+                    panic!("registration");
+                };
+                assert_eq!(held.into_effect(), Effect::CreateBootstrap(req));
+            } else {
+                assert!(effect.is_none());
+                assert!(!a.bootstrap_form.as_ref().unwrap().running);
+                assert!(a.bootstrap_form.as_ref().unwrap().error.is_some());
+            }
+            assert_eq!(a.screen, Screen::BootstrapSetup);
         }
     }
 

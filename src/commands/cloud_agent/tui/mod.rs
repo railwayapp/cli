@@ -17,6 +17,7 @@
 
 mod activity;
 pub mod app;
+pub(crate) mod bootstrap_setup;
 mod cache;
 pub mod session;
 pub mod settings;
@@ -310,6 +311,9 @@ enum Message {
         agent_id: String,
         result: Result<SessionInventory, String>,
     },
+    BootstrapDefaultLoaded(String, bootstrap_setup::DefaultState),
+    BootstrapStep(String),
+    BootstrapDone(String, Result<String, String>),
     LaunchStep(String),
     LaunchReady(Box<Prepared>, Box<LaunchRequest>),
     LaunchFailed(String),
@@ -681,6 +685,57 @@ impl InflightLaunch {
             }
         }
     }
+}
+
+struct BootstrapProgress(mpsc::UnboundedSender<Message>);
+impl Progress for BootstrapProgress {
+    fn finish(&self) {}
+    fn step(&self, text: &str) {
+        let _ = self.0.send(Message::BootstrapStep(text.into()));
+    }
+    fn note(&self, text: &str) {
+        self.step(text);
+    }
+}
+
+fn load_bootstrap_default(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let Some(target) = app.target.as_ref() else {
+        return;
+    };
+    let env = target.environment_id.clone();
+    if app.bootstrap_defaults.contains_key(&env) {
+        return;
+    }
+    app.bootstrap_defaults
+        .insert(env.clone(), bootstrap_setup::DefaultState::Loading);
+    let (tx, client, url) = (tx.clone(), client.clone(), backboard.to_owned());
+    tokio::spawn(async move {
+        use crate::controllers::agent_bootstrap as bootstrap;
+        use bootstrap_setup::DefaultState;
+        let result = async {
+            let configs = Configs::new()?;
+            if configs.get_agent_bootstrap_default(&env).is_none() {
+                return Ok(DefaultState::Missing);
+            }
+            let rows = bootstrap::list(&configs, &client, &url, &env).await?;
+            match rows.into_iter().find(|b| b.is_default) {
+                Some(b) => {
+                    b.require_ready()?;
+                    Ok(DefaultState::Ready(b.name))
+                }
+                None => Ok(DefaultState::Missing),
+            }
+        }
+        .await;
+        let state =
+            result.unwrap_or_else(|e: anyhow::Error| DefaultState::Failed(format!("{e:#}")));
+        let _ = tx.send(Message::BootstrapDefaultLoaded(env, state));
+    });
 }
 
 /// Run the prepare pipeline for `req`, streaming progress and the outcome into
@@ -1201,6 +1256,7 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     // Re-entry has a new reply channel; requests owned by the previous loop
     // cannot finish into this one. Keep their cached rows, release their locks.
+    app.bootstrap_defaults.clear();
     app.refreshing = false;
     app.thread_polls.clear();
     app.activity = Default::default();
@@ -1233,6 +1289,7 @@ pub async fn run(
     let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
 
     loop {
+        load_bootstrap_default(app, &tx, &client, &backboard);
         // Coalesce frames under load: with more messages already waiting,
         // painting now just repeats a screen that is about to change again.
         // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown
@@ -1666,7 +1723,10 @@ pub async fn run(
                     }
                 }
             }
-            Some(Effect::RefreshAll) => start_refresh(app, &tx, &client, &backboard),
+            Some(Effect::RefreshAll) => {
+                app.bootstrap_defaults.clear();
+                start_refresh(app, &tx, &client, &backboard);
+            }
             Some(Effect::OpenUrl(url)) => {
                 // Best-effort: a machine with no browser is a normal way to run
                 // this, and the ssh command in the toast is still copyable.
@@ -1816,6 +1876,29 @@ pub async fn run(
                         op,
                         error,
                     });
+                });
+            }
+            Some(Effect::CreateBootstrap(req)) => {
+                if app.hold_for_ssh_key(HeldConnect::Bootstrap(req.clone())) {
+                    if app.ssh_gate.is_none()
+                        && let Some(form) = app.bootstrap_form.as_mut()
+                    {
+                        form.running = false;
+                        form.error = Some(
+                            "No SSH key found. Run `ssh-keygen -t ed25519`, then retry setup."
+                                .into(),
+                        );
+                    }
+                    continue;
+                }
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let env = req.target.environment_id.clone();
+                    let result = code::bootstrap_setup::create(req, &BootstrapProgress(tx.clone()))
+                        .await
+                        .map(|b| b.name)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapDone(env, result));
                 });
             }
             Some(Effect::Launch(req)) => dispatch_launch(app, req, &tx, &client, &backboard),
@@ -2276,6 +2359,35 @@ fn handle_message(
             }
             None
         }
+        Message::BootstrapDefaultLoaded(env, state) => {
+            app.bootstrap_defaults.insert(env, state);
+            None
+        }
+        Message::BootstrapStep(text) => {
+            if let Some(form) = app.bootstrap_form.as_mut() {
+                form.steps.push(text);
+            }
+            None
+        }
+        Message::BootstrapDone(env, result) => {
+            app.bootstrap_defaults.remove(&env);
+            if let Some(form) = app.bootstrap_form.as_mut() {
+                form.running = false;
+                match result {
+                    Ok(name) => {
+                        form.finished = true;
+                        form.steps.push(format!(
+                            "'{name}' is your local default. Press Enter to return to your prompt."
+                        ));
+                    }
+                    Err(error) => {
+                        form.error = Some(error);
+                    }
+                }
+            }
+            start_refresh(app, tx, client, backboard);
+            None
+        }
         Message::LaunchStep(text) => {
             app.loading_step(text);
             None
@@ -2445,6 +2557,12 @@ fn handle_message(
                 then.map(HeldConnect::into_effect)
             }
             Err(message) => {
+                if matches!(then, Some(HeldConnect::Bootstrap(_)))
+                    && let Some(form) = app.bootstrap_form.as_mut()
+                {
+                    form.running = false;
+                    form.error = Some(format!("SSH key registration failed: {message}"));
+                }
                 // Still unregistered: the next connect raises the gate again.
                 // The toast gets the first line; register_ssh_key already maps
                 // the duplicate-fingerprint rejection to something actionable.

@@ -284,6 +284,26 @@ railway code --codex --no-bootstrap          # starts with a clean VM
 railway ca create scratch --bootstrap dev
 ```
 
+On the `railway ca` main screen, select a project, then click the bootstrap row
+below **Target Project** or press **Ctrl+B**. Projects without a local default
+show an invitation to set one up. The **Create bootstrap** form asks for a name,
+an optional repository (`owner/repo` or an HTTPS URL), and a coding agent.
+Use Tab to move between fields, left/right to pick the agent, and Enter on
+**Create bootstrap** to submit.
+
+The form stays open while the CLI creates a temporary VM, copies the selected
+harness's available local sign-in, skills, MCP configuration and settings,
+optionally clones the repository into `/app`, and saves a checkpoint. Existing
+Railway-managed harness settings take precedence over imported settings. Private
+repositories use the VM's GitHub access. Once capture is ready, the CLI selects
+the bootstrap as your local default and deletes the setup VM. Provisioning or
+capture failures also attempt cleanup and preserve the previous default. Cleanup
+failures name the remaining VM so it can be deleted manually.
+
+Press Enter after completion to return to your unchanged prompt. Submitting it
+creates a VM from the new default using the harness selected in the prompt,
+which can differ from the harness used during bootstrap setup.
+
 In `railway ca`, highlight a VM and press `b` to open the save form. Saving
 captures its disk without stopping or deleting the source VM. The first
 successful CLI save becomes your local environment default if none is set; later saves

@@ -303,6 +303,10 @@ fn render_toast(app: &App, f: &mut Frame, rects: &PaneRects) {
 
 fn render_screen(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     match app.screen {
+        Screen::BootstrapSetup => {
+            render_manage(app, f, rects);
+            render_bootstrap_setup(app, f);
+        }
         Screen::Setup => {
             render_manage(app, f, rects);
             render_wizard(app, f);
@@ -387,7 +391,8 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
     // the title from the prompt box, whatever the pane's height.
     let prompt_gap = if area.height >= 26 { 2 } else { 1 };
     // banner, gap, CLOUD AGENTS, title, status, gap, prompt, gap, target.
-    let panel_h = banner_h + 4 + 1 + prompt_h + prompt_gap + 1;
+    let bootstrap_h = if app.target.is_some() { 2 } else { 0 };
+    let panel_h = banner_h + 4 + 1 + prompt_h + prompt_gap + 1 + bootstrap_h;
     let panel = centered(panel_w, panel_h.min(area.height), area);
 
     let rows = Layout::vertical([
@@ -400,6 +405,7 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
         Constraint::Length(prompt_h),
         Constraint::Length(prompt_gap), // the prompt's room below its outline
         Constraint::Length(1),          // target
+        Constraint::Length(bootstrap_h), // bootstrap for the selected project
     ])
     .split(panel);
 
@@ -450,6 +456,110 @@ fn render_welcome(app: &App, f: &mut Frame, pane: Rect, rects: &mut PaneRects) {
         Paragraph::new(target_line(app)).alignment(Alignment::Center),
         rows[8],
     );
+    if let Some(target) = &app.target {
+        use super::bootstrap_setup::DefaultState;
+        let text = match app.bootstrap_defaults.get(&target.environment_id) {
+            Some(DefaultState::Ready(name)) => format!("Bootstrap  {name} (local default)"),
+            Some(DefaultState::Failed(error)) => format!(
+                "Bootstrap unavailable: {} — configure a new one",
+                error.lines().next().unwrap_or("retry")
+            ),
+            Some(DefaultState::Missing) => "No bootstrap configured — set one up".into(),
+            _ => "Checking bootstrap…".into(),
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                chord_badge(theme, "^b"),
+                Span::raw(" "),
+                Span::styled(text, Style::default().fg(theme.accent)),
+            ]))
+            .alignment(Alignment::Center),
+            rows[9],
+        );
+        rects.bootstrap = whole(rows[9]);
+    }
+}
+
+fn render_bootstrap_setup(app: &App, f: &mut Frame) {
+    let Some(form) = &app.bootstrap_form else {
+        return;
+    };
+    let theme = app.theme;
+    let area = centered(80, 24, page(f));
+    f.render_widget(Clear, area);
+    let block = dialog_block(theme).title(" Create bootstrap ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let mut lines = vec![
+        Line::styled(form.target.label(), Style::default().fg(theme.accent)),
+        Line::raw(""),
+    ];
+    if !form.running && !form.finished {
+        for (index, label, value) in [
+            (0, "Name", form.name.as_str()),
+            (1, "Repository (optional)", form.repo.as_str()),
+            (
+                2,
+                "Default coding agent",
+                super::app::HARNESSES[form.harness],
+            ),
+            (3, "Create bootstrap", ""),
+        ] {
+            let marker = if form.field == index { "›" } else { " " };
+            let value = if value.is_empty() && index == 1 {
+                "owner/repo or HTTPS URL"
+            } else {
+                value
+            };
+            lines.push(Line::styled(
+                format!("{marker} {label}: {value}"),
+                Style::default().fg(if form.field == index {
+                    theme.accent
+                } else {
+                    theme.fg
+                }),
+            ));
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::raw(
+            "Tab / ↑↓ field · ←→ coding agent · Enter continue · Esc back",
+        ));
+        lines.push(Line::raw(
+            "Saves a shared checkpoint with this harness's settings and sign-in.",
+        ));
+        lines.push(Line::raw(
+            "Sets your local default, then deletes the temporary setup VM.",
+        ));
+    } else {
+        for step in form
+            .steps
+            .iter()
+            .rev()
+            .take((inner.height.saturating_sub(5) as usize / 2).max(1))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            lines.push(Line::styled(
+                format!("  {step}"),
+                Style::default().fg(theme.fg),
+            ));
+        }
+        if form.running {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(
+                "Creating bootstrap… Keep this screen open until cleanup finishes.",
+            ));
+        }
+    }
+    if let Some(error) = &form.error {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            error.clone(),
+            Style::default().fg(theme.pending),
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// `^t  Target Project  name (environment)`, or an invitation to set one.
@@ -2388,6 +2498,56 @@ mod tests {
             None,
             true,
         )
+    }
+
+    #[test]
+    fn bootstrap_setup_row_is_below_project_and_only_visible_with_target() {
+        let mut app = app_with_tree();
+        app.bootstrap_defaults.insert(
+            "env_prod".into(),
+            super::super::bootstrap_setup::DefaultState::Missing,
+        );
+        let screen = draw(&app, 120, 40);
+        let lines: Vec<_> = screen.lines().collect();
+        let project = lines
+            .iter()
+            .position(|l| l.contains("Target Project"))
+            .unwrap();
+        let bootstrap = lines
+            .iter()
+            .position(|l| l.contains("No bootstrap configured"))
+            .unwrap();
+        assert!(bootstrap > project);
+        assert!(lines[bootstrap].contains("^b"));
+        app.target = None;
+        let screen = draw(&app, 120, 40);
+        assert!(!screen.contains("No bootstrap configured"));
+        assert!(!screen.contains("Checking bootstrap"));
+    }
+
+    #[test]
+    fn bootstrap_setup_form_and_progress_keep_the_prompt_draft() {
+        let mut app = app_with_tree();
+        app.prompt = "Fix the CLI".into();
+        app.start_bootstrap_setup();
+        let screen = draw(&app, 120, 40);
+        for text in [
+            "Create bootstrap",
+            "Repository (optional)",
+            "Default coding agent",
+            "Name",
+        ] {
+            assert!(screen.contains(text), "{screen}");
+        }
+        let form = app.bootstrap_form.as_mut().unwrap();
+        form.running = true;
+        form.steps = vec!["Creating setup VM".into(), "Saving checkpoint".into()];
+        let screen = draw(&app, 120, 40);
+        assert!(screen.contains("Create bootstrap"));
+        assert!(screen.contains("Saving checkpoint"));
+        assert_eq!(app.prompt, "Fix the CLI");
+        // The form also renders in small terminals without panicking.
+        draw(&app, 60, 18);
     }
 
     pub(super) fn draw(app: &App, w: u16, h: u16) -> String {

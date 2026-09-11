@@ -81,6 +81,7 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
+pub(crate) mod bootstrap_setup;
 pub(crate) mod client;
 /// `railway code` is the launcher: it answers "where, and which harness"
 /// from flags and preferences, then opens that session. On a terminal it opens
@@ -433,6 +434,9 @@ pub struct LaunchArgs {
     /// prepare an agent and then do nothing with it.
     #[clap(skip)]
     pub app_mode: bool,
+    /// Temporary bootstrap setup VMs never become remembered launch targets.
+    #[clap(skip)]
+    pub(crate) bootstrap_setup: bool,
     /// Explicit `remote` mode keeps both client and server inside the VM.
     #[clap(skip)]
     pub client_on_agent: bool,
@@ -2648,8 +2652,10 @@ async fn resolve_agent(
             ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
                 .await?;
         warn_ignored_variables(args, progress);
-        configs.set_code_agent(environment_id, &ready.id);
-        configs.write()?;
+        if !args.bootstrap_setup {
+            configs.set_code_agent(environment_id, &ready.id);
+            configs.write()?;
+        }
         return Ok((ready, false, probe_master));
     }
 
@@ -3241,6 +3247,11 @@ async fn prepare_inner(
         // plain shell has nothing to sign in to.
         Agent::Railway | Agent::Shell => PendingAuth::None,
     };
+    if args.bootstrap_setup && matches!(pending, PendingAuth::MintClaude) {
+        bail!(
+            "Claude sign-in was not cached. Sign in with `railway code --claude`, then retry bootstrap setup."
+        );
+    }
     match pending {
         PendingAuth::Ready { ref source, .. } => progress.note(&format!(
             "Using your {} credential ({source}) on the agent",
@@ -3277,6 +3288,9 @@ async fn prepare_inner(
     let packed_mcp = match std::env::current_dir().map(|cwd| mcp_sync::pack(&prefs, &cwd)) {
         Ok(Ok(packed)) => packed,
         Ok(Err(err)) => {
+            if args.bootstrap_setup {
+                return Err(err.context("Could not copy project MCP configuration"));
+            }
             progress.note(&format!("Skipping MCP import: {err:#}"));
             None
         }
@@ -3321,6 +3335,7 @@ async fn prepare_inner(
     let environment_id = launch_target.environment_id.clone();
     let identity = match identity {
         Ok(identity) => identity,
+        Err(err) if args.bootstrap_setup => return Err(err),
         Err(_) => {
             let key_configs = Configs::new()?;
             ssh_tel::timed_for(
@@ -3352,8 +3367,10 @@ async fn prepare_inner(
         ),
     )
     .await?;
-    configs.set_code_agent(&environment_id, &cloud_agent.id);
-    configs.write()?;
+    if !args.bootstrap_setup {
+        configs.set_code_agent(&environment_id, &cloud_agent.id);
+        configs.write()?;
+    }
 
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
@@ -3593,8 +3610,15 @@ async fn prepare_inner(
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-        for line in skills_note.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let notes = skills_note.lock().unwrap_or_else(|e| e.into_inner());
+        for line in notes.iter() {
             progress.note(line);
+        }
+        if args.bootstrap_setup && !notes.is_empty() {
+            bail!(
+                "Bootstrap configuration sync was incomplete: {}",
+                notes.join("; ")
+            );
         }
         result
     };
@@ -3899,6 +3923,40 @@ mod tests {
                 assert!(server.variables_for("AgentBootstraps").is_empty());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_setup_does_not_remember_its_temporary_vm() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs.set_code_agent("env", "existing");
+        configs.write().unwrap();
+        server.stub("CloudAgent", json!({"cloudAgent": {"id": "setup", "name": "setup", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+        let args = LaunchArgs {
+            agent_id: Some("setup".into()),
+            bootstrap_setup: true,
+            app_mode: true,
+            ..Default::default()
+        };
+        let (agent, created, _) = resolve_agent(
+            &mut configs,
+            &reqwest::Client::new(),
+            &args,
+            &names::Target::new(("project".into(), "env".into()), false),
+            Agent::Railway,
+            &CliProgress::default(),
+            &RelayAccess {
+                identity: None,
+                relay_opts: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.id, "setup");
+        assert!(!created);
+        configs.reload().unwrap();
+        assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
     }
 
     #[tokio::test]
