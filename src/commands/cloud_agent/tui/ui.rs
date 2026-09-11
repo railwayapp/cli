@@ -2852,17 +2852,7 @@ mod tests {
         for i in 0..100 {
             session.send(format!("scroll-line-{i:03}\r\n").as_bytes());
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !session
-            .with_screen(|s| s.contents().contains("scroll-line-099"))
-            .unwrap_or(false)
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "fixture output must arrive"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        session.wait_for_output("scroll-line-099");
         app.attach_session(session, "ca_1".into());
         for width in [None, Some(58)] {
             app.sidebar_width = width;
@@ -3458,15 +3448,7 @@ mod tests {
         for i in 0..80 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-79"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-79");
         session.scroll_by(isize::MAX);
         assert!(session.scrolled_back());
 
