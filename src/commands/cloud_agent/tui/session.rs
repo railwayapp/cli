@@ -15,6 +15,7 @@
 //! session on purpose is what sleeps the agent, and that is the caller's call,
 //! not this module's.
 
+use crate::vt100;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -912,13 +913,15 @@ impl Session {
     /// routinely longer than the pane is wide, so the interesting case is
     /// always a link split across two or three rows; matching within one row
     /// finds only the fragment up to the wrap, which is not a URL anybody can
-    /// open. Text only: vt100 0.15 does not surface OSC 8 hyperlinks, so a link
-    /// whose visible text is not the URL cannot be found this way.
+    /// open. Explicit OSC 8 destinations take precedence over visible text.
     pub fn url_at(&self, row: u16, col: u16) -> Option<String> {
         self.with_screen(|screen| {
             let (rows, cols) = screen.size();
             if row >= rows || col >= cols {
                 return None;
+            }
+            if let Some(url) = screen.cell(row, col).and_then(|cell| cell.hyperlink()) {
+                return Some(url.to_owned());
             }
             // The run of rows the emulator says are one wrapped line.
             let mut start = row;
@@ -2057,6 +2060,71 @@ assert (size.lines, size.columns) == (30, 100)
         assert_eq!(url_in("railway.com", 3), None, "no scheme, no click");
         assert_eq!(url_in("", 0), None);
         assert_eq!(url_in("https://railway.com", 99), None, "past the end");
+    }
+
+    #[test]
+    fn osc8_links_survive_split_reads_wrap_scrollback_and_resize() {
+        let mut session = Session::for_test("ca", "codex").unwrap();
+        session.resize(3, 10);
+        let target = "https://github.com/railwayapp/cli/pull/1194?a=1;b=2";
+        let output = format!("\x1b]8;id=pr;{target}\x1b\\PR #1194 界\x1b]8;;\x07");
+        {
+            let mut parser = session.parser.lock().unwrap();
+            for byte in output.as_bytes() {
+                parser.process(&[*byte]);
+            }
+        }
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 0).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 1).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 2), None);
+        session
+            .parser
+            .lock()
+            .unwrap()
+            .process(b"\r\nend\r\nlast\r\n");
+        session.scroll(true, 20, (1, 1));
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+        session.resize(4, 10);
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+    }
+
+    #[test]
+    fn osc8_targets_are_cell_specific_and_cleared_by_overwrite_and_erase() {
+        let session = Session::for_test("ca", "codex").unwrap();
+        session.parser.lock().unwrap().process(
+            b"\x1b]8;;https://one.example\x07same\x1b]8;;\x07 \x1b]8;;https://two.example\x07same\x1b]8;;\x07",
+        );
+        assert_eq!(session.url_at(0, 0).as_deref(), Some("https://one.example"));
+        assert_eq!(session.url_at(0, 5).as_deref(), Some("https://two.example"));
+        assert_eq!(session.url_at(0, 4), None);
+        session.parser.lock().unwrap().process(b"\rplain\x1b[K");
+        assert_eq!(session.url_at(0, 0), None);
+        assert_eq!(session.url_at(0, 5), None);
+    }
+
+    #[test]
+    fn osc8_links_stay_with_their_screen_and_reject_non_web_targets() {
+        let mut parser = pane_parser(3, 20, 10);
+        parser.process(b"\x1b]8;;https://one.example\x07main\x1b]8;;\x07");
+        parser.process(b"\x1b[?1049hother");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        parser.process(b"\x1b[?1049l");
+        assert_eq!(
+            parser.screen().cell(0, 0).unwrap().hyperlink(),
+            Some("https://one.example")
+        );
+        for target in ["file:///tmp/example", "javascript:alert(1)"] {
+            parser.process(format!("\r\x1b]8;;{target}\x07label\x1b]8;;\x07").as_bytes());
+            assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        }
+        parser
+            .screen_mut()
+            .set_hyperlink(b"https://example.com/\nunsafe");
+        parser.process(b"\rlabel");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        parser.process(b"\x1b]8;;https://one.example\x07\x1bcreset");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
     }
 
     /// The whole point: a link on the emulated screen can be found by where it

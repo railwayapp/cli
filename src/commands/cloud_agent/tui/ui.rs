@@ -1,6 +1,7 @@
 //! Rendering for the `railway ca` TUI. Pure draw code — every decision it
 //! needs has already been made in [`super::app`].
 
+use crate::vt100;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};

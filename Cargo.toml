@@ -122,7 +122,9 @@ russh = { version = "0.60.2", default-features = false, features = [
 tempfile = "3.23.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 portable-pty = "0.8"
-vt100 = "0.16"
+itoa = "1.0.15"
+unicode-width = "0.2.1"
+vte = "0.15.0"
 terminal-colorsaurus = "1.0.3"
 
 [target.'cfg(windows)'.dependencies]

@@ -7361,6 +7361,42 @@ mod tests {
         assert!(a.pending_copy.is_none(), "and it is not a copy");
     }
 
+    #[test]
+    fn clicking_a_codex_labeled_hyperlink_opens_its_destination() {
+        let mut a = loaded_app();
+        let mut session = super::super::session::Session::for_test("ca_1", "codex").unwrap();
+        session.resize(6, 60);
+        session.send(
+            b"\x1b[2J\x1b[H\x1b]8;;https://github.com/railwayapp/cli/pull/1194\x1b\\PR #1194\x1b]8;;\x1b\\\r\n",
+        );
+        for _ in 0..500 {
+            if session.url_at(0, 7).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        a.attach_session(session, "ca_1".into());
+        a.panes.session = PaneBox {
+            x: 34,
+            y: 3,
+            w: 60,
+            h: 6,
+        };
+        a.panes.session_outer = PaneBox {
+            x: 33,
+            y: 2,
+            w: 62,
+            h: 8,
+        };
+        assert_eq!(a.on_mouse(MouseAction::Down, 35, 3), None);
+        assert_eq!(
+            a.on_mouse(MouseAction::Up, 35, 3),
+            Some(Effect::OpenUrl(
+                "https://github.com/railwayapp/cli/pull/1194".into()
+            ))
+        );
+    }
+
     /// Dragging from a link selects it instead. Copying a URL and opening one
     /// are both things people do; the pointer moving is what tells them apart.
     #[test]
