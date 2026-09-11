@@ -295,13 +295,8 @@ pub(super) async fn configure(
             .unwrap_or_else(|| normalized_path(directory));
         Ok(())
     })?;
-    // Codex imports this declaration at startup. Keep setup entirely in the
-    // background, including when Desktop is already running. JSON stdout stays clean.
-    eprintln!(
-        "Saved Codex Desktop connection {alias} and project {} in {}",
-        normalized_path(directory),
-        path.display()
-    );
+    // Callers present this result in their own CLI summary or TUI. Writing to
+    // stderr here would corrupt the frame when setup runs behind an open pane.
     Ok(super::CodexDesktop {
         ssh_alias: alias.into(),
         ssh_config_path: ssh_config.into(),
@@ -500,6 +495,45 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[tokio::test]
+    async fn background_setup_does_not_print_over_the_terminal_ui() {
+        const CHILD: &str = "RAILWAY_TEST_CODEX_CONFIG_QUIET";
+        if std::env::var_os(CHILD).is_some() {
+            crate::util::prompt::set_terminal_owned(true);
+            let result = configure(
+                "railway-test",
+                "test",
+                "/app",
+                Path::new("/tmp/test-ssh-config"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.project_label, "Railway: test");
+            assert!(result.config_path.is_file());
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "commands::cloud_agent::desktop::codex_config::tests::background_setup_does_not_print_over_the_terminal_ui",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("CODEX_HOME", root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Saved Codex Desktop"));
+        assert!(root.path().join("codex-app/config.json").is_file());
     }
 
     #[test]

@@ -84,17 +84,16 @@ impl Connection {
     }
 
     pub(crate) fn args(&self, thread: Option<&str>) -> Vec<String> {
-        let mut args = match self {
-            Self::Codex(c) => codex::attach_args(c),
-            Self::OpenCode(c, beta) => opencode::attach_args(c, *beta),
-        };
-        if let Some(thread) = thread {
-            match self {
-                Self::Codex(_) => args.extend(["resume".into(), thread.into()]),
-                Self::OpenCode(_, _) => args.extend(["--session".into(), thread.into()]),
+        match self {
+            Self::Codex(c) => codex::attach_args(c, thread),
+            Self::OpenCode(c, beta) => {
+                let mut args = opencode::attach_args(c, *beta);
+                if let Some(thread) = thread {
+                    args.extend(["--session".into(), thread.into()]);
+                }
+                args
             }
         }
-        args
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<Thread>> {
@@ -455,6 +454,60 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn codex_resumes_keep_saved_permissions_while_new_threads_use_launch_defaults() {
+        let connection = Connection::Codex(codex::Connection {
+            url: "wss://agent.example.com".into(),
+            token: "secret".into(),
+            directory: "/app/a project".into(),
+            version: "0.154.0".into(),
+            reused: true,
+        });
+        let fresh = connection.args(None);
+        assert!(
+            fresh
+                .windows(2)
+                .any(|args| args == ["--ask-for-approval", "never"])
+        );
+        assert!(
+            fresh
+                .windows(2)
+                .any(|args| args == ["--sandbox", "danger-full-access"])
+        );
+        assert!(!fresh.iter().any(|arg| arg == "resume"));
+
+        let resumed = connection.args(Some("saved-thread"));
+        assert!(resumed.ends_with(&["resume".into(), "saved-thread".into()]));
+        for flag in [
+            "--ask-for-approval",
+            "--sandbox",
+            "--full-auto",
+            "--yolo",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ] {
+            assert!(
+                !resumed.iter().any(|arg| arg == flag),
+                "remote resume must not override saved permissions with {flag}"
+            );
+        }
+        for args in [&fresh, &resumed] {
+            assert!(args.iter().any(|arg| arg == "--no-alt-screen"));
+            assert!(
+                args.windows(2)
+                    .any(|args| args == ["--remote", "wss://agent.example.com"])
+            );
+            assert!(
+                args.windows(2)
+                    .any(|args| args == ["--cd", "/app/a project"])
+            );
+            assert!(
+                args.windows(2)
+                    .any(|args| args == ["--remote-auth-token-env", codex::TOKEN_ENV])
+            );
+            assert!(!args.iter().any(|arg| arg == "secret"));
+        }
+    }
 
     #[test]
     fn native_titles_and_directories_win_over_previews_and_server_defaults() {

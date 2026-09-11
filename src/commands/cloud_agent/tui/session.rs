@@ -15,6 +15,7 @@
 //! session on purpose is what sleeps the agent, and that is the caller's call,
 //! not this module's.
 
+use crate::vt100;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -912,13 +913,15 @@ impl Session {
     /// routinely longer than the pane is wide, so the interesting case is
     /// always a link split across two or three rows; matching within one row
     /// finds only the fragment up to the wrap, which is not a URL anybody can
-    /// open. Text only: vt100 0.15 does not surface OSC 8 hyperlinks, so a link
-    /// whose visible text is not the URL cannot be found this way.
+    /// open. Explicit OSC 8 destinations take precedence over visible text.
     pub fn url_at(&self, row: u16, col: u16) -> Option<String> {
         self.with_screen(|screen| {
             let (rows, cols) = screen.size();
             if row >= rows || col >= cols {
                 return None;
+            }
+            if let Some(url) = screen.cell(row, col).and_then(|cell| cell.hyperlink()) {
+                return Some(url.to_owned());
             }
             // The run of rows the emulator says are one wrapped line.
             let mut start = row;
@@ -1010,7 +1013,12 @@ impl Session {
         let Ok(mut parser) = self.parser.lock() else {
             return;
         };
-        let wanted = (self.scroll as isize).saturating_add(delta).max(0) as usize;
+        // Output arriving while we read history advances the emulator's
+        // offset to hold the same rows. Continue from that live offset so the
+        // next wheel event does not jump back toward newer output.
+        let wanted = (parser.screen().scrollback() as isize)
+            .saturating_add(delta)
+            .max(0) as usize;
         parser.screen_mut().set_scrollback(wanted);
         self.scroll = parser.screen().scrollback();
     }
@@ -1204,6 +1212,16 @@ impl Session {
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {
+        Self::for_test_inner(agent_id, agent_name, None)
+    }
+
+    /// Feed exact terminal output to the emulator without the host PTY
+    /// interpreting or rewriting escape sequences (notably OSC 8 on ConPTY).
+    pub fn for_test_with_output(agent_id: &str, agent_name: &str, output: &[u8]) -> Result<Self> {
+        Self::for_test_inner(agent_id, agent_name, Some(output))
+    }
+
+    fn for_test_inner(agent_id: &str, agent_name: &str, output: Option<&[u8]>) -> Result<Self> {
         let pty = NativePtySystem::default().openpty(PtySize {
             rows: 24,
             cols: 80,
@@ -1219,8 +1237,10 @@ impl Session {
         // The same reader the real session runs. Without it the emulator never
         // sees a byte, and a test against this fixture would be testing
         // nothing at all.
-        let mut reader = pty.master.try_clone_reader()?;
-        {
+        if let Some(output) = output {
+            parser.lock().unwrap().process(output);
+        } else {
+            let mut reader = pty.master.try_clone_reader()?;
             let parser = parser.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -1492,7 +1512,9 @@ assert os.isatty(0) and os.isatty(1)
 assert os.environ['RAILWAY_CODEX_SERVER_TOKEN'] == "secret ' $(echo injected)"
 backend = hashlib.sha256(b'wss://agent.example.com:443').hexdigest()[:16]
 assert pathlib.Path(os.environ['CODEX_HOME']) == pathlib.Path.home() / '.railway/codex-client' / backend
-assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--no-alt-screen', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', 'resume', 'thread-1']
+for i in range(80):
+    print(f'transcript-{i}')
 print('Codex ready', flush=True)
 assert input() == 'hello'
 size = os.get_terminal_size()
@@ -1532,6 +1554,17 @@ print('Codex complete', flush=True)
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let live = pane.with_screen(|s| s.contents()).unwrap();
+        assert!(pane.scrollable());
+        pane.scroll(true, 10, (1, 1));
+        assert!(pane.scrolled_back());
+        let history = pane.with_screen(|s| s.contents()).unwrap();
+        assert_ne!(history, live);
+        assert!(history.contains("transcript-"));
+        pane.scroll(false, 10, (1, 1));
+        assert!(!pane.scrolled_back());
+        assert_eq!(pane.with_screen(|s| s.contents()).unwrap(), live);
+
         pane.resize(30, 100);
         pane.write_raw(b"hello\n");
         while !pane.finished() {
@@ -2046,6 +2079,71 @@ assert (size.lines, size.columns) == (30, 100)
         assert_eq!(url_in("https://railway.com", 99), None, "past the end");
     }
 
+    #[test]
+    fn osc8_links_survive_split_reads_wrap_scrollback_and_resize() {
+        let mut session = Session::for_test("ca", "codex").unwrap();
+        session.resize(3, 10);
+        let target = "https://github.com/railwayapp/cli/pull/1194?a=1;b=2";
+        let output = format!("\x1b]8;id=pr;{target}\x1b\\PR #1194 界\x1b]8;;\x07");
+        {
+            let mut parser = session.parser.lock().unwrap();
+            for byte in output.as_bytes() {
+                parser.process(&[*byte]);
+            }
+        }
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 0).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 1).as_deref(), Some(target));
+        assert_eq!(session.url_at(1, 2), None);
+        session
+            .parser
+            .lock()
+            .unwrap()
+            .process(b"\r\nend\r\nlast\r\n");
+        session.scroll(true, 20, (1, 1));
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+        session.resize(4, 10);
+        assert_eq!(session.url_at(0, 0).as_deref(), Some(target));
+    }
+
+    #[test]
+    fn osc8_targets_are_cell_specific_and_cleared_by_overwrite_and_erase() {
+        let session = Session::for_test("ca", "codex").unwrap();
+        session.parser.lock().unwrap().process(
+            b"\x1b]8;;https://one.example\x07same\x1b]8;;\x07 \x1b]8;;https://two.example\x07same\x1b]8;;\x07",
+        );
+        assert_eq!(session.url_at(0, 0).as_deref(), Some("https://one.example"));
+        assert_eq!(session.url_at(0, 5).as_deref(), Some("https://two.example"));
+        assert_eq!(session.url_at(0, 4), None);
+        session.parser.lock().unwrap().process(b"\rplain\x1b[K");
+        assert_eq!(session.url_at(0, 0), None);
+        assert_eq!(session.url_at(0, 5), None);
+    }
+
+    #[test]
+    fn osc8_links_stay_with_their_screen_and_reject_non_web_targets() {
+        let mut parser = pane_parser(3, 20, 10);
+        parser.process(b"\x1b]8;;https://one.example\x07main\x1b]8;;\x07");
+        parser.process(b"\x1b[?1049hother");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        parser.process(b"\x1b[?1049l");
+        assert_eq!(
+            parser.screen().cell(0, 0).unwrap().hyperlink(),
+            Some("https://one.example")
+        );
+        for target in ["file:///tmp/example", "javascript:alert(1)"] {
+            parser.process(format!("\r\x1b]8;;{target}\x07label\x1b]8;;\x07").as_bytes());
+            assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        }
+        parser
+            .screen_mut()
+            .set_hyperlink(b"https://example.com/\nunsafe");
+        parser.process(b"\rlabel");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+        parser.process(b"\x1b]8;;https://one.example\x07\x1bcreset");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().hyperlink(), None);
+    }
+
     /// The whole point: a link on the emulated screen can be found by where it
     /// is on the screen.
     #[test]
@@ -2169,6 +2267,69 @@ assert (size.lines, size.columns) == (30, 100)
         // Typing returns to the live view.
         session.send(b"x");
         assert!(!session.scrolled_back());
+    }
+
+    #[test]
+    fn scrolling_retains_transcript_above_a_fixed_composer() {
+        for scroll_sequence in ["\r\n", "\x1b[1S"] {
+            let mut session = Session::for_test("ca", "codex").unwrap();
+            session.resize(6, 40);
+            {
+                let mut parser = session.parser.lock().unwrap();
+                parser.process(b"\x1b[5;1HAsk Codex\x1b[6;1Hstatus\x1b[1;4r\x1b[1;1H");
+                parser.process(b"\x1b]8;;https://example.com/first\x07transcript-0\x1b]8;;\x07\r\ntranscript-1\r\ntranscript-2\r\n");
+                for i in 3..40 {
+                    parser.process(format!("\rtranscript-{i}{scroll_sequence}").as_bytes());
+                }
+                parser.process(b"\x1b[r\x1b[5;1H");
+            }
+            let live = session.with_screen(|s| s.contents()).unwrap();
+            assert!(live.contains("transcript-39"));
+            assert!(live.contains("Ask Codex\nstatus"));
+
+            session.scroll(true, 100, (1, 1));
+            assert!(
+                session.scrolled_back(),
+                "scroll sequence {scroll_sequence:?}"
+            );
+            let history = session.with_screen(|s| s.contents()).unwrap();
+            assert!(history.contains("transcript-0"), "{history}");
+            assert_eq!(
+                session.url_at(0, 0).as_deref(),
+                Some("https://example.com/first")
+            );
+            session.scroll(false, 100, (1, 1));
+            assert_eq!(session.with_screen(|s| s.contents()).unwrap(), live);
+
+            session.scroll(true, 10, (1, 1));
+            let held = session.with_screen(|s| s.contents()).unwrap();
+            session
+                .parser
+                .lock()
+                .unwrap()
+                .process(b"\x1b[1;4r\x1b[4;1Htranscript-40\r\ntranscript-41\r\n\x1b[r");
+            assert_eq!(session.with_screen(|s| s.contents()).unwrap(), held);
+            let offset = session.with_screen(|s| s.scrollback()).unwrap();
+            assert!(offset > 10);
+            session.scroll(true, 3, (1, 1));
+            assert_eq!(session.with_screen(|s| s.scrollback()).unwrap(), offset + 3);
+        }
+    }
+
+    #[test]
+    fn interior_scroll_regions_and_alternate_screens_do_not_add_history() {
+        for setup in ["\x1b[2;4r\x1b[2;1H", "\x1b[?1049h\x1b[1;4r"] {
+            let mut parser = pane_parser(6, 40, 100);
+            parser.process(setup.as_bytes());
+            for i in 0..40 {
+                parser.process(format!("line-{i}\r\n").as_bytes());
+            }
+            parser.screen_mut().set_scrollback(100);
+            assert_eq!(parser.screen().scrollback(), 0);
+            parser.process(b"\x1b[?1049l");
+            parser.screen_mut().set_scrollback(100);
+            assert_eq!(parser.screen().scrollback(), 0);
+        }
     }
 
     /// The whole retained history is reachable, not one screenful. The old

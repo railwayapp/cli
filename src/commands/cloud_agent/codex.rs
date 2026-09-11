@@ -341,23 +341,36 @@ async fn verify_websocket(client: &reqwest::Client, endpoint: &str, token: &str)
     .context("Codex initialization timed out")?
 }
 
-pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
-    vec![
+pub(crate) fn attach_args(connection: &Connection, thread: Option<&str>) -> Vec<String> {
+    let mut args = vec![
         // Railway pins the local client to its server. Codex's global-update
         // prompt can steal startup input and would break that version match.
         "-c".into(),
         "check_for_update_on_startup=false".into(),
+        // Codex relies on terminal scrollback rather than mouse reporting.
+        // Keep its transcript on the main screen so the Railway pane can
+        // retain history and scroll it with the wheel or Shift+Page Up/Down.
+        "--no-alt-screen".into(),
         "--remote".into(),
         connection.url.clone(),
         "--remote-auth-token-env".into(),
         TOKEN_ENV.into(),
         "--cd".into(),
         connection.directory.clone(),
-        "--ask-for-approval".into(),
-        "never".into(),
-        "--sandbox".into(),
-        "danger-full-access".into(),
-    ]
+    ];
+    if let Some(thread) = thread {
+        // Remote resumes retain the task's saved permissions. Codex rejects
+        // approval or sandbox overrides even when they match those settings.
+        args.extend(["resume".into(), thread.into()]);
+    } else {
+        args.extend([
+            "--ask-for-approval".into(),
+            "never".into(),
+            "--sandbox".into(),
+            "danger-full-access".into(),
+        ]);
+    }
+    args
 }
 
 #[cfg(test)]

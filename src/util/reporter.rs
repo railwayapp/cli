@@ -62,13 +62,34 @@ pub fn emit_json<T: Serialize>(value: &T) -> anyhow::Result<()> {
 /// terminal back. Deduplicated by rendered text and kept in first-seen order,
 /// so a condition that recurs on a timer surfaces once with a count instead of
 /// as a wall of identical lines.
-static DEFERRED: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+static DEFERRED: std::sync::Mutex<DeferredWarnings> = std::sync::Mutex::new(DeferredWarnings {
+    entries: Vec::new(),
+});
 
 /// Cap on distinct deferred warnings. A TUI session runs for hours; without a
 /// bound, a warning raised from a loop would hold unbounded memory for all of
 /// it. Past the cap, further *distinct* warnings are dropped — repeats of ones
 /// already held still count up, which is the case that actually matters.
 const MAX_DEFERRED: usize = 20;
+
+#[derive(Default)]
+struct DeferredWarnings {
+    entries: Vec<(String, usize)>,
+}
+
+impl DeferredWarnings {
+    fn push(&mut self, rendered: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|(text, _)| *text == rendered) {
+            entry.1 += 1;
+        } else if self.entries.len() < MAX_DEFERRED {
+            self.entries.push((rendered, 1));
+        }
+    }
+
+    fn take(&mut self) -> Vec<(String, usize)> {
+        std::mem::take(&mut self.entries)
+    }
+}
 
 /// Emit a non-fatal warning. Always goes to stderr so it never pollutes
 /// a result on stdout: a yellow line in human mode, a structured object
@@ -125,11 +146,7 @@ fn defer(rendered: String) {
     let Ok(mut held) = DEFERRED.lock() else {
         return;
     };
-    if let Some(entry) = held.iter_mut().find(|(text, _)| *text == rendered) {
-        entry.1 += 1;
-    } else if held.len() < MAX_DEFERRED {
-        held.push((rendered, 1));
-    }
+    held.push(rendered);
 }
 
 /// Write out everything [`warn`] held back while a TUI owned the terminal, and
@@ -139,7 +156,7 @@ pub fn flush_deferred() {
     let Ok(mut held) = DEFERRED.lock() else {
         return;
     };
-    for (rendered, count) in held.drain(..) {
+    for (rendered, count) in held.take() {
         eprint!("{rendered}");
         if count > 1 {
             eprintln!(
@@ -205,10 +222,6 @@ mod tests {
     use super::*;
     use crate::errors::RailwayError;
 
-    /// `DEFERRED` is process-global, so the tests that drive it directly have
-    /// to run one at a time or they consume each other's entries.
-    static DEFERRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A warning raised under a TUI must survive to be read, not vanish — and a
     /// condition that recurs on a timer (the config-lock timeout fired every
     /// few seconds in a long `railway ca` session) must come back as one line
@@ -216,17 +229,15 @@ mod tests {
     /// queued.
     #[test]
     fn deferred_warnings_are_deduplicated_and_counted() {
-        let _guard = DEFERRED_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        flush_deferred(); // start from a clean slate
+        // Other tests release terminal ownership and flush the global queue.
+        // Exercise the same buffer logic with an instance owned by this test.
+        let mut warnings = DeferredWarnings::default();
+        warnings.push("lock timed out\n".to_string());
+        warnings.push("lock timed out\n".to_string());
+        warnings.push("lock timed out\n".to_string());
+        warnings.push("something else\n".to_string());
 
-        defer("lock timed out\n".to_string());
-        defer("lock timed out\n".to_string());
-        defer("lock timed out\n".to_string());
-        defer("something else\n".to_string());
-
-        let held = DEFERRED.lock().unwrap().clone();
+        let held = warnings.take();
         assert_eq!(
             held,
             vec![
@@ -236,9 +247,8 @@ mod tests {
             "repeats collapse into a count, and first-seen order is kept"
         );
 
-        flush_deferred();
         assert!(
-            DEFERRED.lock().unwrap().is_empty(),
+            warnings.take().is_empty(),
             "flushing must drain, or the next TUI exit replays them"
         );
     }
@@ -246,23 +256,18 @@ mod tests {
     /// An unbounded buffer would be a slow leak across an hours-long session.
     #[test]
     fn deferred_warnings_are_capped() {
-        let _guard = DEFERRED_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        flush_deferred();
+        let mut warnings = DeferredWarnings::default();
 
         for i in 0..(MAX_DEFERRED + 10) {
-            defer(format!("distinct warning {i}\n"));
+            warnings.push(format!("distinct warning {i}\n"));
         }
         // The cap bounds distinct entries, but a repeat of one already held
         // still counts up — that is the case worth keeping.
-        defer("distinct warning 0\n".to_string());
+        warnings.push("distinct warning 0\n".to_string());
 
-        let held = DEFERRED.lock().unwrap().clone();
+        let held = warnings.take();
         assert_eq!(held.len(), MAX_DEFERRED);
         assert_eq!(held[0].1, 2);
-
-        flush_deferred();
     }
 
     #[test]
