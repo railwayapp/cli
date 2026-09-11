@@ -30,6 +30,8 @@ impl Backboard {
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut reader = BufReader::new(&mut stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
                 let mut length = 0;
                 loop {
                     let mut line = String::new();
@@ -48,6 +50,18 @@ impl Backboard {
                 seen.lock().unwrap().push(request.clone());
                 let operation = request["operationName"].as_str().unwrap();
                 let id = request["variables"]["id"].as_str().unwrap_or_default();
+                if operation.starts_with("AgentBootstrap") {
+                    assert!(
+                        request_line.starts_with("POST /graphql/internal "),
+                        "{request_line}"
+                    );
+                    assert!(
+                        !request["query"]
+                            .as_str()
+                            .unwrap()
+                            .contains("agentBootstrapDefault")
+                    );
+                }
                 let response = match operation {
                     "Project" => {
                         let project = request["variables"]["id"].as_str().unwrap();
@@ -65,7 +79,7 @@ impl Backboard {
                         json!({"data": {"agentBootstraps": [{
                             "id": "bootstrap", "name": "dev", "environmentId": environment,
                             "status": "READY", "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"
-                        }], "agentBootstrapDefault": {"id": "bootstrap"}}})
+                        }]}})
                     }
                     "MyCloudAgents" => json!({"data": {"myCloudAgents": inventory}}),
                     "CloudAgentSleep" | "CloudAgentWake" if refused.as_deref() == Some(id) => {
@@ -276,8 +290,46 @@ fn bootstrap_list_uses_directory_link_before_preferences_and_flags_before_link()
         let rows: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(rows[0]["name"], "dev");
         assert_eq!(rows[0]["environmentId"], expected);
-        assert_eq!(rows[0]["isDefault"], true);
+        assert_eq!(rows[0]["isDefault"], false);
     }
+    let output = server.run(home.path(), &["bootstrap", "default", "dev", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let selected: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(selected["isDefault"], true);
+    for (args, expected_default) in [
+        (vec!["bootstrap", "list", "--json"], true),
+        (
+            vec![
+                "bootstrap",
+                "list",
+                "--json",
+                "--project",
+                "explicit",
+                "--environment",
+                "production",
+            ],
+            false,
+        ),
+    ] {
+        let output = server.run(home.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows[0]["isDefault"], expected_default);
+    }
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(config.join("config.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["agentBootstrapDefaults"]["railway.com:linked-env"],
+        "bootstrap"
+    );
     let requests = server.requests.lock().unwrap();
     assert!(!requests.iter().any(|r| r["variables"]["id"] == "preferred"));
 }

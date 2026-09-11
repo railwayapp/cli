@@ -1,4 +1,4 @@
-//! Named cloud-agent bootstraps and their environment's shared default.
+//! Named cloud-agent bootstraps using the existing internal API.
 use graphql_client::GraphQLQuery;
 
 type DateTime = chrono::DateTime<chrono::Utc>;
@@ -19,6 +19,4 @@ macro_rules! operation {
 }
 operation!(AgentBootstraps);
 operation!(AgentBootstrap);
-operation!(AgentBootstrapDefault);
 operation!(AgentBootstrapSave);
-operation!(AgentBootstrapSetDefault);

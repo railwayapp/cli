@@ -278,7 +278,7 @@ railway ca bootstrap list
 railway ca bootstrap save updated --agent another-vm --default
 railway ca bootstrap default dev
 
-railway code --codex                         # uses the environment default
+railway code --codex                         # uses your local environment default
 railway code --codex --bootstrap updated     # selects a named bootstrap
 railway code --codex --no-bootstrap          # starts with a clean VM
 railway ca create scratch --bootstrap dev
@@ -286,12 +286,15 @@ railway ca create scratch --bootstrap dev
 
 In `railway ca`, highlight a VM and press `b` to open the save form. Saving
 captures its disk without stopping or deleting the source VM. The first
-successful CLI save becomes the environment default if none is set; later saves
+successful CLI save becomes your local environment default if none is set; later saves
 replace the default only with `--default` or a selection in the form. Saving an
 existing name appends a version to that bootstrap, including when it is already
 the default. Save waits for capture completion before selecting a default.
 
-Bootstraps and their defaults are shared within a project/environment pair.
+Bootstraps are shared within a project/environment pair. The default selection
+is stored only in your local Railway CLI config, keyed by Railway host and
+environment ID (which also identifies the project). It does not change the
+dashboard or teammates’ defaults. Without a local default, new VMs start clean.
 Explicit `--project` and `--environment` flags take precedence, followed by the
 directory's Railway link, then the saved CA project preference. Bootstrap names
 are resolved only within that environment. `list`, `save`, and `default` support
@@ -299,7 +302,7 @@ are resolved only within that environment. `list`, `save`, and `default` support
 variables. Launch-time variables override stored bootstrap variables.
 
 Only new VMs use bootstraps. Connecting to an existing VM preserves its disk.
-A saving or degraded default produces an error; `--no-bootstrap` explicitly
+A deleted, saving, or degraded local default produces an error; `--no-bootstrap` explicitly
 bypasses it. `ca create --from-checkpoint` also bypasses the default and cannot
 be combined with bootstrap flags.
 

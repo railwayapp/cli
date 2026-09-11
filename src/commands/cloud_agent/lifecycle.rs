@@ -92,11 +92,11 @@ pub struct CreateArgs {
     #[clap(long, value_name = "CHECKPOINT_ID")]
     from_checkpoint: Option<String>,
 
-    /// Start from this named bootstrap instead of the environment default
+    /// Start from this named bootstrap instead of your local environment default
     #[clap(long, conflicts_with_all = ["from_checkpoint", "no_bootstrap"])]
     bootstrap: Option<String>,
 
-    /// Create a clean VM without the environment default bootstrap
+    /// Create a clean VM without your local environment default bootstrap
     #[clap(long, conflicts_with = "from_checkpoint")]
     no_bootstrap: bool,
 
@@ -330,6 +330,7 @@ pub async fn create(args: CreateArgs) -> Result<()> {
 
     let backboard = configs.get_backboard();
     let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        configs,
         client,
         &backboard,
         &environment_id,

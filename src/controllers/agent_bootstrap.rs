@@ -3,7 +3,15 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::{client::post_graphql, gql::bootstraps as gql};
+use crate::{client::post_graphql, config::Configs, gql::bootstraps as gql};
+
+/// Bootstrap fields are currently exposed only on Backboard's internal schema.
+pub fn internal_url(url: &str) -> String {
+    match url.strip_suffix("/graphql/v2") {
+        Some(base) => format!("{base}/graphql/internal"),
+        None => url.to_owned(),
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,33 +44,29 @@ macro_rules! from_fragment {
         }
     )+};
 }
-from_fragment!(
-    agent_bootstraps,
-    agent_bootstrap,
-    agent_bootstrap_default,
-    agent_bootstrap_save
-);
+from_fragment!(agent_bootstraps, agent_bootstrap, agent_bootstrap_save);
 
 pub async fn list(
+    configs: &Configs,
     client: &reqwest::Client,
     url: &str,
     environment_id: &str,
 ) -> Result<Vec<Bootstrap>> {
     let data = post_graphql::<gql::AgentBootstraps, _>(
         client,
-        url,
+        internal_url(url),
         gql::agent_bootstraps::Variables {
             environment_id: environment_id.into(),
         },
     )
     .await?;
-    let default = data.agent_bootstrap_default.map(|b| b.id);
+    let default = configs.get_agent_bootstrap_default(environment_id);
     Ok(data
         .agent_bootstraps
         .into_iter()
         .map(|b| {
             let mut b = Bootstrap::from(b);
-            b.is_default = default.as_deref() == Some(&b.id);
+            b.is_default = default == Some(b.id.as_str());
             b
         })
         .collect())
@@ -71,7 +75,7 @@ pub async fn list(
 pub async fn get(client: &reqwest::Client, url: &str, id: &str) -> Result<Bootstrap> {
     Ok(post_graphql::<gql::AgentBootstrap, _>(
         client,
-        url,
+        internal_url(url),
         gql::agent_bootstrap::Variables { id: id.into() },
     )
     .await?
@@ -109,6 +113,7 @@ impl Bootstrap {
 
 /// Called only when creating: reconnecting must never reapply a bootstrap.
 pub async fn resolve_for_create(
+    configs: &Configs,
     client: &reqwest::Client,
     url: &str,
     environment_id: &str,
@@ -119,18 +124,18 @@ pub async fn resolve_for_create(
         return Ok(None);
     }
     let bootstrap = if let Some(name) = name {
-        Some(select(list(client, url, environment_id).await?, name)?)
+        Some(select(
+            list(configs, client, url, environment_id).await?,
+            name,
+        )?)
     } else {
-        post_graphql::<gql::AgentBootstrapDefault, _>(
-            client,
-            url,
-            gql::agent_bootstrap_default::Variables {
-                environment_id: environment_id.into(),
-            },
-        )
-        .await?
-        .agent_bootstrap_default
-        .map(Bootstrap::from)
+        match configs.get_agent_bootstrap_default(environment_id) {
+            None => None,
+            Some(id) => Some(list(configs, client, url, environment_id).await?
+                .into_iter().find(|b| b.id == id).ok_or_else(|| anyhow::anyhow!(
+                    "Your local default bootstrap is no longer available. Select another with `railway ca bootstrap default <name>` or use --no-bootstrap."
+                ))?),
+        }
     };
     if let Some(b) = &bootstrap {
         b.require_ready()?;
@@ -148,7 +153,7 @@ pub async fn save(
 ) -> Result<Bootstrap> {
     Ok(post_graphql::<gql::AgentBootstrapSave, _>(
         client,
-        url,
+        internal_url(url),
         gql::agent_bootstrap_save::Variables {
             input: gql::agent_bootstrap_save::AgentBootstrapSaveInput {
                 cloud_agent_id: Some(agent_id.into()),
@@ -162,24 +167,6 @@ pub async fn save(
     .await?
     .agent_bootstrap_save
     .into())
-}
-
-pub async fn set_default(
-    client: &reqwest::Client,
-    url: &str,
-    id: &str,
-    only_if_unset: bool,
-) -> Result<bool> {
-    let data = post_graphql::<gql::AgentBootstrapSetDefault, _>(
-        client,
-        url,
-        gql::agent_bootstrap_set_default::Variables {
-            id: id.into(),
-            only_if_unset: Some(only_if_unset),
-        },
-    )
-    .await?;
-    Ok(data.agent_bootstrap_set_default.is_some_and(|b| b.id == id))
 }
 
 /// Capture completion is separate from accepting the save request. Never promote
@@ -210,133 +197,170 @@ mod tests {
     use crate::testkit::MockBackboard;
     use serde_json::json;
 
-    fn row(name: &str, status: &str) -> serde_json::Value {
-        json!({"id": format!("bootstrap-{name}"), "name": name, "environmentId": "linked-env",
-            "status": status, "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
+    fn row(id: &str, name: &str, status: &str) -> serde_json::Value {
+        json!({"id": id, "name": name, "environmentId": "env", "status": status,
+            "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
     }
 
     #[tokio::test]
-    async fn bootstrap_default_override_and_clean_vm() {
+    async fn bootstrap_local_default_survives_rename_and_explicit_override() {
         let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs
+            .set_agent_bootstrap_default("env", "saved-id", false)
+            .await
+            .unwrap();
         let client = reqwest::Client::new();
         server.stub(
-            "AgentBootstrapDefault",
-            json!({"agentBootstrapDefault": row("default", "READY")}),
-        );
-        server.stub(
             "AgentBootstraps",
-            json!({"agentBootstraps": [row("default", "READY"), row("other", "READY")],
-            "agentBootstrapDefault": {"id": "bootstrap-default"}}),
+            json!({"agentBootstraps": [
+                row("saved-id", "renamed", "READY"), row("other", "other", "READY")
+            ]}),
         );
-        let b = resolve_for_create(&client, &server.url(), "linked-env", None, false)
+        let b = resolve_for_create(&configs, &client, &server.url(), "env", None, false)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(b.id, "bootstrap-default");
-        assert_eq!(
-            server.variables_for("AgentBootstrapDefault")[0]["environmentId"],
-            "linked-env"
-        );
-        let b = resolve_for_create(&client, &server.url(), "linked-env", Some("other"), false)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(b.id, "bootstrap-other");
+        assert_eq!(b.name, "renamed");
+        assert!(b.is_default);
+        let b = resolve_for_create(
+            &configs,
+            &client,
+            &server.url(),
+            "env",
+            Some("other"),
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(b.id, "other");
+        assert_eq!(configs.get_agent_bootstrap_default("env"), Some("saved-id"));
         let count = server.requests().len();
-        assert!(
-            resolve_for_create(&client, &server.url(), "linked-env", None, true)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for (env, clean) in [("env", true), ("another-project-env", false)] {
+            assert!(
+                resolve_for_create(&configs, &client, &server.url(), env, None, clean)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
         assert_eq!(server.requests().len(), count);
         assert!(
-            resolve_for_create(&client, &server.url(), "linked-env", Some("typo"), false)
+            resolve_for_create(&configs, &client, &server.url(), "env", Some("typo"), false)
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("No bootstrap named 'typo'")
+                .contains("No bootstrap named")
         );
     }
 
     #[tokio::test]
-    async fn bootstrap_missing_default_is_clean_but_unavailable_default_errors() {
+    async fn bootstrap_deleted_or_unready_local_default_errors() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs
+            .set_agent_bootstrap_default("env", "saved", false)
+            .await
+            .unwrap();
         let client = reqwest::Client::new();
         for status in ["SAVING", "DEGRADED", "FUTURE_STATUS"] {
             let server = MockBackboard::spawn();
             server.stub(
-                "AgentBootstrapDefault",
-                json!({"agentBootstrapDefault": row("default", status)}),
+                "AgentBootstraps",
+                json!({"agentBootstraps": [row("saved", "dev", status)]}),
             );
-            let error = resolve_for_create(&client, &server.url(), "linked-env", None, false)
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains(status));
+            assert!(
+                resolve_for_create(&configs, &client, &server.url(), "env", None, false)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains(status)
+            );
         }
-        let server = MockBackboard::spawn();
-        server.stub(
-            "AgentBootstrapDefault",
-            json!({"agentBootstrapDefault": null}),
-        );
+        server.stub("AgentBootstraps", json!({"agentBootstraps": []}));
         assert!(
-            resolve_for_create(&client, &server.url(), "linked-env", None, false)
+            resolve_for_create(&configs, &client, &server.url(), "env", None, false)
                 .await
-                .unwrap()
-                .is_none()
+                .unwrap_err()
+                .to_string()
+                .contains("no longer available")
         );
     }
 
     #[tokio::test]
-    async fn bootstrap_save_preserves_variables_and_polls_before_promotion() {
+    async fn bootstrap_local_preferences_persist_without_replacing_existing_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut first = Configs::for_test(path.clone());
+        let mut second = Configs::for_test(path.clone());
+        assert!(
+            first
+                .set_agent_bootstrap_default("env", "first", true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !second
+                .set_agent_bootstrap_default("env", "second", true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            second
+                .set_agent_bootstrap_default("other-env", "other", true)
+                .await
+                .unwrap()
+        );
+        assert!(
+            first
+                .set_agent_bootstrap_default("env", "chosen", false)
+                .await
+                .unwrap()
+        );
+        // An older TUI/config instance writing unrelated state must not erase
+        // a selection made by another process or the TUI save form.
+        second.set_code_agent("env", "vm");
+        second.write().unwrap();
+        let mut reloaded = Configs::for_test(path);
+        reloaded.reload().unwrap();
+        assert_eq!(reloaded.get_agent_bootstrap_default("env"), Some("chosen"));
+        assert_eq!(
+            reloaded.get_agent_bootstrap_default("other-env"),
+            Some("other")
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_save_preserves_variables_and_polls_capture() {
         let server = MockBackboard::spawn();
         let client = reqwest::Client::new();
         server.stub(
             "AgentBootstrapSave",
-            json!({"agentBootstrapSave": row("dev", "SAVING")}),
+            json!({"agentBootstrapSave": row("saved", "dev", "SAVING")}),
         );
         server.stub(
             "AgentBootstrap",
-            json!({"agentBootstrap": row("dev", "READY")}),
+            json!({"agentBootstrap": row("saved", "dev", "READY")}),
         );
-        server.stub(
-            "AgentBootstrapSetDefault",
-            json!({"agentBootstrapSetDefault": {"id": "bootstrap-dev"}}),
-        );
-        let b = save(
+        let saved = save(
             &client,
             &server.url(),
-            "source-vm",
+            "vm",
             "dev",
             None,
             Some(json!({"MODE": "dev"})),
         )
         .await
         .unwrap();
-        let b = wait_ready(&client, &server.url(), b).await.unwrap();
-        assert!(
-            set_default(&client, &server.url(), &b.id, true)
-                .await
-                .unwrap()
-        );
-        let input = &server.variables_for("AgentBootstrapSave")[0]["input"];
-        assert_eq!(input["cloudAgentId"], "source-vm");
-        assert_eq!(input["variables"]["MODE"], "dev");
+        let ready = wait_ready(&client, &server.url(), saved).await.unwrap();
+        assert_eq!(ready.status, "READY");
         assert_eq!(
-            server.variables_for("AgentBootstrapSetDefault")[0]["onlyIfUnset"],
-            true
+            server.variables_for("AgentBootstrapSave")[0]["input"]["variables"]["MODE"],
+            "dev"
         );
-        let ops: Vec<_> = server
-            .requests()
-            .iter()
-            .map(|r| r["operationName"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(
-            ops,
-            [
-                "AgentBootstrapSave",
-                "AgentBootstrap",
-                "AgentBootstrapSetDefault"
-            ]
-        );
+        assert_eq!(server.requests().len(), 2);
     }
 }

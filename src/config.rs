@@ -105,6 +105,9 @@ pub struct RailwayConfig {
     /// switching projects must not make `railway code` reach for a box in a
     /// different environment.
     pub code_agents: Option<BTreeMap<String, String>>,
+    /// Local default bootstrap IDs, keyed by Railway host and environment UUID.
+    /// Environment IDs also identify their project; never shared with teammates.
+    pub agent_bootstrap_defaults: Option<BTreeMap<String, String>>,
 }
 
 // NOTE: no serde derives -- `Configs` itself is never (de)serialized, only
@@ -627,6 +630,37 @@ impl Configs {
             .cloned()
     }
 
+    pub fn get_agent_bootstrap_default(&self, environment_id: &str) -> Option<&str> {
+        self.root_config
+            .agent_bootstrap_defaults
+            .as_ref()?
+            .get(&format!("{}:{environment_id}", self.get_host()))
+            .map(String::as_str)
+    }
+
+    /// Persist just this preference against the latest config snapshot.
+    pub async fn set_agent_bootstrap_default(
+        &mut self,
+        environment_id: &str,
+        id: &str,
+        only_if_unset: bool,
+    ) -> Result<bool> {
+        let _lock = self.acquire_lock().await;
+        self.reload()?;
+        let key = format!("{}:{environment_id}", self.get_host());
+        let defaults = self
+            .root_config
+            .agent_bootstrap_defaults
+            .get_or_insert_with(BTreeMap::new);
+        if !only_if_unset || !defaults.contains_key(&key) {
+            defaults.insert(key.clone(), id.to_owned());
+        }
+        let selected = defaults.get(&key).is_some_and(|value| value == id);
+        // This snapshot was reloaded under the lock, including credentials.
+        self.write_value(&serde_json::to_value(&self.root_config)?)?;
+        Ok(selected)
+    }
+
     /// Every environment this machine has launched a cloud agent in.
     ///
     /// Local knowledge, so it misses agents made from another machine or the
@@ -855,6 +889,11 @@ impl Configs {
         // concurrent refresh could be lost is microseconds rather than the
         // lifetime of this `Configs`.
         if let Some(disk) = Self::read_root_config(&self.root_config_path) {
+            // A TUI can keep an older config alive while its bootstrap form
+            // saves a preference through a separate instance. Only the
+            // dedicated setter owns this field.
+            to_write["agentBootstrapDefaults"] =
+                serde_json::to_value(disk.agent_bootstrap_defaults)?;
             // Merge on the typed struct so the field set is checked by the
             // compiler: a new credential field on `RailwayUser` is picked up
             // automatically instead of being silently dropped. Everything that

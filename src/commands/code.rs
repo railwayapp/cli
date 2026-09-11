@@ -330,11 +330,11 @@ pub struct LaunchArgs {
     #[clap(long)]
     pub new: bool,
 
-    /// Create a VM from this named bootstrap instead of the environment default
+    /// Create a VM from this named bootstrap instead of your local environment default
     #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"])]
     bootstrap: Option<String>,
 
-    /// Create a clean VM without the environment default bootstrap
+    /// Create a clean VM without your local environment default bootstrap
     #[clap(long, conflicts_with_all = ["remote_agent", "rm"])]
     no_bootstrap: bool,
 
@@ -2660,6 +2660,7 @@ async fn resolve_agent(
     }
 
     let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        configs,
         client,
         &backboard,
         environment_id,
@@ -2676,7 +2677,7 @@ async fn resolve_agent(
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
-        &backboard,
+        crate::controllers::agent_bootstrap::internal_url(&backboard),
         mutations::cloud_agent_create::Variables {
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
@@ -3860,11 +3861,14 @@ mod tests {
                 json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
                 "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
             };
+            configs
+                .set_agent_bootstrap_default("env", "default", false)
+                .await
+                .unwrap();
             server.stub(
-                "AgentBootstrapDefault",
-                json!({"agentBootstrapDefault": row("default")}),
+                "AgentBootstraps",
+                json!({"agentBootstraps": [row("default"), row("dev")]}),
             );
-            server.stub("AgentBootstraps", json!({"agentBootstraps": [row("dev")], "agentBootstrapDefault": {"id": "default"}}));
             server.stub_graphql_error("CloudAgentCreate", "creation reached");
             let args = LaunchArgs {
                 new: true,
@@ -3892,7 +3896,7 @@ mod tests {
             assert_eq!(request["agentBootstrapId"].as_str(), expected);
             assert_eq!(request["environmentId"], "env");
             if clean {
-                assert!(server.variables_for("AgentBootstrapDefault").is_empty());
+                assert!(server.variables_for("AgentBootstraps").is_empty());
             }
         }
     }
@@ -3983,10 +3987,6 @@ mod tests {
             }
             server.stub("CloudAgents", json!({"cloudAgents": []}));
             // Stop at creation so the test never opens SSH or provisions a VM.
-            server.stub(
-                "AgentBootstrapDefault",
-                json!({"agentBootstrapDefault": null}),
-            );
             server.stub_graphql_error("CloudAgentCreate", "creation reached");
             let args = LaunchArgs {
                 new,

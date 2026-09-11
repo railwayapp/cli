@@ -245,7 +245,7 @@ pub async fn create(
 ) -> Result<Agent> {
     let res = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
-        backboard,
+        super::agent_bootstrap::internal_url(backboard),
         mutations::cloud_agent_create::Variables {
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
