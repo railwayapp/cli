@@ -671,6 +671,11 @@ impl LaunchArgs {
         )
     }
 
+    pub(crate) fn set_bootstrap_choice(&mut self, name: Option<String>, none: bool) {
+        self.bootstrap = name;
+        self.no_bootstrap = none;
+    }
+
     /// [`Self::for_target`] over an existing set of flags instead of an empty
     /// one — how a `railway code` invocation that opened in the pane gets its
     /// remaining flags to the pipeline.
@@ -2674,12 +2679,13 @@ async fn resolve_agent(
         args.no_bootstrap,
     )
     .await?;
-    if let Some(b) = &bootstrap {
-        progress.note(&format!("Using bootstrap '{}'", b.name));
-    }
     let variables = create_variables(args)?;
     let name = names::for_launch(client, configs, args, harness, target).await?;
-    progress.step("Creating a cloud agent");
+    if let Some(b) = &bootstrap {
+        progress.step(&format!("Restoring bootstrap '{}'", b.name));
+    } else {
+        progress.step("Creating a cloud agent");
+    }
     let create_started = std::time::Instant::now();
     let create = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
@@ -3270,7 +3276,7 @@ async fn prepare_inner(
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
     let packed_skills = ssh_tel::timed_for("cloud_agent_launch", "skills_pack", async {
-        skills_sync::pack(&prefs, home)
+        skills_sync::pack(&prefs, home, &|note| progress.note(note))
     })
     .await?;
     if let Some(packed) = &packed_skills {
@@ -3873,54 +3879,73 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_launch_passes_selected_bootstrap_to_create() {
-        for (override_name, clean, expected) in [
-            (None, false, Some("default")),
-            (Some("dev"), false, Some("dev")),
-            (None, true, None),
+        for harness in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::OpenCode2,
+            Agent::Claude,
+            Agent::Grok,
+            Agent::Railway,
+            Agent::Shell,
         ] {
-            let server = MockBackboard::spawn();
-            let dir = tempfile::tempdir().unwrap();
-            let mut configs = server.configs(&dir);
-            let row = |name| {
-                json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
-                "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
-            };
-            configs
-                .set_agent_bootstrap_default("env", "default", false)
+            for (override_name, clean, expected) in [
+                (None, false, Some("default")),
+                (Some("dev"), false, Some("dev")),
+                (None, true, None),
+            ] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                let row = |name| {
+                    json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
+                "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z",
+                "activeVersion": {"sourceCloudAgentId": "codex-source", "checkpoint": {"id": "disk-checkpoint"}}})
+                };
+                configs
+                    .set_agent_bootstrap_default("env", "default", false)
+                    .await
+                    .unwrap();
+                server.stub(
+                    "AgentBootstraps",
+                    json!({"agentBootstraps": [row("default"), row("dev")]}),
+                );
+                server.stub_graphql_error("CloudAgentCreate", "creation reached");
+                let args = LaunchArgs {
+                    new: true,
+                    name: Some("fresh".into()),
+                    bootstrap: override_name.map(str::to_owned),
+                    no_bootstrap: clean,
+                    ..Default::default()
+                }
+                .retargeted(
+                    "project".into(),
+                    "env".into(),
+                    harness.slug(),
+                    true,
+                    None,
+                    None,
+                );
+                let error = resolve_agent(
+                    &mut configs,
+                    &reqwest::Client::new(),
+                    &args,
+                    &names::Target::new(("project".into(), "env".into()), false),
+                    harness,
+                    &CliProgress::default(),
+                    &RelayAccess {
+                        identity: None,
+                        relay_opts: vec![],
+                    },
+                )
                 .await
-                .unwrap();
-            server.stub(
-                "AgentBootstraps",
-                json!({"agentBootstraps": [row("default"), row("dev")]}),
-            );
-            server.stub_graphql_error("CloudAgentCreate", "creation reached");
-            let args = LaunchArgs {
-                new: true,
-                name: Some("fresh".into()),
-                bootstrap: override_name.map(str::to_owned),
-                no_bootstrap: clean,
-                ..Default::default()
-            };
-            let error = resolve_agent(
-                &mut configs,
-                &reqwest::Client::new(),
-                &args,
-                &names::Target::new(("project".into(), "env".into()), false),
-                Agent::Claude,
-                &CliProgress::default(),
-                &RelayAccess {
-                    identity: None,
-                    relay_opts: vec![],
-                },
-            )
-            .await
-            .unwrap_err();
-            assert!(error.to_string().contains("creation reached"), "{error}");
-            let request = &server.variables_for("CloudAgentCreate")[0]["input"];
-            assert_eq!(request["agentBootstrapId"].as_str(), expected);
-            assert_eq!(request["environmentId"], "env");
-            if clean {
-                assert!(server.variables_for("AgentBootstraps").is_empty());
+                .unwrap_err();
+                assert!(error.to_string().contains("creation reached"), "{error}");
+                let request = &server.variables_for("CloudAgentCreate")[0]["input"];
+                assert_eq!(request["agentBootstrapId"].as_str(), expected);
+                assert_eq!(request["environmentId"], "env");
+                if clean {
+                    assert!(server.variables_for("AgentBootstraps").is_empty());
+                }
             }
         }
     }

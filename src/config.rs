@@ -638,6 +638,16 @@ impl Configs {
             .map(String::as_str)
     }
 
+    pub async fn clear_agent_bootstrap_default(&mut self, environment_id: &str) -> Result<()> {
+        let _lock = self.acquire_lock().await;
+        self.reload()?;
+        let key = format!("{}:{environment_id}", self.get_host());
+        if let Some(defaults) = self.root_config.agent_bootstrap_defaults.as_mut() {
+            defaults.remove(&key);
+        }
+        self.write_value(&serde_json::to_value(&self.root_config)?)
+    }
+
     /// Persist just this preference against the latest config snapshot.
     pub async fn set_agent_bootstrap_default(
         &mut self,

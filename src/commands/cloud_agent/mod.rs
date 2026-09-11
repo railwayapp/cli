@@ -427,6 +427,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
     app.hide_tabs = saved.hide_tabs;
+    app.sidebar_width = saved.sidebar_width;
     // What the key check learned. Connects gate on this in-frame: an
     // unregistered key raises a register question instead of a hung prompt.
     app.ssh_key = ssh_key;
@@ -489,15 +490,6 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
                     println!("{}", note.dimmed());
                 }
                 return Ok(());
-            }
-            Outcome::ConfigureBootstrap {
-                agent_id,
-                environment_id,
-            } => {
-                if let Err(err) = bootstrap::configure(&agent_id, &environment_id).await {
-                    eprintln!("Couldn't save bootstrap: {err:#}");
-                }
-                pause_for_reentry();
             }
             Outcome::OpenShell {
                 agent_id,

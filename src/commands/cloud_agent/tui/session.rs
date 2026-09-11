@@ -25,6 +25,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::commands::cloud_agent::{client_sessions, codex};
 use crate::commands::ssh::native;
+use crate::vt100;
 
 use super::terminal_palette;
 
@@ -1480,6 +1481,109 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Run with RAILWAY_TEST_CODEX_BIN pointing to a local Codex binary. Uses
+    /// only /status in an isolated home; no credentials or model turns.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires an installed Codex binary"]
+    fn real_codex_scrollback_survives_panel_focus_and_a_lost_resize_release() {
+        use crate::commands::cloud_agent::tui::{
+            app::{App, ManageFocus, MouseAction},
+            ui,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+        let binary = std::env::var("RAILWAY_TEST_CODEX_BIN").expect("set RAILWAY_TEST_CODEX_BIN");
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().canonicalize().unwrap();
+        std::fs::write(root.path().join("config.toml"), format!(
+            "check_for_update_on_startup = false\nmodel_provider = \"scroll_probe\"\nmodel = \"test\"\n[model_providers.scroll_probe]\nname = \"Scroll probe\"\nbase_url = \"http://127.0.0.1:9/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            serde_json::to_string(&directory.to_string_lossy()).unwrap()
+        )).unwrap();
+        let mut cmd = CommandBuilder::new(binary);
+        cmd.env("CODEX_HOME", root.path());
+        cmd.arg("-C");
+        cmd.arg(&directory);
+        let pane = Session::spawn_pty(
+            "ca_1".into(),
+            "codex-scroll-probe".into(),
+            "codex".into(),
+            "",
+            None,
+            &[],
+            false,
+            "codex-test",
+            cmd,
+            34,
+            102,
+            || {},
+        )
+        .unwrap();
+        let mut app = App::new(Vec::new(), None, Some("codex"), None, None, true);
+        app.attach_session(pane, "ca_1".into());
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|f| app.panes = ui::render_with_layout(&app, f).0)
+            .unwrap();
+        let rect = app.panes.session;
+        app.sessions[0].resize(rect.h, rect.w);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !app.sessions[0]
+            .with_screen(|s| s.contents().contains("test default"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Codex startup: {:?}",
+                app.sessions[0].last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Generate enough terminal history without sending work to a model.
+        for _ in 0..6 {
+            app.sessions[0].send(b"/status");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.sessions[0].send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(!app.sessions[0].wants_mouse());
+        assert!(
+            !app.sessions[0]
+                .with_screen(|s| s.alternate_screen())
+                .unwrap()
+        );
+        let live = app.sessions[0].with_screen(|s| s.contents()).unwrap();
+        for _ in 0..8 {
+            app.on_mouse(MouseAction::ScrollUp, rect.x + 4, rect.y + 4);
+        }
+        assert!(
+            app.sessions[0].scrolled_back(),
+            "Codex history must scroll through the app handler: active={:?}, focus={:?}, screen={live}",
+            app.active,
+            app.focus
+        );
+        assert_ne!(app.sessions[0].with_screen(|s| s.contents()).unwrap(), live);
+        let offset = app.sessions[0].scroll;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        terminal
+            .draw(|f| app.panes = ui::render_with_layout(&app, f).0)
+            .unwrap();
+        assert_eq!(
+            app.sessions[0].scroll, offset,
+            "redrawing preserves the history view"
+        );
+        for _ in 0..8 {
+            app.on_mouse(MouseAction::ScrollDown, rect.x + 4, rect.y + 4);
+        }
+        assert!(!app.sessions[0].scrolled_back());
+        let divider = app.panes.sidebar_divider;
+        app.on_mouse(MouseAction::Down, divider.x, divider.y);
+        app.on_mouse(MouseAction::Drag, divider.x + 4, divider.y);
+        app.on_mouse(MouseAction::ScrollUp, rect.x + 8, rect.y + 4);
+        assert!(app.sessions[0].scrolled_back());
+        assert!(!app.resizing_sidebar());
+        assert_eq!(app.focus, ManageFocus::Session);
+    }
+
     #[cfg(unix)]
     #[test]
     fn codex_local_pty_handles_remote_args_auth_input_and_resize() {
@@ -1492,7 +1596,7 @@ assert os.isatty(0) and os.isatty(1)
 assert os.environ['RAILWAY_CODEX_SERVER_TOKEN'] == "secret ' $(echo injected)"
 backend = hashlib.sha256(b'wss://agent.example.com:443').hexdigest()[:16]
 assert pathlib.Path(os.environ['CODEX_HOME']) == pathlib.Path.home() / '.railway/codex-client' / backend
-assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', 'resume', 'thread-1']
 print('Codex ready', flush=True)
 assert input() == 'hello'
 size = os.get_terminal_size()
@@ -2216,6 +2320,58 @@ assert (size.lines, size.columns) == (30, 100)
 
     /// Successive wheel notches keep going past one screenful, through the
     /// same entry point the mouse uses.
+    #[test]
+    fn top_scrolling_regions_preserve_history_and_the_fixed_composer() {
+        let mut parser = pane_parser(6, 30, 20);
+        parser.process(b"\x1b[5;1Hcomposer\x1b[6;1Hfooter\x1b[1;4r\x1b[1;1H");
+        for i in 0..40 {
+            parser.process(format!("\x1b[31mline-{i:02}\x1b[0m\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().cell(4, 0).unwrap().contents(), "c");
+        assert_eq!(parser.screen().cell(5, 0).unwrap().contents(), "f");
+        assert!(parser.screen().contents().contains("line-39"));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(
+            parser.screen().scrollback(),
+            20,
+            "retention remains bounded"
+        );
+        assert!(parser.screen().contents().contains("line-17"));
+        assert_eq!(
+            parser.screen().cell(0, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(1)
+        );
+        let history = parser.screen().contents();
+        // New output keeps the scrolled view anchored and the composer intact.
+        parser.process(b"line-40\r\n");
+        assert!(parser.screen().scrollback() > 0);
+        assert_ne!(
+            parser.screen().contents(),
+            history,
+            "oldest retained row was evicted"
+        );
+        parser.screen_mut().set_scrollback(0);
+        assert!(parser.screen().contents().contains("line-40"));
+        assert_eq!(parser.screen().cell(4, 0).unwrap().contents(), "c");
+        assert_eq!(parser.screen().cell(5, 0).unwrap().contents(), "f");
+    }
+
+    #[test]
+    fn scrolling_below_a_header_and_on_alternate_screens_stays_out_of_history() {
+        for setup in [
+            b"\x1b[2;4r\x1b[2;1H".as_slice(),
+            b"\x1b[?1049h\x1b[1;4r\x1b[1;1H".as_slice(),
+        ] {
+            let mut parser = pane_parser(6, 30, 20);
+            parser.process(setup);
+            for i in 0..40 {
+                parser.process(format!("line-{i:02}\r\n").as_bytes());
+            }
+            parser.screen_mut().set_scrollback(usize::MAX);
+            assert_eq!(parser.screen().scrollback(), 0);
+        }
+    }
+
     #[test]
     fn scrolling_walks_past_one_screenful() {
         let mut session = Session::for_test("ca", "test").unwrap();

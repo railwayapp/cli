@@ -41,6 +41,9 @@ pub(crate) fn repository_url(value: &str) -> Result<String> {
 }
 
 pub(crate) async fn create(req: Request, progress: &dyn Progress) -> Result<bootstrap::Bootstrap> {
+    if req.snapshot.is_some() {
+        return save_existing(req, progress).await;
+    }
     let repo = req.repo.as_deref().map(repository_url).transpose()?;
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
@@ -130,10 +133,12 @@ where
         progress.step("Saving checkpoint");
         let saved = bootstrap::save(client, url, &agent.id, &req.name, None, None).await?;
         let mut saved = bootstrap::wait_ready(client, url, saved).await?;
-        progress.step("Setting local default");
-        saved.is_default = configs
-            .set_agent_bootstrap_default(&req.target.environment_id, &saved.id, false)
-            .await?;
+        if req.make_default {
+            progress.step("Setting local default");
+            saved.is_default = configs
+                .set_agent_bootstrap_default(&req.target.environment_id, &saved.id, false)
+                .await?;
+        }
         Ok(saved)
     }
     .await;
@@ -149,7 +154,8 @@ where
         }
         (result, Err(error)) => {
             let outcome = match result {
-                Ok(_) => "Bootstrap saved and selected locally".to_string(),
+                Ok(b) if b.is_default => "Bootstrap saved and selected locally".to_string(),
+                Ok(_) => "Bootstrap saved".to_string(),
                 Err(e) => format!("Bootstrap setup failed: {e:#}"),
             };
             bail!(
@@ -159,6 +165,70 @@ where
             )
         }
     }
+}
+
+/// Capture the selected VM without leaving the TUI or changing its connection.
+async fn save_existing(req: Request, progress: &dyn Progress) -> Result<bootstrap::Bootstrap> {
+    let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let url = configs.get_backboard();
+    save_existing_with(&req, &mut configs, &client, &url, progress).await
+}
+
+async fn save_existing_with(
+    req: &Request,
+    configs: &mut Configs,
+    client: &reqwest::Client,
+    url: &str,
+    progress: &dyn Progress,
+) -> Result<bootstrap::Bootstrap> {
+    let snapshot = req.snapshot.as_ref().context("No VM selected")?;
+    progress.step("Checking the selected VM");
+    let agent = ca::get(client, url, &req.target.environment_id, &snapshot.agent_id)
+        .await?
+        .context("The selected VM is no longer available")?;
+    if agent.status != ca::Status::Running {
+        bail!("Wake '{}' before saving a bootstrap.", agent.name);
+    }
+    let existing = bootstrap::list(configs, client, url, &req.target.environment_id)
+        .await?
+        .into_iter()
+        .find(|b| b.name == req.name);
+    let saved = match existing {
+        Some(b)
+            if b.source_agent_id.as_deref() == Some(snapshot.agent_id.as_str())
+                && b.status == "SAVING" =>
+        {
+            progress.step("Waiting for the existing checkpoint");
+            b
+        }
+        Some(b)
+            if b.source_agent_id.as_deref() == Some(snapshot.agent_id.as_str())
+                && b.status == "DEGRADED" =>
+        {
+            progress.step("Retrying the failed checkpoint");
+            bootstrap::save(client, url, &agent.id, &req.name, Some(b.id), None).await?
+        }
+        Some(b) => {
+            bail!(
+                "A bootstrap named '{}' already exists ({}). Select it from the bootstrap list or choose a different name. Only a failed capture from this VM can be retried here.",
+                req.name,
+                b.status.to_lowercase()
+            );
+        }
+        None => {
+            progress.step("Saving checkpoint");
+            bootstrap::save(client, url, &agent.id, &req.name, None, None).await?
+        }
+    };
+    let mut saved = bootstrap::wait_ready(client, url, saved).await?;
+    if req.make_default {
+        progress.step("Setting local default");
+        saved.is_default = configs
+            .set_agent_bootstrap_default(&req.target.environment_id, &saved.id, false)
+            .await?;
+    }
+    Ok(saved)
 }
 
 fn config_files(home: &Path, harness: &str) -> Result<Vec<(String, Vec<u8>)>> {
@@ -389,6 +459,8 @@ mod tests {
             name: "dev".into(),
             repo: None,
             harness: "railway".into(),
+            snapshot: None,
+            make_default: true,
         }
     }
     struct Quiet;
@@ -404,6 +476,228 @@ mod tests {
     }
     fn saved(status: &str) -> serde_json::Value {
         json!({"id": "checkpoint-bootstrap", "name": "dev", "environmentId": "env", "status": status, "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"})
+    }
+
+    #[tokio::test]
+    async fn bootstrap_snapshot_respects_default_choice_and_never_deletes_the_vm() {
+        for (existing, make_default) in [
+            (None, true),
+            (Some("previous"), true),
+            (Some("previous"), false),
+            (None, false),
+        ] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            if let Some(id) = existing {
+                configs
+                    .set_agent_bootstrap_default("env", id, false)
+                    .await
+                    .unwrap();
+            }
+            configs.set_code_agent("env", "remembered");
+            configs.write().unwrap();
+            let mut req = request();
+            req.snapshot = Some(
+                crate::commands::cloud_agent::tui::bootstrap_setup::Snapshot {
+                    agent_id: "selected-vm".into(),
+                    agent_name: "selected".into(),
+                },
+            );
+            req.make_default = make_default;
+            server.stub("CloudAgent", json!({"cloudAgent": {"id": "selected-vm", "name": "selected", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+            server.stub("AgentBootstraps", json!({"agentBootstraps": []}));
+            server.stub(
+                "AgentBootstraps",
+                json!({"agentBootstraps": [saved("READY")]}),
+            );
+
+            server.stub(
+                "AgentBootstrapSave",
+                json!({"agentBootstrapSave": saved("READY")}),
+            );
+            let b = save_existing_with(
+                &req,
+                &mut configs,
+                &reqwest::Client::new(),
+                &server.url(),
+                &Quiet,
+            )
+            .await
+            .unwrap();
+            assert_eq!(b.is_default, make_default);
+            assert_eq!(
+                configs.get_agent_bootstrap_default("env"),
+                if make_default {
+                    Some("checkpoint-bootstrap")
+                } else {
+                    existing
+                }
+            );
+            assert_eq!(configs.get_code_agent("env").as_deref(), Some("remembered"));
+            assert_eq!(
+                server.variables_for("AgentBootstrapSave")[0]["input"]["cloudAgentId"],
+                "selected-vm"
+            );
+            assert!(server.variables_for("CloudAgentCreate").is_empty());
+            assert!(server.variables_for("CloudAgentDelete").is_empty());
+            // Existing names cannot silently overwrite a shared checkpoint.
+            let error = save_existing_with(
+                &req,
+                &mut configs,
+                &reqwest::Client::new(),
+                &server.url(),
+                &Quiet,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("already exists"));
+            assert_eq!(server.variables_for("AgentBootstrapSave").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_snapshot_retries_only_failed_captures_from_the_same_vm() {
+        for (status, source, allowed, saves) in [
+            ("DEGRADED", "selected-vm", true, 1),
+            ("SAVING", "selected-vm", true, 0),
+            ("READY", "selected-vm", false, 0),
+            ("DEGRADED", "another-vm", false, 0),
+            ("SAVING", "another-vm", false, 0),
+        ] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            configs
+                .set_agent_bootstrap_default("env", "previous", false)
+                .await
+                .unwrap();
+            let mut req = request();
+            req.snapshot = Some(
+                crate::commands::cloud_agent::tui::bootstrap_setup::Snapshot {
+                    agent_id: "selected-vm".into(),
+                    agent_name: "selected".into(),
+                },
+            );
+            let mut record = saved(status);
+            record["activeVersion"] =
+                json!({"sourceCloudAgentId": source, "checkpoint": {"id": "old-checkpoint"}});
+            server.stub("CloudAgent", json!({"cloudAgent": {"id": "selected-vm", "name": "selected", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+            server.stub("AgentBootstraps", json!({"agentBootstraps": [record]}));
+            server.stub(
+                "AgentBootstrapSave",
+                json!({"agentBootstrapSave": saved("READY")}),
+            );
+            server.stub("AgentBootstrap", json!({"agentBootstrap": saved("READY")}));
+            let result = save_existing_with(
+                &req,
+                &mut configs,
+                &reqwest::Client::new(),
+                &server.url(),
+                &Quiet,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                allowed,
+                "{status} from {source}: {result:?}"
+            );
+            let requests = server.variables_for("AgentBootstrapSave");
+            assert_eq!(requests.len(), saves);
+            if saves > 0 {
+                assert_eq!(
+                    requests[0]["input"]["id"], "checkpoint-bootstrap",
+                    "retry reuses the reserved name"
+                );
+                assert_eq!(requests[0]["input"]["cloudAgentId"], "selected-vm");
+            }
+            assert_eq!(
+                configs.get_agent_bootstrap_default("env"),
+                Some(if allowed {
+                    "checkpoint-bootstrap"
+                } else {
+                    "previous"
+                })
+            );
+            assert!(server.variables_for("CloudAgentCreate").is_empty());
+            assert!(server.variables_for("CloudAgentDelete").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_snapshot_failed_checkpoint_explains_reserved_name_and_preserves_default() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs
+            .set_agent_bootstrap_default("env", "previous", false)
+            .await
+            .unwrap();
+        let mut req = request();
+        req.snapshot = Some(
+            crate::commands::cloud_agent::tui::bootstrap_setup::Snapshot {
+                agent_id: "selected-vm".into(),
+                agent_name: "selected".into(),
+            },
+        );
+        let mut failed = saved("DEGRADED");
+        failed["failureReason"] = json!("checkpoint_failed:timeout:freezesnapshot");
+        server.stub("CloudAgent", json!({"cloudAgent": {"id": "selected-vm", "name": "selected", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+        server.stub("AgentBootstraps", json!({"agentBootstraps": []}));
+        server.stub(
+            "AgentBootstrapSave",
+            json!({"agentBootstrapSave": saved("SAVING")}),
+        );
+        server.stub("AgentBootstrap", json!({"agentBootstrap": failed}));
+        let error = save_existing_with(
+            &req,
+            &mut configs,
+            &reqwest::Client::new(),
+            &server.url(),
+            &Quiet,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("disk capture failed"), "{error}");
+        assert!(error.contains("same name"), "{error}");
+        assert!(
+            error.contains("checkpoint_failed:timeout:freezesnapshot"),
+            "{error}"
+        );
+        assert_eq!(configs.get_agent_bootstrap_default("env"), Some("previous"));
+        assert!(server.variables_for("CloudAgentDelete").is_empty());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_setup_can_preserve_an_existing_default() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs
+            .set_agent_bootstrap_default("env", "previous", false)
+            .await
+            .unwrap();
+        stub_vm(&server);
+        server.stub(
+            "AgentBootstrapSave",
+            json!({"agentBootstrapSave": saved("READY")}),
+        );
+        let mut req = request();
+        req.make_default = false;
+        let b = create_with(
+            &mut configs,
+            &reqwest::Client::new(),
+            &server.url(),
+            &req,
+            &Quiet,
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+        assert!(!b.is_default);
+        assert_eq!(configs.get_agent_bootstrap_default("env"), Some("previous"));
+        assert_eq!(server.variables_for("CloudAgentDelete").len(), 1);
     }
 
     #[tokio::test]
@@ -593,6 +887,19 @@ printf 'cloned' > "$6/README"
         )
         .unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The VM uses GNU timeout, absent on macOS. Like git, mock the external
+        // process here: this test exercises quoting and repeatable cloning.
+        let timeout = dir.path().join("timeout");
+        std::fs::write(
+            &timeout,
+            r#"#!/bin/sh
+[ "$1" = 300 ] || exit 2
+shift
+exec "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&timeout, std::fs::Permissions::from_mode(0o700)).unwrap();
         let workspace = dir.path().join("work space");
         let marker = dir.path().join("injected");
         let repo = format!("https://example.com/repo'$(touch {})", marker.display());

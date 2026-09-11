@@ -203,69 +203,6 @@ async fn save_from_agent(
     result
 }
 
-/// The management TUI releases the terminal for this form, then restores its panes.
-pub async fn configure(agent_id: &str, environment_id: &str) -> Result<()> {
-    let mut configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let url = configs.get_backboard();
-    let agent = ca::get(&client, &url, environment_id, agent_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("The selected VM is no longer available."))?;
-    if agent.status != ca::Status::Running {
-        bail!("Wake '{}' before saving a bootstrap.", agent.name);
-    }
-    let entries = bootstrap::list(&configs, &client, &url, environment_id).await?;
-    println!(
-        "\nSave {} as a reusable bootstrap. Its disk is captured; the VM stays running.",
-        agent.name
-    );
-    println!(
-        "Files and installed tools are included. Startup services should be configured in /etc/railway/bootstrap/startup.sh."
-    );
-    let Some(name) = inquire::Text::new("Bootstrap name:")
-        .with_default(&agent.name)
-        .with_validator(inquire::validator::ValueRequiredValidator::default())
-        .prompt_skippable()?
-    else {
-        return Ok(());
-    };
-    if entries.iter().any(|b| b.name == name)
-        && !inquire::Confirm::new("Save a new version of this existing bootstrap?")
-            .with_default(false)
-            .prompt()?
-    {
-        return Ok(());
-    }
-    let make_default = if entries.iter().any(|b| b.is_default) {
-        inquire::Confirm::new("Make this the local default for this environment?")
-            .with_default(false)
-            .prompt()?
-    } else {
-        true
-    };
-    let b = save_from_agent(
-        &mut configs,
-        &client,
-        &url,
-        &agent,
-        &name,
-        make_default,
-        None,
-        false,
-    )
-    .await?;
-    println!(
-        "Saved '{}'{}.",
-        b.name,
-        if b.is_default {
-            " as your local default bootstrap"
-        } else {
-            ""
-        }
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

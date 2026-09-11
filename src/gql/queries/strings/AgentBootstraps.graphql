@@ -5,6 +5,7 @@ fragment BootstrapFields on AgentBootstrap {
   status
   failureReason
   updatedAt
+  activeVersion { sourceCloudAgentId checkpoint { id } }
 }
 query AgentBootstraps($environmentId: ID!) {
   agentBootstraps(environmentId: $environmentId) { ...BootstrapFields }

@@ -31,6 +31,7 @@ mod table;
 #[cfg(test)]
 mod testkit;
 mod util;
+mod vt100;
 mod workspace;
 
 #[macro_use]

@@ -101,6 +101,8 @@ fn quote(value: &str) -> String {
 
 #[derive(Default, serde::Deserialize)]
 pub(crate) struct Discovery {
+    #[serde(default)]
+    pub primary_harness: Option<String>,
     pub threads: Vec<RemoteThread>,
     pub warnings: Vec<String>,
     pub failed: Vec<String>,

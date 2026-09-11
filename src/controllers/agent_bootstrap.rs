@@ -23,6 +23,8 @@ pub struct Bootstrap {
     pub failure_reason: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub is_default: bool,
+    pub source_agent_id: Option<String>,
+    pub checkpoint_id: Option<String>,
 }
 
 macro_rules! from_fragment {
@@ -39,6 +41,8 @@ macro_rules! from_fragment {
                     },
                     failure_reason: b.failure_reason, updated_at: b.updated_at,
                     is_default: false,
+                    source_agent_id: b.active_version.as_ref().map(|v| v.source_cloud_agent_id.clone()),
+                    checkpoint_id: b.active_version.map(|v| v.checkpoint.id),
                 }
             }
         }
@@ -187,7 +191,13 @@ pub async fn wait_ready(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         b = get(client, url, &b.id).await?;
     }
-    b.require_ready()?;
+    if b.status != "READY" {
+        bail!(
+            "Bootstrap '{}' is not usable: disk capture failed. Default unchanged. Retry from this VM with the same name.\n{}",
+            b.name,
+            b.failure_reason.as_deref().unwrap_or("Capture failed")
+        );
+    }
     Ok(b)
 }
 
@@ -331,6 +341,43 @@ mod tests {
             reloaded.get_agent_bootstrap_default("other-env"),
             Some("other")
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_no_default_persists_and_launches_without_a_checkpoint() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs
+            .set_agent_bootstrap_default("env", "saved", false)
+            .await
+            .unwrap();
+        configs
+            .set_agent_bootstrap_default("other-env", "other", false)
+            .await
+            .unwrap();
+        let mut stale = server.configs(&dir);
+        configs.clear_agent_bootstrap_default("env").await.unwrap();
+        stale.set_code_agent("env", "remembered");
+        stale.write().unwrap();
+        configs.reload().unwrap();
+        assert_eq!(configs.get_agent_bootstrap_default("env"), None);
+        assert_eq!(
+            configs.get_agent_bootstrap_default("other-env"),
+            Some("other")
+        );
+        let b = resolve_for_create(
+            &configs,
+            &reqwest::Client::new(),
+            &server.url(),
+            "env",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(b.is_none());
+        assert!(server.variables_for("AgentBootstraps").is_empty());
     }
 
     #[tokio::test]
