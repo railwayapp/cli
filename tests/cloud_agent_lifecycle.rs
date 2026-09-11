@@ -252,7 +252,10 @@ fn bootstrap_list_uses_directory_link_before_preferences_and_flags_before_link()
     let home = tempfile::tempdir().unwrap();
     let config = home.path().join(".railway");
     std::fs::create_dir_all(&config).unwrap();
-    let path = home.path().to_str().unwrap();
+    // `railway link` records current_dir(), which resolves macOS's /var and
+    // /tmp symlinks. Match that path instead of the temporary directory alias.
+    let linked_directory = home.path().canonicalize().unwrap();
+    let path = linked_directory.to_str().unwrap();
     std::fs::write(config.join("config.json"), json!({
         "projects": {path: {"projectPath": path, "project": "linked", "environment": "linked-env"}},
         "user": {}
