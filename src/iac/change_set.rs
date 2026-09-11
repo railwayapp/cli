@@ -120,6 +120,23 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
                 "severity": "safe",
                 "deployEffect": if matches!(resource_type(resource), "service" | "database") { "deploy" } else { "none" },
             }));
+            // Database creation selects the current engine default before applying the
+            // rest of the resource. Reassert the authored source in the same change set
+            // so an explicitly pinned image is used by the first deployment instead of
+            // appearing as drift on the next plan.
+            if let ("database", Some(source)) =
+                (resource_type(resource), resource.get("source"))
+            {
+                changes.push(update(
+                    &address,
+                    "source",
+                    Value::Null,
+                    source.clone(),
+                    format!("Set {} source during creation", resource_name(resource)),
+                    None,
+                    "safe",
+                ));
+            }
             continue;
         }
         let previous = previous.unwrap();
