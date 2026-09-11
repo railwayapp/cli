@@ -145,7 +145,7 @@ pub struct Agent {
 }
 
 /// One reattachable session on an agent's VM.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsoleSession {
     /// The durable name the relay reattaches by.
     pub name: String,
@@ -166,7 +166,7 @@ pub struct ConsoleSession {
 
 /// The reported state of one coding-agent run, from `CloudAgent.sessions` —
 /// the same snapshot the dashboard's session cards render. Display-only.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSnapshot {
     /// Which harness reported: claude, codex, grok, railway-agent…
     pub harness: String,
@@ -500,26 +500,6 @@ pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(150
 /// whole tree green, but each attach is a relay ssh, a reader thread, and a
 /// scrollback replay — a fleet's worth at once is a thundering herd.
 const AUTO_CONNECT_INFLIGHT: usize = 3;
-
-/// How often the tree asks the platform for everything again on its own.
-///
-/// One `myCloudAgents` request covers the whole account — every workspace,
-/// project and environment — so the cost of this is one request per interval no
-/// matter how large the account is, plus a session query for each agent someone
-/// has open or expanded (usually none or one). For scale: the dashboard polls
-/// `cloudAgents` every 15s *per environment* it is showing, and every 3s while
-/// any agent is in a transient state.
-///
-/// Enough of the same work already happens on demand — a launch refetches its
-/// environment, a wake polls at [`WATCH_TICK`], ⌥r asks immediately — that this
-/// is a safety net for changes made somewhere else entirely: another terminal,
-/// the dashboard, a teammate. 25s is short enough that nobody reaches for ⌥r out
-/// of doubt, and long enough to be invisible in anyone's rate-limit budget.
-pub const AUTO_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(25);
-
-/// How often the watched threads' sessions are re-asked about, for the
-/// sidebar's live labels. See [`App::thread_refresh_in`].
-pub const THREAD_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
@@ -1044,6 +1024,10 @@ pub struct LaunchRequest {
 }
 
 pub struct App {
+    pub(super) activity: super::activity::Activity,
+    pub(super) thread_cache: Option<super::cache::Cache>,
+    /// Discovery is a startup/user gesture, never a consequence of cache age.
+    discovered: std::collections::HashSet<String>,
     /// The project new agents go to: the linked directory's project, or the
     /// preferences file when this directory has no link. Sorted to the top of
     /// the tree and separated from the rest.
@@ -1168,17 +1152,10 @@ pub struct App {
     /// A refresh is in flight. Coalescing: a held ⌥r, or several actions
     /// finishing at once, must not stack account-wide queries.
     pub refreshing: bool,
-    /// When the last refresh of any origin started, which is what the automatic
-    /// one measures from — pressing ⌥r pushes the next tick out rather than
-    /// having it arrive a second later.
-    pub last_refresh: Option<std::time::Instant>,
     /// Refreshing is paused until this passes, because the API said so. A 429
     /// answered by polling harder is how a rate limit becomes a longer rate
     /// limit.
     pub refresh_paused_until: Option<std::time::Instant>,
-    /// When the watched threads were last re-asked about — the fast cadence
-    /// behind the sidebar's live labels, separate from the account refresh.
-    pub last_thread_refresh: Option<std::time::Instant>,
     /// Agents whose fast thread poll is still in flight, so a slow reply (the
     /// gate transcript dials can take seconds) is never stacked under a
     /// second ask for the same agent.
@@ -1217,6 +1194,47 @@ pub struct App {
 }
 
 impl App {
+    pub(super) fn restore_cached_threads(&mut self) {
+        let Some(cache) = &self.thread_cache else {
+            return;
+        };
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    let Load::Loaded(agents) = &mut env.agents else {
+                        continue;
+                    };
+                    for agent in agents {
+                        if agent.sessions == LoadSessions::NotLoaded
+                            && let Some(rows) = cache.read(&env.id, &agent.id)
+                        {
+                            agent.sessions = LoadSessions::Loaded(rows);
+                        }
+                    }
+                }
+            }
+        }
+        self.adopt_pane_sessions();
+    }
+
+    pub(super) fn persist_threads(&self, agent_id: &str) {
+        let Some(cache) = &self.thread_cache else {
+            return;
+        };
+        for ws in &self.tree {
+            for project in &ws.projects {
+                for env in &project.envs {
+                    if let Some(agent) = env.agents_vec().iter().find(|a| a.id == agent_id)
+                        && let LoadSessions::Loaded(rows) = &agent.sessions
+                    {
+                        let _ = cache.save(&env.id, agent_id, rows);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(
         tree: Vec<WorkspaceNode>,
         target: Option<Target>,
@@ -1274,9 +1292,10 @@ impl App {
             watching: std::collections::HashMap::new(),
             last_watched_environment: None,
             refreshing: false,
-            last_refresh: None,
+            thread_cache: None,
+            activity: Default::default(),
+            discovered: Default::default(),
             refresh_paused_until: None,
-            last_thread_refresh: None,
             thread_polls: std::collections::HashSet::new(),
             refresh_announce: false,
             agent_snapshot_floor: std::collections::HashMap::new(),
@@ -1842,8 +1861,7 @@ impl App {
         self.auto_expand_agent()
     }
 
-    /// Discover an agent on first arrival. Once loaded, navigation respects
-    /// the user's expansion choice; only an explicit expand opens it again.
+    /// Selecting a machine refreshes its cached history in place.
     fn auto_expand_agent(&mut self) -> Option<Effect> {
         let row = self.selected_row()?;
         let RowKind::Agent(w, p, e, a) = row.kind else {
@@ -1853,12 +1871,11 @@ impl App {
             return None;
         };
         let agent = agents.get(a)?;
-        if agent.expanded {
-            return None;
-        }
-        match &agent.sessions {
-            LoadSessions::NotLoaded => self.set_agent_expanded((w, p, e, a), true),
-            _ => None,
+        let id = agent.id.clone();
+        if agent.sessions == LoadSessions::NotLoaded {
+            self.set_agent_expanded((w, p, e, a), true)
+        } else {
+            self.refresh_agent_sessions(&id)
         }
     }
 
@@ -2088,14 +2105,13 @@ impl App {
         };
         let agent = agents.get_mut(a)?;
         agent.expanded = open;
-        if !open {
+        if !open || agent.status != "running" {
             return None;
         }
         if self.thread_polls.contains(&agent.id) {
             return None;
         }
-        // Refresh only the icon. Loaded rows remain visible throughout the
-        // request, including when a user reopens an agent during a fast poll.
+        // Loaded rows remain visible while the on-demand request is in flight.
         if !matches!(agent.sessions, LoadSessions::Loaded(_)) {
             agent.sessions = LoadSessions::Loading;
         }
@@ -2153,7 +2169,11 @@ impl App {
         }
         let mut updates = Vec::new();
         for (index, pane) in self.sessions.iter().enumerate() {
-            if pane.agent_id != agent_id || pane.ended() {
+            if pane.agent_id != agent_id
+                || pane.ended()
+                || pane.client_bridge.is_some()
+                || pane.opencode_bridge.is_some()
+            {
                 continue;
             }
             let matches: Vec<_> = threads
@@ -2198,9 +2218,9 @@ impl App {
             .filter(|pane| !pane.ended() && pane.agent_id == agent_id)
             .map(|pane| pane.durable_name.clone())
             .collect();
-        // Whatever this reply says, its agent's fast poll is no longer in
-        // flight (see `threads_to_poll`).
+        // Whatever this reply says, its discovery is no longer in flight.
         self.thread_polls.remove(agent_id);
+        self.discovered.insert(agent_id.into());
         let (w, p, e, _) = path;
         // Resolved by id rather than trusting the index the request went out
         // with: the environment can be refetched while sessions are in
@@ -2235,6 +2255,16 @@ impl App {
             let previous = std::mem::replace(&mut agent.sessions, LoadSessions::NotLoaded);
             agent.sessions = match (result, previous) {
                 (Ok(mut sessions), LoadSessions::Loaded(previous)) => {
+                    // A slow discovery must not roll back a newer live event.
+                    for row in &mut sessions {
+                        if open.contains(&row.name)
+                            && let Some(old) = previous.iter().find(|old| old.name == row.name)
+                            && old.snapshot.as_ref().map(|s| &s.updated_at)
+                                > row.snapshot.as_ref().map(|s| &s.updated_at)
+                        {
+                            *row = old.clone();
+                        }
+                    }
                     // Open drafts may not exist in the provider index yet.
                     // Keep their slot across refreshes, alongside saved rows.
                     for row in &previous {
@@ -2298,6 +2328,7 @@ impl App {
         // to (the relay registers them a moment after ssh connects); fold
         // those back in rather than letting the reply hide them.
         self.adopt_pane_sessions();
+        self.persist_threads(agent_id);
     }
 
     /// Expand an environment, loading its agents the first time.
@@ -3572,18 +3603,11 @@ impl App {
         self.take_session(index)
     }
 
-    /// Refetch one agent's sessions, wherever it is in the tree.
-    ///
-    /// Only when someone is looking: the row is expanded, so its session rows
-    /// are on screen, or there is an open pane onto the agent — a session
-    /// started or ended from that pane changes the `(N)` beside a collapsed
-    /// row, and refusing to refetch left that count wrong until the agent was
-    /// expanded again.
+    /// User-requested discovery on one running machine, coalesced in flight.
     pub fn refresh_agent_sessions(&mut self, agent_id: &str) -> Option<Effect> {
-        if self.thread_polls.contains(agent_id) {
+        if self.thread_refreshing(agent_id) {
             return None;
         }
-        let has_pane = self.sessions.iter().any(|s| s.agent_id == agent_id);
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
                 for e in 0..self.tree[w].projects[p].envs.len() {
@@ -3593,7 +3617,7 @@ impl App {
                     let Some(a) = agents.iter().position(|agent| agent.id == agent_id) else {
                         continue;
                     };
-                    if !agents[a].expanded && !has_pane {
+                    if agents[a].status != "running" {
                         return None;
                     }
                     return Some(Effect::LoadSessions {
@@ -4099,10 +4123,16 @@ impl App {
                         continue;
                     };
                     for (a, agent) in agents.iter_mut().enumerate() {
-                        if agent.status != "running" || agent.sessions != LoadSessions::NotLoaded {
+                        if agent.status != "running"
+                            || self.discovered.contains(&agent.id)
+                            || self.thread_polls.contains(&agent.id)
+                        {
                             continue;
                         }
-                        agent.sessions = LoadSessions::Loading;
+                        if !matches!(agent.sessions, LoadSessions::Loaded(_)) {
+                            agent.sessions = LoadSessions::Loading;
+                        }
+                        self.discovered.insert(agent.id.clone());
                         self.thread_polls.insert(agent.id.clone());
                         out.push(Effect::LoadSessions {
                             agent_id: agent.id.clone(),
@@ -4154,16 +4184,9 @@ impl App {
                         {
                             continue;
                         }
-                        // A failed fetch retries on the refresh cadence,
-                        // watched or not: a transient 502 during the startup
-                        // prefetch would otherwise leave the agent showing
-                        // zero threads forever — nothing else re-asks for an
-                        // unexpanded row.
+                        // Explicit refresh also retries failed discovery.
                         let failed = matches!(agent.sessions, LoadSessions::Failed(_));
-                        // A loaded thread's row is always on screen now — the
-                        // sidebar lists sessions, not agents — so a running
-                        // agent whose threads are visible stays on the refresh
-                        // cadence: its labels are live status text.
+                        // Loaded threads are visible even on collapsed agents.
                         let visible = matches!(&agent.sessions, LoadSessions::Loaded(sessions)
                             if sessions.iter().any(|s| s.is_interesting()));
                         let watched = agent.expanded
@@ -4335,8 +4358,9 @@ impl App {
                 None
             }
             'f' => {
+                let was_full = self.pane_is_full();
                 self.toggle_maximized();
-                None
+                (was_full && !self.pane_is_full()).then_some(Effect::RefreshAll)
             }
             ']' => self.cycle_session(true),
             '[' => self.cycle_session(false),
@@ -4879,6 +4903,9 @@ impl App {
                 if !matches!(env.agents, Load::Loaded(_)) {
                     env.agents = Load::Loading;
                 }
+                for agent in env.agents_vec() {
+                    self.discovered.remove(&agent.id);
+                }
                 Some(Effect::LoadAgents {
                     environment_id: env.id.clone(),
                     path: (w, p, e),
@@ -5331,88 +5358,6 @@ impl App {
         self.reveal_environment(&environment_id)
     }
 
-    /// How long until the tree should ask the platform for everything again, or
-    /// `None` while an automatic refresh would be wrong.
-    ///
-    /// The loop arms a timer with this, so `None` means an idle TUI goes back to
-    /// blocking on the keyboard rather than waking on a schedule to decide there
-    /// was nothing to do.
-    ///
-    /// What suppresses it, and why:
-    ///
-    /// - A refresh already in flight, or a rate limit we were told to wait out.
-    /// - A launch: the pipeline is mid-provision and reports its own progress,
-    ///   and its environment gets refetched when the session opens.
-    /// - A wake or a sleep in progress: [`WATCH_TICK`] is already asking that
-    ///   environment every 1.5s, which is both faster and narrower.
-    /// - A card owning the screen — first-run setup, the settings card, the ssh
-    ///   key question, a delete confirmation. None of them show the tree, and
-    ///   rows moving under a `y/N` question is how the wrong thing gets deleted.
-    /// - A maximized pane, where the tree is folded away entirely. It refreshes
-    ///   when it comes back.
-    pub fn auto_refresh_in(&self) -> Option<std::time::Duration> {
-        if self.refreshing
-            || self.loading.active
-            || self.watching_agents()
-            || self.confirm.is_some()
-            || self.ssh_gate.is_some()
-            || self.wizard.is_some()
-            || self.settings.is_some()
-            || self.pane_is_full()
-        {
-            return None;
-        }
-        let now = std::time::Instant::now();
-        if let Some(until) = self.refresh_paused_until {
-            if until > now {
-                return Some(until - now);
-            }
-        }
-        let Some(last) = self.last_refresh else {
-            // Nothing has refreshed yet, which means the startup fetch is still
-            // on its way; give it the interval before asking again.
-            return Some(AUTO_REFRESH_EVERY);
-        };
-        Some(AUTO_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
-    }
-
-    /// Is a refresh due right now? The timer can fire early — it is re-armed
-    /// from a shortened remainder every time round the loop — so the decision is
-    /// made here rather than by the fact of waking up.
-    pub fn auto_refresh_due(&self) -> bool {
-        self.auto_refresh_in() == Some(std::time::Duration::ZERO)
-    }
-
-    /// Time until the watched threads should be re-asked about — the fast lane
-    /// behind the sidebar's live labels, much tighter than the account
-    /// refresh: a prompt lands and its row should say so in seconds, not at
-    /// the 25s tick. Narrow by construction — [`Self::sessions_to_refresh`]
-    /// names only running agents someone can see — so the cost is one
-    /// per-agent query per tick, and the gate transcript dials behind it are
-    /// cached until a thread actually reports something new.
-    ///
-    /// `None` when there is nothing to poll for, or a rate limit said to wait.
-    pub fn thread_refresh_in(&self) -> Option<std::time::Duration> {
-        if self.screen != Screen::Manage || self.sessions_to_refresh().is_empty() {
-            return None;
-        }
-        let now = std::time::Instant::now();
-        if let Some(until) = self.refresh_paused_until
-            && until > now
-        {
-            return Some(until - now);
-        }
-        let Some(last) = self.last_thread_refresh else {
-            return Some(THREAD_REFRESH_EVERY);
-        };
-        Some(THREAD_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
-    }
-
-    /// Note that the fast thread poll ran, arming the next tick.
-    pub fn thread_refresh_started(&mut self) {
-        self.last_thread_refresh = Some(std::time::Instant::now());
-    }
-
     pub(super) fn mark_thread_refresh(&mut self, agent_id: &str) {
         self.thread_polls.insert(agent_id.into());
     }
@@ -5421,10 +5366,9 @@ impl App {
         self.thread_polls.contains(agent_id)
     }
 
-    /// The fast tick's work: what [`Self::sessions_to_refresh`] names, minus
+    /// On-demand work: what [`Self::sessions_to_refresh`] names, minus
     /// agents whose previous ask is still in flight, marked as in flight.
-    pub fn threads_to_poll(&mut self) -> Vec<Effect> {
-        self.thread_refresh_started();
+    pub fn threads_to_refresh(&mut self) -> Vec<Effect> {
         let effects: Vec<Effect> = self
             .sessions_to_refresh()
             .into_iter()
@@ -5441,27 +5385,21 @@ impl App {
         effects
     }
 
-    /// Note that a refresh has started, so the next automatic one is a full
-    /// interval away and a second one cannot be started on top of it.
+    /// Start a new on-demand discovery pass, coalescing concurrent requests.
     pub fn refresh_started(&mut self) {
         self.refreshing = true;
-        self.last_refresh = Some(std::time::Instant::now());
+        self.discovered.clear();
     }
 
     /// A refresh finished, whatever it found.
     pub fn refresh_finished(&mut self) {
         self.refreshing = false;
-        self.last_refresh = Some(std::time::Instant::now());
     }
 
     /// Report a finished account-wide refresh — but only when someone asked for
     /// one.
     ///
-    /// A keypress needs an answer: silence after ⌥r is indistinguishable from a
-    /// chord that isn't bound. The automatic refresh needs the opposite, and the
-    /// tree itself is its report — a status line rewritten every 25s would
-    /// scrub whatever was there, and turn an idle screen into something that
-    /// looks busy.
+    /// Only the explicit refresh chord needs a status-line acknowledgement.
     pub fn refreshed(&mut self, agents: usize) {
         if !std::mem::take(&mut self.refresh_announce) {
             return;
@@ -5840,16 +5778,16 @@ fn merge_agents(previous: Vec<Agent>, fresh: Vec<Agent>) -> Vec<Agent> {
         .map(|mut agent| {
             if let Some((expanded, sessions)) = kept.remove(&agent.id) {
                 agent.expanded = expanded;
-                // Sessions live on the machine, and a machine that is not
-                // running has none — carrying the old list across a sleep
-                // kept rows for sessions that no longer exist, forever,
-                // because the refresh cadence only asks running agents.
-                // NotLoaded rather than an empty list: when the agent runs
-                // again the prefetch re-asks, and anything that survived the
-                // wake comes back on its own. A pane we are still attached
-                // to is folded back in by `adopt_pane_sessions`.
+                // Saved conversations survive sleep; live shell transports do not.
                 agent.sessions = if agent.status == "running" {
                     sessions
+                } else if let LoadSessions::Loaded(rows) = sessions {
+                    let rows = super::cache::snapshot(&agent.id, rows);
+                    if rows.is_empty() {
+                        LoadSessions::NotLoaded
+                    } else {
+                        LoadSessions::Loaded(rows)
+                    }
                 } else {
                     LoadSessions::NotLoaded
                 };
@@ -6564,7 +6502,10 @@ mod tests {
             .unwrap();
         app.set_agent_expanded((0, 0, 0, 0), false);
         let collapsed = app.rows();
-        assert!(app.auto_expand_agent().is_none());
+        assert!(matches!(
+            app.auto_expand_agent(),
+            Some(Effect::LoadSessions { .. })
+        ));
         app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("offline".into()));
         assert_eq!(app.rows().len(), collapsed.len());
         assert_eq!(app.selected_row().unwrap().expanded, Some(false));
@@ -7391,7 +7332,7 @@ mod tests {
             "nothing else is on screen to have the keyboard"
         );
 
-        assert_eq!(a.on_key(alt('f')), None);
+        assert_eq!(a.on_key(alt('f')), Some(Effect::RefreshAll));
         assert!(!a.maximized);
     }
 
@@ -9972,10 +9913,7 @@ mod tests {
             }]);
         }
         let effect = b.reattach_target_gone("ca_1", "nimble-otter", "claude-one");
-        assert!(
-            matches!(effect, Some(Effect::LoadSessions { .. })),
-            "{effect:?}"
-        );
+        assert_eq!(effect, None, "a sleeping VM must not be dialed for history");
         assert!(!b.toast.as_ref().unwrap().ok, "announced as a failure");
     }
 
@@ -10286,7 +10224,10 @@ mod tests {
             .unwrap();
         a.cursor = agent_row - 1;
 
-        assert_eq!(a.on_key(key(KeyCode::Down)), None);
+        assert!(matches!(
+            a.on_key(key(KeyCode::Down)),
+            Some(Effect::LoadSessions { .. })
+        ));
         assert!(
             !a.rows()
                 .iter()
@@ -10944,8 +10885,11 @@ mod tests {
     #[test]
     fn a_new_session_can_be_refreshed_into_view() {
         let mut a = loaded_app();
-        // Not expanded: nobody is looking, so nothing is fetched.
-        assert_eq!(a.refresh_agent_sessions("ca_1"), None);
+        // Explicit selection refreshes even a collapsed machine's cached list.
+        assert!(matches!(
+            a.refresh_agent_sessions("ca_1"),
+            Some(Effect::LoadSessions { .. })
+        ));
 
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -10959,6 +10903,33 @@ mod tests {
             })
         );
         assert_eq!(a.refresh_agent_sessions("nope"), None);
+    }
+
+    #[test]
+    fn discovery_is_on_demand_and_sleep_keeps_cached_threads_without_dialing() {
+        let mut app = loaded_app();
+        let thread = super::super::super::remote_threads::tests::thread("claude", "saved");
+        let row = ConsoleSession::client_thread("ca_1", "claude", Some(&thread.thread));
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![row.clone()]));
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert_eq!(app.activity.next(std::time::Instant::now()), None);
+        app.refresh_started();
+        assert_eq!(app.sessions_to_prefetch().len(), 1);
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert!(app.refresh_agent_sessions("ca_1").is_none());
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![row]));
+        app.refresh_finished();
+        let previous = app.tree[0].projects[0].envs[0].agents_vec().to_vec();
+        let mut asleep = previous.clone();
+        asleep[0].status = "sleeping".into();
+        app.tree[0].projects[0].envs[0].agents = Load::Loaded(merge_agents(previous, asleep));
+        app.refresh_started();
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert!(app.refresh_agent_sessions("ca_1").is_none());
+        assert!(app.set_agent_expanded((0, 0, 0, 0), true).is_none());
+        assert!(
+            matches!(&app.tree[0].projects[0].envs[0].agents_vec()[0].sessions, LoadSessions::Loaded(rows) if rows.len() == 1 && rows[0].short_name() == thread.thread.title)
+        );
     }
 
     /// An open pane counts as looking too. Sessions started and ended in there
@@ -11044,92 +11015,6 @@ mod tests {
         assert!(a.status.contains("502 from backboard"), "{}", a.status);
         // Quietly: a background refresh must not raise a toast per tick.
         assert!(a.toast.is_none());
-    }
-
-    /// The automatic refresh stays out of the way of everything that is already
-    /// asking, or that is mid-question.
-    #[test]
-    fn the_auto_refresh_yields_to_everything_that_matters() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        assert!(a.auto_refresh_due(), "due, with nothing in the way");
-
-        // One already in flight.
-        a.refreshing = true;
-        assert_eq!(a.auto_refresh_in(), None);
-        a.refreshing = false;
-
-        // A launch, which reports its own progress and refetches when it lands.
-        a.loading.active = true;
-        assert_eq!(a.auto_refresh_in(), None);
-        a.loading.active = false;
-
-        // A wake, which is already polling that environment every 1.5s.
-        a.watching.insert(
-            "ca_1".into(),
-            AgentWatch {
-                want: "running",
-                environment_id: "env_prod".into(),
-                until: std::time::Instant::now() + WAKE_PATIENCE,
-            },
-        );
-        assert_eq!(a.auto_refresh_in(), None);
-        a.watching.clear();
-
-        // A y/N question: rows moving under it is how the wrong thing gets
-        // deleted.
-        a.confirm = Some(PendingConfirm {
-            op: AgentOp::Delete,
-            agent_id: "ca_1".into(),
-            environment_id: "env_prod".into(),
-            agent_name: "nimble-otter".into(),
-        });
-        assert_eq!(a.auto_refresh_in(), None);
-        a.confirm = None;
-
-        assert!(a.auto_refresh_due(), "and back again once they are gone");
-    }
-
-    /// A refresh that just ran is not due again for a full interval, whoever
-    /// started it — pressing ⌥r pushes the automatic one out rather than having
-    /// it arrive a second later.
-    #[test]
-    fn a_refresh_resets_the_clock() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        assert!(a.auto_refresh_due());
-
-        a.on_key(alt('r'));
-        a.refresh_started();
-        a.refresh_finished();
-        assert!(!a.auto_refresh_due());
-        let remaining = a.auto_refresh_in().expect("still armed");
-        assert!(
-            remaining > AUTO_REFRESH_EVERY / 2,
-            "nearly a full interval: {remaining:?}"
-        );
-    }
-
-    /// A 429 answered by polling on schedule is how a rate limit becomes a
-    /// longer rate limit: the automatic refresh waits out the Retry-After.
-    #[test]
-    fn a_rate_limit_pauses_the_auto_refresh() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        a.rate_limited(Some(90));
-
-        assert!(!a.refreshing, "the refused refresh is over");
-        let waiting = a.auto_refresh_in().expect("still armed, just later");
-        assert!(
-            waiting > std::time::Duration::from_secs(60),
-            "waits out the window: {waiting:?}"
-        );
-
-        // Told nothing, it still waits — the alternative is asking again at once.
-        let mut b = loaded_app();
-        b.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        b.rate_limited(None);
-        assert!(!b.auto_refresh_due());
     }
 
     /// Without `myCloudAgents` a refresh asks per environment — but only about

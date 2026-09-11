@@ -15,7 +15,9 @@
 //! hands the terminal back for that and the caller re-enters with the same
 //! request.
 
+mod activity;
 pub mod app;
+mod cache;
 pub mod session;
 pub mod settings;
 pub mod theme;
@@ -367,10 +369,12 @@ enum Message {
         ok: bool,
         req: Box<LaunchRequest>,
     },
-    /// Ask again for one agent's sessions.
-    RefreshAgentSessions(String),
     /// The session produced output, so the screen needs redrawing.
-    SessionOutput,
+    SessionOutput(String),
+    ReportsLoaded {
+        agent_id: String,
+        result: Result<Vec<activity::Report>, String>,
+    },
 }
 
 /// Forwards launch-pipeline steps into the loading screen.
@@ -462,7 +466,7 @@ fn open_client(
         24,
         80,
         move || {
-            let _ = notify.send(Message::SessionOutput);
+            let _ = notify.send(Message::SessionOutput(String::new()));
         },
     )?;
     // Keep the VM identity for reconnect/sleep actions. The local process uses
@@ -482,7 +486,6 @@ fn open_client(
         app.attach_session(session, pane.agent_id.clone());
         app.expand_agent_after_load(pane.agent_id.clone());
     }
-    schedule_session_refresh(pane.agent_id, tx);
     Ok(())
 }
 
@@ -815,8 +818,7 @@ async fn fetch_my_agents(
         .collect())
 }
 
-/// Ask for the whole account's agents in the background: at startup, on ⌥r, and
-/// on every automatic refresh.
+/// Ask for the account's agents at startup and on explicit refresh gestures.
 fn spawn_my_agents_fetch(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
@@ -859,7 +861,7 @@ fn spawn_my_agents_fetch(
 ///
 /// One request for the whole account (see [`fetch_my_agents`]), and the sessions
 /// of the agents someone is looking at once it lands — not a sweep. Every
-/// refresh in the TUI comes through here: ⌥r, the automatic tick, the re-entry
+/// refresh in the TUI comes through here: ⌥r, revealing the sidebar, the re-entry
 /// after the terminal was handed back, and `shift+r` on an account that is
 /// already fully loaded.
 ///
@@ -901,6 +903,26 @@ async fn fetch_sessions(
     cloud_agent_id: &str,
     environment_id: &str,
 ) -> Result<SessionInventory> {
+    // Sidebar state may be old. Verify machine state in the control plane
+    // before any provider/console/SSH request that could keep it awake.
+    let machine = post_graphql::<queries::CloudAgent, _>(
+        client,
+        backboard,
+        queries::cloud_agent::Variables {
+            id: cloud_agent_id.into(),
+            environment_id: environment_id.into(),
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        machine
+            .cloud_agent
+            .is_some_and(
+                |agent| crate::controllers::cloud_agent::Status::from(agent.status).label()
+                    == "running"
+            ),
+        "Machine is not running; showing cached conversations"
+    );
     let discovery = async {
         let info = code::connect_info(environment_id, cloud_agent_id).await?;
         remote_threads::discover(&info).await
@@ -1168,6 +1190,13 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    // Re-entry has a new reply channel; requests owned by the previous loop
+    // cannot finish into this one. Keep their cached rows, release their locks.
+    app.refreshing = false;
+    app.thread_polls.clear();
+    app.activity = Default::default();
+    app.thread_cache = cache::Cache::open(&backboard);
+    app.restore_cached_threads();
     if let Some(pane) = app.autostart_client.take() {
         open_client(app, pane, false, &tx)?;
     }
@@ -1251,7 +1280,31 @@ pub async fn run(
             continue;
         }
 
+        let activity_in = app.activity.next(std::time::Instant::now()).map(|delay| {
+            delay.max(
+                app.refresh_paused_until
+                    .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_default(),
+            )
+        });
         let effect = tokio::select! {
+            _ = tokio::time::sleep(activity_in.unwrap_or(std::time::Duration::MAX)), if activity_in.is_some() => {
+                for agent_id in app.activity.take_due(std::time::Instant::now()) {
+                    let environment = app.sessions.iter().find(|pane| pane.agent_id == agent_id && !pane.ended())
+                        .and_then(|pane| pane.ssh_target.strip_prefix("agent:")?.split_once(':').map(|(env, _)| env.to_owned()));
+                    if let Some(environment) = environment {
+                        let tx = tx.clone(); let client = client.clone(); let backboard = backboard.clone();
+                        tokio::spawn(async move {
+                            let result = activity::fetch(&client, &backboard, &agent_id, &environment).await;
+                            if let Err(error) = &result && let Some(retry_after_secs) = rate_limit_from(error) {
+                                let _ = tx.send(Message::RateLimited { retry_after_secs });
+                            }
+                            let _ = tx.send(Message::ReportsLoaded { agent_id, result: result.map_err(|e| e.to_string()) });
+                        });
+                    } else { app.activity.finished(&agent_id); }
+                }
+                None
+            }
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
             Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
@@ -1278,36 +1331,6 @@ pub async fn run(
             // VM is up, and one refetch just puts "sleeping" back on the row.
             _ = tokio::time::sleep(app::WATCH_TICK), if app.watching_agents() => {
                 app.watch_tick()
-            }
-            // Everything else that changes an agent happens outside this
-            // process: another terminal, the dashboard, a teammate. One
-            // account-wide request every [`app::AUTO_REFRESH_EVERY`] is what
-            // keeps the tree from being a snapshot of when it opened. Armed only
-            // when a refresh would be right — see [`App::auto_refresh_in`] — so
-            // an idle TUI still blocks on the keyboard, and the remainder is
-            // recomputed each pass so an early wake just re-arms.
-            _ = tokio::time::sleep(app.auto_refresh_in().unwrap_or(std::time::Duration::MAX)),
-                if app.auto_refresh_in().is_some() => {
-                if app.auto_refresh_due() {
-                    start_refresh(app, &tx, &client, &backboard);
-                }
-                None
-            }
-            // The fast lane for the sidebar's thread labels: re-ask about the
-            // watched sessions every few seconds, far tighter than the
-            // account refresh — a prompt lands and its row should say so in
-            // seconds. Bounded: only visible running agents, one ask in
-            // flight per agent, and the gate dials behind it are cached until
-            // a thread actually reports something new.
-            _ = tokio::time::sleep(app.thread_refresh_in().unwrap_or(std::time::Duration::MAX)),
-                if app.thread_refresh_in().is_some() => {
-                if app.thread_refresh_in() == Some(std::time::Duration::ZERO) {
-                    let effects = app.threads_to_poll();
-                    if !effects.is_empty() {
-                        spawn_session_prefetch(effects, &tx, &client, &backboard, stop_fetching.clone());
-                    }
-                }
-                None
             }
             // A reattach that stays silent gets its "no response" notice drawn
             // once the stall clock runs out; nothing else would redraw, since
@@ -1998,6 +2021,7 @@ fn handle_message(
                     .clone()
                     .unwrap_or_else(|| session::durable_name(&thread.harness));
                 let notify = tx.clone();
+                let output_agent = connect.agent_id.clone();
                 let mut pane = session::Session::spawn(
                     connect.agent_id.clone(),
                     connect.agent_name,
@@ -2011,7 +2035,7 @@ fn handle_message(
                     24,
                     80,
                     move || {
-                        let _ = notify.send(Message::SessionOutput);
+                        let _ = notify.send(Message::SessionOutput(output_agent.clone()));
                     },
                 )?;
                 pane.console_name = Some(console_name);
@@ -2027,7 +2051,6 @@ fn handle_message(
             match result {
                 Ok(pane) => {
                     app.attach_session(pane, connect.agent_id.clone());
-                    schedule_session_refresh(connect.agent_id, tx);
                 }
                 Err(error) => app.toast_error(format!("Couldn't open conversation: {error:#}")),
             }
@@ -2035,7 +2058,7 @@ fn handle_message(
         }
         Message::ClientThreadSelected { client_id, thread } => {
             if let Some(agent_id) = app.client_thread_selected(&client_id, thread) {
-                schedule_session_refresh(agent_id, tx);
+                app.persist_threads(&agent_id);
             }
             None
         }
@@ -2063,6 +2086,7 @@ fn handle_message(
             asked_at,
         } => {
             app.agents_loaded_at(path, &environment_id, result, asked_at);
+            app.restore_cached_threads();
             // Fill in each running agent's session count without waiting for
             // someone to expand it. Bounded: one environment usually holds a
             // handful of agents, but nothing guarantees it.
@@ -2079,6 +2103,7 @@ fn handle_message(
                 let count = agents.len();
                 app.refresh_finished();
                 app.my_agents_loaded(agents, asked_at);
+                app.restore_cached_threads();
                 let prefetch = app.sessions_to_prefetch();
                 if !prefetch.is_empty() {
                     spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
@@ -2086,7 +2111,7 @@ fn handle_message(
                 // What someone is looking at, asked about again — the counts and
                 // session rows are as able to go stale as the agents are. Narrow
                 // by design: see [`App::sessions_to_refresh`].
-                let watched = app.threads_to_poll();
+                let watched = app.threads_to_refresh();
                 if !watched.is_empty() {
                     spawn_session_prefetch(watched, tx, client, backboard, stop_fetching.clone());
                 }
@@ -2182,6 +2207,7 @@ fn handle_message(
             info,
         } => {
             let notify_tx = tx.clone();
+            let output_agent = agent_id.clone();
             match session::Session::spawn(
                 agent_id.clone(),
                 agent_name,
@@ -2197,7 +2223,7 @@ fn handle_message(
                 24,
                 80,
                 move || {
-                    let _ = notify_tx.send(Message::SessionOutput);
+                    let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
                 },
             ) {
                 Ok(session) => {
@@ -2241,6 +2267,7 @@ fn handle_message(
             info,
         } => {
             let notify_tx = tx.clone();
+            let output_agent = agent_id.clone();
             match session::Session::spawn(
                 agent_id.clone(),
                 agent_name,
@@ -2256,7 +2283,7 @@ fn handle_message(
                 24,
                 80,
                 move || {
-                    let _ = notify_tx.send(Message::SessionOutput);
+                    let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
                 },
             ) {
                 Ok(session) => {
@@ -2344,13 +2371,28 @@ fn handle_message(
             // asserting it did.
             app.refresh_agent_sessions(&agent_id)
         }
-        Message::RefreshAgentSessions(agent_id) => app.refresh_agent_sessions(&agent_id),
         // The draw at the top of the loop is the response.
         // Output also carries the end: the reader thread flips `ended` and
         // sends one last wake, which is when a finished pane gets closed.
-        Message::SessionOutput => {
+        Message::ReportsLoaded { agent_id, result } => {
+            app.activity.finished(&agent_id);
+            if let Ok(reports) = result {
+                activity::apply(app, &agent_id, &reports);
+            }
+            None
+        }
+        Message::SessionOutput(agent_id) => {
             for pane in &mut app.sessions {
                 pane.sync_console_name();
+            }
+            if app.sessions.iter().any(|pane| {
+                pane.agent_id == agent_id
+                    && !pane.ended()
+                    && pane.client_id.is_some()
+                    && pane.client_bridge.is_none()
+                    && pane.opencode_bridge.is_none()
+            }) {
+                app.activity.changed(&agent_id, std::time::Instant::now());
             }
             app.reap_ended_sessions()
         }
@@ -2384,6 +2426,7 @@ fn open_session(
         .unwrap_or_else(|| session::durable_name(prepared.harness));
 
     let notify_tx = tx.clone();
+    let output_agent = prepared.agent_id.clone();
     // A placeholder size: the next frame measures the real pane and resizes
     // both the pty and the emulator before anything is drawn from it.
     let (rows, cols) = (24u16, 80u16);
@@ -2408,7 +2451,7 @@ fn open_session(
         rows,
         cols,
         move || {
-            let _ = notify_tx.send(Message::SessionOutput);
+            let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
         },
     ) {
         Ok(mut session) => {
@@ -2419,7 +2462,6 @@ fn open_session(
                 session.console_name = Some(durable_session);
             }
             app.attach_session(session, prepared.agent_id.clone());
-            schedule_session_refresh(prepared.agent_id.clone(), tx);
             // Refetch the environment so a newly created agent appears, and
             // remember to open it: the session we just started is one of its
             // children now, and that is where it should be visible.
@@ -2441,15 +2483,6 @@ fn open_session(
         }
     }
 }
-
-/// How long after opening a session to re-ask the platform for the agent's
-/// session list, and again after that.
-///
-/// The relay registers a session a moment after ssh connects, so the refresh
-/// that fires with the launch usually misses it — which is why a newly started
-/// session only appeared after closing and reopening the agent. Two cheap
-/// retries cover the gap without polling forever.
-const SESSION_SETTLE: [u64; 2] = [900, 2600];
 
 /// How many count queries are allowed in flight at once.
 const SWEEP_CONCURRENCY: usize = 5;
@@ -2660,22 +2693,6 @@ async fn register_gate_key(client: &reqwest::Client, offer: &SshKeyOffer) -> Res
     .await
     .map(|_| ())
     .map_err(|e| format!("{e:#}"))
-}
-
-/// Re-ask for an agent's sessions shortly after one is opened.
-fn schedule_session_refresh(agent_id: String, tx: &mpsc::UnboundedSender<Message>) {
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        for delay in SESSION_SETTLE {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            if tx
-                .send(Message::RefreshAgentSessions(agent_id.clone()))
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
 }
 
 /// Translate a request from the TUI into the launcher's arguments.

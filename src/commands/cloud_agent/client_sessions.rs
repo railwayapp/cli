@@ -256,7 +256,7 @@ pub(super) fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn title(value: Option<&str>, fallback: &str) -> String {
+pub(super) fn title(value: Option<&str>, fallback: &str) -> String {
     value
         .map(str::trim)
         .filter(|s| !s.is_empty())

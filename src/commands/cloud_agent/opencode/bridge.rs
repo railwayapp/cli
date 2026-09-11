@@ -1,6 +1,6 @@
 //! A pane-scoped HTTP bridge: observe this client's successful thread actions,
 //! while forwarding SSE, request bodies, and upgraded terminal streams intact.
-use super::super::client_sessions::{self, Connection, Thread};
+use super::super::client_sessions::{self, Thread};
 use anyhow::Result;
 use base64::Engine;
 use futures_util::StreamExt;
@@ -14,7 +14,7 @@ use hyper_util::rt::TokioIo;
 use std::{
     convert::Infallible,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -66,6 +66,7 @@ impl Bridge {
             beta,
             notify: Box::new(notify),
             sequence: AtomicU64::new(0),
+            selected: Mutex::new(None),
         });
         let task = tokio::spawn(async move {
             let mut peers = tokio::task::JoinSet::new();
@@ -102,6 +103,112 @@ struct State {
     beta: bool,
     notify: Box<dyn Fn(Thread) + Send + Sync>,
     sequence: AtomicU64,
+    selected: Mutex<Option<Thread>>,
+}
+
+impl State {
+    fn select(&self, thread: Thread) {
+        let mut selected = self.selected.lock().unwrap();
+        *selected = Some(thread.clone());
+        (self.notify)(thread);
+    }
+
+    fn event(&self, value: &serde_json::Value) {
+        let mut selected = self.selected.lock().unwrap();
+        if let Some(thread) = selected.as_mut()
+            && update_thread(thread, value, self.beta)
+        {
+            (self.notify)(thread.clone());
+        }
+    }
+}
+
+fn update_thread(thread: &mut Thread, value: &serde_json::Value, beta: bool) -> bool {
+    let value = value.get("payload").unwrap_or(value);
+    let data = &value[if beta { "data" } else { "properties" }];
+    let id = data["sessionID"]
+        .as_str()
+        .or_else(|| data["info"]["id"].as_str());
+    if id != Some(thread.id.as_str()) {
+        return false;
+    }
+    match value["type"].as_str() {
+        Some("session.renamed") if beta => {
+            let Some(title) = data["title"].as_str() else {
+                return false;
+            };
+            thread.title = client_sessions::title(Some(title), &thread.title);
+        }
+        Some("session.updated") if !beta => {
+            let Ok(info) = client_sessions::parse_opencode(&data["info"], &thread.directory) else {
+                return false;
+            };
+            thread.title = info.title;
+            thread.updated_at = info.updated_at;
+        }
+        Some("session.status") => {
+            thread.state = match data["status"]["type"].as_str() {
+                Some("busy" | "retry") => "working",
+                Some("idle") => "idle",
+                _ => return false,
+            }
+            .into();
+        }
+        Some("session.execution.started") if beta => thread.state = "working".into(),
+        Some("session.execution.succeeded" | "session.execution.interrupted") if beta => {
+            thread.state = "idle".into()
+        }
+        Some("session.execution.failed") if beta => thread.state = "failed".into(),
+        _ => return false,
+    }
+    if beta {
+        thread.updated_at = value["created"]
+            .as_i64()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339();
+    }
+    true
+}
+
+/// Observe the client's existing SSE stream without buffering its delivery.
+/// Bound observation memory even for oversized transcript events.
+#[derive(Default)]
+struct Events {
+    line: Vec<u8>,
+    data: Vec<u8>,
+    overflow: bool,
+}
+impl Events {
+    fn feed(&mut self, bytes: &[u8], mut notify: impl FnMut(serde_json::Value)) {
+        for byte in bytes {
+            if *byte != b'\n' {
+                if self.line.len() + self.data.len() < 256 * 1024 {
+                    self.line.push(*byte);
+                } else {
+                    self.overflow = true;
+                }
+                continue;
+            }
+            if self.line.last() == Some(&b'\r') {
+                self.line.pop();
+            }
+            if self.line.is_empty() {
+                if !self.overflow
+                    && let Ok(value) = serde_json::from_slice(&self.data)
+                {
+                    notify(value);
+                }
+                self.data.clear();
+                self.overflow = false;
+            } else if let Some(data) = self.line.strip_prefix(b"data:") {
+                self.data
+                    .extend_from_slice(data.strip_prefix(b" ").unwrap_or(data));
+                self.data.push(b'\n');
+            }
+            self.line.clear();
+        }
+    }
 }
 
 fn body(bytes: impl Into<Bytes>) -> Body {
@@ -219,31 +326,109 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
                 )
                 && sequence == Some(state.sequence.load(Ordering::SeqCst))
             {
-                (state.notify)(thread);
+                state.select(thread);
             }
             return Ok(builder.body(body(bytes))?);
         }
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Ok(thread) = Connection::OpenCode(state.connection.clone(), state.beta)
-                .thread(&id)
-                .await
-                && sequence == Some(state.sequence.load(Ordering::SeqCst))
-                && !*state.closed.borrow()
-            {
-                (state.notify)(thread);
-            }
-        });
+        // Repeated message reads on the selected session need no metadata
+        // request: its existing event stream supplies subsequent changes.
+        if state
+            .selected
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|thread| thread.id != id)
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let metadata = async {
+                    let url = format!(
+                        "{}{}/session/{id}",
+                        state.connection.url.trim_end_matches('/'),
+                        if state.beta { "/api" } else { "" }
+                    );
+                    let mut request = state
+                        .client
+                        .get(url)
+                        .basic_auth(&state.connection.username, Some(&state.connection.password))
+                        .timeout(Duration::from_secs(10));
+                    if !state.beta {
+                        request = request.query(&[("directory", &state.connection.directory)]);
+                    }
+                    let value: serde_json::Value =
+                        request.send().await?.error_for_status()?.json().await?;
+                    client_sessions::parse_opencode(
+                        if state.beta { &value["data"] } else { &value },
+                        &state.connection.directory,
+                    )
+                };
+                if let Ok(thread) = metadata.await
+                    && sequence == Some(state.sequence.load(Ordering::SeqCst))
+                    && !*state.closed.borrow()
+                {
+                    state.select(thread);
+                }
+            });
+        }
     }
-    let stream = remote
-        .bytes_stream()
-        .map(|chunk| chunk.map(Frame::data).map_err(|e| -> Error { Box::new(e) }));
+    let event_stream = remote
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"));
+    let mut events = Events::default();
+    let stream = remote.bytes_stream().map(move |chunk| {
+        if event_stream && let Ok(bytes) = &chunk {
+            events.feed(bytes, |event| state.event(&event));
+        }
+        chunk.map(Frame::data).map_err(|e| -> Error { Box::new(e) })
+    });
     Ok(builder.body(BodyExt::boxed_unsync(StreamBody::new(stream)))?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn streamed_titles_and_status_only_update_the_selected_conversation() {
+        for beta in [false, true] {
+            let mut thread = client_sessions::parse_opencode(
+                &serde_json::json!({"id":"ses_exact","title":"New Thread"}),
+                "/app",
+            )
+            .unwrap();
+            let value = if beta {
+                serde_json::json!({"type":"session.renamed","data":{"sessionID":"ses_exact","title":"Weather 🌧"}})
+            } else {
+                serde_json::json!({"type":"session.updated","properties":{"info":{"id":"ses_exact","title":"Weather 🌧"}}})
+            };
+            let mut events = Events::default();
+            let wire = format!("data: {value}\r\n\r\n");
+            let mut seen = 0;
+            for byte in wire.as_bytes() {
+                events.feed(&[*byte], |event| {
+                    assert!(update_thread(&mut thread, &event, beta));
+                    seen += 1;
+                });
+            }
+            assert_eq!(seen, 1);
+            assert_eq!(thread.title, "Weather 🌧");
+            let key = if beta { "data" } else { "properties" };
+            assert!(!update_thread(
+                &mut thread,
+                &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_other","status":{"type":"busy"}}}),
+                beta
+            ));
+            assert!(update_thread(
+                &mut thread,
+                &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_exact","status":{"type":"busy"}}}),
+                beta
+            ));
+            assert_eq!(thread.state, "working");
+            assert_eq!(thread.id, "ses_exact");
+        }
+    }
+
     #[test]
     fn browsing_and_background_events_do_not_select_a_thread() {
         for beta in [false, true] {

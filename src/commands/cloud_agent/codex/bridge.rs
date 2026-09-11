@@ -128,6 +128,7 @@ async fn relay(
 #[derive(Default)]
 struct Selections {
     pending: HashSet<String>,
+    selected: Option<super::super::client_sessions::Thread>,
 }
 
 impl Selections {
@@ -151,10 +152,33 @@ impl Selections {
 
     fn response(&mut self, text: &str) -> Option<super::super::client_sessions::Thread> {
         let value: Value = serde_json::from_str(text).ok()?;
-        if !self.pending.remove(&value.get("id")?.to_string()) {
+        if let Some(id) = value.get("id") {
+            if !self.pending.remove(&id.to_string()) {
+                return None;
+            }
+            let thread =
+                super::super::client_sessions::parse_codex(&value["result"]["thread"]).ok()?;
+            self.selected = Some(thread.clone());
+            return Some(thread);
+        }
+        let thread = self.selected.as_mut()?;
+        let params = &value["params"];
+        if params["threadId"].as_str()? != thread.id {
             return None;
         }
-        super::super::client_sessions::parse_codex(&value["result"]["thread"]).ok()
+        match value["method"].as_str()? {
+            "thread/name/updated" => {
+                thread.title = super::super::client_sessions::title(
+                    Some(params["threadName"].as_str()?),
+                    &thread.title,
+                )
+            }
+            "turn/started" => thread.state = "working".into(),
+            "turn/completed" => thread.state = "idle".into(),
+            _ => return None,
+        }
+        thread.updated_at = chrono::Utc::now().to_rfc3339();
+        Some(thread.clone())
     }
 }
 
@@ -192,6 +216,22 @@ mod tests {
             selections.response(&reply(3)).unwrap().title,
             "Repair build"
         );
+        assert!(selections.response(r#"{"method":"thread/name/updated","params":{"threadId":"internal-title-thread","threadName":"Hidden"}}"#).is_none());
+        let renamed = selections.response(r#"{"method":"thread/name/updated","params":{"threadId":"thread-1","threadName":"Generated title"}}"#).unwrap();
+        assert_eq!(renamed.id, "thread-1");
+        assert_eq!(renamed.title, "Generated title");
+        assert_eq!(
+            selections
+                .response(r#"{"method":"turn/started","params":{"threadId":"thread-1"}}"#)
+                .unwrap()
+                .state,
+            "working"
+        );
+        let completed = selections
+            .response(r#"{"method":"turn/completed","params":{"threadId":"thread-1"}}"#)
+            .unwrap();
+        assert_eq!(completed.title, "Generated title");
+        assert_eq!(completed.state, "idle");
     }
 
     #[tokio::test]

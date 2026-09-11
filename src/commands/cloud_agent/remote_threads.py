@@ -5,6 +5,7 @@ The SDK is installed lazily into an isolated cache only when Claude history exis
 """
 
 import datetime
+from contextlib import closing
 import importlib
 import json
 import os
@@ -234,7 +235,7 @@ def codex_threads():
     if not paths:
         return []
     # Codex maintains a metadata index independently of App Server's lifetime.
-    with sqlite3.connect(paths[0].absolute().as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+    with closing(sqlite3.connect(paths[0].absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
         db.row_factory = sqlite3.Row
         columns = {row[1] for row in db.execute("PRAGMA table_info(threads)")}
         required = {"id", "cwd", "title", "created_at", "updated_at", "archived", "source"}
@@ -259,7 +260,7 @@ def opencode_threads():
     for path in paths:
         if not path.is_file():
             continue
-        with sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2) as db:
+        with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
             db.row_factory = sqlite3.Row
             for table, harness in (("session", "opencode"), ("session_v2", "opencode2")):
                 columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}

@@ -1981,26 +1981,10 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
-        (RowKind::Agent(w, p, e, a), _) => {
+        (RowKind::Agent(..), _) => {
             let status = row.status.as_deref().unwrap_or_default();
-            let refreshing = match &app.tree[*w].projects[*p].envs[*e].agents {
-                Load::Loaded(agents) => agents
-                    .get(*a)
-                    .is_some_and(|agent| app.thread_refreshing(&agent.id)),
-                _ => false,
-            };
-            let sessions = match &app.tree[*w].projects[*p].envs[*e].agents {
-                Load::Loaded(agents) => agents.get(*a).map(|agent| &agent.sessions),
-                _ => None,
-            };
-            // Session discovery lives on the orb, not in a placeholder child.
-            // Keep the agent's actual status intact for its details/actions.
-            let (glyph, color) = match sessions {
-                _ if refreshing => (spinner_frame(tick).to_string(), theme.pending),
-                Some(LoadSessions::Loading) => (spinner_frame(tick).to_string(), theme.pending),
-                Some(LoadSessions::Failed(_)) => ("◌".into(), theme.pending),
-                _ => (status_glyph(status).into(), status_color(theme, status)),
-            };
+            // Metadata discovery does not change machine health.
+            let (glyph, color) = (status_glyph(status), status_color(theme, status));
             spans.push(Span::styled(
                 format!("{glyph} "),
                 Style::default().fg(color),
@@ -3274,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn session_discovery_animates_the_agent_orb_and_restores_its_status() {
+    fn session_discovery_never_replaces_the_machine_status_icon() {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
         app.cursor = app
@@ -3286,10 +3270,10 @@ mod tests {
             agents[0].sessions = LoadSessions::Loading;
         }
         app.loading.tick = 0;
-        assert!(draw(&app, 100, 30).contains("⠋ nimble-otter"));
+        assert!(draw(&app, 100, 30).contains("● nimble-otter"));
         app.tick();
         let out = draw(&app, 100, 30);
-        assert!(out.contains("⠙ nimble-otter"));
+        assert!(out.contains("● nimble-otter"));
         assert!(
             out.contains("running"),
             "the detail pane retains the VM status: {out}"
@@ -3297,7 +3281,7 @@ mod tests {
 
         app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("temporary failure".into()));
         let out = draw(&app, 100, 30);
-        assert!(out.contains("◌ nimble-otter"));
+        assert!(out.contains("● nimble-otter"));
         assert!(
             out.contains("couldn't load sessions"),
             "failure details remain available: {out}"

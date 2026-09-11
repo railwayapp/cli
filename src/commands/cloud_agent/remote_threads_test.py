@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -85,7 +86,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result["threads"][0]["thread"]["id"], "grok-thread")
 
     def test_codex_metadata_works_without_a_running_backend_or_local_snapshot(self):
-        with sqlite3.connect(self.root / "state_5.sqlite") as db:
+        with closing(sqlite3.connect(self.root / "state_5.sqlite")) as db, db:
             db.execute("CREATE TABLE threads (id TEXT, cwd TEXT, title TEXT, name TEXT, created_at INT, updated_at INT, archived INT, source TEXT)")
             db.executemany("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)", [
                 ("real-id", "/app/other", "Original question", "Generated title", 100, 200, 0, "cli"),
@@ -102,7 +103,7 @@ class DiscoveryTest(unittest.TestCase):
         data = self.root / "opencode"
         data.mkdir()
         database = data / "opencode.db"
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db, db:
             for table in ("session", "session_v2"):
                 db.execute(f"CREATE TABLE {table} (id TEXT, title TEXT, directory TEXT, parent_id TEXT, time_created INT, time_updated INT, time_archived INT)")
                 db.executemany(f"INSERT INTO {table} VALUES (?,?,?,?,?,?,?)", [

@@ -300,8 +300,17 @@ remain available after their terminal exits; opening the list does not launch
 clients for them. A fresh harness pane starts as **New Thread**, then adopts the
 harness's generated title. **[S]** is reserved for direct VM shells; harness
 consoles, server processes, and provisioning commands do not get session rows.
-Refreshes animate the agent icon while preserving loaded rows, their order,
-expansion choices, and the selected conversation.
+Conversation metadata is cached locally across restarts, including for sleeping
+VMs. Discovery runs at startup, when selecting or expanding a running machine,
+when Option+F / Alt+F reveals the sidebar, and on explicit refresh. Loaded rows,
+their order, expansion choices, and the selected conversation stay in place.
+The machine's status icon always represents its machine state.
+
+There is no periodic account or VM-history polling. Codex and OpenCode title and
+activity changes come from their existing native-client connections. Output from
+an active SSH harness pane triggers a coalesced read of Railway's stored session
+reports, without opening another VM connection. An idle sidebar does not refresh
+history on its own; changes made elsewhere appear on the next explicit refresh.
 
 Claude and Grok history is discovered directly on the VM over SSH, including
 conversations started outside Railway's launcher. Claude uses a pinned official
