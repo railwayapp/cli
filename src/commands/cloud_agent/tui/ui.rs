@@ -3749,6 +3749,32 @@ mod tests {
         assert!(style_of("plain").add_modifier.is_empty());
     }
 
+    #[test]
+    fn codex_shaded_rows_keep_truecolor_and_blank_cell_backgrounds() {
+        use ratatui::widgets::Widget;
+
+        for (shade, rgb) in [("48;48;48", (48, 48, 48)), ("245;245;245", (245, 245, 245))] {
+            let mut parser = vt100::Parser::new(3, 20, 0);
+            // Codex shades the whole prompt/plan row, including its padding,
+            // then resets for the next row. EL paints empty cells as well.
+            parser.process(
+                format!("\x1b[48;2;{shade}m\x1b[2K  plan\x1b[0m\r\n\x1b[38;2;0;95;135maccent\x1b[0m plain")
+                    .as_bytes(),
+            );
+            let area = Rect::new(0, 0, 20, 3);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            Paragraph::new(screen_lines(parser.screen(), false)).render(area, &mut buffer);
+
+            for col in 0..20 {
+                assert_eq!(buffer[(col, 0)].bg, Color::Rgb(rgb.0, rgb.1, rgb.2));
+                assert_eq!(buffer[(col, 1)].bg, Color::Reset);
+            }
+            assert_eq!(buffer[(10, 0)].symbol(), " ");
+            assert_eq!(buffer[(0, 1)].fg, Color::Rgb(0, 95, 135));
+            assert_eq!(buffer[(7, 1)].fg, Color::Reset);
+        }
+    }
+
     /// A wide character owns two columns but is one glyph: its continuation
     /// cell must not become a phantom space that shifts the rest of the line
     /// right.

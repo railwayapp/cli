@@ -20,6 +20,7 @@ pub mod app;
 mod cache;
 pub mod session;
 pub mod settings;
+mod terminal_palette;
 pub mod theme;
 mod ui;
 pub mod wizard;
@@ -2942,6 +2943,7 @@ fn finish_copy(app: &mut App, text: Option<String>) {
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+    terminal_palette::capture();
     enable_raw_mode()?;
     // While the TUI holds the terminal, no inquire prompt can work — the event
     // loop would eat its keystrokes and the next frame would paint over it.

@@ -26,6 +26,51 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use crate::commands::cloud_agent::{client_sessions, codex};
 use crate::commands::ssh::native;
 
+use super::terminal_palette;
+
+type PaneParser = vt100::Parser<PaletteReplies>;
+
+fn pane_parser(rows: u16, cols: u16, scrollback: usize) -> PaneParser {
+    PaneParser::new_with_callbacks(
+        rows,
+        cols,
+        scrollback,
+        PaletteReplies {
+            colors: terminal_palette::cached(),
+            replies: Vec::new(),
+        },
+    )
+}
+
+/// Let the emulator parse OSC, including BEL/ST terminators and split reads.
+/// Only answer palette queries; color setters and other OSCs stay pane-local.
+struct PaletteReplies {
+    colors: Option<terminal_palette::DefaultColors>,
+    replies: Vec<u8>,
+}
+
+impl vt100::Callbacks for PaletteReplies {
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let Some(colors) = &self.colors else {
+            // An unknown host palette must stay unknown: inventing a dark
+            // background makes Codex's shaded controls illegible on light themes.
+            return;
+        };
+        let (code, color) = match params {
+            [b"10", b"?"] => (10, &colors.fg),
+            [b"11", b"?"] => (11, &colors.bg),
+            _ => return,
+        };
+        self.replies.extend_from_slice(
+            format!(
+                "\x1b]{code};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                color.r, color.g, color.b
+            )
+            .as_bytes(),
+        );
+    }
+}
+
 /// A durable session name for a new session.
 ///
 /// Ours to choose: the relay creates the session when the name is unknown, and
@@ -167,7 +212,7 @@ struct TerminalReplies {
 }
 
 impl TerminalReplies {
-    fn process(&mut self, bytes: &[u8], parser: &mut vt100::Parser, kitty: &AtomicBool) -> Vec<u8> {
+    fn process(&mut self, bytes: &[u8], parser: &mut PaneParser, kitty: &AtomicBool) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut parsed = 0;
         for (i, &byte) in bytes.iter().enumerate() {
@@ -187,6 +232,9 @@ impl TerminalReplies {
                     // cursor queries in one read each see their own position.
                     parser.process(&bytes[parsed..=i]);
                     parsed = i + 1;
+                    // OSC palette queries before this CSI must be answered
+                    // before DA1, which Codex uses as its probe's sentinel.
+                    replies.append(&mut parser.callbacks_mut().replies);
                     if let Some(reply) = kitty_scan(&self.pending, kitty) {
                         replies.extend(reply);
                     }
@@ -203,6 +251,7 @@ impl TerminalReplies {
             }
         }
         parser.process(&bytes[parsed..]);
+        replies.append(&mut parser.callbacks_mut().replies);
         replies
     }
 }
@@ -369,7 +418,7 @@ pub struct Session {
     pub ssh_target: String,
     pub identity: Option<std::path::PathBuf>,
     pub relay_opts: Vec<String>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<PaneParser>>,
     /// Shared with the reader thread, which also writes to it — a synthetic
     /// cursor-position reply (see [`dsr_reply`]) has to go back over the same
     /// pty the keyboard does, and `take_writer` can only be called once.
@@ -600,7 +649,7 @@ impl Session {
         // reports EOF when ssh exits and the reader thread parks forever.
         drop(pty.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4000)));
+        let parser = Arc::new(Mutex::new(pane_parser(rows, cols, 4000)));
         let ended = Arc::new(AtomicBool::new(false));
         let got_output = Arc::new(AtomicBool::new(false));
         let kitty_keys = Arc::new(AtomicBool::new(false));
@@ -639,7 +688,7 @@ impl Session {
                 // only ever sent the announcement must still read as stalled)
                 // nor cause a redraw.
                 let mut feed = |bytes: &[u8],
-                                parser: &Arc<Mutex<vt100::Parser>>,
+                                parser: &Arc<Mutex<PaneParser>>,
                                 kitty_keys: &Arc<AtomicBool>,
                                 writer: &Arc<Mutex<Box<dyn Write + Send>>>,
                                 got_output: &Arc<AtomicBool>,
@@ -1163,7 +1212,7 @@ impl Session {
         })?;
         let child = pty.slave.spawn_command(CommandBuilder::new("cat"))?;
         drop(pty.slave);
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 4000)));
+        let parser = Arc::new(Mutex::new(pane_parser(24, 80, 4000)));
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pty.master.take_writer()?));
 
@@ -1665,7 +1714,7 @@ assert (size.lines, size.columns) == (30, 100)
             for chunk_size in 1..=BURST.len() {
                 let mut filter = BannerFilter::new();
                 let mut queries = TerminalReplies::default();
-                let mut parser = vt100::Parser::new(24, 80, 0);
+                let mut parser = pane_parser(24, 80, 0);
                 let kitty = AtomicBool::new(false);
                 let mut replies = Vec::new();
                 for chunk in banner.chunks(chunk_size).chain(BURST.chunks(chunk_size)) {
@@ -1682,13 +1731,94 @@ assert (size.lines, size.columns) == (30, 100)
 
     #[test]
     fn cursor_queries_are_answered_in_order_at_their_position() {
-        let mut parser = vt100::Parser::new(24, 80, 0);
+        let mut parser = pane_parser(24, 80, 0);
         let replies = TerminalReplies::default().process(
             b"hello\x1b[6n\r\nworld\x1b[6n",
             &mut parser,
             &AtomicBool::new(false),
         );
         assert_eq!(replies, b"\x1b[1;6R\x1b[2;6R");
+    }
+
+    #[test]
+    fn codex_palette_probe_preserves_host_colors_and_reply_order_across_reads() {
+        use terminal_colorsaurus::Color;
+
+        for (fg, bg) in [
+            (
+                Color::rgb(0xeeee, 0xdddd, 0xcccc),
+                Color::rgb(0x1234, 0x2345, 0x3456),
+            ),
+            (
+                Color::rgb(0x1111, 0x2222, 0x3333),
+                Color::rgb(0xffff, 0xfafa, 0xefef),
+            ),
+        ] {
+            for terminator in ["\x07", "\x1b\\"] {
+                // Codex probes the palette before DA1, which closes its probe.
+                // Also interleave cursor and Kitty queries to catch reordering.
+                let burst = format!(
+                    "hi\x1b[6n\x1b]10;?{terminator}\x1b]11;?{terminator}\x1b[0c\x1b[?u\r\nbye\x1b[6n"
+                );
+                let expected = format!(
+                    "\x1b[1;3R\x1b]10;rgb:{:04x}/{:04x}/{:04x}\x1b\\\x1b]11;rgb:{:04x}/{:04x}/{:04x}\x1b\\\x1b[?62;22c\x1b[?0u\x1b[2;4R",
+                    fg.r, fg.g, fg.b, bg.r, bg.g, bg.b
+                );
+                for chunk_size in 1..=burst.len() {
+                    let mut parser = pane_parser(24, 80, 0);
+                    parser.callbacks_mut().colors = Some(terminal_palette::DefaultColors {
+                        fg: fg.clone(),
+                        bg: bg.clone(),
+                    });
+                    let mut queries = TerminalReplies::default();
+                    let mut filter = BannerFilter::new();
+                    let kitty = AtomicBool::new(false);
+                    let mut replies = Vec::new();
+                    for chunk in burst.as_bytes().chunks(chunk_size) {
+                        replies.extend(queries.process(&filter.push(chunk), &mut parser, &kitty));
+                    }
+                    assert_eq!(replies, expected.as_bytes(), "chunk size {chunk_size}");
+                    assert_eq!(parser.screen().contents(), "hi\nbye");
+                    assert!(parser.callbacks().replies.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn palette_queries_need_no_following_csi_and_color_setters_stay_local() {
+        use terminal_colorsaurus::Color;
+
+        let mut parser = pane_parser(24, 80, 0);
+        parser.callbacks_mut().colors = Some(terminal_palette::DefaultColors {
+            fg: Color::rgb(0xffff, 0xffff, 0xffff),
+            bg: Color::rgb(0x1234, 0x2345, 0x3456),
+        });
+        let mut queries = TerminalReplies::default();
+        let kitty = AtomicBool::new(false);
+        assert!(queries.process(
+            b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b]0;title\x07\x1b]8;;https://example.com\x1b\\\x1b]52;c;?\x07",
+            &mut parser,
+            &kitty,
+        ).is_empty());
+        assert_eq!(
+            queries.process(b"\x1b]11;?\x1b\\", &mut parser, &kitty),
+            b"\x1b]11;rgb:1234/2345/3456\x1b\\"
+        );
+        assert!(parser.screen().contents().is_empty());
+    }
+
+    #[test]
+    fn unavailable_host_palette_does_not_invent_colors_or_block_other_queries() {
+        let mut parser = pane_parser(24, 80, 0);
+        parser.callbacks_mut().colors = None;
+        let replies = TerminalReplies::default().process(
+            b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[?u\x1b[6n",
+            &mut parser,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(replies, b"\x1b[?62;22c\x1b[?0u\x1b[1;1R");
+        assert!(parser.screen().contents().is_empty());
     }
 
     #[test]

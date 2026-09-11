@@ -123,6 +123,7 @@ tempfile = "3.23.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 portable-pty = "0.8"
 vt100 = "0.16"
+terminal-colorsaurus = "1.0.3"
 
 [target.'cfg(windows)'.dependencies]
 pageant = "0.2.0"
