@@ -347,6 +347,10 @@ pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
         // prompt can steal startup input and would break that version match.
         "-c".into(),
         "check_for_update_on_startup=false".into(),
+        // Codex relies on terminal scrollback rather than mouse reporting.
+        // Keep its transcript on the main screen so the Railway pane can
+        // retain history and scroll it with the wheel or Shift+Page Up/Down.
+        "--no-alt-screen".into(),
         "--remote".into(),
         connection.url.clone(),
         "--remote-auth-token-env".into(),

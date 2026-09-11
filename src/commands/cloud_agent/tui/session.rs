@@ -1492,7 +1492,9 @@ assert os.isatty(0) and os.isatty(1)
 assert os.environ['RAILWAY_CODEX_SERVER_TOKEN'] == "secret ' $(echo injected)"
 backend = hashlib.sha256(b'wss://agent.example.com:443').hexdigest()[:16]
 assert pathlib.Path(os.environ['CODEX_HOME']) == pathlib.Path.home() / '.railway/codex-client' / backend
-assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--no-alt-screen', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+for i in range(80):
+    print(f'transcript-{i}')
 print('Codex ready', flush=True)
 assert input() == 'hello'
 size = os.get_terminal_size()
@@ -1532,6 +1534,17 @@ print('Codex complete', flush=True)
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let live = pane.with_screen(|s| s.contents()).unwrap();
+        assert!(pane.scrollable());
+        pane.scroll(true, 10, (1, 1));
+        assert!(pane.scrolled_back());
+        let history = pane.with_screen(|s| s.contents()).unwrap();
+        assert_ne!(history, live);
+        assert!(history.contains("transcript-"));
+        pane.scroll(false, 10, (1, 1));
+        assert!(!pane.scrolled_back());
+        assert_eq!(pane.with_screen(|s| s.contents()).unwrap(), live);
+
         pane.resize(30, 100);
         pane.write_raw(b"hello\n");
         while !pane.finished() {
