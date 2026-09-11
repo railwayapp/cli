@@ -8,6 +8,11 @@ query Sandboxes($environmentId: String!, $first: Int, $after: String) {
         environmentId
         createdAt
         idleTimeoutMinutes
+        domains {
+          prefix
+          port
+          domain
+        }
       }
     }
   }
