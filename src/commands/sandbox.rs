@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -109,6 +109,15 @@ struct CreateArgs {
     /// `postgres.railway.internal`
     #[clap(long)]
     private_network: bool,
+
+    /// Publish an HTTP domain on a port, optionally with a prefix (repeatable).
+    /// Requires --private-network; forks do not inherit source domains
+    #[clap(
+        long = "domain",
+        value_name = "[PREFIX:]PORT",
+        requires = "private_network"
+    )]
+    domains: Vec<PublicDomainSpec>,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -289,6 +298,15 @@ struct ForkArgs {
     /// egress only). The fork does not inherit the source's network mode
     #[clap(long)]
     private_network: bool,
+
+    /// Publish an HTTP domain on a port, optionally with a prefix (repeatable).
+    /// Requires --private-network; forks do not inherit source domains
+    #[clap(
+        long = "domain",
+        value_name = "[PREFIX:]PORT",
+        requires = "private_network"
+    )]
+    domains: Vec<PublicDomainSpec>,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -793,6 +811,77 @@ pub(crate) fn variables_to_input(
     ))
 }
 
+#[derive(Clone, Debug)]
+struct PublicDomainSpec {
+    prefix: Option<String>,
+    port: u16,
+}
+
+impl FromStr for PublicDomainSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(spec: &str) -> Result<Self> {
+        let (prefix, port) = match spec.split_once(':') {
+            Some((prefix, port)) => {
+                if prefix.is_empty()
+                    || prefix.len() > 46
+                    || !prefix
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                    || prefix.starts_with('-')
+                    || prefix.ends_with('-')
+                {
+                    bail!(
+                        "domain prefix must be 1-46 lowercase letters, digits, or hyphens, with no leading or trailing hyphen"
+                    );
+                }
+                (Some(prefix.to_owned()), port)
+            }
+            None => (None, spec),
+        };
+        let port = port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| {
+                anyhow!("domain port must be between 1 and 65535 (use [PREFIX:]PORT)")
+            })?;
+        Ok(Self { prefix, port })
+    }
+}
+
+fn public_domains_input(
+    domains: &[PublicDomainSpec],
+) -> Result<Option<Vec<mutations::sandbox_create::SandboxDomainInput>>> {
+    if domains.is_empty() {
+        return Ok(None);
+    }
+    if domains.len() > 10 {
+        bail!("a sandbox supports at most 10 public domains");
+    }
+    let mut ports = BTreeSet::new();
+    let mut prefixes = BTreeSet::new();
+    for domain in domains {
+        if !ports.insert(domain.port) {
+            bail!("public domain ports must be unique: {}", domain.port);
+        }
+        if let Some(prefix) = &domain.prefix {
+            if !prefixes.insert(prefix) {
+                bail!("public domain prefixes must be unique: {prefix}");
+            }
+        }
+    }
+    Ok(Some(
+        domains
+            .iter()
+            .map(|domain| mutations::sandbox_create::SandboxDomainInput {
+                prefix: domain.prefix.clone(),
+                port: i64::from(domain.port),
+            })
+            .collect(),
+    ))
+}
+
 /// How `create_and_store` reports the new sandbox.
 pub(crate) enum CreateReport {
     /// The full `sandbox create` block: id, status, region, connect hints.
@@ -819,6 +908,7 @@ pub(crate) async fn create_and_store(
         ("Creating sandbox", "Created", "Failed to create sandbox")
     };
 
+    let requested_domains = input.public_domains.as_ref().map_or(0, Vec::len);
     let mut spinner = create_shimmer_spinner(doing);
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
@@ -855,6 +945,15 @@ pub(crate) async fn create_and_store(
             if let Some(idle) = sandbox.idle_timeout_minutes {
                 println!("  idle timeout: {idle}m");
             }
+            if sandbox.domains.len() < requested_domains {
+                println!("  domains: publishing (run `railway sandbox list` to see the URLs)");
+            }
+            for domain in &sandbox.domains {
+                println!(
+                    "  {}: https://{} -> port {}",
+                    domain.prefix, domain.domain, domain.port
+                );
+            }
             println!("\nConnect with:\n  railway sandbox ssh");
         }
     }
@@ -868,6 +967,7 @@ async fn create(
     environment: Option<String>,
     args: CreateArgs,
 ) -> Result<()> {
+    let public_domains = public_domains_input(&args.domains)?;
     let (project_id, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
@@ -903,6 +1003,7 @@ async fn create(
     let input = mutations::sandbox_create::SandboxCreateInput {
         environment_id: environment_id.clone(),
         idle_timeout_minutes: args.idle_timeout_minutes,
+        public_domains,
         template,
         source_sandbox_id: None,
         network_isolation: args
@@ -1351,6 +1452,7 @@ async fn fork(
     environment: Option<String>,
     args: ForkArgs,
 ) -> Result<()> {
+    let public_domains = public_domains_input(&args.domains)?;
     let (source_sandbox_id, environment_id) = resolve_target(
         configs,
         client,
@@ -1377,6 +1479,7 @@ async fn fork(
     let input = mutations::sandbox_create::SandboxCreateInput {
         environment_id: environment_id.clone(),
         idle_timeout_minutes: args.idle_timeout_minutes,
+        public_domains,
         template: None,
         source_sandbox_id: Some(source_sandbox_id),
         network_isolation: args
@@ -1484,6 +1587,12 @@ async fn list(
             node.region,
             node.created_at.format("%Y-%m-%d %H:%M").to_string()
         );
+        for domain in &node.domains {
+            println!(
+                "    {}: https://{} -> port {}",
+                domain.prefix, domain.domain, domain.port
+            );
+        }
     }
     if hidden > 0 {
         println!("\n({hidden} destroyed sandboxes hidden; use --all to show them)");
@@ -2095,6 +2204,98 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn domain_flags_parse_for_create_and_fork() {
+        for command in ["create", "fork"] {
+            let parsed = parse_exec(&[
+                command,
+                "--private-network",
+                "--domain",
+                "8080",
+                "--domain",
+                "api:3000",
+            ])
+            .unwrap();
+            let domains = match parsed.command {
+                Commands::Create(args) => args.domains,
+                Commands::Fork(args) => args.domains,
+                _ => panic!("expected create or fork"),
+            };
+            let input = public_domains_input(&domains).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(input).unwrap(),
+                serde_json::json!([
+                    { "port": 8080 },
+                    { "prefix": "api", "port": 3000 },
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn domain_flags_require_private_network() {
+        for command in ["create", "fork"] {
+            assert!(parse_exec(&[command, "--domain", "8080"]).is_err());
+            assert!(parse_exec(&[command]).is_ok());
+        }
+        assert!(public_domains_input(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn domain_specs_reject_invalid_prefixes_and_ports() {
+        for spec in [
+            "",
+            "0",
+            "65536",
+            "api:0",
+            "api:65536",
+            "api:abc",
+            ":8080",
+            "API:8080",
+            "-api:8080",
+            "api-:8080",
+            "api.foo:8080",
+            "a_b:8080",
+            "api:8080:9000",
+            "https://api:8080",
+            "é:8080",
+        ] {
+            assert!(spec.parse::<PublicDomainSpec>().is_err(), "accepted {spec}");
+        }
+        assert!(
+            format!("{}:8080", "a".repeat(47))
+                .parse::<PublicDomainSpec>()
+                .is_err()
+        );
+        assert!(
+            format!("{}:65535", "a".repeat(46))
+                .parse::<PublicDomainSpec>()
+                .is_ok()
+        );
+        assert!("a-1:1".parse::<PublicDomainSpec>().is_ok());
+    }
+
+    #[test]
+    fn domain_requests_validate_count_and_uniqueness() {
+        for specs in [vec!["8080", "api:8080"], vec!["api:8080", "api:3000"]] {
+            let domains: Vec<_> = specs
+                .iter()
+                .map(|s| s.parse::<PublicDomainSpec>().unwrap())
+                .collect();
+            assert!(public_domains_input(&domains).is_err());
+        }
+        let domains: Vec<_> = (1..=10)
+            .map(|port| PublicDomainSpec { prefix: None, port })
+            .collect();
+        assert_eq!(public_domains_input(&domains).unwrap().unwrap().len(), 10);
+        let mut too_many = domains;
+        too_many.push(PublicDomainSpec {
+            prefix: None,
+            port: 11,
+        });
+        assert!(public_domains_input(&too_many).is_err());
     }
 
     #[test]

@@ -6,5 +6,10 @@ mutation SandboxCreate($input: SandboxCreateInput!) {
     environmentId
     createdAt
     idleTimeoutMinutes
+    domains {
+      prefix
+      port
+      domain
+    }
   }
 }
