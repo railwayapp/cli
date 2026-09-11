@@ -7364,17 +7364,15 @@ mod tests {
     #[test]
     fn clicking_a_codex_labeled_hyperlink_opens_its_destination() {
         let mut a = loaded_app();
-        let mut session = super::super::session::Session::for_test("ca_1", "codex").unwrap();
-        session.resize(6, 60);
-        session.send(
+        let mut session = super::super::session::Session::for_test_with_output(
+            "ca_1", "codex",
             b"\x1b[2J\x1b[H\x1b]8;;https://github.com/railwayapp/cli/pull/1194\x1b\\PR #1194\x1b]8;;\x1b\\\r\n",
+        ).unwrap();
+        session.resize(6, 60);
+        assert_eq!(
+            session.url_at(0, 1).as_deref(),
+            Some("https://github.com/railwayapp/cli/pull/1194")
         );
-        for _ in 0..500 {
-            if session.url_at(0, 7).is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         a.attach_session(session, "ca_1".into());
         a.panes.session = PaneBox {
             x: 34,

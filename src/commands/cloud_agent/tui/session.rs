@@ -1212,6 +1212,16 @@ impl Session {
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {
+        Self::for_test_inner(agent_id, agent_name, None)
+    }
+
+    /// Feed exact terminal output to the emulator without the host PTY
+    /// interpreting or rewriting escape sequences (notably OSC 8 on ConPTY).
+    pub fn for_test_with_output(agent_id: &str, agent_name: &str, output: &[u8]) -> Result<Self> {
+        Self::for_test_inner(agent_id, agent_name, Some(output))
+    }
+
+    fn for_test_inner(agent_id: &str, agent_name: &str, output: Option<&[u8]>) -> Result<Self> {
         let pty = NativePtySystem::default().openpty(PtySize {
             rows: 24,
             cols: 80,
@@ -1227,8 +1237,10 @@ impl Session {
         // The same reader the real session runs. Without it the emulator never
         // sees a byte, and a test against this fixture would be testing
         // nothing at all.
-        let mut reader = pty.master.try_clone_reader()?;
-        {
+        if let Some(output) = output {
+            parser.lock().unwrap().process(output);
+        } else {
+            let mut reader = pty.master.try_clone_reader()?;
             let parser = parser.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
