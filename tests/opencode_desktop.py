@@ -20,6 +20,8 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('bootstrap', sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+m.LEGACY_PORT = int(sys.argv[3])
+m.CODE_PORT = int(sys.argv[4])
 if sys.platform == 'darwin':
     def process_start(pid):
         result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=', '-o', 'lstart='], capture_output=True, text=True)
@@ -28,7 +30,7 @@ if sys.platform == 'darwin':
         return fields[1] if result.returncode == 0 and len(fields) == 2 and not fields[0].startswith('Z') else None
     m.process_start = process_start
 try:
-    print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]), int(sys.argv[3]))))
+    print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]))))
 except Exception as error:
     print(str(error), file=sys.stderr)
     sys.exit(1)
@@ -70,18 +72,23 @@ class BootstrapTests(unittest.TestCase):
         beta.write_text(binary.read_text())
         beta.chmod(0o700)
         self.harness = 'opencode'
-        with socket.socket() as sock:
+        with socket.socket() as sock, socket.socket() as code, socket.socket() as custom:
             sock.bind(('127.0.0.1', 0))
+            code.bind(('127.0.0.1', 0))
+            custom.bind(('127.0.0.1', 0))
             self.port = sock.getsockname()[1]
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('OPENCODE_SERVER_', 'RAILWAY_PUBLIC_DOMAIN'))}
-        self.env['RAILWAY_PUBLIC_DOMAIN_8080'] = 'app-test.up.railway.app'
+            self.code_port = code.getsockname()[1]
+            self.custom_port = custom.getsockname()[1]
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('OPENCODE_SERVER_', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_CODE_PORT'))}
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.port}'] = 'app-test.up.railway.app'
         self.state = self.home / '.railway/desktop/opencode/server.json'
 
     def run_bootstrap(self, request=None, check=True):
         request = dict(request or {'directory': str(self.directory), 'password': 'test-password'})
         request.setdefault('harness', self.harness)
         result = subprocess.run(
-            [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port)],
+            [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port), str(self.code_port)],
             input=json.dumps(request),
             capture_output=True, text=True, timeout=15, env=self.env,
         )
@@ -167,6 +174,123 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(result['username'], 'boot-user')
         self.assertEqual(result['password'], 'boot-password')
 
+    def test_custom_code_endpoint_coexists_with_app_and_survives_reconnect_and_restart(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-test.up.railway.app'
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'app-test.up.railway.app'
+        with socket.socket() as app:
+            app.bind(('0.0.0.0', self.port))
+            app.listen()
+            for harness in ('opencode', 'opencode2'):
+                with self.subTest(harness=harness):
+                    self.harness = harness
+                    first = self.run_bootstrap()
+                    self.assertEqual(first['url'], 'https://code-test.up.railway.app')
+                    self.assertEqual(json.loads(self.state.read_text())['port'], self.custom_port)
+                    self.assertIsNotNone(self.run_bootstrap({'action': 'inspect'}))
+                    self.assertTrue(self.run_bootstrap({'action': 'connect'})['reused'])
+                    self.run_bootstrap({'action': 'stop'})
+                    restarted = self.run_bootstrap({'action': 'connect'})
+                    self.assertFalse(restarted['reused'])
+                    self.assertEqual(restarted['url'], first['url'])
+                    self.assertEqual(restarted['password'], first['password'])
+                    self.run_bootstrap({'action': 'stop'})
+                    self.state.unlink()
+
+    def test_legacy_state_without_port_keeps_its_endpoint_when_code_domain_exists(self):
+        first = self.run_bootstrap()
+        state = json.loads(self.state.read_text())
+        state.pop('port')
+        self.state.write_text(json.dumps(state))
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        self.assertIsNotNone(self.run_bootstrap({'action': 'inspect'}))
+        reused = self.run_bootstrap({'action': 'connect'})
+        self.assertTrue(reused['reused'])
+        self.assertEqual(reused['url'], first['url'])
+        self.run_bootstrap({'action': 'stop'})
+        restarted = self.run_bootstrap({'action': 'connect'})
+        self.assertEqual(restarted['url'], first['url'])
+        self.assertEqual(restarted['password'], first['password'])
+        self.assertEqual(json.loads(self.state.read_text())['port'], self.port)
+
+    def test_saved_code_endpoint_never_falls_back_to_app_domain(self):
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'app-test.up.railway.app'
+        self.run_bootstrap()
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}')
+        result = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'no public address for port {self.code_port}', result.stderr)
+
+    def test_checkpoint_restore_adopts_new_port_including_pre_port_state(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+                self.env.pop('RAILWAY_CODE_PORT', None)
+                first = self.run_bootstrap()
+                saved = json.loads(self.state.read_text())
+                self.run_bootstrap({'action': 'stop'})
+                if legacy:
+                    saved.pop('port')
+                    saved.pop('vm_id')
+                self.state.write_text(json.dumps(saved))
+                self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+                self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+                self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-restored.up.railway.app'
+                with socket.socket() as app:
+                    app.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    app.bind(('0.0.0.0', self.port))
+                    app.listen()
+                    restored = self.run_bootstrap({'action': 'connect'})
+                    self.assertEqual(restored['url'], 'https://code-restored.up.railway.app')
+                    self.assertEqual(restored['password'], first['password'])
+                    self.assertEqual(restored['directory'], first['directory'])
+                    self.assertFalse(restored['reused'])
+                    state = json.loads(self.state.read_text())
+                    self.assertEqual((state['port'], state['vm_id']), (self.custom_port, 'vm-restored'))
+                    self.run_bootstrap({'action': 'stop'})
+                self.state.unlink()
+
+    def test_restoring_without_endpoint_does_not_keep_source_code_port(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-source.up.railway.app'
+        self.run_bootstrap()
+        self.run_bootstrap({'action': 'stop'})
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        self.env.pop('RAILWAY_CODE_PORT')
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}')
+        self.assertEqual(self.run_bootstrap({'action': 'connect'})['url'], 'https://app-test.up.railway.app')
+
+    def test_configured_port_requires_its_own_domain_and_rejects_invalid_ports(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-other.up.railway.app'
+        result = self.run_bootstrap(check=False)
+        self.assertIn(f'no public address for port {self.custom_port}', result.stderr)
+        for port in ('0', '1023', '8080', '8790', '65536', 'nope'):
+            # LEGACY_PORT is remapped by the test wrapper.
+            self.env['RAILWAY_CODE_PORT'] = str(self.port) if port == '8080' else port
+            result = self.run_bootstrap(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('RAILWAY_CODE_PORT', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def test_restored_pid_is_never_adopted_or_stopped(self):
+        self.run_bootstrap()
+        saved = self.state.read_text()
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        try:
+            self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+            self.run_bootstrap({'action': 'stop'})
+        finally:
+            self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+            self.state.write_text(saved)
+        self.assertTrue(self.run_bootstrap()['reused'])
+
+    def test_legacy_agent_can_use_the_unqualified_domain(self):
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.port}')
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'legacy.up.railway.app'
+        self.assertEqual(self.run_bootstrap()['url'], 'https://legacy.up.railway.app')
+
     def test_occupied_port_is_not_replaced(self):
         with socket.socket() as other:
             other.bind(('0.0.0.0', self.port))
@@ -176,8 +300,18 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn('occupied', result.stderr)
             self.assertFalse(self.state.exists())
 
+    def test_busy_code_port_does_not_fall_back_to_the_free_app_port(self):
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        with socket.socket() as other:
+            other.bind(('0.0.0.0', self.code_port))
+            other.listen()
+            result = self.run_bootstrap(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f'Port {self.code_port} is occupied', result.stderr)
+            self.assertFalse(self.state.exists())
+
     def test_missing_domain_does_not_launch(self):
-        self.env.pop('RAILWAY_PUBLIC_DOMAIN_8080')
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.port}')
         result = self.run_bootstrap(check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('no public address', result.stderr)
