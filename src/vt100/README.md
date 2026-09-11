@@ -11,6 +11,9 @@ Local changes:
   overwrite/erase. Cell ownership naturally preserves links through scrolling,
   alternate screens, line insertion/deletion, and resize.
 - Bound and validate web hyperlink destinations; ignore unsupported schemes.
+- Retain main-screen scrollback for regions that start at the top, including
+  inline transcripts above a fixed composer. Interior and alternate-screen
+  regions do not contribute history.
 
 Hyperlinks are consumed by Railway's pane click handler, not serialized into
 terminal screen dumps. Regression coverage lives in the pane session tests.

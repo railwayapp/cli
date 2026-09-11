@@ -522,7 +522,11 @@ impl Grid {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && !self.scroll_region_active() {
+            // Inline TUIs keep their composer below a scrolling transcript.
+            // Rows leaving the top of the main screen still belong in history
+            // when the region stops above the bottom row. Interior regions do
+            // not contribute history; the alternate grid has no scrollback.
+            if self.scrollback_len > 0 && self.scroll_top == 0 {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -559,10 +563,6 @@ impl Grid {
 
     fn in_scroll_region(&self) -> bool {
         self.pos.row >= self.scroll_top && self.pos.row <= self.scroll_bottom
-    }
-
-    fn scroll_region_active(&self) -> bool {
-        self.scroll_top != 0 || self.scroll_bottom != self.size.rows - 1
     }
 
     pub fn set_origin_mode(&mut self, mode: bool) {
