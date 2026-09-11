@@ -43,7 +43,7 @@ pub(crate) use opencode_config::configure_installed as configure_installed_openc
 /// Set up a desktop coding app to work on a cloud agent over SSH
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart Claude after setup.\nCodex also imports the SSH connection and remote project through\n$CODEX_HOME/codex-app/config.json (default ~/.codex/codex-app/config.json).\nSetup saves configuration in the background without opening Codex Desktop.\nThe app imports it on its next startup.\nFind Railway: <agent-name> in Codex's project sidebar.\n\nOpenCode runs in the background on the agent's public app port (8080).\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nYou may need to restart OpenCode Desktop to load the updated configuration.\nOpen Home → Projects → Railway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied app port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\nFor Codex it removes the import declaration; remove already-imported hosts\nand projects in Codex Settings → Connections and the sidebar.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
+    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart Claude after setup.\nCodex also imports the SSH connection and remote project through\n$CODEX_HOME/codex-app/config.json (default ~/.codex/codex-app/config.json).\nSetup saves configuration in the background without opening Codex Desktop.\nThe app imports it on its next startup.\nFind Railway: <agent-name> in Codex's project sidebar.\n\nOpenCode setup requests a code endpoint on newly created VMs (default port 4096).\nExisting VMs use their configured endpoint, or the app port (8080) without one.\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nYou may need to restart OpenCode Desktop to load the updated configuration.\nOpen Home → Projects → Railway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied server port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\nFor Codex it removes the import declaration; remove already-imported hosts\nand projects in Codex Settings → Connections and the sidebar.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
 )]
 pub struct Args {
     /// Configure Claude Code Desktop
@@ -410,6 +410,9 @@ impl Args {
         // Only the first app creates. All later apps seed the same agent.
         launch.new = self.new && agent_id.is_none();
         launch.agent_id = agent_id;
+        // A preceding Claude/Codex SSH pass may create the VM before the
+        // OpenCode pass, so request its endpoint on the first pass too.
+        launch.code_endpoint = self.opencode || self.opencode2;
         launch
     }
 
@@ -645,7 +648,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
     if apps.contains(&App::Codex) {
         if apps == [App::Codex] {
             println!(
-                "Would start or reuse the authenticated Codex App Server on port 8080 and verify its public WebSocket endpoint."
+                "Would request a code endpoint for a new VM, then start or reuse the authenticated Codex App Server on its configured port (default 4096; legacy connections use 8080) and verify its public WebSocket endpoint."
             );
         }
         codex_config::preview(&alias, &agent_name, &args.dir)?;
@@ -664,7 +667,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
     if apps.iter().any(|app| app.is_opencode()) {
         println!("\nWould generate credentials for a new agent, or reuse its saved credentials.");
         println!(
-            "Would start password-protected OpenCode in the background on port 8080 from {}.",
+            "Would request a code endpoint for a new VM, then start password-protected OpenCode on its configured port (default 4096; legacy connections use 8080) from {}.",
             args.dir
         );
         println!(
@@ -1314,6 +1317,7 @@ mod tests {
         ]);
         let first = args.launch_args(App::Claude, None, None);
         assert!(first.new);
+        assert!(first.code_endpoint);
         assert!(first.agent_id.is_none());
         assert_eq!(first.environment.as_deref(), Some("production"));
         for app in [App::Codex, App::OpenCode] {
@@ -1348,6 +1352,12 @@ mod tests {
         );
         assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--remove"]).is_err());
         assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--dry-run"]).is_ok());
+    }
+
+    #[test]
+    fn ssh_only_desktop_setup_does_not_request_a_code_endpoint() {
+        let args = args_for(&["--claude", "--codex", "--new"]);
+        assert!(!args.launch_args(App::Claude, None, None).code_endpoint);
     }
 
     #[test]

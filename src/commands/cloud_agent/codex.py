@@ -13,6 +13,9 @@ import subprocess
 import sys
 import time
 
+CODE_PORT = 4096
+LEGACY_PORT = 8080
+
 
 class SetupError(Exception):
     pass
@@ -34,7 +37,14 @@ def process_start(pid):
         return None
 
 
+def restored_state(state):
+    current = os.environ.get("RAILWAY_FACTORY_VM_ID")
+    return bool(current and state.get("vm_id") and state["vm_id"] != current)
+
+
 def owned_process(state):
+    if restored_state(state):
+        return False
     pid, start = state.get("pid"), state.get("start")
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
 
@@ -138,7 +148,31 @@ def stop_owned(state):
         time.sleep(0.1)
 
 
-def setup(request, home, port=8080):
+def server_port(state):
+    configured = os.environ.get("RAILWAY_CODE_PORT")
+    if configured:
+        if not configured.isascii() or not configured.isdecimal():
+            raise SetupError("RAILWAY_CODE_PORT must be a valid code endpoint port.")
+        configured = int(configured)
+        if not 1024 <= configured <= 65535 or configured in (LEGACY_PORT, 8790):
+            raise SetupError("RAILWAY_CODE_PORT must be 1024-65535, excluding the app and gateway ports.")
+    # A live legacy server retains its endpoint. On a restored disk there is
+    # no owned process: adopt the new VM's explicit code port, even when the
+    # checkpoint contains pre-port launcher state. The API owns this setting.
+    if owned_process(state):
+        port = state.get("port", LEGACY_PORT)
+    elif configured:
+        port = configured
+    elif state and not restored_state(state):
+        port = state.get("port", LEGACY_PORT)
+    else:
+        port = CODE_PORT if os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{CODE_PORT}") else LEGACY_PORT
+    if type(port) is not int or not 1024 <= port <= 65535 or port == 8790:
+        raise SetupError("The saved Codex server has an unsupported port.")
+    return port
+
+
+def setup(request, home):
     os.umask(0o077)
     action = request.get("action", "start")
     if action not in ("start", "connect", "inspect"):
@@ -147,6 +181,7 @@ def setup(request, home, port=8080):
     state_path = root / "server.json"
     if action == "inspect":
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        port = server_port(state)
         if (owned_process(state) and state.get("token") and state.get("directory")
                 and healthy(port, state["token"])):
             return {"directory": state["directory"], "version": state.get("version")}
@@ -161,6 +196,7 @@ def setup(request, home, port=8080):
         except BlockingIOError:
             raise SetupError("Another Codex setup is running on this agent. Retry when it finishes.") from None
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        port = server_port(state)
         if action == "connect":
             if not state.get("directory") or not state.get("token"):
                 raise SetupError("The saved Codex connection is incomplete. Rerun railway code --codex --agent <name>.")
@@ -168,9 +204,11 @@ def setup(request, home, port=8080):
         directory = str(Path(request["directory"]).resolve(strict=True))
         if not Path(directory).is_dir():
             raise SetupError("Codex's working directory must be a directory.")
-        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN_8080") or os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+        domain = os.environ.get(f"RAILWAY_PUBLIC_DOMAIN_{port}")
+        if not domain and port == LEGACY_PORT:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
         if not domain or not re.fullmatch(r"[a-zA-Z0-9.-]+", domain):
-            raise SetupError("This agent has no valid public address for port 8080.")
+            raise SetupError(f"This agent has no valid public address for port {port}.")
         token = state.get("token") or request.get("token")
         if not isinstance(token, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{43,}", token):
             raise SetupError("Codex requires a high-entropy URL-safe connection token.")
@@ -196,7 +234,8 @@ def setup(request, home, port=8080):
             token_path = root / "server-token"
             token_path.write_text(token)
             os.chmod(token_path, 0o600)
-            state = dict(token=token, directory=directory, version=version)
+            state = dict(token=token, directory=directory, version=version, port=port,
+                         vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"))
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
@@ -224,6 +263,9 @@ def setup(request, home, port=8080):
                 if child.poll() is None:
                     os.killpg(child.pid, signal.SIGTERM)
                 raise
+        if reused and not state.get("vm_id") and os.environ.get("RAILWAY_FACTORY_VM_ID"):
+            state["vm_id"] = os.environ["RAILWAY_FACTORY_VM_ID"]
+            save(state_path, state)
         # Codex's native --remote parser requires an explicit port, including
         # the default TLS port. Keep it in the wire value (URL serializers omit it).
         return dict(url=f"wss://{domain}:443", token=token, directory=directory,

@@ -135,6 +135,7 @@ pub(crate) async fn prepare_pane(
     let directory = args.remote_dir.take();
     let password = opencode::generate_password();
     args.app_mode = true;
+    args.code_endpoint = true;
     if harness != "codex" {
         args.boot_variables
             .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
@@ -215,6 +216,7 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
     pin_agent(&mut args).await?;
     let directory = args.remote_dir.take().unwrap_or_else(|| "/app".into());
     args.app_mode = true;
+    args.code_endpoint = true;
     let password = opencode::generate_password();
     if harness != Harness::Codex {
         args.boot_variables

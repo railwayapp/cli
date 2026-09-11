@@ -363,6 +363,14 @@ pub struct LaunchArgs {
     #[clap(skip)]
     pub(crate) boot_variables: std::collections::BTreeMap<String, String>,
 
+    /// Provision the code endpoint on a new VM (automatic for managed clients)
+    #[clap(long, requires = "new")]
+    pub(crate) code_endpoint: bool,
+
+    /// Provision a new VM's code endpoint on this port (defaults to 4096)
+    #[clap(long, requires = "new", value_parser = ca::parse_code_port)]
+    code_port: Option<u16>,
+
     /// Load variables from a .env file (repeatable). `--variable` flags
     /// override file entries with the same key
     #[clap(long = "env-file", value_name = "PATH")]
@@ -529,6 +537,8 @@ impl LaunchArgs {
                 if self.agent_args.len() > 2
                     || self.new
                     || self.name.is_some()
+                    || self.code_endpoint
+                    || self.code_port.is_some()
                     || !self.variables.is_empty()
                     || !self.env_files.is_empty()
                     || self.refresh_auth
@@ -575,6 +585,8 @@ impl LaunchArgs {
             && self.initial_prompt.is_none()
             && self.resume_session_id.is_none()
             && self.variables.is_empty()
+            && !self.code_endpoint
+            && self.code_port.is_none()
             && self.env_files.is_empty()
             && self.agent_args.is_empty()
             && self.remote_dir.is_none()
@@ -2624,14 +2636,7 @@ async fn resolve_agent(
         );
     }
 
-    let mut variables = variables_to_input(&args.env_files, &args.variables)?
-        .map(serde_json::to_value)
-        .transpose()?
-        .unwrap_or_else(|| serde_json::json!({}));
-    for (key, value) in &args.boot_variables {
-        variables[key] = serde_json::Value::String(value.clone());
-    }
-    let variables = crate::controllers::cloud_agent::with_default_variables(Some(variables));
+    let variables = create_variables(args)?;
     let name = names::for_launch(client, configs, args, harness, target).await?;
     progress.step("Creating a cloud agent");
     let create_started = std::time::Instant::now();
@@ -2643,6 +2648,8 @@ async fn resolve_agent(
                 environment_id: environment_id.to_owned(),
                 name,
                 variables,
+                code_endpoint: create_code_endpoint(args),
+                cloud_agent_checkpoint_id: None,
             },
         },
     )
@@ -2679,6 +2686,25 @@ async fn resolve_agent(
             Err(e)
         }
     }
+}
+
+fn create_code_endpoint(
+    args: &LaunchArgs,
+) -> Option<mutations::cloud_agent_create::CloudAgentCodeEndpointInput> {
+    (args.code_endpoint || args.code_port.is_some()).then(|| {
+        mutations::cloud_agent_create::CloudAgentCodeEndpointInput {
+            port: args.code_port.map(i64::from),
+        }
+    })
+}
+
+/// User variables and internal credential seeds sent at creation.
+fn create_variables(args: &LaunchArgs) -> Result<Option<serde_json::Value>> {
+    let mut variables = variables_to_input(&args.env_files, &args.variables)?.unwrap_or_default();
+    variables.extend(args.boot_variables.clone());
+    Ok(ca::with_default_variables(Some(serde_json::to_value(
+        variables,
+    )?)))
 }
 
 /// `--variable`/`--env-file` only reach the VM spec at create time, so say so
@@ -4339,6 +4365,28 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn code_endpoint_creation_is_typed_and_ports_are_validated() {
+        let mut args = LaunchArgs::try_parse_from(["code", "--opencode2", "--new"]).unwrap();
+        // Merely selecting a harness (e.g. for an SSH session) does not expose it.
+        assert!(create_code_endpoint(&args).is_none());
+        args.code_endpoint = true;
+        assert!(create_code_endpoint(&args).unwrap().port.is_none());
+        args.code_port = Some(5000);
+        assert_eq!(create_code_endpoint(&args).unwrap().port, Some(5000));
+        args.boot_variables
+            .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+        let variables = create_variables(&args).unwrap().unwrap();
+        assert!(variables.get("RAILWAY_CODE_PORT").is_none());
+        assert_eq!(variables["OPENCODE_SERVER_USERNAME"], "opencode");
+        assert_eq!(variables["SHELL"], "/bin/bash");
+        for port in ["0", "1023", "8080", "8790", "65536", "nope"] {
+            assert!(LaunchArgs::try_parse_from(["code", "--new", "--code-port", port]).is_err());
+        }
+        assert!(LaunchArgs::try_parse_from(["code", "--new", "--code-port", "5000"]).is_ok());
+        assert!(LaunchArgs::try_parse_from(["code", "--code-port", "5000"]).is_err());
     }
 
     #[test]

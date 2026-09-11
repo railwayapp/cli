@@ -241,6 +241,7 @@ pub async fn create(
     environment_id: &str,
     name: Option<String>,
     variables: Option<serde_json::Value>,
+    options: CreateOptions,
 ) -> Result<Agent> {
     let res = post_graphql::<mutations::CloudAgentCreate, _>(
         client,
@@ -250,6 +251,12 @@ pub async fn create(
                 environment_id: environment_id.to_owned(),
                 name,
                 variables: with_default_variables(variables),
+                code_endpoint: options.code_port.map(|port| {
+                    mutations::cloud_agent_create::CloudAgentCodeEndpointInput {
+                        port: Some(i64::from(port)),
+                    }
+                }),
+                cloud_agent_checkpoint_id: options.checkpoint_id,
             },
         },
     )
@@ -263,6 +270,20 @@ pub async fn create(
         environment_id: res.environment_id,
         created_at: res.created_at,
     })
+}
+
+#[derive(Default)]
+pub struct CreateOptions {
+    pub code_port: Option<u16>,
+    pub checkpoint_id: Option<String>,
+}
+
+pub fn parse_code_port(value: &str) -> std::result::Result<u16, String> {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port >= 1024 && ![8080, 8790].contains(port))
+        .ok_or_else(|| "Code port must be 1024-65535, excluding 8080 and 8790".into())
 }
 
 pub async fn wake(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
@@ -624,6 +645,42 @@ mod tests {
     use super::*;
     use crate::testkit::MockBackboard;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn create_serializes_endpoint_and_checkpoint_only_when_requested() {
+        for code_port in [None, Some(4096), Some(5000)] {
+            let server = MockBackboard::spawn();
+            server.stub("CloudAgentCreate", serde_json::json!({"cloudAgentCreate": {
+                "id": "created", "name": "restored", "status": "STARTING",
+                "projectId": "project", "environmentId": "env", "createdAt": "2026-09-10T00:00:00Z"
+            }}));
+            let checkpoint_id = code_port.map(|_| "checkpoint".to_owned());
+            create(
+                &reqwest::Client::new(),
+                &server.url(),
+                "env",
+                Some("restored".into()),
+                None,
+                CreateOptions {
+                    code_port,
+                    checkpoint_id,
+                },
+            )
+            .await
+            .unwrap();
+            let requests = server.variables_for("CloudAgentCreate");
+            let input = &requests[0]["input"];
+            assert_eq!(input["variables"]["SHELL"], "/bin/bash");
+            if let Some(port) = code_port {
+                assert_eq!(input["codeEndpoint"], serde_json::json!({"port": port}));
+                assert_eq!(input["cloudAgentCheckpointId"], "checkpoint");
+            } else {
+                // Old Backboards must not see unknown null input fields.
+                assert!(input.get("codeEndpoint").is_none());
+                assert!(input.get("cloudAgentCheckpointId").is_none());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn a_missing_remembered_target_never_redirects_or_permits_creation() {
