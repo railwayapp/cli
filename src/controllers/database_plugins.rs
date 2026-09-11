@@ -290,7 +290,7 @@ pub fn resolve_root_service_id(config: &EnvironmentConfig, service_id: &str) -> 
 mod tests {
     use super::*;
     use crate::controllers::config::{DeployConfig, ServiceSource, Variable};
-    use crate::controllers::database_engines::{MYSQL, POSTGRES, PitrSpec, REDIS};
+    use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
 
     fn service_with_image(image: &str) -> ServiceInstance {
         ServiceInstance {
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn pitr_state_reads_the_gate_variable_the_spec_declares() {
+    fn pitr_state_reads_the_engines_own_gate_variable() {
         let postgres = with_var(
             service_with_image("ghcr.io/railwayapp-templates/postgres-ssl:16"),
             "WAL_ARCHIVE_BUCKET",
@@ -324,22 +324,18 @@ mod tests {
         assert!(state.enabled);
         assert!(state.bucket_wired);
 
-        // The detection follows the declared prefix, not a variable name
-        // baked in here: the same service reads as NOT configured under a
-        // contract whose archive lives somewhere else.
-        let other = PitrSpec {
-            template_code: "other-pitr",
-            archive_var_prefix: "OTHER_ARCHIVE_",
-        };
-        assert!(!compute_pitr_state(&postgres, &other).enabled);
+        // The very same service reads as NOT configured under MySQL's
+        // contract: each engine's archive lives under its own prefix, and
+        // detection follows the declaration rather than one baked-in name.
+        assert!(!compute_pitr_state(&postgres, &MYSQL.pitr.unwrap()).enabled);
 
-        let elsewhere = with_var(
-            service_with_image("ghcr.io/railwayapp-templates/postgres-ssl:16"),
-            "OTHER_ARCHIVE_BUCKET",
-            "somewhere",
+        let mysql = with_var(
+            service_with_image("ghcr.io/railwayapp-templates/mysql-ha/mysql:8.4"),
+            "BINLOG_ARCHIVE_BUCKET",
+            "binlogs",
         );
-        assert!(compute_pitr_state(&elsewhere, &other).enabled);
-        assert!(!compute_pitr_state(&elsewhere, &POSTGRES.pitr.unwrap()).enabled);
+        assert!(compute_pitr_state(&mysql, &MYSQL.pitr.unwrap()).enabled);
+        assert!(!compute_pitr_state(&mysql, &POSTGRES.pitr.unwrap()).enabled);
     }
 
     #[test]
