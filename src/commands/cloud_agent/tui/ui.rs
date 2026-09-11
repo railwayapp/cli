@@ -1130,7 +1130,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                     (
                         "x",
                         if conversation {
-                            "disconnect"
+                            "delete thread"
                         } else {
                             "end session"
                         },

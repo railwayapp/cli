@@ -107,6 +107,37 @@ pub(crate) struct Discovery {
 }
 
 pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
+    let output = run_helper(info, "").await?;
+    let mut result: Discovery =
+        serde_json::from_str(&output).context("Invalid conversation inventory")?;
+    result.threads.retain(|row| {
+        matches!(
+            row.harness.as_str(),
+            "claude" | "grok" | "codex" | "opencode" | "opencode2" | "railway"
+        ) && client_sessions::validate_id(&row.thread.id).is_ok()
+    });
+    Ok(result)
+}
+
+pub(crate) async fn delete(
+    info: &code::ConnectInfo,
+    harness: &str,
+    id: &str,
+    consoles: &[String],
+) -> Result<()> {
+    client_sessions::validate_id(id)?;
+    let request =
+        serde_json::json!({"harness": harness, "id": id, "consoles": consoles}).to_string();
+    let result: serde_json::Value =
+        serde_json::from_str(&run_helper(info, &quote(&request)).await?)?;
+    anyhow::ensure!(
+        result["deleted"] == id,
+        "The harness did not confirm conversation deletion"
+    );
+    Ok(())
+}
+
+async fn run_helper(info: &code::ConnectInfo, argument: &str) -> Result<String> {
     let mut command = tokio::process::Command::new("ssh");
     command
         .args(native::relay_port_args())
@@ -116,7 +147,7 @@ pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
     }
     // Read-only metadata runs never request a durable console or a PTY.
     let remote = format!(
-        "{}export RAILWAY_CODE_AUTOSTARTED=1 RAILWAY_THREAD_DISCOVERY=1; python3 -",
+        "{}export RAILWAY_CODE_AUTOSTARTED=1 RAILWAY_THREAD_DISCOVERY=1; python3 - {argument}",
         code::harness_env_prefix()
     );
     let mut child = command
@@ -128,16 +159,16 @@ pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context("Starting conversation discovery over SSH")?;
+        .context("Starting conversation command over SSH")?;
     let mut stdin = child.stdin.take().context("SSH stdin unavailable")?;
     stdin.write_all(HELPER.as_bytes()).await?;
     drop(stdin);
     let output = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output())
         .await
-        .context("Conversation discovery timed out")??;
+        .context("Conversation command timed out")??;
     if !output.status.success() {
         bail!(
-            "Conversation discovery failed: {}",
+            "Conversation command failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -146,15 +177,7 @@ pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
         .lines()
         .find_map(|line| line.strip_prefix(PREFIX))
         .context("SSH returned no conversation inventory")?;
-    let mut result: Discovery =
-        serde_json::from_str(json).context("Invalid conversation inventory")?;
-    result.threads.retain(|row| {
-        matches!(
-            row.harness.as_str(),
-            "claude" | "grok" | "codex" | "opencode" | "opencode2" | "railway"
-        ) && client_sessions::validate_id(&row.thread.id).is_ok()
-    });
-    Ok(result)
+    Ok(json.to_owned())
 }
 
 #[cfg(test)]

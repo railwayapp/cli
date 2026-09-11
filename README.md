@@ -384,6 +384,12 @@ when Option+F / Alt+F reveals the sidebar, and on explicit refresh. Loaded rows,
 their order, expansion choices, and the selected conversation stay in place.
 The machine's status icon always represents its machine state.
 
+Press **x / X** on a saved conversation to delete it from its harness. The row
+disappears immediately while native deletion runs in the background; failures
+restore the row and show an error. This deletes the saved conversation, rather
+than just disconnecting its terminal. Draft **New Thread** panes simply close,
+and **[S]** shell rows retain their end-session action.
+
 There is no periodic account or VM-history polling. Codex and OpenCode title and
 activity changes come from their existing native-client connections. Output from
 an active SSH harness pane triggers a coalesced read of Railway's stored session

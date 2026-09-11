@@ -9,6 +9,11 @@ pub(super) struct Cache {
 }
 
 impl Cache {
+    #[cfg(test)]
+    pub(super) fn for_test(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     pub fn open(backboard: &str) -> Option<Self> {
         Some(Self {
             root: dirs::cache_dir()?

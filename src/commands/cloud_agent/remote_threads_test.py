@@ -75,6 +75,54 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(rows[0]["thread"]["state"], "waiting")
         self.assertEqual(rows[0]["thread"]["created_at"], "1970-01-01T00:00:01+00:00")
 
+    def test_native_deletion_is_scoped_and_reports_failures(self):
+        self.grok("target")
+        self.grok("neighbor")
+        def delete(args, environment, directory=None):
+            self.assertEqual(args, ["grok", "sessions", "delete", "target"])
+            self.assertEqual(environment["GROK_HOME"], str(self.root))
+            self.grok("target").unlink()
+        with patch.object(threads, "config_roots", return_value={"grok": [self.root]}), patch.object(
+            threads, "run_delete_command", side_effect=delete
+        ):
+            threads.delete_conversation({"harness": "grok", "id": "target"})
+        self.assertEqual([r["thread"]["id"] for r in threads.grok_threads(self.root)], ["neighbor"])
+        with patch.object(threads, "config_roots", return_value={"grok": [self.root]}), patch.object(
+            threads, "run_delete_command", side_effect=RuntimeError("Permission denied")
+        ), self.assertRaisesRegex(RuntimeError, "Permission denied"):
+            threads.delete_conversation({"harness": "grok", "id": "neighbor"})
+        for harness in ("grok", "claude", "codex", "opencode", "opencode2"):
+            with patch.object(threads, "stop_consoles") as stop, self.assertRaises(ValueError):
+                threads.delete_conversation({"harness": harness, "id": "../neighbor"})
+            stop.assert_not_called()
+
+    def test_claude_deletion_uses_sdk_and_restores_config_on_failure(self):
+        def delete(session_id):
+            self.assertEqual(session_id, "target")
+            self.assertEqual(os.environ["CLAUDE_CONFIG_DIR"], str(self.root))
+            raise PermissionError("Read-only history")
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "original"}), patch.object(
+            threads, "config_roots", return_value={"claude": [self.root]}
+        ), patch.object(threads, "claude_sdk", return_value=SimpleNamespace(delete_session=delete)):
+            with self.assertRaises(PermissionError):
+                threads.delete_conversation({"harness": "claude", "id": "target"})
+            self.assertEqual(os.environ["CLAUDE_CONFIG_DIR"], "original")
+
+    @unittest.skipUnless(os.name == "posix", "VM process signals require POSIX")
+    def test_deletion_stops_only_exact_console_processes_and_waits_for_exit(self):
+        environments = {101: {"RAILWAY_DURABLE_SESSION_NAME": "exact"},
+                        102: {"RAILWAY_DURABLE_SESSION_NAME": "exact-other"},
+                        103: {"RAILWAY_DURABLE_SESSION_NAME": "exact"}}
+        def terminate(pid, sig):
+            self.assertEqual(sig, threads.signal.SIGTERM)
+            environments.pop(pid)
+        with patch.object(threads.Path, "glob", return_value=[Path(str(i)) for i in environments]), patch.object(
+            threads, "process_environment", side_effect=lambda pid: environments.get(pid, {})
+        ), patch.object(threads.os, "kill", side_effect=terminate) as kill:
+            threads.stop_consoles(["exact"])
+        self.assertEqual([c.args[0] for c in kill.call_args_list], [101, 103])
+        self.assertEqual(set(environments), {102})
+
     def test_provider_failure_preserves_other_history(self):
         self.grok("grok-thread")
         (self.root / "projects").mkdir()

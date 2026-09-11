@@ -199,6 +199,39 @@ impl Connection {
         }
     }
 
+    /// Delete through the harness so its history indexes and transcripts agree.
+    pub(crate) async fn delete_thread(&self, id: &str) -> Result<()> {
+        validate_id(id)?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            match self {
+                Self::Codex(c) => {
+                    let mut rpc = codex::Rpc::connect(c).await?;
+                    if let Err(error) = rpc.call("thread/delete", json!({"threadId": id})).await
+                        && !error
+                            .to_string()
+                            .ends_with(&format!("no rollout found for thread id {id}"))
+                    {
+                        return Err(error);
+                    }
+                }
+                Self::OpenCode(c, beta) => {
+                    opencode_request(
+                        c,
+                        *beta,
+                        reqwest::Method::DELETE,
+                        &format!("session/{id}"),
+                        &[],
+                        None,
+                    )
+                    .await?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .context("Conversation deletion timed out")?
+    }
+
     /// Only pre-create a conversation when seeding a prompt. A bare launch
     /// belongs on the native home screen, without a forced --session argument.
     pub(crate) async fn new_thread(&self, prompt: Option<&str>) -> Result<Option<Thread>> {
@@ -335,6 +368,7 @@ async fn opencode_request(
     query: &[(&str, String)],
     body: Option<Value>,
 ) -> Result<Value> {
+    let deleting = method == reqwest::Method::DELETE;
     let url = opencode::validate_url(&c.url)?
         .join(&format!("{}{path}", if beta { "api/" } else { "" }))?;
     let client = reqwest::Client::builder()
@@ -352,6 +386,13 @@ async fn opencode_request(
         request = request.json(&body);
     }
     let response = request.send().await?;
+    if deleting && response.status() == reqwest::StatusCode::NOT_FOUND {
+        let error: Value = response.json().await.unwrap_or(Value::Null);
+        if error["_tag"] == "SessionNotFoundError" || error["name"] == "NotFoundError" {
+            return Ok(Value::Null);
+        }
+        bail!("OpenCode conversation deletion failed (404 Not Found)");
+    }
     if !response.status().is_success() {
         bail!(
             "OpenCode conversation request failed ({})",
@@ -366,6 +407,28 @@ async fn opencode_request(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn deletion_rejects_non_native_ids_before_connecting() {
+        for beta in [false, true] {
+            for id in ["", "../neighbor", "id?all=true", "~draft", "id/child"] {
+                let connection = Connection::OpenCode(
+                    opencode::Connection {
+                        url: "https://backend.invalid".into(),
+                        username: "opencode".into(),
+                        password: "secret".into(),
+                        directory: "/app/project".into(),
+                        reused: true,
+                    },
+                    beta,
+                );
+                assert_eq!(
+                    connection.delete_thread(id).await.unwrap_err().to_string(),
+                    "Invalid conversation ID"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn bare_opencode_launch_opens_home_without_creating_a_session() {
         for beta in [false, true] {

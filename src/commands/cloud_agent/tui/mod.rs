@@ -29,7 +29,7 @@ use std::panic;
 
 use super::client_sessions::{self, Connection as ClientConnection, Thread as ClientThread};
 use super::remote_threads::{self, RemoteThread};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -408,6 +408,10 @@ fn open_client(
     tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<()> {
     let name = pane.name();
+    if app.deleted_threads.contains(&name) {
+        app.connecting.remove(&name);
+        return Ok(());
+    }
     if pane.thread.is_some()
         && let Some(index) = app
             .sessions
@@ -1287,7 +1291,15 @@ pub async fn run(
                     .unwrap_or_default(),
             )
         });
+        let toast_remaining = app.toast_remaining();
+        let stall_remaining = app
+            .stall_check_remaining()
+            .unwrap_or(std::time::Duration::MAX);
         let effect = tokio::select! {
+            Some((name, error)) = app.deletion_rx.recv() => {
+                app.thread_deleted(&name, error);
+                None
+            }
             _ = tokio::time::sleep(activity_in.unwrap_or(std::time::Duration::MAX)), if activity_in.is_some() => {
                 for agent_id in app.activity.take_due(std::time::Instant::now()) {
                     let environment = app.sessions.iter().find(|pane| pane.agent_id == agent_id && !pane.ended())
@@ -1322,7 +1334,7 @@ pub async fn run(
             // A toast fades on its own, so the loop has to wake for it — an
             // idle TUI blocks on the keyboard and would otherwise leave it on
             // screen until the next keypress.
-            _ = tokio::time::sleep(app.toast_remaining()), if app.toast.is_some() => {
+            _ = tokio::time::sleep(toast_remaining), if app.toast.is_some() => {
                 app.expire_toast();
                 None
             }
@@ -1335,7 +1347,7 @@ pub async fn run(
             // A reattach that stays silent gets its "no response" notice drawn
             // once the stall clock runs out; nothing else would redraw, since
             // a silent pane by definition sends no output to wake the loop.
-            _ = tokio::time::sleep(app.stall_check_remaining().unwrap_or(std::time::Duration::MAX)),
+            _ = tokio::time::sleep(stall_remaining),
                 if app.stall_check_remaining().is_some() => None,
             // An ended pane whose finished/dropped call is still waiting on
             // ssh's exit status: the EOF that woke the loop can beat waitpid,
@@ -1664,6 +1676,74 @@ pub async fn run(
                     Ok(()) => app.toast("Copied the SSH shell command"),
                     Err(err) => app.toast_error(format!("Couldn't copy: {err}")),
                 }
+            }
+            Some(Effect::DeleteThread {
+                agent_id,
+                environment_id,
+                session_name,
+            }) => {
+                // All panes of this exact thread go; other threads on the VM
+                // remain attached. Preserve the reply channel across TUI re-entry.
+                let mut consoles = std::collections::HashSet::new();
+                let mut panes = Vec::new();
+                for index in (0..app.sessions.len()).rev() {
+                    if app.sessions[index].agent_id != agent_id
+                        || app.sessions[index].durable_name != session_name
+                    {
+                        continue;
+                    }
+                    if let Some(mut pane) = app.take_session(index) {
+                        pane.sync_console_name();
+                        if pane.client_bridge.is_none()
+                            && pane.opencode_bridge.is_none()
+                            && let Some(console) = &pane.console_name
+                        {
+                            consoles.insert(console.clone());
+                        }
+                        panes.push(pane);
+                    }
+                }
+                let tx = app.deletion_tx.clone();
+                tokio::spawn(async move {
+                    let result: Result<()> =
+                        tokio::time::timeout(std::time::Duration::from_secs(150), async {
+                            let (harness, scoped_agent, id) =
+                                client_sessions::parse_name(&session_name)
+                                    .context("Invalid conversation identity")?;
+                            anyhow::ensure!(
+                                scoped_agent == agent_id,
+                                "Conversation belongs to another VM"
+                            );
+                            let id = id.context("Conversation has no native thread yet")?;
+                            client_sessions::validate_id(id)?;
+                            tokio::task::spawn_blocking(move || {
+                                for mut pane in panes {
+                                    pane.detach();
+                                }
+                            })
+                            .await?;
+                            if let Some(connection) =
+                                code::saved_config::client_connection(&agent_id, &environment_id)
+                                    .filter(|c| c.harness() == harness && consoles.is_empty())
+                            {
+                                connection.delete_thread(id).await
+                            } else {
+                                let info = code::connect_info(&environment_id, &agent_id).await?;
+                                remote_threads::delete(
+                                    &info,
+                                    harness,
+                                    id,
+                                    &consoles.into_iter().collect::<Vec<_>>(),
+                                )
+                                .await
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("Conversation deletion timed out"))
+                        });
+                    let _ = tx.send((session_name, result.err().map(|e| format!("{e:#}"))));
+                });
             }
             Some(Effect::KillSession {
                 agent_id,
@@ -2014,6 +2094,9 @@ fn handle_message(
             thread,
         } => {
             app.connecting.remove(&connect.session_name);
+            if app.deleted_threads.contains(&connect.session_name) {
+                return None;
+            }
             let pane_id = super::opencode::generate_password();
             let result = thread.resume_command(&pane_id).and_then(|command| {
                 let console_name = thread

@@ -97,7 +97,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
-            ("x", "end the session"),
+            ("x / X", "delete conversation / end shell"),
             ("r", "reconnect a pane whose connection dropped"),
         ],
     ),
@@ -920,6 +920,11 @@ pub enum Effect {
         environment_id: String,
         session_name: String,
     },
+    DeleteThread {
+        agent_id: String,
+        environment_id: String,
+        session_name: String,
+    },
     /// Reconnect to an existing session on a running agent — no provisioning,
     /// no credential work, just ssh with the session's name.
     Reattach {
@@ -1023,6 +1028,13 @@ pub struct LaunchRequest {
     pub base: Box<crate::commands::code::LaunchArgs>,
 }
 
+struct DeletedThread {
+    environment: String,
+    agent_id: String,
+    order: Vec<String>,
+    row: ConsoleSession,
+}
+
 pub struct App {
     pub(super) activity: super::activity::Activity,
     pub(super) thread_cache: Option<super::cache::Cache>,
@@ -1101,6 +1113,11 @@ pub struct App {
     /// row that reads "running" in the meantime looks like the key did nothing.
     /// A name leaves this set when a refresh no longer lists it.
     pub ending: std::collections::HashSet<String>,
+    // Keep tombstones after acknowledgements to reject late inventories/events.
+    pub(super) deleted_threads: std::collections::HashSet<String>,
+    deleting_threads: HashMap<String, DeletedThread>,
+    pub(super) deletion_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<String>)>,
+    pub(super) deletion_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<String>)>,
     /// Session names whose attach is in flight — the row wears a spinner
     /// instead of the branch marker until the pane opens or the attempt fails.
     pub connecting: std::collections::HashSet<String>,
@@ -1206,8 +1223,9 @@ impl App {
                     };
                     for agent in agents {
                         if agent.sessions == LoadSessions::NotLoaded
-                            && let Some(rows) = cache.read(&env.id, &agent.id)
+                            && let Some(mut rows) = cache.read(&env.id, &agent.id)
                         {
+                            rows.retain(|row| !self.deleted_threads.contains(&row.name));
                             agent.sessions = LoadSessions::Loaded(rows);
                         }
                     }
@@ -1243,6 +1261,7 @@ impl App {
         default_project: Option<String>,
         configured: bool,
     ) -> Self {
+        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::unbounded_channel();
         let harness = harness
             .and_then(|h| HARNESSES.iter().position(|x| *x == h))
             .unwrap_or(0);
@@ -1273,6 +1292,10 @@ impl App {
             pending_select_session: None,
             panes: PaneRects::default(),
             ending: std::collections::HashSet::new(),
+            deleted_threads: Default::default(),
+            deleting_threads: Default::default(),
+            deletion_tx,
+            deletion_rx,
             connecting: std::collections::HashSet::new(),
             auto_attempted: std::collections::HashSet::new(),
             drop_seen: std::collections::HashSet::new(),
@@ -2205,6 +2228,10 @@ impl App {
         agent_id: &str,
         result: Result<Vec<ConsoleSession>, String>,
     ) {
+        let result = result.map(|mut rows| {
+            rows.retain(|row| !self.deleted_threads.contains(&row.name));
+            rows
+        });
         let selected = self.selected_row().and_then(|row| {
             let RowKind::Session(w, p, e, a, i) = row.kind else {
                 return None;
@@ -3361,6 +3388,9 @@ impl App {
             })
             .collect();
         for (agent_id, name, thread) in panes {
+            if self.deleted_threads.contains(&name) {
+                continue;
+            }
             'tree: for ws in &mut self.tree {
                 for proj in &mut ws.projects {
                     for env in &mut proj.envs {
@@ -3404,6 +3434,118 @@ impl App {
         self.select_pending_session();
     }
 
+    fn delete_thread_row(
+        &mut self,
+        w: usize,
+        p: usize,
+        e: usize,
+        a: usize,
+        i: usize,
+    ) -> Option<Effect> {
+        let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
+        let Load::Loaded(agents) = &mut env.agents else {
+            return None;
+        };
+        let agent = agents.get_mut(a)?;
+        let LoadSessions::Loaded(rows) = &mut agent.sessions else {
+            return None;
+        };
+        let row = rows.get(i)?.clone();
+        if !self.deleted_threads.insert(row.name.clone()) {
+            return None;
+        }
+        let agent_id = agent.id.clone();
+        let environment_id = env.id.clone();
+        let name = row.name.clone();
+        let mut order = self
+            .deleting_threads
+            .values()
+            .find(|d| d.environment == environment_id && d.agent_id == agent_id)
+            .map(|d| d.order.clone())
+            .unwrap_or_default();
+        for row in rows.iter() {
+            if !order.contains(&row.name) {
+                order.push(row.name.clone());
+            }
+        }
+        rows.remove(i);
+        self.deleting_threads.insert(
+            name.clone(),
+            DeletedThread {
+                environment: environment_id.clone(),
+                agent_id: agent_id.clone(),
+                order,
+                row,
+            },
+        );
+        self.connecting.remove(&name);
+        if self.pending_select_session.as_deref() == Some(&name) {
+            self.pending_select_session = None;
+        }
+        self.clamp_cursor();
+        self.persist_threads(&agent_id);
+        Some(Effect::DeleteThread {
+            agent_id,
+            environment_id,
+            session_name: name,
+        })
+    }
+
+    pub(super) fn thread_deleted(&mut self, name: &str, error: Option<String>) {
+        let Some(DeletedThread {
+            environment,
+            agent_id,
+            order,
+            row,
+        }) = self.deleting_threads.remove(name)
+        else {
+            return;
+        };
+        if let Some(error) = error {
+            self.deleted_threads.remove(name);
+            let selected = self.selected_row().and_then(|r| match r.kind {
+                RowKind::Session(w, p, e, a, i) => {
+                    self.console_session(w, p, e, a, i).map(|r| r.name.clone())
+                }
+                _ => None,
+            });
+            for ws in &mut self.tree {
+                for project in &mut ws.projects {
+                    for env in &mut project.envs {
+                        if env.id != environment {
+                            continue;
+                        }
+                        let Load::Loaded(agents) = &mut env.agents else {
+                            continue;
+                        };
+                        let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
+                            continue;
+                        };
+                        match &mut agent.sessions {
+                            LoadSessions::Loaded(rows) if !rows.iter().any(|r| r.name == name) => {
+                                let index = order
+                                    .iter()
+                                    .skip_while(|id| id.as_str() != name)
+                                    .skip(1)
+                                    .find_map(|id| rows.iter().position(|r| &r.name == id))
+                                    .unwrap_or(rows.len());
+                                rows.insert(index, row.clone())
+                            }
+                            LoadSessions::Loaded(_) => {}
+                            other => *other = LoadSessions::Loaded(vec![row.clone()]),
+                        }
+                    }
+                }
+            }
+            if let Some(selected) = selected {
+                self.pending_select_session = Some(selected);
+                self.select_pending_session();
+            }
+            self.toast_error(format!("Couldn't delete {}: {error}", row.short_name()));
+        }
+        self.persist_threads(&agent_id);
+    }
+
     /// A native client selected a conversation; adopt its exact provider ID.
     pub(super) fn client_thread_selected(
         &mut self,
@@ -3436,6 +3578,9 @@ impl App {
         let draft =
             super::super::client_sessions::parse_name(&old).is_none_or(|(_, _, id)| id.is_none());
         let name = super::super::client_sessions::name(&pane.harness, &agent_id, Some(&thread.id));
+        if self.deleted_threads.contains(&name) {
+            return agent_id;
+        }
         let row = ConsoleSession::client_thread(&agent_id, &pane.harness, Some(&thread));
         pane.durable_name = name.clone();
         pane.client_thread = Some(thread);
@@ -4854,7 +4999,7 @@ impl App {
             }
             // `x` ends the highlighted session — on the agent, not just here.
             // Connected or not: the session lives on the VM either way.
-            KeyCode::Char('x') => {
+            KeyCode::Char('x') | KeyCode::Char('X') => {
                 let kind = row?.kind;
                 let RowKind::Session(w, p, e, a, i) = kind else {
                     // On an agent, close our window onto it without ending
@@ -4871,14 +5016,14 @@ impl App {
                 let (agent_id, _) = self.agent_at(w, p, e, a)?;
                 let environment_id = self.tree[w].projects[p].envs[e].id.clone();
                 if super::super::client_sessions::is_client(&name) {
-                    return match self.pane_for_row(kind) {
-                        Some(index) => Some(Effect::CloseSession { index }),
-                        None => {
-                            self.status =
-                                "This conversation is saved on the VM. Enter resumes it.".into();
-                            None
-                        }
-                    };
+                    if super::super::client_sessions::parse_name(&name)
+                        .is_some_and(|(_, _, id)| id.is_none())
+                    {
+                        return self
+                            .pane_for_row(kind)
+                            .map(|index| Effect::CloseSession { index });
+                    }
+                    return self.delete_thread_row(w, p, e, a, i);
                 }
                 self.ending.insert(name.clone());
                 Some(Effect::KillSession {
@@ -6383,9 +6528,16 @@ mod tests {
         a.focus = ManageFocus::Tree;
         assert!(matches!(
             a.on_key(key(KeyCode::Char('x'))),
-            Some(Effect::CloseSession { index: 0 })
+            Some(Effect::DeleteThread { .. })
         ));
         drop(a.take_session(0));
+        // A rejected delete restores the resumable native row, not an SSH name.
+        a.thread_deleted(&name, Some("offline".into()));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "Fix deployment startup")
+            .unwrap();
         a.focus = ManageFocus::Tree;
         assert!(
             matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, agent_id, .. }) if session_name == name && agent_id == "ca_1")
@@ -10930,6 +11082,127 @@ mod tests {
         assert!(
             matches!(&app.tree[0].projects[0].envs[0].agents_vec()[0].sessions, LoadSessions::Loaded(rows) if rows.len() == 1 && rows[0].short_name() == thread.thread.title)
         );
+    }
+
+    #[test]
+    fn deleting_a_conversation_is_immediate_scoped_and_rollback_survives_stale_replies() {
+        let mut app = loaded_app();
+        let cache_dir = tempfile::tempdir().unwrap();
+        app.thread_cache = Some(super::super::cache::Cache::for_test(
+            cache_dir.path().into(),
+        ));
+        let row = |harness, id| {
+            ConsoleSession::client_thread(
+                "ca_1",
+                harness,
+                Some(&super::super::super::remote_threads::tests::thread(harness, id).thread),
+            )
+        };
+        let first = row("claude", "first");
+        let victim = row("claude", "target");
+        let other_harness = row("grok", "target");
+        let rows = vec![first.clone(), victim.clone(), other_harness.clone()];
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, 1)))
+            .unwrap();
+        app.focus = ManageFocus::Tree;
+        let mut pane = super::super::session::Session::for_test("ca_1", "VM").unwrap();
+        pane.durable_name = victim.name.clone();
+        pane.harness = "claude".into();
+        pane.client_id = Some("pane-exact".into());
+        app.sessions.push(pane);
+        assert!(
+            matches!(app.on_key(key(KeyCode::Char('X'))), Some(Effect::DeleteThread { session_name, .. }) if session_name == victim.name)
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first.clone(), other_harness.clone()])
+        );
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+        app.client_thread_selected(
+            "pane-exact",
+            super::super::super::remote_threads::tests::thread("claude", "target").thread,
+        );
+        assert_eq!(
+            app.thread_cache
+                .as_ref()
+                .unwrap()
+                .read("env_prod", "ca_1")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first.clone(), other_harness.clone()])
+        );
+        app.thread_deleted(&victim.name, Some("permission denied".into()));
+        assert_eq!(
+            app.thread_cache
+                .as_ref()
+                .unwrap()
+                .read("env_prod", "ca_1")
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(rows.clone())
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.text.contains("permission denied"))
+        );
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, 1)))
+            .unwrap();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x'))),
+            Some(Effect::DeleteThread { .. })
+        ));
+        app.thread_deleted(&victim.name, None);
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first, other_harness])
+        );
+    }
+
+    #[test]
+    fn concurrent_deletion_failures_restore_original_order_in_either_completion_order() {
+        for reverse in [false, true] {
+            let mut app = loaded_app();
+            let rows: Vec<_> = ["first", "second", "third"]
+                .into_iter()
+                .map(|id| {
+                    ConsoleSession::client_thread(
+                        "ca_1",
+                        "claude",
+                        Some(
+                            &super::super::super::remote_threads::tests::thread("claude", id)
+                                .thread,
+                        ),
+                    )
+                })
+                .collect();
+            app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+            app.delete_thread_row(0, 0, 0, 0, 1).unwrap();
+            app.delete_thread_row(0, 0, 0, 0, 1).unwrap();
+            for i in if reverse { [2, 1] } else { [1, 2] } {
+                app.thread_deleted(&rows[i].name, Some("offline".into()));
+            }
+            assert_eq!(
+                app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+                LoadSessions::Loaded(rows)
+            );
+        }
     }
 
     /// An open pane counts as looking too. Sessions started and ended in there

@@ -18,6 +18,10 @@ import sqlite3
 import urllib.parse
 import urllib.request
 import base64
+import re
+import select
+import signal
+import time
 
 SDK_VERSION = "0.2.152"
 RESULT_PREFIX = "RAILWAY-THREADS:"
@@ -294,7 +298,7 @@ def opencode_server_threads():
         query = {"limit": 100, "order": "desc"} if beta else {"directory": state["directory"]}
         if cursor:
             query["cursor"] = cursor
-        request = urllib.request.Request("http://127.0.0.1:8080/" + ("api/" if beta else "") +
+        request = urllib.request.Request(f"http://127.0.0.1:{state.get('port', 8080)}/" + ("api/" if beta else "") +
                                          "session?" + urllib.parse.urlencode(query),
                                          headers={"Authorization": "Basic " + credentials})
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
@@ -343,5 +347,146 @@ def discover():
     return {"threads": list(newest.values()), "warnings": warnings, "failed": failed}
 
 
+def run_delete_command(args, environment, directory=None):
+    result = subprocess.run(args, env=environment, cwd=directory, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    if result.returncode:
+        raise RuntimeError(text(result.stderr.decode(errors="replace")) or
+                           text(result.stdout.decode(errors="replace")) or "Native deletion failed")
+
+
+def codex_delete(session_id):
+    # Use App Server's deletion implementation, including its metadata and
+    # rollout cleanup, even when no network-facing backend is configured.
+    binary = "codex"
+    state = read_json(Path.home() / ".railway/desktop/codex/server.json") or {}
+    version = state.get("version", "")
+    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?", version):
+        pinned = Path.home() / ".railway/runtimes/codex-server" / version / "bin/codex"
+        if pinned.is_file():
+            binary = str(pinned)
+    process = subprocess.Popen([binary, "app-server"], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    pending = b""
+    deadline = time.monotonic() + 30
+    def call(number, method, params):
+        nonlocal pending
+        process.stdin.write((json.dumps({"id": number, "method": method, "params": params}) + "\n").encode())
+        process.stdin.flush()
+        while True:
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                response = json.loads(line)
+                if response.get("id") == number:
+                    if "error" in response:
+                        if (method == "thread/delete" and response["error"].get("code") == -32600 and
+                                response["error"].get("message") == f"no rollout found for thread id {session_id}"):
+                            return None
+                        raise RuntimeError(text(response["error"].get("message")) or "Codex deletion failed")
+                    return response.get("result")
+            wait = deadline - time.monotonic()
+            if wait <= 0 or not select.select([process.stdout], [], [], wait)[0]:
+                raise TimeoutError("Codex deletion timed out")
+            chunk = os.read(process.stdout.fileno(), 8192)
+            if not chunk:
+                raise RuntimeError("Codex App Server exited before confirming deletion")
+            pending += chunk
+            if len(pending) > 1024 * 1024:
+                raise RuntimeError("Oversized Codex response")
+    try:
+        call(1, "initialize", {"clientInfo": {"name": "railway", "version": "1"},
+                               "capabilities": {"experimentalApi": True}})
+        call(2, "thread/delete", {"threadId": session_id})
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        process.stdin.close()
+        process.stdout.close()
+
+
+def stop_consoles(names):
+    # Only consoles belonging to panes of the selected conversation are passed
+    # by the client. Match their exact relay stamp, never command substrings.
+    names = set(names)
+    if not names:
+        return
+    if any(not isinstance(name, str) or not name or len(name) > 256 for name in names):
+        raise ValueError("Invalid console identity")
+    def targets():
+        return [int(path.name) for path in Path("/proc").glob("[0-9]*")
+                if int(path.name) != os.getpid() and
+                process_environment(int(path.name)).get("RAILWAY_DURABLE_SESSION_NAME") in names]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid in targets():
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 3
+        while targets() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not targets():
+            return
+    raise RuntimeError("The conversation's terminal did not stop")
+
+
+def delete_conversation(request):
+    harness, session_id = request["harness"], request["id"]
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise ValueError("Invalid conversation ID")
+    if harness not in ("codex", "claude", "grok", "opencode", "opencode2"):
+        raise ValueError(f"{harness} does not expose native conversation deletion")
+    roots = config_roots() if harness in ("claude", "grok") else None
+    stop_consoles(request.get("consoles", []))
+    if harness == "codex":
+        codex_delete(session_id)
+    elif harness == "claude":
+        sdk = claude_sdk()
+        previous = os.environ.get("CLAUDE_CONFIG_DIR")
+        try:
+            for root in roots["claude"]:
+                os.environ["CLAUDE_CONFIG_DIR"] = str(root)
+                try:
+                    sdk.delete_session(session_id)
+                except FileNotFoundError:
+                    pass  # Already removed is the desired final state.
+        finally:
+            if previous is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = previous
+    elif harness == "grok":
+        for root in roots["grok"]:
+            if any(row["thread"]["id"] == session_id for row in grok_threads(root)):
+                run_delete_command(["grok", "sessions", "delete", session_id],
+                                   {**os.environ, "GROK_HOME": str(root)})
+                if any(row["thread"]["id"] == session_id for row in grok_threads(root)):
+                    raise RuntimeError("Grok still reports the conversation after deletion")
+    elif harness in ("opencode", "opencode2"):
+        matches = [row for row in opencode_threads()
+                   if row["harness"] == harness and row["thread"]["id"] == session_id]
+        for row in matches:
+            environment = dict(os.environ)
+            if row.get("database"):
+                environment["OPENCODE_DB"] = row["database"]
+            args = (["opencode2", "api", "--standalone", "delete", "/api/session/" + session_id]
+                    if harness == "opencode2" else ["opencode", "session", "delete", session_id])
+            run_delete_command(args, environment)
+        if any(row["harness"] == harness and row["thread"]["id"] == session_id for row in opencode_threads()):
+            raise RuntimeError("OpenCode still reports the conversation after deletion")
+    else:
+        raise ValueError(f"{harness} does not expose native conversation deletion")
+    return {"deleted": session_id}
+
+
 if __name__ == "__main__":
-    print(RESULT_PREFIX + json.dumps(discover(), ensure_ascii=True))
+    try:
+        result = delete_conversation(json.loads(sys.argv[1])) if len(sys.argv) > 1 else discover()
+        print(RESULT_PREFIX + json.dumps(result, ensure_ascii=True))
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(1)
