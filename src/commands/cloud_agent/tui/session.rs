@@ -2457,10 +2457,11 @@ assert (size.lines, size.columns) == (30, 100)
             );
         }
 
-        // Return to the live view before waiting: the tail cannot be visible
-        // while the viewport is pinned to older history.
-        session.scroll_by(isize::MIN);
-        session.wait_for_output("round-4-line-39");
+        // Send a fresh marker after the final resize. Shrinking the screen can
+        // discard its bottom rows, including the last round's tail if it was
+        // already delivered. Sending also returns the viewport to live output.
+        session.send(b"CHURN-DRAINED-MARKER\r\n");
+        session.wait_for_output("CHURN-DRAINED-MARKER");
 
         session.scroll_by(isize::MAX);
         let top = session.with_screen(|s| s.contents()).unwrap();
