@@ -934,6 +934,21 @@ mod cli_tests {
             assert_parses(&["ca", "setup", "--show"]);
             assert_parses(&["ca", "start", "--claude"]);
             assert_parses(&["ca", "start", "--codex", "--new"]);
+            for verb in ["install", "new", "agents", "sync"] {
+                assert_parses(&["ca", "herdr", verb]);
+            }
+            assert_parses(&["ca", "herdr", "bootstrap"]);
+            assert_parses(&["ca", "herdr", "install", "--print"]);
+            assert_parses(&["ca", "herdr", "install", "--remove"]);
+            assert_parses(&["ca", "herdr", "new", "--dry-run"]);
+            assert_parses(&["ca", "herdr", "new", "--codex", "-p", "proj"]);
+            assert_parses(&["ca", "herdr", "agents", "--remote"]);
+            assert_parses(&["ca", "herdr", "agents", "--wake", "--open"]);
+            assert_parses(&["ca", "herdr", "sync", "--debounce", "30"]);
+            assert_parses(&["ca", "herdr", "sync", "--spawn-watch"]);
+            assert_parses(&["ca", "herdr", "watch", "--foreground"]);
+            assert_parses(&["ca", "herdr", "bootstrap", "my-box", "--claude"]);
+            assert_parses(&["ca", "herdr", "sync", "--dry-run", "--json"]);
         }
 
         /// `railway ca` browses and `railway code` launches, but every launch

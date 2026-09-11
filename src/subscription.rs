@@ -14,6 +14,27 @@ where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
+    subscribe_graphql_at::<T>("/graphql/v2", variables).await
+}
+
+pub async fn subscribe_graphql_internal<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
+    variables: T::Variables,
+) -> Result<Subscription<StreamingOperation<T>>>
+where
+    <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
+    <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
+{
+    subscribe_graphql_at::<T>("/graphql/internal", variables).await
+}
+
+async fn subscribe_graphql_at<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
+    path: &str,
+    variables: T::Variables,
+) -> Result<Subscription<StreamingOperation<T>>>
+where
+    <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
+    <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
+{
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = reqwest::Client::default();
@@ -22,7 +43,7 @@ where
     // Railway VM mid-build — 1s is routinely missed even when the network
     // is fine, and every retry misses it the same way.
     let mut request = client
-        .get(format!("wss://backboard.{hostname}/graphql/v2"))
+        .get(format!("wss://backboard.{hostname}{path}"))
         .timeout(Duration::from_secs(10));
 
     if let Some(token) = &Configs::get_railway_token() {
