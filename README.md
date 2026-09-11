@@ -108,6 +108,16 @@ Run `railway autoupdate status` to inspect the running and recorded installed
 versions, staged/in-progress CLI updates, skill-sync results, and unmanaged
 skills. Use `railway skills update` for detailed skill results or to retry a sync.
 
+## Cloud agent launch defaults
+
+Each `railway code` invocation with `--codex`, `--opencode`, `--opencode2`,
+`--claude`, `--grok`, or `--railway` creates a fresh VM. This also applies to
+`remote`, Codex `desktop-only`, and harness arguments after `--`; `--new` is
+accepted but optional. Use `connect [agent]` for an existing backend,
+`--agent <name-or-id>` for explicit server setup, or `railway ca ssh <agent>`
+for a shell. Bare launches and shared CA/Desktop provisioning retain their
+existing targeting behavior.
+
 ## Coding backend and app endpoints
 
 The `code-*` endpoint is optional and configured only at VM creation.
@@ -192,7 +202,7 @@ Prepare an authenticated server on a cloud agent and open your local client:
 ```bash
 railway code --opencode
 railway code --opencode2
-railway code --opencode2 --new
+railway code --opencode2 --name my-box
 ```
 
 When the matching OpenCode Desktop edition has an existing settings file or
@@ -210,9 +220,10 @@ for manual setup, plus a Railway reconnect command:
 After successful setup in an interactive terminal, it clears the setup messages
 and shows the connection details, with the Desktop update confirmation inside
 the result panel. Failed setup keeps its diagnostic output visible.
-Press Enter to launch the matching local terminal client. If that client is
-missing, Railway offers to install it first. Declining, Esc, or Ctrl+C at
-either prompt leaves the server running and prints the connection details.
+The matching local terminal client launches automatically inside the Railway CA
+frame. If that client is missing, Railway offers to install it first. Declining,
+Esc, or Ctrl+C at the installation prompt leaves the server running and prints
+the connection details. Installations initiated inside the frame run quietly.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
@@ -242,10 +253,10 @@ To run both client and server inside the cloud agent, in Railway CA:
 
 ```bash
 railway code --opencode remote
-railway code --opencode2 remote --new
+railway code --opencode2 remote
 ```
 
-`--new` creates a fresh VM; `--agent <name-or-id>` targets an existing one.
+Harness launches create a fresh VM; `--agent <name-or-id>` targets an existing one.
 For the local-client setup, `--dir` selects the remote project directory
 (default `/app`). Beta uses its server's startup directory, so switching it
 requires a fresh agent. Setup uses the same generated credentials, HTTPS
@@ -263,7 +274,7 @@ Run the native Codex terminal UI on your computer, connected to Codex App Server
 on a persistent Railway cloud agent:
 
 ```bash
-railway code --codex --new
+railway code --codex
 railway code --codex --agent my-box --dir /app
 railway code --codex connect my-box
 railway code --codex connect
@@ -276,7 +287,7 @@ New Codex agents use the same naming rules as OpenCode, with a `codex-` prefix
 For a Desktop-only workflow:
 
 ```bash
-railway code --codex desktop-only --new
+railway code --codex desktop-only
 railway code --codex desktop-only --agent my-box --dir /app
 ```
 
@@ -289,10 +300,11 @@ credentials, the SSH configuration file location, the Desktop project name, and
 commands to reconnect or retrieve the configuration.
 
 Terminal setup carries your available local Codex sign-in and configured
-skills/MCP sync, starts App Server on the configured code port (default 4096, or 8080 for legacy
-connections), verifies its public WebSocket
-handshake, and offers to launch the local client. Tools, files, and threads live
-on the VM. Use `/resume` in Codex to reopen a remote thread. `connect` discovers
+skills/MCP sync, starts App Server on the configured code port (default 4096, or
+8080 for legacy connections), verifies its public WebSocket
+handshake, and automatically launches the local client inside the Railway CA
+frame. Tools, files, and threads live on the VM. Use `/resume` in Codex or select
+a conversation in the CA sidebar to reopen a remote thread. `connect` discovers
 running Codex servers; an explicit agent also wakes and restarts a previously
 configured server as needed.
 
@@ -306,8 +318,9 @@ Ctrl+D on an empty prompt detaches even during startup.
 The terminal connection uses `wss://` through the agent's public domain. Its
 bearer token is passed to the local client through an environment variable.
 The remote server's token, PID, version, directory, and logs live under
-`~/.railway/codex/`. Repeated setup reuses the server and token. An occupied port
-or a different running project directory requires another agent (`--new`).
+`~/.railway/codex/`. Setup on an explicitly selected agent reuses its token and
+healthy server when the version is unchanged. An occupied port or a different
+running project directory requires another agent.
 
 Setup and `connect` also register and verify the agent's SSH host in
 `~/.ssh/config` as `railway-<agent-name>`, using the same registration as
@@ -321,9 +334,13 @@ Find `Railway: <name>` in Codex Desktop's project sidebar. An existing custom SS
 alias and project label are preserved. `connect` imports the server's actual
 working directory. You can use the same VM from the terminal and Desktop.
 
-The VM must have a Codex release with `--ws-auth` and `--ws-token-file` support.
-Terminal mode uses a local client with the same version as the server. If needed,
-it offers to install that official `@openai/codex` version with npm into
+Server setup silently checks npm for the latest official Codex release and
+validates its authenticated App Server before replacing a running process.
+Versions are cached under `~/.railway/runtimes/codex-server/<version>/`, with
+update diagnostics in `~/.railway/codex/update.log`. A failed update preserves
+the existing server. `connect` keeps a running server's version; restarting a
+stopped server checks for updates. Terminal mode automatically finds or installs
+the exact matching local `@openai/codex` version using npm under
 `~/.railway/runtimes/codex-client/<version>/`.
 
 For scripts, `--connection-json` returns a single JSON object containing
@@ -339,6 +356,77 @@ railway code --codex -- exec "run tests" # execute inside the VM
 Closing the local client leaves the server running. Use `railway ca sleep my-box`
 to stop compute, then `railway code --codex connect my-box` to wake and reconnect.
 Codex currently marks its remote App Server transport experimental.
+
+Local connections enable automatic command permissions: Codex uses
+`--ask-for-approval never --sandbox danger-full-access`, standard OpenCode
+configures remote permissions while preserving explicit denies, and OpenCode2
+uses `--auto`. These settings also apply on reconnect. Codex records trust for
+the remote project directory, including a different repository selected when
+resuming a thread.
+
+Fresh OpenCode and OpenCode2 launches open the native home/splash screen. A
+conversation is created when you submit a prompt; a launch with an initial
+prompt starts directly in that conversation. Connection details are shown
+before launch and again after the local client exits.
+
+## Cloud agent conversation history
+
+In `railway ca` and the `railway code` frame, expand a cloud agent in the left
+list to browse its **Claude, Grok, Codex, OpenCode, and OpenCode2 conversations**.
+Select a title and press Enter to reopen that exact thread. Saved conversations
+remain available after their terminal exits; opening the list does not launch
+clients for them. A fresh harness pane starts as **New Thread**, then adopts the
+harness's generated title. **[S]** is reserved for direct VM shells; harness
+consoles, server processes, and provisioning commands do not get session rows.
+Conversation metadata is cached locally across restarts, including for sleeping
+VMs. Discovery runs at startup, when selecting or expanding a running machine,
+when Option+F / Alt+F reveals the sidebar, and on explicit refresh. Loaded rows,
+their order, expansion choices, and the selected conversation stay in place.
+The machine's status icon always represents its machine state.
+
+Press **x / X** on a saved conversation to delete it from its harness. The row
+disappears immediately while native deletion runs in the background; failures
+restore the row and show an error. This deletes the saved conversation, rather
+than just disconnecting its terminal. Draft **New Thread** panes simply close,
+and **[S]** shell rows retain their end-session action.
+
+There is no periodic account or VM-history polling. Codex and OpenCode title and
+activity changes come from their existing native-client connections. Output from
+an active SSH harness pane triggers a coalesced read of Railway's stored session
+reports, without opening another VM connection. An idle sidebar does not refresh
+history on its own; changes made elsewhere appear on the next explicit refresh.
+
+Claude and Grok history is discovered directly on the VM over SSH, including
+conversations started outside Railway's launcher. Claude uses a pinned official
+Agent SDK, cached automatically on the VM when history is first discovered;
+Grok uses its saved `summary.json` metadata. Discovery respects
+`CLAUDE_CONFIG_DIR` and `GROK_HOME`, and filters hidden subagents and empty
+startup records. A temporary discovery failure retains previously loaded rows.
+Codex and both OpenCode versions also expose their VM-local metadata indexes,
+so their history is available without a locally saved backend connection.
+
+Selecting a Claude or Grok thread reconnects to its verified live terminal when
+available, or resumes its native UI from the recorded project and configuration
+directory. Claude background jobs use `claude attach`. Live metadata and hooks
+update thread status and associate native panes with their conversation IDs.
+Native Codex and OpenCode client actions update the pane's exact conversation
+identity through a per-pane authenticated bridge.
+History belongs to the VM where it was saved; wake a sleeping agent before
+opening one of its threads.
+
+## SSH shells and conversation resume
+
+```bash
+railway ca ssh my-box                 # open a login shell
+railway ca ssh my-box --session       # attach to or start a durable session
+railway ca ssh my-box --session name  # attach to a named session
+railway ca ssh my-box --resume        # resume the latest Claude conversation
+```
+
+Plain SSH bypasses harness autostart. When opening a durable session after its
+terminal has ended, interactive users can choose a recent Claude conversation.
+In the CA frame, Option+B / Alt+B opens a shell on the selected VM and returns
+to the frame on exit. The sidebar's `c` action copies the shell command.
 
 ## Retrieve saved connection configuration
 

@@ -37,20 +37,49 @@ except Exception as error:
 '''
 FAKE = '''
 import base64,json,os,socket,sys
+from pathlib import Path
+from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 # HTTPServer.server_bind does reverse DNS, which can stall on macOS CI.
 # The fake server must use loopback only, including hostname resolution.
 socket.getfqdn = lambda host: 'localhost'
 class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def authenticated(self):
         expected = 'Basic ' + base64.b64encode((os.environ['OPENCODE_SERVER_USERNAME'] + ':' + os.environ['OPENCODE_SERVER_PASSWORD']).encode()).decode()
         if not os.environ.get('TEST_DISABLE_AUTH') and self.headers.get('Authorization') != expected:
             self.send_response(401)
             self.end_headers()
-            return
+            return False
+        return True
+    def config_path(self):
+        return Path(os.environ['HOME']) / '.config/opencode/opencode.json'
+    def do_GET(self):
+        if not self.authenticated(): return
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': 'v0.0.0-beta-test'} if 'opencode2' in sys.argv[0] else {})}).encode())
+        if urlparse(self.path).path in ('/config', '/global/config'):
+            path = self.config_path()
+            self.wfile.write(path.read_bytes() if path.exists() else b'{}')
+        else:
+            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': 'v0.0.0-beta-test'} if 'opencode2' in sys.argv[0] else {})}).encode())
+    def do_PATCH(self):
+        if not self.authenticated(): return
+        path = self.config_path()
+        config = json.loads(path.read_text()) if path.exists() else {}
+        updates = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        def merge(original, updates):
+            for key, value in updates.items():
+                if isinstance(value, dict) and isinstance(original.get(key), dict):
+                    merge(original[key], value)
+                else:
+                    original[key] = value
+        if not os.environ.get('TEST_IGNORE_PERMISSIONS'):
+            merge(config, updates)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(config))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps(config).encode())
     def log_message(self,*args): pass
 port = int(sys.argv[sys.argv.index('--port') + 1])
 ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
@@ -173,6 +202,32 @@ class BootstrapTests(unittest.TestCase):
         result = self.run_bootstrap()
         self.assertEqual(result['username'], 'boot-user')
         self.assertEqual(result['password'], 'boot-password')
+
+    def test_setup_and_reconnect_enable_permissions_without_restarting_or_losing_config(self):
+        path = self.home / '.config/opencode/opencode.json'
+        path.parent.mkdir(parents=True)
+        original = {'model': 'openai/test', 'mcp': {'test': {'type': 'remote', 'url': 'https://example.com'}},
+                    'permission': {'bash': {'*': 'ask', 'rm *': 'deny'}, 'edit': 'ask'},
+                    'agent': {'custom': {'description': 'Keep me', 'permission': {'bash': 'ask', 'edit': 'deny'}}}}
+        path.write_text(json.dumps(original))
+        self.run_bootstrap()
+        configured = json.loads(path.read_text())
+        self.assertEqual(configured['permission'], {'read': 'allow', 'external_directory': 'allow', 'doom_loop': 'allow', 'bash': {'*': 'allow', 'rm *': 'deny'}, 'edit': 'allow'})
+        self.assertEqual(configured['agent']['custom'], {'description': 'Keep me', 'permission': {'bash': 'allow', 'edit': 'deny'}})
+        self.assertEqual(configured['mcp'], original['mcp'])
+        self.assertEqual(configured['model'], original['model'])
+        pid = json.loads(self.state.read_text())['pid']
+        path.write_text(json.dumps(original))
+        self.assertTrue(self.run_bootstrap({'action': 'connect'})['reused'])
+        self.assertEqual(json.loads(self.state.read_text())['pid'], pid)
+        self.assertEqual(json.loads(path.read_text()), configured)
+
+    def test_permission_update_failure_is_reported_and_leaves_server_running(self):
+        self.env['TEST_IGNORE_PERMISSIONS'] = '1'
+        result = self.run_bootstrap(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('did not apply automatic permissions', result.stderr)
+        self.assertIsNotNone(self.run_bootstrap({'action': 'inspect'}))
 
     def test_custom_code_endpoint_coexists_with_app_and_survives_reconnect_and_restart(self):
         self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)

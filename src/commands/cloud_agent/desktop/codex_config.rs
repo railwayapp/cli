@@ -252,6 +252,12 @@ fn update(path: &Path, edit: impl FnOnce(&mut AppConfig) -> Result<()>) -> Resul
         .open(parent.join(".railway-config.lock"))?;
     lock.try_lock_exclusive()
         .context("Another Railway process is updating Codex Desktop; rerun setup")?;
+    // A concurrent PTY fork can inherit the descriptor until its child execs.
+    // Explicitly unlock on every return; closing only our copy can leave the
+    // inherited open-file description holding the lock after setup finishes.
+    let _unlock = scopeguard::guard(&lock, |lock| {
+        let _ = FileExt::unlock(lock);
+    });
     let mut config = read(path)?;
     edit(&mut config)?;
     let mut bytes = serde_json::to_vec_pretty(&config)?;

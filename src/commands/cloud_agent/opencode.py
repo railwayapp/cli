@@ -5,6 +5,7 @@ The child has its own session and closed SSH descriptors; no tunnel is needed.
 """
 import base64
 import fcntl
+import http.client
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 CODE_PORT = 4096
@@ -82,6 +84,68 @@ def port_available(port):
         return True
     except OSError:
         return False
+
+
+def automatic_permissions(config):
+    # Match auto mode: turn approval requests into allows, preserving explicit
+    # denials and agent restrictions (for example, the read-only plan agent).
+    def allow_asks(value):
+        if isinstance(value, dict):
+            return {key: allow_asks(item) for key, item in value.items()}
+        return "allow" if value == "ask" else value
+
+    current = config.get("permission", {})
+    policy = allow_asks(current)
+    if isinstance(policy, dict) and "*" not in policy:
+        # Global PATCH preserves key order. Appending a new wildcard after
+        # existing rules would override their explicit denials. Override only
+        # OpenCode's asking defaults; the other built-in defaults already allow.
+        policy = {"read": "allow", "external_directory": "allow", "doom_loop": "allow", **policy}
+    updates = {} if current == policy else {"permission": policy}
+    agents = {}
+    for name, agent in config.get("agent", {}).items():
+        if isinstance(agent, dict) and "permission" in agent:
+            policy = allow_asks(agent["permission"])
+            if policy != agent["permission"]:
+                agents[name] = {"permission": policy}
+    if agents:
+        updates["agent"] = agents
+    return updates
+
+
+def configure_permissions(port, credentials, directory):
+    # Standard OpenCode's attach client has no --auto flag. Apply the policy
+    # through the running server so reconnecting to an older server also works.
+    # The global API preserves JSONC and reloads active locations. The project
+    # PATCH endpoint writes config.json, which some versions do not load.
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    token = base64.b64encode(f"{credentials['username']}:{credentials['password']}".encode()).decode()
+    project_path = "/config?" + urllib.parse.urlencode({"directory": directory})
+
+    def request(method, path="/global/config", payload=None):
+        connection.request(method, path, body=json.dumps(payload) if payload is not None else None,
+                           headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = response.read()
+        if response.status != 200:
+            raise SetupError(f"Could not configure OpenCode automatic permissions (HTTP {response.status}).")
+        config = json.loads(body)
+        if not isinstance(config, dict):
+            raise SetupError("OpenCode returned an invalid permissions configuration.")
+        return config
+
+    try:
+        updates = automatic_permissions(request("GET"))
+        if updates:
+            request("PATCH", payload=updates)
+            if automatic_permissions(request("GET")):
+                raise SetupError("OpenCode did not apply automatic permissions. Rerun setup to retry.")
+        if automatic_permissions(request("GET", project_path)):
+            raise SetupError("OpenCode's project configuration overrides automatic permissions. Update its permission rules and reconnect.")
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        raise SetupError("Could not configure OpenCode automatic permissions. Rerun setup to retry.") from error
+    finally:
+        connection.close()
 
 
 def server_port(state):
@@ -228,6 +292,8 @@ def setup(request, home):
             if cwd.exists():
                 state["directory"] = str(cwd.resolve())
                 save(state_path, state)
+        if harness == "opencode":
+            configure_permissions(port, credentials, directory)
         if reused and not state.get("vm_id") and os.environ.get("RAILWAY_FACTORY_VM_ID"):
             state["vm_id"] = os.environ["RAILWAY_FACTORY_VM_ID"]
             save(state_path, state)

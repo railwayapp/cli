@@ -1,6 +1,6 @@
 //! A live agent session rendered inside the TUI.
 //!
-//! `ssh` runs under a pty we own, its output is fed to a host-side terminal
+//! SSH or a local remote-server client runs under a pty we own; its output is fed to a host-side terminal
 //! emulator, and the emulated screen is drawn into the right-hand pane. Keys
 //! typed while the pane has focus are encoded and written back to the pty, so
 //! the agent's own TUI behaves as if it had the terminal — which, as far as it
@@ -23,7 +23,53 @@ use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
+use crate::commands::cloud_agent::{client_sessions, codex};
 use crate::commands::ssh::native;
+
+use super::terminal_palette;
+
+type PaneParser = vt100::Parser<PaletteReplies>;
+
+fn pane_parser(rows: u16, cols: u16, scrollback: usize) -> PaneParser {
+    PaneParser::new_with_callbacks(
+        rows,
+        cols,
+        scrollback,
+        PaletteReplies {
+            colors: terminal_palette::cached(),
+            replies: Vec::new(),
+        },
+    )
+}
+
+/// Let the emulator parse OSC, including BEL/ST terminators and split reads.
+/// Only answer palette queries; color setters and other OSCs stay pane-local.
+struct PaletteReplies {
+    colors: Option<terminal_palette::DefaultColors>,
+    replies: Vec<u8>,
+}
+
+impl vt100::Callbacks for PaletteReplies {
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let Some(colors) = &self.colors else {
+            // An unknown host palette must stay unknown: inventing a dark
+            // background makes Codex's shaded controls illegible on light themes.
+            return;
+        };
+        let (code, color) = match params {
+            [b"10", b"?"] => (10, &colors.fg),
+            [b"11", b"?"] => (11, &colors.bg),
+            _ => return,
+        };
+        self.replies.extend_from_slice(
+            format!(
+                "\x1b]{code};rgb:{:04x}/{:04x}/{:04x}\x1b\\",
+                color.r, color.g, color.b
+            )
+            .as_bytes(),
+        );
+    }
+}
 
 /// A durable session name for a new session.
 ///
@@ -119,8 +165,8 @@ fn da1_reply(chunk: &[u8]) -> Option<Vec<u8>> {
 /// [`Session::send_key`] know when the modified-Enter CSI-u encodings will
 /// be understood on the far side.
 ///
-/// Scanning is chunk-wise, like [`dsr_reply`]: a sequence split across two
-/// reads is missed, which costs one retry of a query, not correctness.
+/// [`TerminalReplies`] supplies complete sequences, including those split
+/// across SSH reads.
 fn kitty_scan(chunk: &[u8], kitty: &AtomicBool) -> Option<Vec<u8>> {
     let mut reply = None;
     let mut i = 0;
@@ -158,6 +204,199 @@ fn kitty_scan(chunk: &[u8], kitty: &AtomicBool) -> Option<Vec<u8>> {
     reply
 }
 
+/// Answer terminal queries as a stream: SSH can split a query at any byte,
+/// and a harness may wait for its answer without writing anything else.
+#[derive(Default)]
+struct TerminalReplies {
+    pending: Vec<u8>,
+}
+
+impl TerminalReplies {
+    fn process(&mut self, bytes: &[u8], parser: &mut PaneParser, kitty: &AtomicBool) -> Vec<u8> {
+        let mut replies = Vec::new();
+        let mut parsed = 0;
+        for (i, &byte) in bytes.iter().enumerate() {
+            if byte == 0x1b {
+                self.pending.clear();
+                self.pending.push(byte);
+            } else if self.pending == b"\x1b" {
+                if byte == b'[' {
+                    self.pending.push(byte);
+                } else {
+                    self.pending.clear();
+                }
+            } else if !self.pending.is_empty() {
+                self.pending.push(byte);
+                if (0x40..=0x7e).contains(&byte) {
+                    // Process up to this query before answering, so multiple
+                    // cursor queries in one read each see their own position.
+                    parser.process(&bytes[parsed..=i]);
+                    parsed = i + 1;
+                    // OSC palette queries before this CSI must be answered
+                    // before DA1, which Codex uses as its probe's sentinel.
+                    replies.append(&mut parser.callbacks_mut().replies);
+                    if let Some(reply) = kitty_scan(&self.pending, kitty) {
+                        replies.extend(reply);
+                    }
+                    if let Some(reply) = da1_reply(&self.pending) {
+                        replies.extend(reply);
+                    }
+                    if let Some(reply) = dsr_reply(&self.pending, parser.screen()) {
+                        replies.extend(reply);
+                    }
+                    self.pending.clear();
+                } else if !(0x20..=0x3f).contains(&byte) || self.pending.len() > 64 {
+                    self.pending.clear();
+                }
+            }
+        }
+        parser.process(&bytes[parsed..]);
+        replies.append(&mut parser.callbacks_mut().replies);
+        replies
+    }
+}
+
+/// The relay announces the durable session on connect
+/// (`Railway durable session: <name>`, see `sandbox ssh --session`'s docs).
+/// That line lands in this pane's pty before the harness draws, and without
+/// filtering it keeps the emulator's first row — the harness clears what it
+/// drew, not what arrived before it, so the announcement sits on top of the
+/// agent's TUI for the whole session.
+// The relay has shipped the announcement both with and without a colon.
+const DURABLE_BANNER_MARKER: &[u8] = b"Railway durable session";
+/// Give up looking after this much input: the relay prints immediately, so
+/// anything later containing the marker is the session's own output, not the
+/// announcement, and must be kept.
+const BANNER_GIVE_UP_AFTER: usize = 32 * 1024;
+
+/// Streaming filter for the relay's durable-session announcement.
+///
+/// Chunk-wise like [`kitty_scan`]: complete banner lines are removed, an
+/// incomplete tail is held for the next `push`, and `flush` drains it at EOF.
+/// Only the first announcement is removed — afterwards (or after enough
+/// banner-free input) the filter is done so identical text the user or the
+/// harness prints later is preserved.
+struct BannerFilter {
+    pending: Vec<u8>,
+    seen: usize,
+    done: bool,
+    name: Option<String>,
+}
+
+impl BannerFilter {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            seen: 0,
+            done: false,
+            name: None,
+        }
+    }
+
+    fn find_marker(haystack: &[u8]) -> Option<usize> {
+        if haystack.len() < DURABLE_BANNER_MARKER.len() {
+            return None;
+        }
+        haystack
+            .windows(DURABLE_BANNER_MARKER.len())
+            .position(|w| w == DURABLE_BANNER_MARKER)
+    }
+
+    /// Remove every *complete* banner line in `data` (a line with a
+    /// terminator). A marker with no terminator yet is left for the next
+    /// chunk. Returns whether anything was removed.
+    fn strip_complete_lines(&mut self, data: &mut Vec<u8>) -> bool {
+        let mut removed = false;
+        while let Some(pos) = Self::find_marker(data) {
+            let rest = &data[pos..];
+            let end_rel = rest
+                .iter()
+                .position(|b| *b == b'\n')
+                .or_else(|| rest.iter().position(|b| *b == b'\r'));
+            let Some(end_rel) = end_rel else {
+                // No terminator yet — wait for more input.
+                break;
+            };
+            let end = pos + end_rel + 1;
+            if self.name.is_none() {
+                let value = String::from_utf8_lossy(&rest[DURABLE_BANNER_MARKER.len()..end_rel]);
+                if let Some(name) = value
+                    .trim_start_matches([' ', ':'])
+                    .split_whitespace()
+                    .next()
+                    .map(|name| name.trim_end_matches('.'))
+                    && client_sessions::validate_id(name).is_ok()
+                {
+                    self.name = Some(name.into());
+                }
+            }
+            // A leading blank line that only exists to carry the banner
+            // (the pty starts with `\r\n` before the announcement) goes with
+            // it, or the pane keeps a blank first row instead of the banner.
+            let start = if data[..pos].iter().all(|b| *b == b'\r' || *b == b'\n') {
+                0
+            } else {
+                pos
+            };
+            data.drain(start..end);
+            removed = true;
+        }
+        removed
+    }
+
+    /// Feed a read through the filter; the returned bytes are what the
+    /// emulator should see (possibly empty when only banner arrived).
+    fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if self.done {
+            return chunk.to_vec();
+        }
+        self.seen += chunk.len();
+        let mut data = std::mem::take(&mut self.pending);
+        data.extend_from_slice(chunk);
+        if self.strip_complete_lines(&mut data) {
+            self.done = true;
+            return data;
+        }
+        if self.seen >= BANNER_GIVE_UP_AFTER {
+            self.done = true;
+            return data;
+        }
+        // Hold only a possible banner, never an arbitrary tail of terminal
+        // output. A cursor query can be the last thing a harness writes until
+        // we answer it; buffering that query deadlocks terminal startup when
+        // the relay's banner is absent or has changed format.
+        let split = if let Some(pos) = Self::find_marker(&data) {
+            pos
+        } else {
+            let held = (1..DURABLE_BANNER_MARKER.len())
+                .rev()
+                .find(|&len| data.ends_with(&DURABLE_BANNER_MARKER[..len]))
+                .unwrap_or(0);
+            data.len() - held
+        };
+        self.pending = data.split_off(split);
+        data
+    }
+
+    /// Drain at EOF, removing even an unterminated trailing banner.
+    fn flush(&mut self) -> Vec<u8> {
+        if self.done {
+            return std::mem::take(&mut self.pending);
+        }
+        self.done = true;
+        let mut data = std::mem::take(&mut self.pending);
+        while let Some(pos) = Self::find_marker(&data) {
+            let start = if data[..pos].iter().all(|b| *b == b'\r' || *b == b'\n') {
+                0
+            } else {
+                pos
+            };
+            data.drain(start..);
+        }
+        data
+    }
+}
+
 /// A running `ssh` under a pty, plus the emulator that makes sense of it.
 pub struct Session {
     pub agent_id: String,
@@ -167,12 +406,19 @@ pub struct Session {
     pub harness: String,
     /// The durable session this pane is attached to.
     pub durable_name: String,
+    /// SSH transport identity for a pane whose visible identity is a thread.
+    pub console_name: Option<String>,
+    announced_console: Arc<Mutex<Option<String>>>,
+    pub client_id: Option<String>,
+    pub client_thread: Option<client_sessions::Thread>,
+    pub client_bridge: Option<codex::bridge::Bridge>,
+    pub opencode_bridge: Option<crate::commands::cloud_agent::opencode::bridge::Bridge>,
     /// How this pane connected, kept so the same session can be reopened
     /// full-screen without rebuilding the relay plumbing.
     pub ssh_target: String,
     pub identity: Option<std::path::PathBuf>,
     pub relay_opts: Vec<String>,
-    parser: Arc<Mutex<vt100::Parser>>,
+    parser: Arc<Mutex<PaneParser>>,
     /// Shared with the reader thread, which also writes to it — a synthetic
     /// cursor-position reply (see [`dsr_reply`]) has to go back over the same
     /// pty the keyboard does, and `take_writer` can only be called once.
@@ -211,6 +457,21 @@ pub struct Session {
 }
 
 impl Session {
+    /// The relay can replace a requested name with its own durable petname.
+    /// Keep that exact transport identity separate from the visible thread.
+    pub(super) fn sync_console_name(&mut self) {
+        if self.client_bridge.is_none()
+            && self.opencode_bridge.is_none()
+            && let Some(name) = self
+                .announced_console
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            self.console_name = Some(name);
+        }
+    }
+
     /// Write straight to the pty — keystrokes, pointer reports, and the
     /// reader thread's own DSR replies all go through this one shared writer.
     fn write_raw(&self, bytes: &[u8]) {
@@ -244,15 +505,6 @@ impl Session {
         cols: u16,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
-        let pty = NativePtySystem::default()
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("Failed to allocate a pty for the agent session")?;
-
         let mut cmd = CommandBuilder::new("ssh");
         // `-tt` forces a remote pty even though our own stdin is not a
         // terminal from ssh's point of view; without it the agent gets a pipe
@@ -285,6 +537,105 @@ impl Session {
         if !reattach {
             cmd.arg(remote_cmd);
         }
+        Self::spawn_pty(
+            agent_id,
+            agent_name,
+            harness,
+            ssh_target,
+            identity,
+            relay_opts,
+            reattach,
+            durable_session,
+            cmd,
+            rows,
+            cols,
+            notify,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_client(
+        agent_id: String,
+        agent_name: String,
+        binary: &std::path::Path,
+        connection: &client_sessions::Connection,
+        client_url: Option<&str>,
+        thread_id: Option<&str>,
+        prompt: Option<&str>,
+        rows: u16,
+        cols: u16,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
+        let mut cmd = CommandBuilder::new(binary);
+        let mut local_connection = connection.clone();
+        if let Some(url) = client_url {
+            match &mut local_connection {
+                client_sessions::Connection::Codex(c) => c.url = url.into(),
+                client_sessions::Connection::OpenCode(c, _) => c.url = url.into(),
+            }
+        }
+        cmd.args(local_connection.args(thread_id));
+        if let Some(prompt) = prompt {
+            match connection {
+                client_sessions::Connection::Codex(_) => {
+                    cmd.args(["--", prompt]);
+                }
+                client_sessions::Connection::OpenCode(_, true) => {
+                    cmd.args(["--prompt", prompt]);
+                }
+                _ => {}
+            }
+        }
+        match connection {
+            client_sessions::Connection::Codex(c) => {
+                cmd.env(codex::TOKEN_ENV, &c.token);
+                cmd.env("CODEX_HOME", codex::local::client_home(c)?);
+            }
+            client_sessions::Connection::OpenCode(c, _) => {
+                cmd.env("OPENCODE_SERVER_USERNAME", &c.username);
+                cmd.env("OPENCODE_SERVER_PASSWORD", &c.password);
+            }
+        }
+        let name = client_sessions::name(connection.harness(), &agent_id, thread_id);
+        Self::spawn_pty(
+            agent_id,
+            agent_name,
+            connection.harness().into(),
+            "",
+            None,
+            &[],
+            false,
+            &name,
+            cmd,
+            rows,
+            cols,
+            notify,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pty(
+        agent_id: String,
+        agent_name: String,
+        harness: String,
+        ssh_target: &str,
+        identity: Option<&std::path::Path>,
+        relay_opts: &[String],
+        reattach: bool,
+        durable_session: &str,
+        mut cmd: CommandBuilder,
+        rows: u16,
+        cols: u16,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
+        let pty = NativePtySystem::default()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to allocate a pty for the agent session")?;
         // The emulator understands xterm sequences and the relay does not
         // forward COLORTERM, so both are stated here rather than inherited.
         cmd.env("TERM", "xterm-256color");
@@ -293,15 +644,16 @@ impl Session {
         let child = pty
             .slave
             .spawn_command(cmd)
-            .context("Failed to start ssh for the agent session")?;
+            .context("Failed to start the agent client")?;
         // The slave handle must go before the reader starts, or the pty never
         // reports EOF when ssh exits and the reader thread parks forever.
         drop(pty.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 4000)));
+        let parser = Arc::new(Mutex::new(pane_parser(rows, cols, 4000)));
         let ended = Arc::new(AtomicBool::new(false));
         let got_output = Arc::new(AtomicBool::new(false));
         let kitty_keys = Arc::new(AtomicBool::new(false));
+        let announced_console = Arc::new(Mutex::new(None));
         let mut reader = pty
             .master
             .try_clone_reader()
@@ -318,6 +670,7 @@ impl Session {
             let writer = writer.clone();
             let got_output = got_output.clone();
             let kitty_keys = kitty_keys.clone();
+            let announced_console = announced_console.clone();
             std::thread::spawn(move || {
                 // 64K per read, not 8K: a reattach replays the session's
                 // recorded output in one burst, and this thread is the only
@@ -327,42 +680,70 @@ impl Session {
                 // connection mid-replay. Fewer, larger reads keep the drain
                 // ahead of the network.
                 let mut buf = [0u8; 65536];
+                let mut banner = BannerFilter::new();
+                let mut terminal_replies = TerminalReplies::default();
+                // Fold filtered bytes into the emulator plus the terminal
+                // queries it may carry. Banner-only reads feed nothing, so
+                // they neither count as session output (a dead attach that
+                // only ever sent the announcement must still read as stalled)
+                // nor cause a redraw.
+                let mut feed = |bytes: &[u8],
+                                parser: &Arc<Mutex<PaneParser>>,
+                                kitty_keys: &Arc<AtomicBool>,
+                                writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+                                got_output: &Arc<AtomicBool>,
+                                notify: &dyn Fn()| {
+                    if bytes.is_empty() {
+                        return;
+                    }
+                    got_output.store(true, Ordering::Relaxed);
+                    let replies = parser
+                        .lock()
+                        .map(|mut parser| terminal_replies.process(bytes, &mut parser, kitty_keys))
+                        .unwrap_or_default();
+                    if !replies.is_empty() {
+                        if let Ok(mut writer) = writer.lock() {
+                            let _ = writer.write_all(&replies);
+                            let _ = writer.flush();
+                        }
+                    }
+                    notify();
+                };
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            got_output.store(true, Ordering::Relaxed);
-                            let mut replies =
-                                kitty_scan(&buf[..n], &kitty_keys).unwrap_or_default();
-                            // In the order they were asked: a harness reads the
-                            // replies back as a stream, and DA1 is the sentinel
-                            // that says the kitty answer before it was the whole
-                            // answer.
-                            if let Some(da1) = da1_reply(&buf[..n]) {
-                                replies.extend_from_slice(&da1);
+                            let filtered = banner.push(&buf[..n]);
+                            if let Some(name) = banner.name.take() {
+                                *announced_console.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(name);
+                                notify();
                             }
-                            if let Some(dsr) = parser.lock().ok().and_then(|mut parser| {
-                                parser.process(&buf[..n]);
-                                dsr_reply(&buf[..n], parser.screen())
-                            }) {
-                                replies.extend_from_slice(&dsr);
-                            }
-                            if !replies.is_empty() {
-                                if let Ok(mut writer) = writer.lock() {
-                                    let _ = writer.write_all(&replies);
-                                    let _ = writer.flush();
-                                }
-                            }
-                            notify();
+                            feed(
+                                &filtered,
+                                &parser,
+                                &kitty_keys,
+                                &writer,
+                                &got_output,
+                                &notify,
+                            );
                         }
                     }
                 }
+                let tail = banner.flush();
+                feed(&tail, &parser, &kitty_keys, &writer, &got_output, &notify);
                 ended.store(true, Ordering::Relaxed);
                 notify();
             });
         }
 
         Ok(Self {
+            announced_console,
+            console_name: None,
+            client_id: None,
+            client_thread: None,
+            client_bridge: None,
+            opencode_bridge: None,
             agent_id,
             agent_name,
             harness,
@@ -831,7 +1212,7 @@ impl Session {
         })?;
         let child = pty.slave.spawn_command(CommandBuilder::new("cat"))?;
         drop(pty.slave);
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 4000)));
+        let parser = Arc::new(Mutex::new(pane_parser(24, 80, 4000)));
         let writer: Arc<Mutex<Box<dyn Write + Send>>> =
             Arc::new(Mutex::new(pty.master.take_writer()?));
 
@@ -854,6 +1235,12 @@ impl Session {
             });
         }
         Ok(Self {
+            console_name: None,
+            announced_console: Arc::new(Mutex::new(None)),
+            client_id: None,
+            client_thread: None,
+            client_bridge: None,
+            opencode_bridge: None,
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
             harness: "claude".to_string(),
@@ -1093,8 +1480,356 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_local_pty_handles_remote_args_auth_input_and_resize() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("fake codex");
+        std::fs::write(&binary, r#"#!/usr/bin/env python3
+import hashlib, json, os, pathlib, sys
+assert os.isatty(0) and os.isatty(1)
+assert os.environ['RAILWAY_CODEX_SERVER_TOKEN'] == "secret ' $(echo injected)"
+backend = hashlib.sha256(b'wss://agent.example.com:443').hexdigest()[:16]
+assert pathlib.Path(os.environ['CODEX_HOME']) == pathlib.Path.home() / '.railway/codex-client' / backend
+assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+print('Codex ready', flush=True)
+assert input() == 'hello'
+size = os.get_terminal_size()
+assert (size.lines, size.columns) == (30, 100), size
+print('Codex complete', flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let connection = codex::Connection {
+            url: "wss://agent.example.com:443".into(),
+            token: "secret ' $(echo injected)".into(),
+            directory: "/app/a project".into(),
+            version: "0.153.4".into(),
+            reused: true,
+        };
+        let mut pane = Session::spawn_client(
+            "agent-id".into(),
+            "box".into(),
+            &binary,
+            &client_sessions::Connection::Codex(connection),
+            Some("ws://127.0.0.1:54321"),
+            Some("thread-1"),
+            None,
+            24,
+            80,
+            || {},
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pane
+            .with_screen(|s| s.contents().contains("Codex ready"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        pane.resize(30, 100);
+        pane.write_raw(b"hello\n");
+        while !pane.finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            pane.with_screen(|s| s.contents().contains("Codex complete"))
+                .unwrap()
+        );
+        assert_eq!(
+            pane.durable_name,
+            client_sessions::name("codex", "agent-id", Some("thread-1"))
+        );
+        assert!(pane.relay_opts.is_empty());
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn both_opencode_clients_resume_the_requested_thread_inside_a_resizable_pty() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("fake opencode");
+        std::fs::write(
+            &binary,
+            r#"#!/usr/bin/env python3
+import os, sys
+assert os.isatty(0) and os.isatty(1)
+assert os.environ['OPENCODE_SERVER_USERNAME'] == 'opencode'
+assert os.environ['OPENCODE_SERVER_PASSWORD'] == "secret ' $(echo injected)"
+assert sys.argv[-2:] == ['--session', 'ses_thread1']
+if sys.argv[1] == 'attach':
+    assert sys.argv[2:-2] == ['https://agent.example.com', '--dir', '/app/a project']
+else:
+    assert sys.argv[1:-2] == ['--server', 'https://agent.example.com', '--auto']
+print('ready', flush=True)
+assert input() == 'hello'
+size = os.get_terminal_size()
+assert (size.lines, size.columns) == (30, 100)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for beta in [false, true] {
+            let c = crate::commands::cloud_agent::opencode::Connection {
+                url: "https://agent.example.com".into(),
+                username: "opencode".into(),
+                password: "secret ' $(echo injected)".into(),
+                directory: "/app/a project".into(),
+                reused: true,
+            };
+            let mut pane = Session::spawn_client(
+                "vm".into(),
+                "box".into(),
+                &binary,
+                &client_sessions::Connection::OpenCode(c, beta),
+                None,
+                Some("ses_thread1"),
+                None,
+                24,
+                80,
+                || {},
+            )
+            .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !pane
+                .with_screen(|s| s.contents().contains("ready"))
+                .unwrap_or(false)
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{:?}",
+                    pane.last_line()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            pane.resize(30, 100);
+            pane.write_raw(b"hello\n");
+            while !pane.finished() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{:?}",
+                    pane.last_line()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                pane.durable_name,
+                client_sessions::name(
+                    if beta { "opencode2" } else { "opencode" },
+                    "vm",
+                    Some("ses_thread1")
+                )
+            );
+        }
+    }
+
+    /// Drain a filter the way the reader thread does: push each chunk, then
+    /// flush at EOF, concatenating everything the emulator would have seen.
+    fn drain_filter(chunks: &[&[u8]]) -> Vec<u8> {
+        let mut filter = BannerFilter::new();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            out.extend_from_slice(&filter.push(chunk));
+        }
+        out.extend_from_slice(&filter.flush());
+        out
+    }
+
+    #[test]
+    fn the_relay_announcement_never_reaches_the_emulator() {
+        let out = drain_filter(&[b"Railway durable session: claude-abc123\r\nhello"]);
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn a_leading_blank_line_around_the_announcement_goes_with_it() {
+        let out = drain_filter(&[b"\r\nRailway durable session: claude-abc123\r\nhello"]);
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn a_banner_split_across_reads_is_still_removed() {
+        let out = drain_filter(&[b"Railway durable sess", b"ion: claude-abc123\r\nhello"]);
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn banner_bytes_are_held_back_not_fed_as_a_fragment() {
+        let mut filter = BannerFilter::new();
+        // A partial banner with no terminator feeds nothing yet — feeding the
+        // fragment would leave "Railway dur" on the emulator's first row.
+        assert!(filter.push(b"Railway dur").is_empty());
+        let mut out = filter.push(b"able session: x-1\r\nok");
+        out.extend_from_slice(&filter.flush());
+        assert_eq!(out, b"ok");
+        assert_eq!(filter.name.as_deref(), Some("x-1"));
+    }
+
+    #[test]
+    fn relay_petname_updates_transport_without_replacing_the_thread() {
+        let mut filter = BannerFilter::new();
+        filter.push(b"Railway durable session exact-petname. Use CTRL + \\ then D to detach\r\n");
+        let mut pane = Session::for_test("agent", "box").unwrap();
+        pane.durable_name = client_sessions::draft_name("claude", "agent", "pane");
+        *pane.announced_console.lock().unwrap() = filter.name.take();
+        pane.sync_console_name();
+        assert_eq!(pane.console_name.as_deref(), Some("exact-petname"));
+        assert_eq!(
+            pane.durable_name,
+            client_sessions::draft_name("claude", "agent", "pane")
+        );
+        filter.push(b"Railway durable session forged\r\n");
+        assert!(filter.name.is_none());
+    }
+
+    #[test]
+    fn ordinary_output_flows_through_untouched() {
+        let out = drain_filter(&[b"\x1b[?1049h\x1b[Hhello\r\nworld"]);
+        assert_eq!(out, b"\x1b[?1049h\x1b[Hhello\r\nworld");
+    }
+
+    #[test]
+    fn terminal_startup_queries_are_answered_without_waiting_for_more_output() {
+        const BURST: &[u8] = b"\x1b[?2004h\x1b[?1004h\x1b[?u\x1b[c\x1b[6n";
+        for banner in [
+            b"".as_slice(),
+            b"Railway durable session: railway-test\r\n",
+            b"Railway durable session railway-test. Use CTRL + \\ then D to detach\r\n",
+            b"An unrecognized relay greeting\r\n",
+        ] {
+            for chunk_size in 1..=BURST.len() {
+                let mut filter = BannerFilter::new();
+                let mut queries = TerminalReplies::default();
+                let mut parser = pane_parser(24, 80, 0);
+                let kitty = AtomicBool::new(false);
+                let mut replies = Vec::new();
+                for chunk in banner.chunks(chunk_size).chain(BURST.chunks(chunk_size)) {
+                    let bytes = filter.push(chunk);
+                    replies.extend(queries.process(&bytes, &mut parser, &kitty));
+                }
+                // Do not flush EOF: the harness is waiting for these replies
+                // before it can draw its first frame or send another byte.
+                assert!(replies.starts_with(b"\x1b[?0u\x1b[?62;22c"));
+                assert!(replies.ends_with(b";1R"), "{replies:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_queries_are_answered_in_order_at_their_position() {
+        let mut parser = pane_parser(24, 80, 0);
+        let replies = TerminalReplies::default().process(
+            b"hello\x1b[6n\r\nworld\x1b[6n",
+            &mut parser,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(replies, b"\x1b[1;6R\x1b[2;6R");
+    }
+
+    #[test]
+    fn codex_palette_probe_preserves_host_colors_and_reply_order_across_reads() {
+        use terminal_colorsaurus::Color;
+
+        for (fg, bg) in [
+            (
+                Color::rgb(0xeeee, 0xdddd, 0xcccc),
+                Color::rgb(0x1234, 0x2345, 0x3456),
+            ),
+            (
+                Color::rgb(0x1111, 0x2222, 0x3333),
+                Color::rgb(0xffff, 0xfafa, 0xefef),
+            ),
+        ] {
+            for terminator in ["\x07", "\x1b\\"] {
+                // Codex probes the palette before DA1, which closes its probe.
+                // Also interleave cursor and Kitty queries to catch reordering.
+                let burst = format!(
+                    "hi\x1b[6n\x1b]10;?{terminator}\x1b]11;?{terminator}\x1b[0c\x1b[?u\r\nbye\x1b[6n"
+                );
+                let expected = format!(
+                    "\x1b[1;3R\x1b]10;rgb:{:04x}/{:04x}/{:04x}\x1b\\\x1b]11;rgb:{:04x}/{:04x}/{:04x}\x1b\\\x1b[?62;22c\x1b[?0u\x1b[2;4R",
+                    fg.r, fg.g, fg.b, bg.r, bg.g, bg.b
+                );
+                for chunk_size in 1..=burst.len() {
+                    let mut parser = pane_parser(24, 80, 0);
+                    parser.callbacks_mut().colors = Some(terminal_palette::DefaultColors {
+                        fg: fg.clone(),
+                        bg: bg.clone(),
+                    });
+                    let mut queries = TerminalReplies::default();
+                    let mut filter = BannerFilter::new();
+                    let kitty = AtomicBool::new(false);
+                    let mut replies = Vec::new();
+                    for chunk in burst.as_bytes().chunks(chunk_size) {
+                        replies.extend(queries.process(&filter.push(chunk), &mut parser, &kitty));
+                    }
+                    assert_eq!(replies, expected.as_bytes(), "chunk size {chunk_size}");
+                    assert_eq!(parser.screen().contents(), "hi\nbye");
+                    assert!(parser.callbacks().replies.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn palette_queries_need_no_following_csi_and_color_setters_stay_local() {
+        use terminal_colorsaurus::Color;
+
+        let mut parser = pane_parser(24, 80, 0);
+        parser.callbacks_mut().colors = Some(terminal_palette::DefaultColors {
+            fg: Color::rgb(0xffff, 0xffff, 0xffff),
+            bg: Color::rgb(0x1234, 0x2345, 0x3456),
+        });
+        let mut queries = TerminalReplies::default();
+        let kitty = AtomicBool::new(false);
+        assert!(queries.process(
+            b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b]0;title\x07\x1b]8;;https://example.com\x1b\\\x1b]52;c;?\x07",
+            &mut parser,
+            &kitty,
+        ).is_empty());
+        assert_eq!(
+            queries.process(b"\x1b]11;?\x1b\\", &mut parser, &kitty),
+            b"\x1b]11;rgb:1234/2345/3456\x1b\\"
+        );
+        assert!(parser.screen().contents().is_empty());
+    }
+
+    #[test]
+    fn unavailable_host_palette_does_not_invent_colors_or_block_other_queries() {
+        let mut parser = pane_parser(24, 80, 0);
+        parser.callbacks_mut().colors = None;
+        let replies = TerminalReplies::default().process(
+            b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[?u\x1b[6n",
+            &mut parser,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(replies, b"\x1b[?62;22c\x1b[?0u\x1b[1;1R");
+        assert!(parser.screen().contents().is_empty());
+    }
+
+    #[test]
+    fn identical_text_after_the_announcement_is_kept() {
+        // Only the relay's own announcement is stripped: the same words typed
+        // or echoed later are session content.
+        let out = drain_filter(&[
+            b"Railway durable session: one\r\n",
+            b"echo Railway durable session: two\r\n",
+        ]);
+        assert_eq!(out, b"echo Railway durable session: two\r\n");
     }
 
     /// The kitty keyboard protocol dance, as a harness does it: query, get

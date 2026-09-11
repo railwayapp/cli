@@ -81,7 +81,7 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
-mod client;
+pub(crate) mod client;
 /// `railway code` is the launcher: it answers "where, and which harness"
 /// from flags and preferences, then opens that session. On a terminal it opens
 /// it inside `railway ca`'s manage screen with the tree collapsed, so the
@@ -89,7 +89,7 @@ mod client;
 /// everywhere else it hands the terminal straight to ssh.
 mod names;
 mod plumbing;
-mod saved_config;
+pub(crate) mod saved_config;
 
 pub(crate) fn clear_saved_config() {
     if let Some(home) = dirs::home_dir() {
@@ -136,7 +136,7 @@ pub async fn command(args: Args) -> Result<()> {
         return saved_config::command(args);
     }
     let mut args = args.launch;
-    if let Some(action) = args.client_action()? {
+    if let Some(action) = args.prepare_code_launch()? {
         let harness = if args.codex {
             client::Harness::Codex
         } else if args.opencode2 {
@@ -156,6 +156,7 @@ pub async fn command(args: Args) -> Result<()> {
             }
             ClientAction::Remote => {
                 args.agent_args.clear();
+                args.client_on_agent = true;
                 client::pin_agent(&mut args).await?;
             }
         }
@@ -230,13 +231,13 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
   railway code --opencode           # remote OpenCode server + local client
   railway code --opencode2          # same, with OpenCode2 Beta
   railway code --opencode remote    # run client and server inside Railway CA
-  railway code --opencode2 --new
+  railway code --opencode2 --name my-box
   railway code --opencode2 connect
   railway code --opencode connect my-box
   railway code --railway            # Railway's own agent, no sign-in needed
-  railway code --codex --new        # force a fresh agent instead of reusing
-  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL
-  railway code --codex --new --env-file .env
+  railway code --codex --new        # optional: harness launches already create a VM
+  railway code --codex --variable DB_URL=postgres.DATABASE_URL
+  railway code --codex --env-file .env
   railway code --codex -- exec "explain this codebase"
 
 With no agent flag, the default saved by `railway ca setup` is used
@@ -244,11 +245,22 @@ With no agent flag, the default saved by `railway ca setup` is used
 flag, this directory's linked project is used, and your default project when
 the directory has no link.
 
-`--codex`, `--opencode`, and `--opencode2` prepare a server and offer to open
-your local client. Missing clients can be installed after confirmation.
-`connect [agent]` reconnects locally; `remote` runs the client inside Railway CA.
-`--dir` selects the remote directory (default /app). `--connection-json`
-returns credentials as JSON for Codex or OpenCode2.
+Each `railway code` launch with an explicit harness flag creates a fresh VM by
+default, including `remote` and `--` passthrough commands. Use `connect [agent]`
+for an existing Codex/OpenCode server, or `railway ca ssh <agent>` for a shell.
+`--new` is optional for harness launches; an explicit `--agent` selects an existing
+VM for server setup.
+
+`railway code --codex`, `--opencode`, and `--opencode2` prepare a server, print
+connection details, and automatically open your local client with command
+approvals disabled. Codex updates its server at startup and automatically matches
+the local client version and trusts the remote project. All three clients open
+inside the Railway CA frame, whose sidebar lists conversation titles and resumes
+the selected thread. Missing OpenCode
+clients can be installed after confirmation. `connect [agent]` reconnects locally;
+`remote` runs the client on the VM over SSH. `--dir` selects the remote directory
+(default /app).
+`--connection-json` returns credentials as JSON for Codex or OpenCode2.
 Codex setup and connect also register and verify its SSH host and save its remote
 project in the background. Codex Desktop imports it on its next startup;
 setup never launches or activates the app.
@@ -280,7 +292,7 @@ sign in on the agent using the harness's login flow.
 Note: requires the CLOUD_AGENTS feature to be enabled."#
 )]
 pub struct LaunchArgs {
-    /// Prepare a Codex server and offer to launch your local client, carrying your ChatGPT sign-in
+    /// Prepare a Codex server and launch your local client, carrying your ChatGPT sign-in
     /// (~/.codex/auth.json) when there is one to carry
     #[clap(long)]
     codex: bool,
@@ -293,7 +305,7 @@ pub struct LaunchArgs {
     #[clap(long)]
     opencode2: bool,
 
-    /// Return Codex or OpenCode2 connection details as JSON, including credentials,
+    /// Return verified Codex or OpenCode2 connection details as JSON, including credentials,
     /// without launching a local client. Progress is written to stderr.
     #[clap(long, requires = "client_json_harness")]
     connection_json: bool,
@@ -314,7 +326,7 @@ pub struct LaunchArgs {
     #[clap(long)]
     railway: bool,
 
-    /// Always create a fresh agent instead of reusing this environment's
+    /// Create a fresh agent (already the default for railway code with a harness flag)
     #[clap(long)]
     pub new: bool,
 
@@ -342,7 +354,7 @@ pub struct LaunchArgs {
     /// Set a variable on the agent (repeatable, comma-separable). Values
     /// may reference other variables — `DB_URL=postgres.DATABASE_URL` or the
     /// full `${{postgres.DATABASE_URL}}` form — resolved server-side at
-    /// create time. Applies to newly created agents (combine with --new)
+    /// create time. Applies to newly created agents
     #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
     variables: Vec<String>,
 
@@ -402,7 +414,7 @@ pub struct LaunchArgs {
 
     /// Launch no harness at all — just the VM's login shell. Set by the TUI's
     /// shell option, not a flag: the CLI already has a spelling for this
-    /// (`railway ca ssh <agent> -- bash`), and a second one would compete
+    /// (`railway ca ssh <agent>`), and a second one would compete
     /// with it.
     #[clap(skip)]
     pub shell: bool,
@@ -413,6 +425,18 @@ pub struct LaunchArgs {
     /// prepare an agent and then do nothing with it.
     #[clap(skip)]
     pub app_mode: bool,
+    /// Explicit `remote` mode keeps both client and server inside the VM.
+    #[clap(skip)]
+    pub client_on_agent: bool,
+
+    /// Resume this exact harness conversation instead of starting a new one —
+    /// the harness's own session id, from the platform's reported sessions.
+    /// Set by callers that found a resumable thread (`railway ca ssh` after a
+    /// sleep); there is no flag because the id is not something a user types.
+    /// Only Claude has a verified resume-by-id CLI today; other harnesses
+    /// launch fresh and the id is ignored.
+    #[clap(skip)]
+    pub resume_session_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -424,6 +448,28 @@ enum ClientAction {
 }
 
 impl LaunchArgs {
+    /// Apply the public `railway code` launch policy before dispatch. Keep it
+    /// here rather than in clap or provisioning, which CA, Desktop, and SSH also
+    /// use when opening sessions on an existing VM.
+    fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
+        let action = self.client_action()?;
+        let harness_selected = self.codex
+            || self.opencode
+            || self.opencode2
+            || self.claude
+            || self.grok
+            || self.railway;
+        if harness_selected
+            && !self.rm
+            && self.remote_agent.is_none()
+            && self.agent_id.is_none()
+            && !matches!(action, Some(ClientAction::Connect(_)))
+        {
+            self.new = true;
+        }
+        Ok(action)
+    }
+
     /// Dispatch only the public local-client commands; explicit harness
     /// arguments and CA's internal prepare/launch paths keep their VM semantics.
     fn client_action(&self) -> Result<Option<ClientAction>> {
@@ -499,7 +545,7 @@ impl LaunchArgs {
                     || self.remote_dir.is_some()
                 {
                     bail!(
-                        "connect uses an existing server. Use railway code --codex, --opencode, or --opencode2 [--new] to set one up."
+                        "connect uses an existing server. Use railway code --codex, --opencode, or --opencode2 to set one up on a fresh VM."
                     );
                 }
                 let positional = self.agent_args.get(1).cloned();
@@ -537,6 +583,7 @@ impl LaunchArgs {
             && self.environment.is_none()
             && self.project.is_none()
             && self.initial_prompt.is_none()
+            && self.resume_session_id.is_none()
             && self.variables.is_empty()
             && !self.code_endpoint
             && self.code_port.is_none()
@@ -1087,6 +1134,15 @@ pub enum SessionStyle {
     Pane,
 }
 
+/// Bypass the login-profile autostart on VMs prepared by `railway code`.
+pub(crate) const LOGIN_SHELL_COMMAND: &str = "export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l";
+
+pub(crate) fn harness_env_prefix() -> String {
+    format!(
+        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
+    )
+}
+
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -1105,6 +1161,7 @@ fn remote_command(
     agent: Agent,
     env_prefix: &str,
     initial_prompt: Option<&str>,
+    resume_session_id: Option<&str>,
     agent_args: &[String],
     style: SessionStyle,
 ) -> String {
@@ -1114,7 +1171,7 @@ fn remote_command(
     // still matters: `bash -l` sources ~/.profile, which would otherwise
     // relaunch whatever agent the VM last recorded on top of the user.
     if agent == Agent::Shell {
-        return format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
+        return format!("{env_prefix}{LOGIN_SHELL_COMMAND}");
     }
     // Railway's TUI fronts a shared daemon whose default is to join the
     // directory's live session — every window becomes another view of the
@@ -1140,23 +1197,35 @@ fn remote_command(
     };
     let after = match style {
         SessionStyle::FullTerminal => "; exec bash -l",
-        SessionStyle::Pane => "",
+        SessionStyle::Pane => "; exit \"$railway_code_status\"",
     };
+    // Capture the harness status before resetting the terminal. Otherwise
+    // printf's success turns startup failures into clean session exits and
+    // the pane closes before the user can read the error.
+    let reset = format!("railway_code_status=$?; {}", terminal_reset_printf());
+    // Resuming reopens an existing conversation, so it takes the id instead of
+    // a prompt (the conversation already has its task). Both native harnesses
+    // accept --resume <id>; the id is quoted as a single shell argument.
+    if matches!(agent, Agent::Claude | Agent::Grok)
+        && let Some(id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty())
+    {
+        return format!(
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --resume {}; {reset}{after}",
+            shell_join(std::slice::from_ref(&id.to_string())),
+        );
+    }
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
         Some(prompt) if matches!(agent, Agent::OpenCode | Agent::OpenCode2) => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --prompt {}; {}{after}",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --prompt {}; {reset}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
-            terminal_reset_printf()
         ),
         Some(prompt) => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}{after}",
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {reset}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
-            terminal_reset_printf()
         ),
-        None if agent_args.is_empty() => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}{after}",
-            terminal_reset_printf()
-        ),
+        None if agent_args.is_empty() => {
+            format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {reset}{after}")
+        }
         None => format!(
             "{env_prefix}exec {} {}",
             agent.name(),
@@ -3495,13 +3564,12 @@ async fn prepare_inner(
     };
     ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
-    let env_prefix = format!(
-        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
-    );
+    let env_prefix = harness_env_prefix();
     let remote_cmd = remote_command(
         agent,
         &env_prefix,
         args.initial_prompt.as_deref(),
+        args.resume_session_id.as_deref(),
         &args.agent_args,
         style,
     );
@@ -4024,6 +4092,123 @@ mod tests {
     }
 
     #[test]
+    fn code_harness_launches_create_new_agents_by_default() {
+        for flag in [
+            "--codex",
+            "--opencode",
+            "--opencode2",
+            "--claude",
+            "--grok",
+            "--railway",
+        ] {
+            for extra in [
+                vec![],
+                vec!["--new"],
+                vec![
+                    "--name",
+                    "my-box",
+                    "--variable",
+                    "K=V",
+                    "--env-file",
+                    ".env",
+                ],
+                vec!["--", "exec", "explain this codebase"],
+            ] {
+                let argv = [vec!["code", flag], extra].concat();
+                let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+                args.prepare_code_launch().unwrap();
+                assert!(args.new, "{argv:?} must create a fresh VM");
+            }
+        }
+        for argv in [
+            vec!["code", "--codex", "remote"],
+            vec!["code", "--opencode", "remote"],
+            vec!["code", "--opencode2", "remote"],
+            vec!["code", "--codex", "desktop-only"],
+            vec!["code", "--codex", "--connection-json"],
+            vec!["code", "--opencode2", "--connection-json"],
+            vec!["code", "--codex", "desktop-only", "--connection-json"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert!(args.prepare_code_launch().unwrap().is_some());
+            assert!(args.new, "{argv:?} must create a fresh VM");
+        }
+    }
+
+    #[test]
+    fn code_connect_and_explicit_targets_do_not_request_new_agents() {
+        for flag in ["--codex", "--opencode", "--opencode2"] {
+            for (extra, selector) in [
+                (vec!["connect"], None),
+                (vec!["connect", "my-box"], Some("my-box".to_string())),
+                (
+                    vec!["connect", "--agent", "my-box"],
+                    Some("my-box".to_string()),
+                ),
+            ] {
+                let mut args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                assert_eq!(
+                    args.prepare_code_launch().unwrap(),
+                    Some(ClientAction::Connect(selector))
+                );
+                assert!(!args.new, "connect must never create a VM");
+            }
+            for extra in [vec![], vec!["remote"]] {
+                let mut args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--agent", "my-box"], extra].concat(),
+                )
+                .unwrap();
+                args.prepare_code_launch().unwrap();
+                assert!(!args.new);
+                assert_eq!(args.remote_agent.as_deref(), Some("my-box"));
+            }
+            let mut args = LaunchArgs::try_parse_from(["code", flag, "connect", "--new"]).unwrap();
+            assert!(args.prepare_code_launch().is_err());
+        }
+        let mut args =
+            LaunchArgs::try_parse_from(["code", "--codex", "desktop-only", "--agent", "my-box"])
+                .unwrap();
+        assert_eq!(
+            args.prepare_code_launch().unwrap(),
+            Some(ClientAction::DesktopOnly)
+        );
+        assert!(!args.new);
+    }
+
+    #[test]
+    fn code_creation_default_is_scoped_to_harness_launches() {
+        for argv in [
+            vec!["code"],
+            vec!["code", "--rm"],
+            vec!["code", "--codex", "--rm"],
+            vec!["code", "--claude", "--rm"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert_eq!(args.prepare_code_launch().unwrap(), None);
+            assert!(!args.new, "{argv:?} must retain its existing behavior");
+        }
+        let mut args = LaunchArgs::try_parse_from(["code", "--new"]).unwrap();
+        args.prepare_code_launch().unwrap();
+        assert!(args.new);
+
+        // CA's shared flags and targeted session launches bypass the public
+        // code command policy, so an existing machine remains the target.
+        let args = LaunchArgs::try_parse_from(["ca", "--codex"]).unwrap();
+        assert!(!args.new);
+        let args = LaunchArgs::for_target(
+            "project".into(),
+            "environment".into(),
+            "codex",
+            false,
+            None,
+            Some("existing-agent".into()),
+        );
+        assert!(!args.new);
+        assert_eq!(args.agent_id.as_deref(), Some("existing-agent"));
+    }
+
+    #[test]
     fn connection_json_only_accepts_server_connection_actions() {
         for flag in ["--codex", "--opencode2"] {
             for extra in [vec![], vec!["connect", "box"], vec!["--new"]] {
@@ -4246,6 +4431,7 @@ mod tests {
             Agent::OpenCode2,
             "",
             Some("explain this project"),
+            None,
             &[],
             SessionStyle::Pane,
         );
@@ -4273,6 +4459,7 @@ mod tests {
             Agent::OpenCode,
             "",
             Some("explain this project"),
+            None,
             &[],
             SessionStyle::Pane,
         );
@@ -4556,6 +4743,7 @@ mod tests {
                 Agent::Shell,
                 "P; ",
                 prompt,
+                None,
                 &args,
                 SessionStyle::FullTerminal,
             );
@@ -4700,6 +4888,7 @@ mod tests {
             Agent::Claude,
             "P; ",
             Some("fix the tests"),
+            None,
             &[],
             FullTerminal,
         );
@@ -4707,13 +4896,14 @@ mod tests {
         assert!(seeded.ends_with("exec bash -l"));
         assert!(!seeded.contains("exec claude"));
 
-        let interactive = remote_command(Agent::Claude, "P; ", None, &[], FullTerminal);
+        let interactive = remote_command(Agent::Claude, "P; ", None, None, &[], FullTerminal);
         assert!(interactive.contains("claude;"), "{interactive}");
         assert!(interactive.ends_with("exec bash -l"));
 
         let scripted = remote_command(
             Agent::Codex,
             "P; ",
+            None,
             None,
             &["exec".into(), "explain this".into()],
             FullTerminal,
@@ -4725,10 +4915,10 @@ mod tests {
         assert!(!scripted.contains("bash -l"));
 
         // A prompt of only whitespace is not a prompt.
-        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[], FullTerminal);
+        let blank = remote_command(Agent::Grok, "P; ", Some("   "), None, &[], FullTerminal);
         assert_eq!(
             blank,
-            remote_command(Agent::Grok, "P; ", None, &[], FullTerminal)
+            remote_command(Agent::Grok, "P; ", None, None, &[], FullTerminal)
         );
 
         // Railway's TUI runs in-process, or the shared daemon would join
@@ -4738,6 +4928,7 @@ mod tests {
             Agent::Railway,
             "P; ",
             Some("fix the tests"),
+            None,
             &[],
             FullTerminal,
         );
@@ -4747,7 +4938,7 @@ mod tests {
             ),
             "{railway}"
         );
-        let railway_bare = remote_command(Agent::Railway, "P; ", None, &[], FullTerminal);
+        let railway_bare = remote_command(Agent::Railway, "P; ", None, None, &[], FullTerminal);
         assert!(
             railway_bare.contains(
                 "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\";"
@@ -4759,6 +4950,7 @@ mod tests {
             Agent::Railway,
             "P; ",
             None,
+            None,
             &["--continue".into()],
             FullTerminal,
         );
@@ -4769,6 +4961,57 @@ mod tests {
         assert!(!railway_exec.contains("--session"), "{railway_exec}");
     }
 
+    /// Resuming reopens a specific conversation: the id must be quoted, the
+    /// session must survive the harness exiting, and a harness with no
+    /// verified resume-by-id CLI must launch fresh rather than guess flags.
+    #[test]
+    fn remote_command_resume_shapes() {
+        use SessionStyle::FullTerminal;
+
+        let resumed = remote_command(
+            Agent::Claude,
+            "P; ",
+            None,
+            Some("abc-123"),
+            &[],
+            FullTerminal,
+        );
+        assert!(resumed.contains("claude --resume abc-123;"), "{resumed}");
+        assert!(resumed.ends_with("exec bash -l"));
+
+        // The id is platform-reported text: a quote inside must not escape.
+        let hostile = remote_command(
+            Agent::Claude,
+            "P; ",
+            None,
+            Some("a'; rm -rf /'"),
+            &[],
+            FullTerminal,
+        );
+        assert!(
+            hostile.contains(r"claude --resume 'a'\''; rm -rf /'\''';"),
+            "{hostile}"
+        );
+
+        // A resume id on a harness without a verified resume CLI is ignored.
+        let codex = remote_command(
+            Agent::Codex,
+            "P; ",
+            None,
+            Some("abc-123"),
+            &[],
+            FullTerminal,
+        );
+        assert!(!codex.contains("--resume"), "{codex}");
+
+        // A blank id is not an id.
+        let blank = remote_command(Agent::Claude, "P; ", None, Some("  "), &[], FullTerminal);
+        assert_eq!(
+            blank,
+            remote_command(Agent::Claude, "P; ", None, None, &[], FullTerminal)
+        );
+    }
+
     /// A pane session must end when the harness does. The shell fallback that
     /// serves a full-terminal caller strands a pane on a bare VM prompt inside
     /// what still looks like the TUI — ctrl-c out of the agent read as the CLI
@@ -4776,11 +5019,36 @@ mod tests {
     #[test]
     fn a_pane_session_ends_with_the_harness() {
         for prompt in [None, Some("fix the tests")] {
-            let pane = remote_command(Agent::Claude, "P; ", prompt, &[], SessionStyle::Pane);
+            let pane = remote_command(Agent::Claude, "P; ", prompt, None, &[], SessionStyle::Pane);
             assert!(!pane.contains("bash -l"), "{pane}");
             // The reset still runs — the pane's emulator swallows it, and a
             // full-screen takeover of the same session needs it.
-            assert!(pane.ends_with("\\033[?25h'"), "{pane}");
+            assert!(pane.contains("\\033[?25h'"), "{pane}");
+            assert!(pane.ends_with("exit \"$railway_code_status\""), "{pane}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_preserves_the_harness_exit_status_after_resetting_the_terminal() {
+        for agent in [Agent::Railway, Agent::Claude, Agent::OpenCode] {
+            for prompt in [None, Some("fix the tests")] {
+                for status in [0, 1, 42, 127] {
+                    let prefix = format!(
+                        "{}() {{ echo harness-output; return {status}; }}; ",
+                        agent.name()
+                    );
+                    let command =
+                        remote_command(agent, &prefix, prompt, None, &[], SessionStyle::Pane);
+                    let output = std::process::Command::new("bash")
+                        .args(["--noprofile", "--norc", "-c", &command])
+                        .output()
+                        .unwrap();
+                    assert_eq!(output.status.code(), Some(status), "{command}");
+                    assert!(output.stdout.starts_with(b"harness-output\n"));
+                    assert!(output.stdout.ends_with(TERMINAL_RESET.as_bytes()));
+                }
+            }
         }
     }
 
@@ -4792,6 +5060,7 @@ mod tests {
             Agent::Claude,
             "P; ",
             Some("'; rm -rf / #"),
+            None,
             &[],
             SessionStyle::FullTerminal,
         );

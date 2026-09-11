@@ -27,9 +27,9 @@ use super::theme::Theme;
 /// shell, so it takes no prompt and sits after every real agent.
 pub const HARNESSES: &[&str] = &[
     "railway",
-    "claude",
-    "codex",
     "grok",
+    "codex",
+    "claude",
     "opencode",
     "opencode2",
     "shell",
@@ -93,18 +93,19 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("⌥f", "give it the whole screen · again to restore"),
             ("⌥enter / f", "leave the TUI and connect full screen"),
             ("⌥⇧[ ⌥⇧]", "previous / next session"),
-            ("c", "copy an ssh command for it"),
             ("⌥⇧esc / ^]", "stop typing in it"),
             ("wheel", "scroll its output"),
             ("click a link", "open it in your browser"),
             ("shift+pgup/pgdn", "scroll without the mouse"),
-            ("x", "end the session"),
+            ("x / X", "delete conversation / end shell"),
             ("r", "reconnect a pane whose connection dropped"),
         ],
     ),
     (
         "agents",
         &[
+            ("⌥b", "open an SSH shell outside the TUI"),
+            ("c", "copy an SSH shell command"),
             ("n", "new agent — pick its harness first"),
             ("⌥n", "new agent now, on the selected harness"),
             (
@@ -144,7 +145,7 @@ pub struct Agent {
 }
 
 /// One reattachable session on an agent's VM.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConsoleSession {
     /// The durable name the relay reattaches by.
     pub name: String,
@@ -165,7 +166,7 @@ pub struct ConsoleSession {
 
 /// The reported state of one coding-agent run, from `CloudAgent.sessions` —
 /// the same snapshot the dashboard's session cards render. Display-only.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadSnapshot {
     /// Which harness reported: claude, codex, grok, railway-agent…
     pub harness: String,
@@ -194,14 +195,76 @@ pub struct ThreadSnapshot {
 const LAUNCH_PROLOGUE: &str = "export RAILWAY_CODE_AUTOSTARTED=1; ";
 
 impl ConsoleSession {
+    pub(super) fn client_thread(
+        agent_id: &str,
+        harness: &str,
+        thread: Option<&super::super::client_sessions::Thread>,
+    ) -> Self {
+        Self {
+            name: super::super::client_sessions::name(
+                harness,
+                agent_id,
+                thread.map(|t| t.id.as_str()),
+            ),
+            kind: "THREAD".into(),
+            command: Some(harness.into()),
+            running: true,
+            attached: false,
+            created_at: thread.and_then(|t| t.created_at),
+            snapshot: thread.map(|thread| ThreadSnapshot {
+                harness: harness.into(),
+                session_id: thread.id.clone(),
+                state: thread.state.clone(),
+                prompt: Some(thread.title.clone()),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: thread.updated_at.clone(),
+            }),
+        }
+    }
     /// Is this worth showing?
     ///
-    /// Only what is still running. Finished sessions are our own provisioning
-    /// execs and shells that have already ended — including one just killed,
-    /// which should leave the list rather than linger as "exited" and look like
-    /// the kill did not take.
+    /// Provider threads remain resumable after the harness exits; transport
+    /// rows are reserved for live interactive shells directly on the VM.
     pub fn is_interesting(&self) -> bool {
-        self.running
+        self.running && (self.kind == "THREAD" || self.is_shell())
+    }
+
+    pub(super) fn is_shell(&self) -> bool {
+        if self.kind != "SHELL" || self.snapshot.is_some() || self.harness_slug().is_some() {
+            return false;
+        }
+        let Some(command) = self
+            .command
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            return true;
+        };
+        let command = command
+            .trim_end_matches(';')
+            .rsplit("; ")
+            .next()
+            .unwrap_or(command)
+            .trim_start_matches("exec ");
+        let words = shlex::split(command).unwrap_or_default();
+        if words
+            .iter()
+            .skip(1)
+            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+        {
+            return false;
+        }
+        matches!(
+            command
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .rsplit('/')
+                .next(),
+            Some("bash" | "sh" | "zsh" | "fish" | "-bash" | "-sh" | "-zsh")
+        )
     }
 
     /// The session's name, folded short and led by its harness:
@@ -210,6 +273,14 @@ impl ConsoleSession {
     /// already leads with its harness. The plain name when the harness is
     /// unknowable.
     pub fn short_name(&self) -> String {
+        if super::super::client_sessions::is_client(&self.name) {
+            return self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.prompt.clone())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| super::super::client_sessions::NEW_THREAD.into());
+        }
         match self.harness_slug() {
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
                 let segments: Vec<&str> = self.name.split('-').collect();
@@ -223,13 +294,12 @@ impl ConsoleSession {
         }
     }
 
-    /// The thread list's label: what is happening in the thread, truncated to
-    /// the tree's width. While the harness works, the prompt names the work;
-    /// once the turn is over, what the agent last said is the news (known for
-    /// railway-agent threads, whose daemon serves the transcript). The short
-    /// name is the fallback for a session nothing has reported from (a plain
-    /// shell, a run that hasn't spoken yet).
+    /// The native title names a thread throughout its lifecycle. Only direct
+    /// VM shells use a transport name and the `[S]` marker.
     pub fn thread_label(&self) -> String {
+        if super::super::client_sessions::is_client(&self.name) {
+            return truncate(&self.short_name(), 28);
+        }
         if let Some(snapshot) = &self.snapshot {
             fn clean(text: Option<&str>) -> Option<&str> {
                 text.map(str::trim).filter(|text| !text.is_empty())
@@ -250,11 +320,15 @@ impl ConsoleSession {
                 return truncate(text, 28);
             }
         }
-        format!("[S] {}", self.short_name())
+        if self.is_shell() {
+            format!("[S] {}", self.short_name())
+        } else {
+            super::super::client_sessions::NEW_THREAD.into()
+        }
     }
 
     /// The harness this session runs, read off its launch line's binary.
-    fn harness_slug(&self) -> Option<&'static str> {
+    pub(super) fn harness_slug(&self) -> Option<&'static str> {
         let summary = self.command_summary();
         if summary == self.name {
             return None;
@@ -265,6 +339,8 @@ impl ConsoleSession {
             "railway-agent-tui" | "railway-agent" => Some("railway"),
             "claude" => Some("claude"),
             "codex" => Some("codex"),
+            "opencode" => Some("opencode"),
+            "opencode2" => Some("opencode2"),
             "grok" => Some("grok"),
             _ => None,
         }
@@ -424,26 +500,6 @@ pub const WATCH_TICK: std::time::Duration = std::time::Duration::from_millis(150
 /// whole tree green, but each attach is a relay ssh, a reader thread, and a
 /// scrollback replay — a fleet's worth at once is a thundering herd.
 const AUTO_CONNECT_INFLIGHT: usize = 3;
-
-/// How often the tree asks the platform for everything again on its own.
-///
-/// One `myCloudAgents` request covers the whole account — every workspace,
-/// project and environment — so the cost of this is one request per interval no
-/// matter how large the account is, plus a session query for each agent someone
-/// has open or expanded (usually none or one). For scale: the dashboard polls
-/// `cloudAgents` every 15s *per environment* it is showing, and every 3s while
-/// any agent is in a transient state.
-///
-/// Enough of the same work already happens on demand — a launch refetches its
-/// environment, a wake polls at [`WATCH_TICK`], ⌥r asks immediately — that this
-/// is a safety net for changes made somewhere else entirely: another terminal,
-/// the dashboard, a teammate. 25s is short enough that nobody reaches for ⌥r out
-/// of doubt, and long enough to be invisible in anyone's rate-limit budget.
-pub const AUTO_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(25);
-
-/// How often the watched threads' sessions are re-asked about, for the
-/// sidebar's live labels. See [`App::thread_refresh_in`].
-pub const THREAD_REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Toast {
@@ -760,6 +816,10 @@ pub struct SshKeyOffer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeldConnect {
     Launch(LaunchRequest),
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
+    },
     Reattach {
         agent_id: String,
         agent_name: String,
@@ -773,6 +833,13 @@ impl HeldConnect {
     pub fn into_effect(self) -> Effect {
         match self {
             HeldConnect::Launch(req) => Effect::Launch(req),
+            HeldConnect::OpenShell {
+                agent_id,
+                agent_name,
+            } => Effect::OpenShell {
+                agent_id,
+                agent_name,
+            },
             HeldConnect::Reattach {
                 agent_id,
                 agent_name,
@@ -853,6 +920,11 @@ pub enum Effect {
         environment_id: String,
         session_name: String,
     },
+    DeleteThread {
+        agent_id: String,
+        environment_id: String,
+        session_name: String,
+    },
     /// Reconnect to an existing session on a running agent — no provisioning,
     /// no credential work, just ssh with the session's name.
     Reattach {
@@ -880,11 +952,15 @@ pub enum Effect {
     /// by ⌥r, by the auto-refresh tick, and on re-entry after the TUI has
     /// handed the terminal back. See [`super::start_refresh`].
     RefreshAll,
-    /// Put an `ssh` command for one session on the clipboard.
+    /// Put an SSH shell command for this VM on the clipboard.
     CopySsh {
         agent_id: String,
         environment_id: String,
-        session_name: String,
+    },
+    /// Leave the TUI for a new shell on an existing VM, keeping its panes.
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
     },
     /// Leave the TUI and give the whole terminal to one session.
     FullScreen {
@@ -952,7 +1028,18 @@ pub struct LaunchRequest {
     pub base: Box<crate::commands::code::LaunchArgs>,
 }
 
+struct DeletedThread {
+    environment: String,
+    agent_id: String,
+    order: Vec<String>,
+    row: ConsoleSession,
+}
+
 pub struct App {
+    pub(super) activity: super::activity::Activity,
+    pub(super) thread_cache: Option<super::cache::Cache>,
+    /// Discovery is a startup/user gesture, never a consequence of cache age.
+    discovered: std::collections::HashSet<String>,
     /// The project new agents go to: the linked directory's project, or the
     /// preferences file when this directory has no link. Sorted to the top of
     /// the tree and separated from the rest.
@@ -983,6 +1070,7 @@ pub struct App {
     /// the same path a keypress would, so the ssh-key gate and the Claude
     /// mint still get their say.
     pub autostart: Option<LaunchRequest>,
+    pub(crate) autostart_client: Option<super::ClientPane>,
     /// Like `autostart`, but the pipeline is already running — started beside
     /// the tree load because its gates were verified up front. The loop adopts
     /// it on frame one instead of dispatching.
@@ -1025,6 +1113,11 @@ pub struct App {
     /// row that reads "running" in the meantime looks like the key did nothing.
     /// A name leaves this set when a refresh no longer lists it.
     pub ending: std::collections::HashSet<String>,
+    // Keep tombstones after acknowledgements to reject late inventories/events.
+    pub(super) deleted_threads: std::collections::HashSet<String>,
+    deleting_threads: HashMap<String, DeletedThread>,
+    pub(super) deletion_tx: tokio::sync::mpsc::UnboundedSender<(String, Option<String>)>,
+    pub(super) deletion_rx: tokio::sync::mpsc::UnboundedReceiver<(String, Option<String>)>,
     /// Session names whose attach is in flight — the row wears a spinner
     /// instead of the branch marker until the pane opens or the attempt fails.
     pub connecting: std::collections::HashSet<String>,
@@ -1076,17 +1169,10 @@ pub struct App {
     /// A refresh is in flight. Coalescing: a held ⌥r, or several actions
     /// finishing at once, must not stack account-wide queries.
     pub refreshing: bool,
-    /// When the last refresh of any origin started, which is what the automatic
-    /// one measures from — pressing ⌥r pushes the next tick out rather than
-    /// having it arrive a second later.
-    pub last_refresh: Option<std::time::Instant>,
     /// Refreshing is paused until this passes, because the API said so. A 429
     /// answered by polling harder is how a rate limit becomes a longer rate
     /// limit.
     pub refresh_paused_until: Option<std::time::Instant>,
-    /// When the watched threads were last re-asked about — the fast cadence
-    /// behind the sidebar's live labels, separate from the account refresh.
-    pub last_thread_refresh: Option<std::time::Instant>,
     /// Agents whose fast thread poll is still in flight, so a slow reply (the
     /// gate transcript dials can take seconds) is never stacked under a
     /// second ask for the same agent.
@@ -1125,6 +1211,48 @@ pub struct App {
 }
 
 impl App {
+    pub(super) fn restore_cached_threads(&mut self) {
+        let Some(cache) = &self.thread_cache else {
+            return;
+        };
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    let Load::Loaded(agents) = &mut env.agents else {
+                        continue;
+                    };
+                    for agent in agents {
+                        if agent.sessions == LoadSessions::NotLoaded
+                            && let Some(mut rows) = cache.read(&env.id, &agent.id)
+                        {
+                            rows.retain(|row| !self.deleted_threads.contains(&row.name));
+                            agent.sessions = LoadSessions::Loaded(rows);
+                        }
+                    }
+                }
+            }
+        }
+        self.adopt_pane_sessions();
+    }
+
+    pub(super) fn persist_threads(&self, agent_id: &str) {
+        let Some(cache) = &self.thread_cache else {
+            return;
+        };
+        for ws in &self.tree {
+            for project in &ws.projects {
+                for env in &project.envs {
+                    if let Some(agent) = env.agents_vec().iter().find(|a| a.id == agent_id)
+                        && let LoadSessions::Loaded(rows) = &agent.sessions
+                    {
+                        let _ = cache.save(&env.id, agent_id, rows);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn new(
         tree: Vec<WorkspaceNode>,
         target: Option<Target>,
@@ -1133,6 +1261,7 @@ impl App {
         default_project: Option<String>,
         configured: bool,
     ) -> Self {
+        let (deletion_tx, deletion_rx) = tokio::sync::mpsc::unbounded_channel();
         let harness = harness
             .and_then(|h| HARNESSES.iter().position(|x| *x == h))
             .unwrap_or(0);
@@ -1146,6 +1275,7 @@ impl App {
             manage_prompt: None,
             maximized: false,
             autostart: None,
+            autostart_client: None,
             autostart_inflight: None,
             quit_when_done: false,
             exit_note: None,
@@ -1162,6 +1292,10 @@ impl App {
             pending_select_session: None,
             panes: PaneRects::default(),
             ending: std::collections::HashSet::new(),
+            deleted_threads: Default::default(),
+            deleting_threads: Default::default(),
+            deletion_tx,
+            deletion_rx,
             connecting: std::collections::HashSet::new(),
             auto_attempted: std::collections::HashSet::new(),
             drop_seen: std::collections::HashSet::new(),
@@ -1181,9 +1315,10 @@ impl App {
             watching: std::collections::HashMap::new(),
             last_watched_environment: None,
             refreshing: false,
-            last_refresh: None,
+            thread_cache: None,
+            activity: Default::default(),
+            discovered: Default::default(),
             refresh_paused_until: None,
-            last_thread_refresh: None,
             thread_polls: std::collections::HashSet::new(),
             refresh_announce: false,
             agent_snapshot_floor: std::collections::HashMap::new(),
@@ -1749,12 +1884,7 @@ impl App {
         self.auto_expand_agent()
     }
 
-    /// Open the agent the cursor just landed on, so its sessions are visible
-    /// without a second keypress.
-    ///
-    /// Not when we already know it has none: expanding then would replace the
-    /// sessions with a "no sessions" line, which is noise for the common case
-    /// of walking past an idle agent.
+    /// Selecting a machine refreshes its cached history in place.
     fn auto_expand_agent(&mut self) -> Option<Effect> {
         let row = self.selected_row()?;
         let RowKind::Agent(w, p, e, a) = row.kind else {
@@ -1764,17 +1894,11 @@ impl App {
             return None;
         };
         let agent = agents.get(a)?;
-        if agent.expanded {
-            return None;
-        }
-        match &agent.sessions {
-            LoadSessions::Loaded(sessions)
-                if sessions.iter().any(ConsoleSession::is_interesting) =>
-            {
-                self.set_agent_expanded((w, p, e, a), true)
-            }
-            LoadSessions::NotLoaded => self.set_agent_expanded((w, p, e, a), true),
-            _ => None,
+        let id = agent.id.clone();
+        if agent.sessions == LoadSessions::NotLoaded {
+            self.set_agent_expanded((w, p, e, a), true)
+        } else {
+            self.refresh_agent_sessions(&id)
         }
     }
 
@@ -2004,17 +2128,97 @@ impl App {
         };
         let agent = agents.get_mut(a)?;
         agent.expanded = open;
-        if !open {
+        if !open || agent.status != "running" {
             return None;
         }
-        // Always refetch on expand: sessions come and go while you are looking
-        // at something else, and a stale list is worse than a brief spinner.
-        agent.sessions = LoadSessions::Loading;
+        if self.thread_polls.contains(&agent.id) {
+            return None;
+        }
+        // Loaded rows remain visible while the on-demand request is in flight.
+        if !matches!(agent.sessions, LoadSessions::Loaded(_)) {
+            agent.sessions = LoadSessions::Loading;
+        }
         Some(Effect::LoadSessions {
             agent_id: agent.id.clone(),
             environment_id,
             path,
         })
+    }
+
+    /// A partial discovery failure keeps the affected harness's previous rows.
+    pub(super) fn preserve_failed_threads(
+        &self,
+        agent_id: &str,
+        failed: &[String],
+        rows: &mut Vec<ConsoleSession>,
+    ) {
+        if failed.is_empty() {
+            return;
+        }
+        for ws in &self.tree {
+            for project in &ws.projects {
+                for env in &project.envs {
+                    let Load::Loaded(agents) = &env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter().find(|a| a.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(previous) = &agent.sessions else {
+                        continue;
+                    };
+                    for row in previous {
+                        if super::super::client_sessions::parse_name(&row.name)
+                            .is_some_and(|(h, _, _)| failed.iter().any(|f| f == h))
+                            && !rows.iter().any(|r| r.name == row.name)
+                        {
+                            rows.push(row.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adopt only an exact, unambiguous live-process/console association. Two
+    /// Grok dashboard tabs can share one PID; their order is not a focus signal.
+    pub(super) fn remote_threads_loaded(
+        &mut self,
+        agent_id: &str,
+        threads: &[super::super::remote_threads::RemoteThread],
+    ) {
+        for pane in &mut self.sessions {
+            pane.sync_console_name();
+        }
+        let mut updates = Vec::new();
+        for (index, pane) in self.sessions.iter().enumerate() {
+            if pane.agent_id != agent_id
+                || pane.ended()
+                || pane.client_bridge.is_some()
+                || pane.opencode_bridge.is_some()
+            {
+                continue;
+            }
+            let matches: Vec<_> = threads
+                .iter()
+                .filter(|row| {
+                    (row.pane_id.is_some() && row.pane_id == pane.client_id)
+                        || row.console_name.as_ref().is_some_and(|name| {
+                            pane.console_name.as_ref() == Some(name) || &pane.durable_name == name
+                        })
+                })
+                .collect();
+            if let [row] = matches.as_slice() {
+                updates.push((index, (*row).clone()));
+            }
+        }
+        for (index, row) in updates {
+            self.sessions[index].harness = row.harness;
+            if row.console_name.is_some() {
+                self.sessions[index].console_name = row.console_name;
+            }
+            self.adopt_thread(index, row.thread);
+        }
     }
 
     /// Record a finished session fetch.
@@ -2024,9 +2228,26 @@ impl App {
         agent_id: &str,
         result: Result<Vec<ConsoleSession>, String>,
     ) {
-        // Whatever this reply says, its agent's fast poll is no longer in
-        // flight (see `threads_to_poll`).
+        let result = result.map(|mut rows| {
+            rows.retain(|row| !self.deleted_threads.contains(&row.name));
+            rows
+        });
+        let selected = self.selected_row().and_then(|row| {
+            let RowKind::Session(w, p, e, a, i) = row.kind else {
+                return None;
+            };
+            let session = self.console_session(w, p, e, a, i)?;
+            Some(session.name.clone())
+        });
+        let open: std::collections::HashSet<_> = self
+            .sessions
+            .iter()
+            .filter(|pane| !pane.ended() && pane.agent_id == agent_id)
+            .map(|pane| pane.durable_name.clone())
+            .collect();
+        // Whatever this reply says, its discovery is no longer in flight.
         self.thread_polls.remove(agent_id);
+        self.discovered.insert(agent_id.into());
         let (w, p, e, _) = path;
         // Resolved by id rather than trusting the index the request went out
         // with: the environment can be refetched while sessions are in
@@ -2060,6 +2281,37 @@ impl App {
         {
             let previous = std::mem::replace(&mut agent.sessions, LoadSessions::NotLoaded);
             agent.sessions = match (result, previous) {
+                (Ok(mut sessions), LoadSessions::Loaded(previous)) => {
+                    // A slow discovery must not roll back a newer live event.
+                    for row in &mut sessions {
+                        if open.contains(&row.name)
+                            && let Some(old) = previous.iter().find(|old| old.name == row.name)
+                            && old.snapshot.as_ref().map(|s| &s.updated_at)
+                                > row.snapshot.as_ref().map(|s| &s.updated_at)
+                        {
+                            *row = old.clone();
+                        }
+                    }
+                    // Open drafts may not exist in the provider index yet.
+                    // Keep their slot across refreshes, alongside saved rows.
+                    for row in &previous {
+                        if super::super::client_sessions::is_client(&row.name)
+                            && open.contains(&row.name)
+                            && !sessions.iter().any(|s| s.name == row.name)
+                        {
+                            sessions.push(row.clone());
+                        }
+                    }
+                    // Provider recency and title updates change row content,
+                    // never its position while someone is navigating the list.
+                    let positions: HashMap<_, _> = previous
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| (&s.name, i))
+                        .collect();
+                    sessions.sort_by_key(|s| positions.get(&s.name).copied().unwrap_or(usize::MAX));
+                    LoadSessions::Loaded(sessions)
+                }
                 (Ok(sessions), _) => LoadSessions::Loaded(sessions),
                 // The same rule the agent list follows: a refresh that fails
                 // keeps what it had rather than replacing a good list with an
@@ -2095,11 +2347,15 @@ impl App {
                 .collect();
             self.ending.retain(|name| live.contains(name.as_str()));
         }
+        if self.pending_select_session.is_none() {
+            self.pending_select_session = selected;
+        }
         self.clamp_cursor();
         // The platform's list may still be missing sessions we are attached
         // to (the relay registers them a moment after ssh connects); fold
         // those back in rather than letting the reply hide them.
         self.adopt_pane_sessions();
+        self.persist_threads(agent_id);
     }
 
     /// Expand an environment, loading its agents the first time.
@@ -2218,14 +2474,16 @@ impl App {
             // half the time you press it. The costs, all in a shell: ⌥f is
             // Meta-f (forward-word), ⌥n and ⌥p are Meta-n / Meta-p (the
             // non-incremental history searches, which few people bind and
-            // both harnesses ignore), and ⌥r is Meta-r (revert-line).
+            // both harnesses ignore), and ⌥r is Meta-r (revert-line). ⌥b
+            // opens a full SSH shell on this pane's VM; it takes Meta-b
+            // (backward-word) while a pane owns the keyboard.
             // Readline leaves Meta-] and Meta-[ unbound, bash binds Meta-{
             // only to the rarely-reached complete-into-braces, and `^]`
             // (character-search) is untouched because only the Meta forms are
             // claimed. Nothing else is intercepted — ⌥s still reaches the
             // agent from here.
             if let Some(chord) = alt_chord(&key)
-                && matches!(chord, 'f' | 'n' | 'p' | 'r' | ']' | '[')
+                && matches!(chord, 'b' | 'f' | 'n' | 'p' | 'r' | ']' | '[')
             {
                 return self.alt_action(chord);
             }
@@ -2918,6 +3176,9 @@ impl App {
                             // adopted from our own panes — already attached by
                             // definition.
                             if !session.is_interesting()
+                                // Conversation history is resumable, not a list
+                                // of processes to attach in the background.
+                                || super::super::client_sessions::is_client(&session.name)
                                 || session.created_at.is_none()
                                 || self.ending.contains(&session.name)
                                 || self.auto_attempted.contains(&session.name)
@@ -3064,7 +3325,9 @@ impl App {
         // session that is running, `attached` (we demonstrably are), and not
         // already claimed by another pane — newest first when several fit.
         for i in 0..self.sessions.len() {
-            if self.sessions[i].ended() {
+            if self.sessions[i].ended()
+                || super::super::client_sessions::is_client(&self.sessions[i].durable_name)
+            {
                 continue;
             }
             let agent_id = self.sessions[i].agent_id.clone();
@@ -3100,6 +3363,9 @@ impl App {
                 // The listed name is attached now, whatever it was minted as —
                 // auto-connect must treat it as already tried.
                 self.auto_attempted.insert(real.clone());
+                if self.sessions[i].console_name.is_some() {
+                    self.sessions[i].console_name = Some(real.clone());
+                }
                 self.sessions[i].durable_name = real;
             }
         }
@@ -3109,13 +3375,22 @@ impl App {
         // selected and connected instead of waiting on the relay's
         // bookkeeping. The reconciliation above retires it as soon as the
         // real record lands.
-        let panes: Vec<(String, String)> = self
+        let panes: Vec<_> = self
             .sessions
             .iter()
             .filter(|pane| !pane.ended())
-            .map(|pane| (pane.agent_id.clone(), pane.durable_name.clone()))
+            .map(|pane| {
+                (
+                    pane.agent_id.clone(),
+                    pane.durable_name.clone(),
+                    pane.client_thread.clone(),
+                )
+            })
             .collect();
-        for (agent_id, name) in panes {
+        for (agent_id, name, thread) in panes {
+            if self.deleted_threads.contains(&name) {
+                continue;
+            }
             'tree: for ws in &mut self.tree {
                 for proj in &mut ws.projects {
                     for env in &mut proj.envs {
@@ -3125,14 +3400,23 @@ impl App {
                         let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
                             continue;
                         };
-                        let ours = ConsoleSession {
-                            name: name.clone(),
-                            kind: "SHELL".into(),
-                            command: None,
-                            running: true,
-                            attached: true,
-                            created_at: None,
-                            snapshot: None,
+                        let ours = if let Some((harness, _, _)) =
+                            super::super::client_sessions::parse_name(&name)
+                        {
+                            let mut row =
+                                ConsoleSession::client_thread(&agent_id, harness, thread.as_ref());
+                            row.name = name.clone();
+                            row
+                        } else {
+                            ConsoleSession {
+                                name: name.clone(),
+                                kind: "SHELL".into(),
+                                command: None,
+                                running: true,
+                                attached: true,
+                                created_at: None,
+                                snapshot: None,
+                            }
                         };
                         match &mut agent.sessions {
                             LoadSessions::Loaded(sessions) => {
@@ -3148,6 +3432,193 @@ impl App {
             }
         }
         self.select_pending_session();
+    }
+
+    fn delete_thread_row(
+        &mut self,
+        w: usize,
+        p: usize,
+        e: usize,
+        a: usize,
+        i: usize,
+    ) -> Option<Effect> {
+        let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
+        let Load::Loaded(agents) = &mut env.agents else {
+            return None;
+        };
+        let agent = agents.get_mut(a)?;
+        let LoadSessions::Loaded(rows) = &mut agent.sessions else {
+            return None;
+        };
+        let row = rows.get(i)?.clone();
+        if !self.deleted_threads.insert(row.name.clone()) {
+            return None;
+        }
+        let agent_id = agent.id.clone();
+        let environment_id = env.id.clone();
+        let name = row.name.clone();
+        let mut order = self
+            .deleting_threads
+            .values()
+            .find(|d| d.environment == environment_id && d.agent_id == agent_id)
+            .map(|d| d.order.clone())
+            .unwrap_or_default();
+        for row in rows.iter() {
+            if !order.contains(&row.name) {
+                order.push(row.name.clone());
+            }
+        }
+        rows.remove(i);
+        self.deleting_threads.insert(
+            name.clone(),
+            DeletedThread {
+                environment: environment_id.clone(),
+                agent_id: agent_id.clone(),
+                order,
+                row,
+            },
+        );
+        self.connecting.remove(&name);
+        if self.pending_select_session.as_deref() == Some(&name) {
+            self.pending_select_session = None;
+        }
+        self.clamp_cursor();
+        self.persist_threads(&agent_id);
+        Some(Effect::DeleteThread {
+            agent_id,
+            environment_id,
+            session_name: name,
+        })
+    }
+
+    pub(super) fn thread_deleted(&mut self, name: &str, error: Option<String>) {
+        let Some(DeletedThread {
+            environment,
+            agent_id,
+            order,
+            row,
+        }) = self.deleting_threads.remove(name)
+        else {
+            return;
+        };
+        if let Some(error) = error {
+            self.deleted_threads.remove(name);
+            let selected = self.selected_row().and_then(|r| match r.kind {
+                RowKind::Session(w, p, e, a, i) => {
+                    self.console_session(w, p, e, a, i).map(|r| r.name.clone())
+                }
+                _ => None,
+            });
+            for ws in &mut self.tree {
+                for project in &mut ws.projects {
+                    for env in &mut project.envs {
+                        if env.id != environment {
+                            continue;
+                        }
+                        let Load::Loaded(agents) = &mut env.agents else {
+                            continue;
+                        };
+                        let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
+                            continue;
+                        };
+                        match &mut agent.sessions {
+                            LoadSessions::Loaded(rows) if !rows.iter().any(|r| r.name == name) => {
+                                let index = order
+                                    .iter()
+                                    .skip_while(|id| id.as_str() != name)
+                                    .skip(1)
+                                    .find_map(|id| rows.iter().position(|r| &r.name == id))
+                                    .unwrap_or(rows.len());
+                                rows.insert(index, row.clone())
+                            }
+                            LoadSessions::Loaded(_) => {}
+                            other => *other = LoadSessions::Loaded(vec![row.clone()]),
+                        }
+                    }
+                }
+            }
+            if let Some(selected) = selected {
+                self.pending_select_session = Some(selected);
+                self.select_pending_session();
+            }
+            self.toast_error(format!("Couldn't delete {}: {error}", row.short_name()));
+        }
+        self.persist_threads(&agent_id);
+    }
+
+    /// A native client selected a conversation; adopt its exact provider ID.
+    pub(super) fn client_thread_selected(
+        &mut self,
+        client_id: &str,
+        thread: super::super::client_sessions::Thread,
+    ) -> Option<String> {
+        let index = self
+            .sessions
+            .iter()
+            .position(|s| s.client_id.as_deref() == Some(client_id))?;
+        Some(self.adopt_thread(index, thread))
+    }
+
+    fn adopt_thread(
+        &mut self,
+        index: usize,
+        thread: super::super::client_sessions::Thread,
+    ) -> String {
+        let old = self.sessions[index].durable_name.clone();
+        let selected = self.selected_row().is_some_and(|row| {
+            if let RowKind::Session(w, p, e, a, i) = row.kind {
+                self.console_session(w, p, e, a, i)
+                    .is_some_and(|row| row.name == old)
+            } else {
+                false
+            }
+        });
+        let pane = &mut self.sessions[index];
+        let agent_id = pane.agent_id.clone();
+        let draft =
+            super::super::client_sessions::parse_name(&old).is_none_or(|(_, _, id)| id.is_none());
+        let name = super::super::client_sessions::name(&pane.harness, &agent_id, Some(&thread.id));
+        if self.deleted_threads.contains(&name) {
+            return agent_id;
+        }
+        let row = ConsoleSession::client_thread(&agent_id, &pane.harness, Some(&thread));
+        pane.durable_name = name.clone();
+        pane.client_thread = Some(thread);
+        if selected || self.pending_select_session.as_deref() == Some(&old) {
+            self.pending_select_session = Some(name.clone());
+        }
+        self.connecting.remove(&old);
+        self.auto_attempted.insert(name.clone());
+        for ws in &mut self.tree {
+            for project in &mut ws.projects {
+                for env in &mut project.envs {
+                    let Load::Loaded(agents) = &mut env.agents else {
+                        continue;
+                    };
+                    let Some(agent) = agents.iter_mut().find(|a| a.id == agent_id) else {
+                        continue;
+                    };
+                    let LoadSessions::Loaded(rows) = &mut agent.sessions else {
+                        continue;
+                    };
+                    if let Some(i) = rows.iter().position(|r| r.name == old && draft) {
+                        rows[i] = row.clone();
+                        let mut index = 0;
+                        rows.retain(|r| {
+                            let keep = r.name != name || index == i;
+                            index += 1;
+                            keep
+                        });
+                    } else if let Some(existing) = rows.iter_mut().find(|r| r.name == name) {
+                        *existing = row.clone();
+                    } else {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        self.adopt_pane_sessions();
+        agent_id
     }
 
     /// What a maximized-header tab says for the pane at `index`: the
@@ -3237,6 +3708,7 @@ impl App {
                         // Placeholders carry no timestamp; only platform
                         // records can be adopted as a pane's real name.
                         .filter(|s| s.created_at.is_some())
+                        .filter(|s| s.is_shell())
                         .map(|s| (s.name.clone(), s.attached, s.running, s.created_at))
                         .collect();
                 }
@@ -3276,15 +3748,11 @@ impl App {
         self.take_session(index)
     }
 
-    /// Refetch one agent's sessions, wherever it is in the tree.
-    ///
-    /// Only when someone is looking: the row is expanded, so its session rows
-    /// are on screen, or there is an open pane onto the agent — a session
-    /// started or ended from that pane changes the `(N)` beside a collapsed
-    /// row, and refusing to refetch left that count wrong until the agent was
-    /// expanded again.
+    /// User-requested discovery on one running machine, coalesced in flight.
     pub fn refresh_agent_sessions(&mut self, agent_id: &str) -> Option<Effect> {
-        let has_pane = self.sessions.iter().any(|s| s.agent_id == agent_id);
+        if self.thread_refreshing(agent_id) {
+            return None;
+        }
         for w in 0..self.tree.len() {
             for p in 0..self.tree[w].projects.len() {
                 for e in 0..self.tree[w].projects[p].envs.len() {
@@ -3294,7 +3762,7 @@ impl App {
                     let Some(a) = agents.iter().position(|agent| agent.id == agent_id) else {
                         continue;
                     };
-                    if !agents[a].expanded && !has_pane {
+                    if agents[a].status != "running" {
                         return None;
                     }
                     return Some(Effect::LoadSessions {
@@ -3366,7 +3834,11 @@ impl App {
                 // Dropping the session detaches its local half; the agent
                 // stays running (sleeping is deliberate, never a side effect).
                 if let Some(session) = self.take_session(i) {
-                    if watched && unasked && settled {
+                    if watched
+                        && unasked
+                        && settled
+                        && !super::super::client_sessions::is_client(&session.durable_name)
+                    {
                         respawn = Some((session.agent_id.clone(), session.harness.clone()));
                     }
                     closed = Some(session.agent_name.clone());
@@ -3563,6 +4035,10 @@ impl App {
             && let Some(session) = self.console_session(w, p, e, a, i)
         {
             let name = session.name.clone();
+            if super::super::client_sessions::is_client(&name) {
+                self.maximized = true;
+                return self.reattach_row(row.kind);
+            }
             let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
             return Some(Effect::FullScreen {
                 agent_id,
@@ -3571,10 +4047,40 @@ impl App {
             });
         }
         let session = self.sessions.get(self.active?)?;
+        if super::super::client_sessions::is_client(&session.durable_name) {
+            self.maximized = true;
+            return None;
+        }
         Some(Effect::FullScreen {
             agent_id: session.agent_id.clone(),
             session_name: session.durable_name.clone(),
             agent_name: session.agent_name.clone(),
+        })
+    }
+
+    /// Choose the VM the user is looking at, never the default launch target
+    /// or a different pane when the tree has focus.
+    fn shell_agent(&self) -> Option<(String, String)> {
+        if self.focus == ManageFocus::Session {
+            let session = self.active_session()?;
+            return Some((session.agent_id.clone(), session.agent_name.clone()));
+        }
+        match self.selected_row()?.kind {
+            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => {
+                self.agent_at(w, p, e, a)
+            }
+            _ => None,
+        }
+    }
+
+    fn open_shell(&mut self) -> Option<Effect> {
+        let Some((agent_id, agent_name)) = self.shell_agent() else {
+            self.status = "Select a VM to open an SSH shell".into();
+            return None;
+        };
+        Some(Effect::OpenShell {
+            agent_id,
+            agent_name,
         })
     }
 
@@ -3762,10 +4268,17 @@ impl App {
                         continue;
                     };
                     for (a, agent) in agents.iter_mut().enumerate() {
-                        if agent.status != "running" || agent.sessions != LoadSessions::NotLoaded {
+                        if agent.status != "running"
+                            || self.discovered.contains(&agent.id)
+                            || self.thread_polls.contains(&agent.id)
+                        {
                             continue;
                         }
-                        agent.sessions = LoadSessions::Loading;
+                        if !matches!(agent.sessions, LoadSessions::Loaded(_)) {
+                            agent.sessions = LoadSessions::Loading;
+                        }
+                        self.discovered.insert(agent.id.clone());
+                        self.thread_polls.insert(agent.id.clone());
                         out.push(Effect::LoadSessions {
                             agent_id: agent.id.clone(),
                             environment_id: environment_id.clone(),
@@ -3811,19 +4324,14 @@ impl App {
                         // runs — and which has already marked what it claimed
                         // as loading. Asking about those here as well would be
                         // two requests for one agent.
-                        if agent.sessions == LoadSessions::Loading {
+                        if agent.sessions == LoadSessions::Loading
+                            || self.thread_polls.contains(&agent.id)
+                        {
                             continue;
                         }
-                        // A failed fetch retries on the refresh cadence,
-                        // watched or not: a transient 502 during the startup
-                        // prefetch would otherwise leave the agent showing
-                        // zero threads forever — nothing else re-asks for an
-                        // unexpanded row.
+                        // Explicit refresh also retries failed discovery.
                         let failed = matches!(agent.sessions, LoadSessions::Failed(_));
-                        // A loaded thread's row is always on screen now — the
-                        // sidebar lists sessions, not agents — so a running
-                        // agent whose threads are visible stays on the refresh
-                        // cadence: its labels are live status text.
+                        // Loaded threads are visible even on collapsed agents.
                         let visible = matches!(&agent.sessions, LoadSessions::Loaded(sessions)
                             if sessions.iter().any(|s| s.is_interesting()));
                         let watched = agent.expanded
@@ -3987,13 +4495,17 @@ impl App {
     fn alt_action(&mut self, action: char) -> Option<Effect> {
         self.status.clear();
         match action {
+            'b' if self.screen == Screen::Manage && self.confirm.is_none() && !self.keys_open => {
+                self.open_shell()
+            }
             's' => {
                 self.start_settings();
                 None
             }
             'f' => {
+                let was_full = self.pane_is_full();
                 self.toggle_maximized();
-                None
+                (was_full && !self.pane_is_full()).then_some(Effect::RefreshAll)
             }
             ']' => self.cycle_session(true),
             '[' => self.cycle_session(false),
@@ -4384,19 +4896,19 @@ impl App {
                 self.full_screen_current()
             }
             KeyCode::Char('f') => self.full_screen_current(),
-            // The command to reach this exact session from another terminal —
-            // the same one the dashboard hands out.
+            // A separate shell on this exact VM, even from a session row.
             KeyCode::Char('c') => {
-                let RowKind::Session(w, p, e, a, i) = row?.kind else {
-                    self.status = "Select a session to copy its ssh command".into();
-                    return None;
+                let (w, p, e, a) = match row?.kind {
+                    RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+                    _ => {
+                        self.status = "Select a VM or session to copy its SSH shell command".into();
+                        return None;
+                    }
                 };
-                let session_name = self.console_session(w, p, e, a, i)?.name.clone();
                 let (agent_id, _) = self.agent_at(w, p, e, a)?;
                 Some(Effect::CopySsh {
                     agent_id,
                     environment_id: self.tree[w].projects[p].envs[e].id.clone(),
-                    session_name,
                 })
             }
             KeyCode::Right | KeyCode::Char('l') => self.set_expanded(row?.kind, true),
@@ -4487,7 +4999,7 @@ impl App {
             }
             // `x` ends the highlighted session — on the agent, not just here.
             // Connected or not: the session lives on the VM either way.
-            KeyCode::Char('x') => {
+            KeyCode::Char('x') | KeyCode::Char('X') => {
                 let kind = row?.kind;
                 let RowKind::Session(w, p, e, a, i) = kind else {
                     // On an agent, close our window onto it without ending
@@ -4503,6 +5015,16 @@ impl App {
                 let name = self.console_session(w, p, e, a, i)?.name.clone();
                 let (agent_id, _) = self.agent_at(w, p, e, a)?;
                 let environment_id = self.tree[w].projects[p].envs[e].id.clone();
+                if super::super::client_sessions::is_client(&name) {
+                    if super::super::client_sessions::parse_name(&name)
+                        .is_some_and(|(_, _, id)| id.is_none())
+                    {
+                        return self
+                            .pane_for_row(kind)
+                            .map(|index| Effect::CloseSession { index });
+                    }
+                    return self.delete_thread_row(w, p, e, a, i);
+                }
                 self.ending.insert(name.clone());
                 Some(Effect::KillSession {
                     agent_id,
@@ -4525,6 +5047,9 @@ impl App {
                 // way: blanking it would fold the group and move every row.
                 if !matches!(env.agents, Load::Loaded(_)) {
                     env.agents = Load::Loading;
+                }
+                for agent in env.agents_vec() {
+                    self.discovered.remove(&agent.id);
                 }
                 Some(Effect::LoadAgents {
                     environment_id: env.id.clone(),
@@ -4978,92 +5503,17 @@ impl App {
         self.reveal_environment(&environment_id)
     }
 
-    /// How long until the tree should ask the platform for everything again, or
-    /// `None` while an automatic refresh would be wrong.
-    ///
-    /// The loop arms a timer with this, so `None` means an idle TUI goes back to
-    /// blocking on the keyboard rather than waking on a schedule to decide there
-    /// was nothing to do.
-    ///
-    /// What suppresses it, and why:
-    ///
-    /// - A refresh already in flight, or a rate limit we were told to wait out.
-    /// - A launch: the pipeline is mid-provision and reports its own progress,
-    ///   and its environment gets refetched when the session opens.
-    /// - A wake or a sleep in progress: [`WATCH_TICK`] is already asking that
-    ///   environment every 1.5s, which is both faster and narrower.
-    /// - A card owning the screen — first-run setup, the settings card, the ssh
-    ///   key question, a delete confirmation. None of them show the tree, and
-    ///   rows moving under a `y/N` question is how the wrong thing gets deleted.
-    /// - A maximized pane, where the tree is folded away entirely. It refreshes
-    ///   when it comes back.
-    pub fn auto_refresh_in(&self) -> Option<std::time::Duration> {
-        if self.refreshing
-            || self.loading.active
-            || self.watching_agents()
-            || self.confirm.is_some()
-            || self.ssh_gate.is_some()
-            || self.wizard.is_some()
-            || self.settings.is_some()
-            || self.pane_is_full()
-        {
-            return None;
-        }
-        let now = std::time::Instant::now();
-        if let Some(until) = self.refresh_paused_until {
-            if until > now {
-                return Some(until - now);
-            }
-        }
-        let Some(last) = self.last_refresh else {
-            // Nothing has refreshed yet, which means the startup fetch is still
-            // on its way; give it the interval before asking again.
-            return Some(AUTO_REFRESH_EVERY);
-        };
-        Some(AUTO_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
+    pub(super) fn mark_thread_refresh(&mut self, agent_id: &str) {
+        self.thread_polls.insert(agent_id.into());
     }
 
-    /// Is a refresh due right now? The timer can fire early — it is re-armed
-    /// from a shortened remainder every time round the loop — so the decision is
-    /// made here rather than by the fact of waking up.
-    pub fn auto_refresh_due(&self) -> bool {
-        self.auto_refresh_in() == Some(std::time::Duration::ZERO)
+    pub(super) fn thread_refreshing(&self, agent_id: &str) -> bool {
+        self.thread_polls.contains(agent_id)
     }
 
-    /// Time until the watched threads should be re-asked about — the fast lane
-    /// behind the sidebar's live labels, much tighter than the account
-    /// refresh: a prompt lands and its row should say so in seconds, not at
-    /// the 25s tick. Narrow by construction — [`Self::sessions_to_refresh`]
-    /// names only running agents someone can see — so the cost is one
-    /// per-agent query per tick, and the gate transcript dials behind it are
-    /// cached until a thread actually reports something new.
-    ///
-    /// `None` when there is nothing to poll for, or a rate limit said to wait.
-    pub fn thread_refresh_in(&self) -> Option<std::time::Duration> {
-        if self.screen != Screen::Manage || self.sessions_to_refresh().is_empty() {
-            return None;
-        }
-        let now = std::time::Instant::now();
-        if let Some(until) = self.refresh_paused_until
-            && until > now
-        {
-            return Some(until - now);
-        }
-        let Some(last) = self.last_thread_refresh else {
-            return Some(THREAD_REFRESH_EVERY);
-        };
-        Some(THREAD_REFRESH_EVERY.saturating_sub(now.duration_since(last)))
-    }
-
-    /// Note that the fast thread poll ran, arming the next tick.
-    pub fn thread_refresh_started(&mut self) {
-        self.last_thread_refresh = Some(std::time::Instant::now());
-    }
-
-    /// The fast tick's work: what [`Self::sessions_to_refresh`] names, minus
+    /// On-demand work: what [`Self::sessions_to_refresh`] names, minus
     /// agents whose previous ask is still in flight, marked as in flight.
-    pub fn threads_to_poll(&mut self) -> Vec<Effect> {
-        self.thread_refresh_started();
+    pub fn threads_to_refresh(&mut self) -> Vec<Effect> {
         let effects: Vec<Effect> = self
             .sessions_to_refresh()
             .into_iter()
@@ -5080,27 +5530,21 @@ impl App {
         effects
     }
 
-    /// Note that a refresh has started, so the next automatic one is a full
-    /// interval away and a second one cannot be started on top of it.
+    /// Start a new on-demand discovery pass, coalescing concurrent requests.
     pub fn refresh_started(&mut self) {
         self.refreshing = true;
-        self.last_refresh = Some(std::time::Instant::now());
+        self.discovered.clear();
     }
 
     /// A refresh finished, whatever it found.
     pub fn refresh_finished(&mut self) {
         self.refreshing = false;
-        self.last_refresh = Some(std::time::Instant::now());
     }
 
     /// Report a finished account-wide refresh — but only when someone asked for
     /// one.
     ///
-    /// A keypress needs an answer: silence after ⌥r is indistinguishable from a
-    /// chord that isn't bound. The automatic refresh needs the opposite, and the
-    /// tree itself is its report — a status line rewritten every 25s would
-    /// scrub whatever was there, and turn an idle screen into something that
-    /// looks busy.
+    /// Only the explicit refresh chord needs a status-line acknowledgement.
     pub fn refreshed(&mut self, agents: usize) {
         if !std::mem::take(&mut self.refresh_announce) {
             return;
@@ -5418,7 +5862,7 @@ fn project_agent_count(project: &ProjectNode) -> usize {
 /// Everywhere else the unshifted chord is simply absent — it can go dead, but
 /// never misfire.
 fn alt_chord(key: &KeyEvent) -> Option<char> {
-    const ACTIONS: &[char] = &['f', 's', 'n', 'p', 'r', ']', '['];
+    const ACTIONS: &[char] = &['b', 'f', 's', 'n', 'p', 'r', ']', '['];
     if key.modifiers.contains(KeyModifiers::ALT) {
         if let KeyCode::Char(c) = key.code {
             let c = match c.to_ascii_lowercase() {
@@ -5438,6 +5882,7 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
     // nothing until the next keystroke, so without Meta it simply doesn't
     // exist — the same trade ⌥[ documents above.
     match key.code {
+        KeyCode::Char('∫') => Some('b'),
         KeyCode::Char('ƒ') => Some('f'),
         KeyCode::Char('ß') => Some('s'),
         KeyCode::Char('π') => Some('p'),
@@ -5478,16 +5923,16 @@ fn merge_agents(previous: Vec<Agent>, fresh: Vec<Agent>) -> Vec<Agent> {
         .map(|mut agent| {
             if let Some((expanded, sessions)) = kept.remove(&agent.id) {
                 agent.expanded = expanded;
-                // Sessions live on the machine, and a machine that is not
-                // running has none — carrying the old list across a sleep
-                // kept rows for sessions that no longer exist, forever,
-                // because the refresh cadence only asks running agents.
-                // NotLoaded rather than an empty list: when the agent runs
-                // again the prefetch re-asks, and anything that survived the
-                // wake comes back on its own. A pane we are still attached
-                // to is folded back in by `adopt_pane_sessions`.
+                // Saved conversations survive sleep; live shell transports do not.
                 agent.sessions = if agent.status == "running" {
                     sessions
+                } else if let LoadSessions::Loaded(rows) = sessions {
+                    let rows = super::cache::snapshot(&agent.id, rows);
+                    if rows.is_empty() {
+                        LoadSessions::NotLoaded
+                    } else {
+                        LoadSessions::Loaded(rows)
+                    }
                 } else {
                     LoadSessions::NotLoaded
                 };
@@ -5886,11 +6331,7 @@ mod tests {
             Ok(vec![ConsoleSession {
                 name: "merry-daisy-ld9".into(),
                 kind: "SHELL".into(),
-                command: Some(
-                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
-                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'ship the release notes today'; printf 'x'"
-                        .into(),
-                ),
+                command: Some("exec bash -l".into()),
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
@@ -5899,8 +6340,8 @@ mod tests {
         );
         assert_eq!(
             a.session_tab_label(0),
-            "railway-ld9",
-            "the tab takes the listed name, folded short"
+            "merry-daisy-ld9",
+            "a shell tab takes the listed transport name"
         );
     }
 
@@ -6028,6 +6469,341 @@ mod tests {
     /// the listed name and the placeholder collapses into the real row,
     /// rather than both standing as duplicates.
     #[test]
+    fn client_conversation_keeps_its_identity_and_reconnects_without_becoming_an_ssh_session() {
+        let mut a = loaded_app();
+        let name = super::super::super::client_sessions::name("codex", "ca_1", Some("thread-1"));
+        let thread = super::super::super::client_sessions::Thread {
+            id: "thread-1".into(),
+            title: "Fix deployment startup".into(),
+            directory: "/app".into(),
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
+            updated_at: "now".into(),
+            state: "idle".into(),
+        };
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = name.clone();
+        pane.harness = "codex".into();
+        a.attach_session(pane, "ca_1".into());
+        let shell = ConsoleSession {
+            name: "unrelated-shell".into(),
+            kind: "SHELL".into(),
+            command: Some("bash".into()),
+            running: true,
+            attached: true,
+            created_at: None,
+            snapshot: None,
+        };
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![shell.clone()]));
+        assert_eq!(
+            a.sessions[0].durable_name, name,
+            "never adopt the SSH shell's identity"
+        );
+        for _ in 0..2 {
+            a.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![
+                    shell.clone(),
+                    ConsoleSession::client_thread("ca_1", "codex", Some(&thread)),
+                ]),
+            );
+        }
+        let rows = a.rows();
+        let instance_rows: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.label == "Fix deployment startup")
+            .collect();
+        assert_eq!(instance_rows.len(), 1);
+        assert!(
+            a.take_auto_connects()
+                .iter()
+                .all(|c| c.session_name != name),
+            "history never spawns clients automatically"
+        );
+        a.cursor = instance_rows[0].0;
+        a.focus = ManageFocus::Tree;
+        assert_eq!(a.on_key(key(KeyCode::Char('f'))), None);
+        assert!(a.maximized);
+        a.focus = ManageFocus::Tree;
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('x'))),
+            Some(Effect::DeleteThread { .. })
+        ));
+        drop(a.take_session(0));
+        // A rejected delete restores the resumable native row, not an SSH name.
+        a.thread_deleted(&name, Some("offline".into()));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "Fix deployment startup")
+            .unwrap();
+        a.focus = ManageFocus::Tree;
+        assert!(
+            matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, agent_id, .. }) if session_name == name && agent_id == "ca_1")
+        );
+    }
+
+    #[test]
+    fn all_harnesses_promote_and_rename_a_thread_in_place_without_stealing_navigation() {
+        use super::super::super::{client_sessions, remote_threads::tests::thread};
+        for harness in [
+            "claude",
+            "grok",
+            "codex",
+            "opencode",
+            "opencode2",
+            "railway",
+        ] {
+            let mut app = loaded_app();
+            let mut pane = session("ca_1", "box");
+            pane.harness = harness.into();
+            pane.durable_name = client_sessions::draft_name(harness, "ca_1", "our-pane");
+            pane.client_id = Some("our-pane".into());
+            app.attach_session(pane, "ca_1".into());
+            let draft_index = app.cursor;
+            assert_eq!(app.selected_row().unwrap().label, "New Thread");
+            let mut saved = thread(harness, "real-id").thread;
+            saved.title = "New Thread".into();
+            app.client_thread_selected("our-pane", saved.clone());
+            assert_eq!(app.cursor, draft_index);
+            assert_eq!(
+                app.sessions[0].durable_name,
+                client_sessions::name(harness, "ca_1", Some("real-id"))
+            );
+            // Move elsewhere while a title is generated in the active pane.
+            app.focus = ManageFocus::Tree;
+            app.cursor = 0;
+            saved.title = "Typical weather in Sacramento".into();
+            app.client_thread_selected("our-pane", saved.clone());
+            assert_eq!(
+                app.cursor, 0,
+                "{harness}: title updates must not move the cursor"
+            );
+            assert!(
+                app.rows()[draft_index]
+                    .label
+                    .starts_with("Typical weather in ")
+            );
+            assert_eq!(
+                app.sessions[0].client_thread.as_ref().unwrap().title,
+                "Typical weather in Sacramento"
+            );
+            let before: Vec<_> = app
+                .rows()
+                .iter()
+                .map(|r| (r.kind, r.label.clone()))
+                .collect();
+            app.set_agent_expanded((0, 0, 0, 0), true);
+            app.mark_thread_refresh("ca_1");
+            assert!(app.thread_refreshing("ca_1"));
+            assert_eq!(
+                before,
+                app.rows()
+                    .iter()
+                    .map(|r| (r.kind, r.label.clone()))
+                    .collect::<Vec<_>>()
+            );
+            app.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![ConsoleSession::client_thread(
+                    "ca_1",
+                    harness,
+                    Some(&saved),
+                )]),
+            );
+            assert_eq!(app.cursor, 0);
+            assert!(!app.thread_refreshing("ca_1"));
+            assert!(app.rows().iter().all(|r| !r.label.starts_with("[S]")));
+        }
+    }
+
+    #[test]
+    fn refresh_preserves_order_selection_and_an_explicitly_collapsed_agent() {
+        use super::super::super::remote_threads::tests::thread;
+        let mut app = loaded_app();
+        let mut first = thread("claude", "first").thread;
+        first.title = "First title".into();
+        let mut second = thread("claude", "second").thread;
+        second.title = "Second title".into();
+        let rows = |first: &super::super::super::client_sessions::Thread,
+                    second: &super::super::super::client_sessions::Thread| {
+            vec![
+                ConsoleSession::client_thread("ca_1", "claude", Some(first)),
+                ConsoleSession::client_thread("ca_1", "claude", Some(second)),
+            ]
+        };
+        app.set_agent_expanded((0, 0, 0, 0), true);
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows(&first, &second)));
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "Second title")
+            .unwrap();
+        let selected = app.cursor;
+        first.title = "Renamed first title".into();
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows(&second, &first)));
+        assert_eq!(app.cursor, selected);
+        assert_eq!(app.selected_row().unwrap().label, "Second title");
+        assert_eq!(app.rows()[selected - 1].label, "Renamed first title");
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Agent(0, 0, 0, 0)))
+            .unwrap();
+        app.set_agent_expanded((0, 0, 0, 0), false);
+        let collapsed = app.rows();
+        assert!(matches!(
+            app.auto_expand_agent(),
+            Some(Effect::LoadSessions { .. })
+        ));
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("offline".into()));
+        assert_eq!(app.rows().len(), collapsed.len());
+        assert_eq!(app.selected_row().unwrap().expanded, Some(false));
+    }
+
+    #[test]
+    fn only_interactive_vm_shells_use_session_rows() {
+        let mut row = ConsoleSession {
+            name: "console".into(),
+            kind: "SHELL".into(),
+            command: Some("exec bash -l".into()),
+            running: true,
+            attached: false,
+            created_at: None,
+            snapshot: None,
+        };
+        assert!(row.is_interesting());
+        assert!(row.thread_label().starts_with("[S]"));
+        for harness in [
+            "claude",
+            "grok",
+            "codex",
+            "opencode",
+            "opencode2",
+            "railway-agent-tui",
+        ] {
+            row.command = Some(format!("export RAILWAY_CODE_AUTOSTARTED=1; {harness}"));
+            assert!(!row.is_interesting(), "{harness} is not a shell");
+            assert!(!row.thread_label().starts_with("[S]"));
+        }
+        row.kind = "EXEC".into();
+        row.command = Some("python3 -".into());
+        assert!(!row.is_interesting());
+    }
+
+    #[test]
+    fn remote_threads_adopt_the_exact_pane_and_resume_from_the_left_list() {
+        use super::super::super::remote_threads::tests::thread;
+        for harness in ["claude", "grok"] {
+            let mut a = loaded_app();
+            let mut pane = session("ca_1", "box");
+            pane.durable_name = "relay-one".into();
+            pane.console_name = Some("relay-one".into());
+            pane.client_id = Some("our-pane".into());
+            a.attach_session(pane, "ca_1".into());
+            let mut first = thread(harness, "first");
+            first.pane_id = Some("our-pane".into());
+            first.console_name = Some("relay-one".into());
+            first.thread.title = "First task".into();
+            a.remote_threads_loaded("ca_1", &[first.clone()]);
+            a.sessions_loaded(
+                (0, 0, 0, 0),
+                "ca_1",
+                Ok(vec![ConsoleSession::client_thread(
+                    "ca_1",
+                    harness,
+                    Some(&first.thread),
+                )]),
+            );
+            assert_eq!(a.sessions[0].durable_name, first.name("ca_1"));
+            assert_eq!(a.sessions[0].console_name.as_deref(), Some("relay-one"));
+            assert_eq!(a.selected_row().unwrap().label, "First task");
+            let mut second = first.clone();
+            second.thread.id = "second".into();
+            second.thread.title = "Second task".into();
+            first.pane_id = None;
+            first.console_name = None;
+            a.remote_threads_loaded("ca_1", &[first.clone(), second.clone()]);
+            let rows = vec![
+                ConsoleSession::client_thread("ca_1", harness, Some(&first.thread)),
+                ConsoleSession::client_thread("ca_1", harness, Some(&second.thread)),
+            ];
+            a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+            assert_eq!(a.sessions[0].durable_name, second.name("ca_1"));
+            assert_eq!(a.selected_row().unwrap().label, "Second task");
+            assert!(a.take_auto_connects().is_empty());
+            let mut partial = Vec::new();
+            a.preserve_failed_threads("ca_1", &[harness.into()], &mut partial);
+            assert_eq!(partial.len(), 2);
+            drop(a.take_session(0));
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|row| row.label == "First task")
+                .unwrap();
+            a.focus = ManageFocus::Tree;
+            assert!(
+                matches!(a.on_key(key(KeyCode::Enter)), Some(Effect::Reattach { session_name, agent_id, .. })
+                if session_name == first.name("ca_1") && agent_id == "ca_1")
+            );
+        }
+    }
+
+    #[test]
+    fn native_thread_selection_and_title_refresh_follow_ids_not_row_positions() {
+        use super::super::super::client_sessions::{self, Thread};
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "box");
+        pane.harness = "codex".into();
+        pane.durable_name = client_sessions::name("codex", "ca_1", None);
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        let first = Thread {
+            id: "thread-1".into(),
+            title: "First conversation".into(),
+            directory: "/app".into(),
+            created_at: None,
+            updated_at: String::new(),
+            state: "idle".into(),
+        };
+        a.client_thread_selected("local-client", first.clone());
+        assert_eq!(a.session_tab_label(0), "First conversation");
+        assert!(!a.rows().iter().any(|r| r.label.contains("New codex")));
+        let mut second = first.clone();
+        second.id = "thread-2".into();
+        second.title = "Second conversation".into();
+        a.client_thread_selected("local-client", second.clone());
+        assert_eq!(
+            a.sessions[0].durable_name,
+            client_sessions::name("codex", "ca_1", Some("thread-2"))
+        );
+        let rows = vec![
+            ConsoleSession::client_thread("ca_1", "codex", Some(&first)),
+            ConsoleSession::client_thread("ca_1", "codex", Some(&second)),
+        ];
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "First conversation")
+            .unwrap();
+        let mut renamed = first.clone();
+        renamed.title = "Renamed conversation".into();
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![
+                ConsoleSession::client_thread("ca_1", "codex", Some(&second)),
+                ConsoleSession::client_thread("ca_1", "codex", Some(&renamed)),
+            ]),
+        );
+        assert_eq!(a.selected_row().unwrap().label, "Renamed conversation");
+        assert!(a.take_auto_connects().is_empty());
+    }
+
+    #[test]
     fn a_platform_listing_renames_the_pane_instead_of_duplicating() {
         let mut a = loaded_app();
         let mut pane = session("ca_1", "nimble-otter");
@@ -6042,11 +6818,7 @@ mod tests {
             Ok(vec![ConsoleSession {
                 name: "merry-daisy-ld9".into(),
                 kind: "SHELL".into(),
-                command: Some(
-                    "export RAILWAY_CODE_AUTOSTARTED=1; railway-agent-tui --session \
-                     \"$RAILWAY_DURABLE_SESSION_NAME\" 'My firs test'; printf 'x'"
-                        .into(),
-                ),
+                command: Some("exec bash -l".into()),
                 running: true,
                 attached: true,
                 created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0),
@@ -6064,7 +6836,10 @@ mod tests {
             .filter(|r| matches!(r.kind, RowKind::Session(..)))
             .collect();
         assert_eq!(threads.len(), 1, "one session, one row: {rows:#?}");
-        assert_eq!(threads[0].label, "[S] railway-ld9", "the name leads");
+        assert_eq!(
+            threads[0].label, "[S] merry-daisy-ld9",
+            "the shell name leads"
+        );
         assert!(threads[0].note.is_empty(), "the orb and name are the row");
         assert_eq!(
             threads[0].status.as_deref(),
@@ -6073,7 +6848,7 @@ mod tests {
         );
         assert_eq!(
             a.selected_row().unwrap().label,
-            "[S] railway-ld9",
+            "[S] merry-daisy-ld9",
             "the cursor followed the rename"
         );
     }
@@ -6549,15 +7324,18 @@ mod tests {
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
         session.resize(6, 60);
         session.send(b"see https://railway.com/deploy now\r\n");
-        for _ in 0..40 {
-            if session
-                .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("railway.com"))
-            {
+        // ConPTY can deliver the echoed URL in several reads on a busy runner.
+        // Wait for the complete link, rather than clicking a partial hostname.
+        for _ in 0..500 {
+            if session.url_at(0, 8).as_deref() == Some("https://railway.com/deploy") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert_eq!(
+            session.url_at(0, 8).as_deref(),
+            Some("https://railway.com/deploy")
+        );
         a.attach_session(session, "ca_1".into());
         a.panes.session = PaneBox {
             x: 34,
@@ -6706,7 +7484,7 @@ mod tests {
             "nothing else is on screen to have the keyboard"
         );
 
-        assert_eq!(a.on_key(alt('f')), None);
+        assert_eq!(a.on_key(alt('f')), Some(Effect::RefreshAll));
         assert!(!a.maximized);
     }
 
@@ -7453,10 +8231,13 @@ mod tests {
     fn shift_tab_cycles_the_harness_on_the_prompt() {
         let mut a = app();
         assert_eq!(a.harness_name(), "claude");
+        a.set_harness(Some("railway"));
+        a.on_key(key(KeyCode::BackTab));
+        assert_eq!(a.harness_name(), "grok");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "codex");
         a.on_key(key(KeyCode::BackTab));
-        assert_eq!(a.harness_name(), "grok");
+        assert_eq!(a.harness_name(), "claude");
         a.on_key(key(KeyCode::BackTab));
         assert_eq!(a.harness_name(), "opencode");
         a.on_key(key(KeyCode::BackTab));
@@ -7664,7 +8445,7 @@ mod tests {
         let Some(Effect::SaveSettings(outcome)) = a.on_key(key(KeyCode::Right)) else {
             panic!("expected a save");
         };
-        assert_eq!(outcome.agent, "codex");
+        assert_eq!(outcome.agent, "opencode");
         assert_eq!(
             outcome.theme, a.theme.slug,
             "the rest rides along unchanged"
@@ -9284,10 +10065,7 @@ mod tests {
             }]);
         }
         let effect = b.reattach_target_gone("ca_1", "nimble-otter", "claude-one");
-        assert!(
-            matches!(effect, Some(Effect::LoadSessions { .. })),
-            "{effect:?}"
-        );
+        assert_eq!(effect, None, "a sleeping VM must not be dialed for history");
         assert!(!b.toast.as_ref().unwrap().ok, "announced as a failure");
     }
 
@@ -9408,10 +10186,9 @@ mod tests {
         assert!(a.confirm.is_none(), "a key read is not a key pressed");
     }
 
-    /// `c` copies a command for the highlighted session, and says so when
-    /// there is no session under the cursor.
+    /// `c` copies a shell command for the VM behind either kind of row.
     #[test]
-    fn c_copies_an_ssh_command_for_the_session() {
+    fn c_copies_an_ssh_shell_command_for_a_vm_or_session() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -9435,7 +10212,19 @@ mod tests {
             Some(Effect::CopySsh {
                 agent_id: "ca_1".into(),
                 environment_id: "env_prod".into(),
-                session_name: "claude-one".into(),
+            })
+        );
+
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('c'))),
+            Some(Effect::CopySsh {
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
             })
         );
 
@@ -9444,7 +10233,93 @@ mod tests {
         a.cursor = 0;
         a.prompt_focused = false;
         assert_eq!(a.on_key(key(KeyCode::Char('c'))), None);
-        assert!(a.status.contains("Select a session"), "{}", a.status);
+        assert!(a.status.contains("Select a VM"), "{}", a.status);
+    }
+
+    #[test]
+    fn option_b_opens_the_selected_vm_including_without_an_agent_session() {
+        for chord in [alt('b'), alt('B'), key(KeyCode::Char('∫'))] {
+            let mut a = loaded_app();
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.label == "nimble-otter")
+                .unwrap();
+            assert_eq!(
+                a.on_key(chord),
+                Some(Effect::OpenShell {
+                    agent_id: "ca_1".into(),
+                    agent_name: "nimble-otter".into(),
+                })
+            );
+            assert!(a.sessions.is_empty());
+        }
+    }
+
+    #[test]
+    fn option_b_uses_the_focused_panes_vm_and_keeps_the_session() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_other", "other-vm"), "ca_other".into());
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        a.focus = ManageFocus::Session;
+        assert_eq!(
+            a.on_key(alt('b')),
+            Some(Effect::OpenShell {
+                agent_id: "ca_other".into(),
+                agent_name: "other-vm".into(),
+            })
+        );
+        assert_eq!(a.sessions.len(), 1);
+        assert_eq!(a.focus, ManageFocus::Session);
+
+        // With the tree focused, its row wins over that unrelated pane.
+        a.focus = ManageFocus::Tree;
+        assert_eq!(
+            a.on_key(alt('b')),
+            Some(Effect::OpenShell {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+            })
+        );
+        a.cursor = 0;
+        assert_eq!(a.on_key(alt('b')), None);
+        assert!(a.status.contains("Select a VM"));
+    }
+
+    #[test]
+    fn option_b_respects_dialogs_and_the_ssh_key_gate() {
+        let mut a = loaded_app();
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        a.on_key(key(KeyCode::Char('?')));
+        assert_eq!(a.on_key(alt('b')), None);
+        a.keys_open = false;
+        a.on_key(key(KeyCode::Char('d')));
+        assert!(a.confirm.is_some());
+        assert_eq!(a.on_key(alt('b')), None);
+        a.confirm = None;
+
+        let held = HeldConnect::OpenShell {
+            agent_id: "ca_1".into(),
+            agent_name: "nimble-otter".into(),
+        };
+        a.ssh_key = SshKeyState::NeedsRegistration(offer());
+        assert!(a.hold_for_ssh_key(held.clone()));
+        assert_eq!(a.ssh_gate.as_ref().unwrap().then, Some(held.clone()));
+        assert_eq!(
+            held.into_effect(),
+            Effect::OpenShell {
+                agent_id: "ca_1".into(),
+                agent_name: "nimble-otter".into(),
+            }
+        );
     }
 
     /// Landing on an agent opens it, so its sessions are there without a
@@ -9501,7 +10376,10 @@ mod tests {
             .unwrap();
         a.cursor = agent_row - 1;
 
-        assert_eq!(a.on_key(key(KeyCode::Down)), None);
+        assert!(matches!(
+            a.on_key(key(KeyCode::Down)),
+            Some(Effect::LoadSessions { .. })
+        ));
         assert!(
             !a.rows()
                 .iter()
@@ -9947,7 +10825,7 @@ mod tests {
             "ca_1",
             Ok(vec![ConsoleSession {
                 name: "sess-7".into(),
-                command: Some("claude".into()),
+                command: Some("bash -l".into()),
                 kind: "SHELL".into(),
                 running: true,
                 attached: false,
@@ -9956,10 +10834,7 @@ mod tests {
             }]),
         );
         let rows = a.rows();
-        let session_row = rows
-            .iter()
-            .find(|r| r.label == "[S] claude-sess-7")
-            .unwrap();
+        let session_row = rows.iter().find(|r| r.label == "[S] sess-7").unwrap();
         assert!(matches!(session_row.kind, RowKind::Session(0, 0, 0, 0, 0)));
         assert_eq!(session_row.depth, 1, "a child of its agent");
         assert!(
@@ -10048,7 +10923,10 @@ mod tests {
             running: true,
             ..exec.clone()
         };
-        assert!(detached.is_interesting(), "a live exec is someone's work");
+        assert!(
+            !detached.is_interesting(),
+            "a provisioning exec is never a conversation"
+        );
 
         let dead_shell = ConsoleSession {
             kind: "SHELL".into(),
@@ -10159,8 +11037,11 @@ mod tests {
     #[test]
     fn a_new_session_can_be_refreshed_into_view() {
         let mut a = loaded_app();
-        // Not expanded: nobody is looking, so nothing is fetched.
-        assert_eq!(a.refresh_agent_sessions("ca_1"), None);
+        // Explicit selection refreshes even a collapsed machine's cached list.
+        assert!(matches!(
+            a.refresh_agent_sessions("ca_1"),
+            Some(Effect::LoadSessions { .. })
+        ));
 
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].expanded = true;
@@ -10174,6 +11055,154 @@ mod tests {
             })
         );
         assert_eq!(a.refresh_agent_sessions("nope"), None);
+    }
+
+    #[test]
+    fn discovery_is_on_demand_and_sleep_keeps_cached_threads_without_dialing() {
+        let mut app = loaded_app();
+        let thread = super::super::super::remote_threads::tests::thread("claude", "saved");
+        let row = ConsoleSession::client_thread("ca_1", "claude", Some(&thread.thread));
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![row.clone()]));
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert_eq!(app.activity.next(std::time::Instant::now()), None);
+        app.refresh_started();
+        assert_eq!(app.sessions_to_prefetch().len(), 1);
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert!(app.refresh_agent_sessions("ca_1").is_none());
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![row]));
+        app.refresh_finished();
+        let previous = app.tree[0].projects[0].envs[0].agents_vec().to_vec();
+        let mut asleep = previous.clone();
+        asleep[0].status = "sleeping".into();
+        app.tree[0].projects[0].envs[0].agents = Load::Loaded(merge_agents(previous, asleep));
+        app.refresh_started();
+        assert!(app.sessions_to_prefetch().is_empty());
+        assert!(app.refresh_agent_sessions("ca_1").is_none());
+        assert!(app.set_agent_expanded((0, 0, 0, 0), true).is_none());
+        assert!(
+            matches!(&app.tree[0].projects[0].envs[0].agents_vec()[0].sessions, LoadSessions::Loaded(rows) if rows.len() == 1 && rows[0].short_name() == thread.thread.title)
+        );
+    }
+
+    #[test]
+    fn deleting_a_conversation_is_immediate_scoped_and_rollback_survives_stale_replies() {
+        let mut app = loaded_app();
+        let cache_dir = tempfile::tempdir().unwrap();
+        app.thread_cache = Some(super::super::cache::Cache::for_test(
+            cache_dir.path().into(),
+        ));
+        let row = |harness, id| {
+            ConsoleSession::client_thread(
+                "ca_1",
+                harness,
+                Some(&super::super::super::remote_threads::tests::thread(harness, id).thread),
+            )
+        };
+        let first = row("claude", "first");
+        let victim = row("claude", "target");
+        let other_harness = row("grok", "target");
+        let rows = vec![first.clone(), victim.clone(), other_harness.clone()];
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, 1)))
+            .unwrap();
+        app.focus = ManageFocus::Tree;
+        let mut pane = super::super::session::Session::for_test("ca_1", "VM").unwrap();
+        pane.durable_name = victim.name.clone();
+        pane.harness = "claude".into();
+        pane.client_id = Some("pane-exact".into());
+        app.sessions.push(pane);
+        assert!(
+            matches!(app.on_key(key(KeyCode::Char('X'))), Some(Effect::DeleteThread { session_name, .. }) if session_name == victim.name)
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first.clone(), other_harness.clone()])
+        );
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+        app.client_thread_selected(
+            "pane-exact",
+            super::super::super::remote_threads::tests::thread("claude", "target").thread,
+        );
+        assert_eq!(
+            app.thread_cache
+                .as_ref()
+                .unwrap()
+                .read("env_prod", "ca_1")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first.clone(), other_harness.clone()])
+        );
+        app.thread_deleted(&victim.name, Some("permission denied".into()));
+        assert_eq!(
+            app.thread_cache
+                .as_ref()
+                .unwrap()
+                .read("env_prod", "ca_1")
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(rows.clone())
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.text.contains("permission denied"))
+        );
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| matches!(r.kind, RowKind::Session(0, 0, 0, 0, 1)))
+            .unwrap();
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('x'))),
+            Some(Effect::DeleteThread { .. })
+        ));
+        app.thread_deleted(&victim.name, None);
+        app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows));
+        assert_eq!(
+            app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+            LoadSessions::Loaded(vec![first, other_harness])
+        );
+    }
+
+    #[test]
+    fn concurrent_deletion_failures_restore_original_order_in_either_completion_order() {
+        for reverse in [false, true] {
+            let mut app = loaded_app();
+            let rows: Vec<_> = ["first", "second", "third"]
+                .into_iter()
+                .map(|id| {
+                    ConsoleSession::client_thread(
+                        "ca_1",
+                        "claude",
+                        Some(
+                            &super::super::super::remote_threads::tests::thread("claude", id)
+                                .thread,
+                        ),
+                    )
+                })
+                .collect();
+            app.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(rows.clone()));
+            app.delete_thread_row(0, 0, 0, 0, 1).unwrap();
+            app.delete_thread_row(0, 0, 0, 0, 1).unwrap();
+            for i in if reverse { [2, 1] } else { [1, 2] } {
+                app.thread_deleted(&rows[i].name, Some("offline".into()));
+            }
+            assert_eq!(
+                app.tree[0].projects[0].envs[0].agents_vec()[0].sessions,
+                LoadSessions::Loaded(rows)
+            );
+        }
     }
 
     /// An open pane counts as looking too. Sessions started and ended in there
@@ -10259,92 +11288,6 @@ mod tests {
         assert!(a.status.contains("502 from backboard"), "{}", a.status);
         // Quietly: a background refresh must not raise a toast per tick.
         assert!(a.toast.is_none());
-    }
-
-    /// The automatic refresh stays out of the way of everything that is already
-    /// asking, or that is mid-question.
-    #[test]
-    fn the_auto_refresh_yields_to_everything_that_matters() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        assert!(a.auto_refresh_due(), "due, with nothing in the way");
-
-        // One already in flight.
-        a.refreshing = true;
-        assert_eq!(a.auto_refresh_in(), None);
-        a.refreshing = false;
-
-        // A launch, which reports its own progress and refetches when it lands.
-        a.loading.active = true;
-        assert_eq!(a.auto_refresh_in(), None);
-        a.loading.active = false;
-
-        // A wake, which is already polling that environment every 1.5s.
-        a.watching.insert(
-            "ca_1".into(),
-            AgentWatch {
-                want: "running",
-                environment_id: "env_prod".into(),
-                until: std::time::Instant::now() + WAKE_PATIENCE,
-            },
-        );
-        assert_eq!(a.auto_refresh_in(), None);
-        a.watching.clear();
-
-        // A y/N question: rows moving under it is how the wrong thing gets
-        // deleted.
-        a.confirm = Some(PendingConfirm {
-            op: AgentOp::Delete,
-            agent_id: "ca_1".into(),
-            environment_id: "env_prod".into(),
-            agent_name: "nimble-otter".into(),
-        });
-        assert_eq!(a.auto_refresh_in(), None);
-        a.confirm = None;
-
-        assert!(a.auto_refresh_due(), "and back again once they are gone");
-    }
-
-    /// A refresh that just ran is not due again for a full interval, whoever
-    /// started it — pressing ⌥r pushes the automatic one out rather than having
-    /// it arrive a second later.
-    #[test]
-    fn a_refresh_resets_the_clock() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        assert!(a.auto_refresh_due());
-
-        a.on_key(alt('r'));
-        a.refresh_started();
-        a.refresh_finished();
-        assert!(!a.auto_refresh_due());
-        let remaining = a.auto_refresh_in().expect("still armed");
-        assert!(
-            remaining > AUTO_REFRESH_EVERY / 2,
-            "nearly a full interval: {remaining:?}"
-        );
-    }
-
-    /// A 429 answered by polling on schedule is how a rate limit becomes a
-    /// longer rate limit: the automatic refresh waits out the Retry-After.
-    #[test]
-    fn a_rate_limit_pauses_the_auto_refresh() {
-        let mut a = loaded_app();
-        a.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        a.rate_limited(Some(90));
-
-        assert!(!a.refreshing, "the refused refresh is over");
-        let waiting = a.auto_refresh_in().expect("still armed, just later");
-        assert!(
-            waiting > std::time::Duration::from_secs(60),
-            "waits out the window: {waiting:?}"
-        );
-
-        // Told nothing, it still waits — the alternative is asking again at once.
-        let mut b = loaded_app();
-        b.last_refresh = Some(std::time::Instant::now() - AUTO_REFRESH_EVERY);
-        b.rate_limited(None);
-        assert!(!b.auto_refresh_due());
     }
 
     /// Without `myCloudAgents` a refresh asks per environment — but only about

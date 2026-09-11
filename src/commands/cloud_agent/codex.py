@@ -95,13 +95,13 @@ def port_available(port):
         return False
 
 
-def runtime(environment):
+def runtime(environment, binary="codex"):
     try:
-        help_result = subprocess.run(["codex", "app-server", "--help"], env=environment,
+        help_result = subprocess.run([str(binary), "app-server", "--help"], env=environment,
                                      capture_output=True, text=True, timeout=15, check=True)
         if not all(flag in help_result.stdout for flag in ("--ws-auth", "--ws-token-file", "--listen")):
             raise SetupError("Update Codex on this agent: authenticated App Server WebSockets are required.")
-        version = subprocess.run(["codex", "--version"], env=environment,
+        version = subprocess.run([str(binary), "--version"], env=environment,
                                  capture_output=True, text=True, timeout=15, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         raise SetupError("Could not run Codex on this agent. Install a current @openai/codex release and retry.") from None
@@ -109,6 +109,43 @@ def runtime(environment):
     if not match:
         raise SetupError("Could not identify the remote Codex version.")
     return match[1]
+
+
+def update_runtime(home, root, environment):
+    # Install beside the image's runtime. Validate the new binary before
+    # touching a running server, and keep npm output out of the SSH response.
+    log_path = root / "update.log"
+    try:
+        with log_path.open("w") as log:
+            result = subprocess.run(["npm", "view", "@openai/codex@latest", "version"],
+                                    env=environment, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=log, text=True,
+                                    timeout=60, check=True)
+            version = result.stdout.strip()
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-zA-Z0-9.-]+)?", version):
+                raise SetupError("Could not identify the latest official Codex release.")
+            prefix = Path(home) / ".railway/runtimes/codex-server" / version
+            binary = prefix / "node_modules/.bin/codex"
+            if not binary.is_file():
+                subprocess.run(["npm", "install", "--prefix", str(prefix), "--no-audit",
+                                "--no-fund", f"@openai/codex@{version}"],
+                               env=environment, stdin=subprocess.DEVNULL,
+                               stdout=log, stderr=log, timeout=180, check=True)
+            if runtime(environment, binary) != version:
+                raise SetupError("The installed Codex server does not match the requested release.")
+            return str(binary), version
+    except (OSError, subprocess.SubprocessError):
+        raise SetupError(f"Could not update Codex. Check {log_path} on the agent and retry.") from None
+
+
+def stop_owned(state):
+    if owned_process(state):
+        os.killpg(state["pid"], signal.SIGTERM)
+    deadline = time.monotonic() + 15
+    while owned_process(state):
+        if time.monotonic() >= deadline:
+            raise SetupError("The previous Codex server did not stop for its update. Retry once it exits.")
+        time.sleep(0.1)
 
 
 def server_port(state):
@@ -182,12 +219,18 @@ def setup(request, home):
                 raise SetupError(f"The managed Codex server is unhealthy. Check {root / 'server.log'} on the agent.")
             if state.get("directory") != directory:
                 raise SetupError(f"Codex is already serving {state.get('directory')}. Use connect or --new for a different directory.")
-        else:
+        environment = dict(os.environ, HOME=str(home))
+        environment["PATH"] = f"{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+        if not reused and not port_available(port):
+            raise SetupError(f"Port {port} is occupied by another process. Use --new for a fresh agent.")
+        if action == "start" or not reused:
+            binary, version = update_runtime(home, root, environment)
+            if reused and state.get("version") != version:
+                stop_owned(state)
+                reused = False
+        if not reused:
             if not port_available(port):
                 raise SetupError(f"Port {port} is occupied by another process. Use --new for a fresh agent.")
-            environment = dict(os.environ, HOME=str(home))
-            environment["PATH"] = f"{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            version = runtime(environment)
             token_path = root / "server-token"
             token_path.write_text(token)
             os.chmod(token_path, 0o600)
@@ -196,8 +239,9 @@ def setup(request, home):
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
-                    ["codex", "app-server", "--listen", f"ws://0.0.0.0:{port}",
-                     "--ws-auth", "capability-token", "--ws-token-file", str(token_path)],
+                    [binary, "app-server", "--listen", f"ws://0.0.0.0:{port}",
+                     "--ws-auth", "capability-token", "--ws-token-file", str(token_path),
+                     "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"'],
                     cwd=directory, env=environment, stdin=subprocess.DEVNULL,
                     stdout=log, stderr=subprocess.STDOUT, close_fds=True, start_new_session=True,
                 )

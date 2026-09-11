@@ -3,7 +3,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use super::Connection;
 use crate::config::Configs;
 
@@ -83,6 +84,19 @@ pub(crate) async fn ensure_client(beta: bool) -> Result<Option<PathBuf>> {
         }).await
 }
 
+/// Installation while the CA frame owns the terminal must not print or prompt.
+pub(crate) async fn ensure_client_quiet(beta: bool) -> Result<PathBuf> {
+    if let Some(binary) = find_client(beta) {
+        return Ok(binary);
+    }
+    let home = dirs::home_dir().context("Unable to get home directory")?;
+    if beta {
+        install_beta(&runtime_root(&home)).await
+    } else {
+        install_standard(&home).await
+    }
+}
+
 async fn ensure_client_with<F, I, Fut>(
     found: Option<PathBuf>,
     consent: F,
@@ -102,6 +116,7 @@ where
     Ok(Some(install().await?))
 }
 
+#[cfg(test)]
 fn client_command(binary: &Path, connection: &Connection, beta: bool) -> Command {
     let mut command = Command::new(binary);
     command
@@ -114,21 +129,26 @@ fn client_command(binary: &Path, connection: &Connection, beta: bool) -> Command
     command
 }
 
-pub(crate) fn run_client(binary: &Path, connection: &Connection, beta: bool) -> Result<ExitStatus> {
-    client_command(binary, connection, beta)
-        .status()
-        .with_context(|| format!("Could not launch local client {}", binary.display()))
-}
-
 async fn install_standard(home: &Path) -> Result<PathBuf> {
     if cfg!(windows) {
         let npm = which::which("npm")
             .context("Install Node.js, then rerun connect to install OpenCode")?;
-        let status = Command::new(npm)
-            .args(["install", "--global", "opencode-ai"])
-            .status()?;
-        if !status.success() {
-            bail!("OpenCode installation failed ({status}); the remote server is still running.");
+        let output = tokio::time::timeout(
+            Duration::from_secs(300),
+            tokio::process::Command::new(npm)
+                .args(["install", "--global", "opencode-ai"])
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("OpenCode installation timed out")??;
+        if !output.status.success() {
+            bail!(
+                "OpenCode installation failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     } else {
         // Fetch the documented installer as a file; no shell pipeline or profile
@@ -145,12 +165,23 @@ async fn install_standard(home: &Path) -> Result<PathBuf> {
         let mut script = tempfile::NamedTempFile::new()?;
         script.write_all(&response)?;
         script.flush()?;
-        let status = Command::new("bash")
-            .arg(script.path())
-            .arg("--no-modify-path")
-            .status()?;
-        if !status.success() {
-            bail!("OpenCode installation failed ({status}); the remote server is still running.");
+        let output = tokio::time::timeout(
+            Duration::from_secs(300),
+            tokio::process::Command::new("bash")
+                .arg(script.path())
+                .arg("--no-modify-path")
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("OpenCode installation timed out")??;
+        if !output.status.success() {
+            bail!(
+                "OpenCode installation failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
     find_client(false).or_else(|| client_paths(home, false).into_iter().find_map(|path| which::which(path).ok()))

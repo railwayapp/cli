@@ -20,6 +20,26 @@ const ARCHIVE: &str = "code-configs.json";
 const LOCK: &str = ".code-config.lock";
 const VERSION: u32 = 1;
 
+/// Known instances can be probed without opening SSH or changing remote state.
+pub(crate) fn client_connection(
+    agent_id: &str,
+    environment_id: &str,
+) -> Option<crate::commands::cloud_agent::client_sessions::Connection> {
+    let saved = SavedConfig::load_in(&dirs::home_dir()?, Some(agent_id)).ok()?;
+    if saved.agent_id != agent_id || saved.environment_id != environment_id {
+        return None;
+    }
+    use crate::commands::cloud_agent::client_sessions::Connection;
+    saved
+        .codex
+        .map(|c| Connection::Codex(c.connection))
+        .or_else(|| {
+            saved
+                .opencode
+                .map(|c| Connection::OpenCode(c.connection, c.beta))
+        })
+}
+
 /// Replay locally saved connection details without creating or waking an agent
 #[derive(Parser)]
 #[clap(

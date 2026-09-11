@@ -1061,7 +1061,11 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         .selected_agent_status()
         .is_some_and(|status| status != "running");
     let hint: Vec<(&str, &str)> = if app.pane_is_full() {
-        vec![("⌥f", "restore the tree"), ("⌥⇧esc / ^]", "stop typing")]
+        vec![
+            ("⌥f", "restore the tree"),
+            ("⌥b", "SSH shell"),
+            ("⌥⇧esc / ^]", "stop typing"),
+        ]
     } else if app.focus == ManageFocus::Session {
         // A dead pane's keys are recovery, not typing — the hint has to say
         // so, or "stop typing" advertises an input nothing is reading.
@@ -1075,7 +1079,11 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ("esc", "back to the tree"),
             ]
         } else {
-            let mut keys = vec![("⌥⇧esc / ^]", "stop typing"), ("⌥f", "maximize")];
+            let mut keys = vec![
+                ("⌥⇧esc / ^]", "stop typing"),
+                ("⌥f", "maximize"),
+                ("⌥b", "SSH shell"),
+            ];
             // The agent is taking the clicks, so say how to take one back — this is
             // the terminal's own convention, but nobody guesses it.
             if app.active_session().is_some_and(|s| s.wants_mouse()) {
@@ -1102,21 +1110,43 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ("⌥s", "settings"),
                 ("q", "quit"),
             ],
-            Some(RowKind::Session(..)) => vec![
-                ("enter", "connect"),
-                ("⌥f", "maximize"),
-                ("⌥enter", "full screen"),
-                ("c", "copy ssh"),
-                ("x", "end session"),
-                if sleeping {
-                    ("w", "wake")
-                } else {
-                    ("s", "sleep")
-                },
-                ("d", "delete agent"),
-            ],
+            Some(RowKind::Session(w, p, e, a, i)) => {
+                let conversation = app
+                    .console_session(w, p, e, a, i)
+                    .is_some_and(|s| super::super::client_sessions::is_client(&s.name));
+                vec![
+                    ("enter", if conversation { "resume" } else { "connect" }),
+                    ("⌥b", "SSH shell"),
+                    ("⌥f", "maximize"),
+                    (
+                        "⌥enter",
+                        if conversation {
+                            "maximize"
+                        } else {
+                            "full screen"
+                        },
+                    ),
+                    ("c", "copy shell"),
+                    (
+                        "x",
+                        if conversation {
+                            "delete thread"
+                        } else {
+                            "end session"
+                        },
+                    ),
+                    if sleeping {
+                        ("w", "wake")
+                    } else {
+                        ("s", "sleep")
+                    },
+                    ("d", "delete agent"),
+                ]
+            }
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
+                ("⌥b", "SSH shell"),
+                ("c", "copy shell"),
                 ("n", "new agent"),
                 if sleeping {
                     ("w", "wake")
@@ -1460,20 +1490,27 @@ fn render_harness_pick(app: &App, f: &mut Frame) {
         .iter()
         .map(|i| super::app::HARNESSES[*i])
         .map(|slug| PanelRow {
-            label: super::app::harness_label(slug).to_string(),
+            label: match slug {
+                "railway" => "Railway",
+                "grok" => "Grok Build",
+                "codex" => "ChatGPT",
+                "claude" => "Claude Code",
+                "opencode" => "OpenCode",
+                "opencode2" => "OpenCode2 [Beta]",
+                "shell" => "Shell",
+                other => other,
+            }
+            .to_string(),
             tag: String::new(),
-            detail: super::wizard::harness_blurb(slug).to_string(),
+            detail: String::new(),
         })
         .collect();
-    let footer = Line::from(chord_spans(
-        theme,
-        &[
-            ("↑↓", "choose"),
-            ("tab", "OpenCode version"),
-            ("enter", "new agent"),
-            ("esc", "cancel"),
-        ],
-    ));
+    let mut shortcuts = vec![("↑↓", "choose")];
+    if super::app::opencode_alternate(cursor).is_some() {
+        shortcuts.push(("tab", "OpenCode version"));
+    }
+    shortcuts.extend([("enter", "new agent"), ("esc", "cancel")]);
+    let footer = Line::from(chord_spans(theme, &shortcuts));
 
     render_panel(
         f,
@@ -1944,19 +1981,10 @@ fn tree_line(theme: &Theme, row: &Row, app: &App) -> Line<'static> {
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
-        (RowKind::Agent(w, p, e, a), _) => {
+        (RowKind::Agent(..), _) => {
             let status = row.status.as_deref().unwrap_or_default();
-            let sessions = match &app.tree[*w].projects[*p].envs[*e].agents {
-                Load::Loaded(agents) => agents.get(*a).map(|agent| &agent.sessions),
-                _ => None,
-            };
-            // Session discovery lives on the orb, not in a placeholder child.
-            // Keep the agent's actual status intact for its details/actions.
-            let (glyph, color) = match sessions {
-                Some(LoadSessions::Loading) => (spinner_frame(tick).to_string(), theme.pending),
-                Some(LoadSessions::Failed(_)) => ("◌".into(), theme.pending),
-                _ => (status_glyph(status).into(), status_color(theme, status)),
-            };
+            // Metadata discovery does not change machine health.
+            let (glyph, color) = (status_glyph(status), status_color(theme, status));
             spans.push(Span::styled(
                 format!("{glyph} "),
                 Style::default().fg(color),
@@ -3230,7 +3258,7 @@ mod tests {
     }
 
     #[test]
-    fn session_discovery_animates_the_agent_orb_and_restores_its_status() {
+    fn session_discovery_never_replaces_the_machine_status_icon() {
         let mut app = app_with_tree();
         app.screen = Screen::Manage;
         app.cursor = app
@@ -3242,10 +3270,10 @@ mod tests {
             agents[0].sessions = LoadSessions::Loading;
         }
         app.loading.tick = 0;
-        assert!(draw(&app, 100, 30).contains("⠋ nimble-otter"));
+        assert!(draw(&app, 100, 30).contains("● nimble-otter"));
         app.tick();
         let out = draw(&app, 100, 30);
-        assert!(out.contains("⠙ nimble-otter"));
+        assert!(out.contains("● nimble-otter"));
         assert!(
             out.contains("running"),
             "the detail pane retains the VM status: {out}"
@@ -3253,7 +3281,7 @@ mod tests {
 
         app.sessions_loaded((0, 0, 0, 0), "ca_1", Err("temporary failure".into()));
         let out = draw(&app, 100, 30);
-        assert!(out.contains("◌ nimble-otter"));
+        assert!(out.contains("● nimble-otter"));
         assert!(
             out.contains("couldn't load sessions"),
             "failure details remain available: {out}"
@@ -3719,6 +3747,32 @@ mod tests {
         assert!(style_of("slant").add_modifier.contains(Modifier::ITALIC));
         assert!(style_of("loud").add_modifier.contains(Modifier::BOLD));
         assert!(style_of("plain").add_modifier.is_empty());
+    }
+
+    #[test]
+    fn codex_shaded_rows_keep_truecolor_and_blank_cell_backgrounds() {
+        use ratatui::widgets::Widget;
+
+        for (shade, rgb) in [("48;48;48", (48, 48, 48)), ("245;245;245", (245, 245, 245))] {
+            let mut parser = vt100::Parser::new(3, 20, 0);
+            // Codex shades the whole prompt/plan row, including its padding,
+            // then resets for the next row. EL paints empty cells as well.
+            parser.process(
+                format!("\x1b[48;2;{shade}m\x1b[2K  plan\x1b[0m\r\n\x1b[38;2;0;95;135maccent\x1b[0m plain")
+                    .as_bytes(),
+            );
+            let area = Rect::new(0, 0, 20, 3);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            Paragraph::new(screen_lines(parser.screen(), false)).render(area, &mut buffer);
+
+            for col in 0..20 {
+                assert_eq!(buffer[(col, 0)].bg, Color::Rgb(rgb.0, rgb.1, rgb.2));
+                assert_eq!(buffer[(col, 1)].bg, Color::Reset);
+            }
+            assert_eq!(buffer[(10, 0)].symbol(), " ");
+            assert_eq!(buffer[(0, 1)].fg, Color::Rgb(0, 95, 135));
+            assert_eq!(buffer[(7, 1)].fg, Color::Reset);
+        }
     }
 
     /// A wide character owns two columns but is one glyph: its continuation
