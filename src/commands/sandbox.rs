@@ -25,7 +25,7 @@ use crate::util::shell::shell_join;
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox checkpoint create my-setup       # capture the active sandbox's disk\n  railway sandbox create --checkpoint my-setup     # boot a new sandbox from it\n  railway sandbox checkpoint list   # list named checkpoints in the environment\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
+    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox create --memory-gb 16 --cpu 8   # size the VM\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox checkpoint create my-setup       # capture the active sandbox's disk\n  railway sandbox create --checkpoint my-setup     # boot a new sandbox from it\n  railway sandbox checkpoint list   # list named checkpoints in the environment\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -109,6 +109,14 @@ struct CreateArgs {
     /// `postgres.railway.internal`
     #[clap(long)]
     private_network: bool,
+
+    /// Memory for the sandbox in GB; omit for the workspace default
+    #[clap(long, value_name = "GB")]
+    memory_gb: Option<f64>,
+
+    /// vCPUs for the sandbox, fractional allowed; omit for the workspace default
+    #[clap(long, value_name = "VCPU")]
+    cpu: Option<f64>,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -289,6 +297,15 @@ struct ForkArgs {
     /// egress only). The fork does not inherit the source's network mode
     #[clap(long)]
     private_network: bool,
+
+    /// Memory for the fork in GB; the fork does not inherit the source's size
+    #[clap(long, value_name = "GB")]
+    memory_gb: Option<f64>,
+
+    /// vCPUs for the fork, fractional allowed; the fork does not inherit the
+    /// source's size
+    #[clap(long, value_name = "VCPU")]
+    cpu: Option<f64>,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -793,6 +810,16 @@ pub(crate) fn variables_to_input(
     ))
 }
 
+/// `None` when neither flag is set so `skip_serializing_none` omits `resources`
+/// and the server applies the workspace default, to each size independently.
+fn resources_to_input(
+    memory_gb: Option<f64>,
+    cpu: Option<f64>,
+) -> Option<mutations::sandbox_create::SandboxResourcesInput> {
+    (memory_gb.is_some() || cpu.is_some())
+        .then_some(mutations::sandbox_create::SandboxResourcesInput { cpu, memory_gb })
+}
+
 /// How `create_and_store` reports the new sandbox.
 pub(crate) enum CreateReport {
     /// The full `sandbox create` block: id, status, region, connect hints.
@@ -909,6 +936,7 @@ async fn create(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        resources: resources_to_input(args.memory_gb, args.cpu),
         // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
         // region flag yet.
         region: None,
@@ -1383,6 +1411,7 @@ async fn fork(
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        resources: resources_to_input(args.memory_gb, args.cpu),
         // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
         // region flag yet.
         region: None,
@@ -2358,6 +2387,21 @@ mod tests {
             json,
             serde_json::json!({ "instructions": ["npm i -g pnpm"] })
         );
+    }
+
+    /// Sizes the user did not set must stay off the wire so the server
+    /// applies the workspace's sandbox default to each of them.
+    #[test]
+    fn resources_serialize_only_set_fields() {
+        assert!(resources_to_input(None, None).is_none());
+
+        let memory_only = resources_to_input(Some(16.0), None).unwrap();
+        let json = serde_json::to_value(memory_only).unwrap();
+        assert_eq!(json, serde_json::json!({ "memoryGB": 16.0 }));
+
+        let both = resources_to_input(Some(16.0), Some(0.5)).unwrap();
+        let json = serde_json::to_value(both).unwrap();
+        assert_eq!(json, serde_json::json!({ "memoryGB": 16.0, "cpu": 0.5 }));
     }
 
     #[test]
