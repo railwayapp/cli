@@ -118,6 +118,50 @@ accepted but optional. Use `connect [agent]` for an existing backend,
 for a shell. Bare launches and shared CA/Desktop provisioning retain their
 existing targeting behavior.
 
+## Local Railway TUI prototype
+
+```bash
+railway code --railway                       # new VM, local TUI on its public agent endpoint
+railway code --railway --agent my-box --dir /app/project
+railway code --railway connect my-box        # connect to an existing VM; wake it if asleep
+railway code --railway remote                # run the TUI on a new VM over SSH
+railway code --railway --connection-json     # setup and verify, without opening a TUI
+railway code get-config my-box               # replay saved connection details
+```
+
+The local `railway-agent-tui` connects over WebSocket to the existing
+`CloudAgent.agentWsUrl` (`wss://<agent-domain>/agent`). It shares the
+platform-supervised `railway-agent serve` daemon and persistent sessions with
+dashboard chat and the VM's TUI. Creating or waking the VM starts that daemon;
+the launcher verifies the public control protocol with `get_state` before
+opening the TUI. It does not start a second daemon or require a `code-*` domain.
+`--dir` selects the remote project, defaulting to `/app`; reconnect uses the
+locally saved directory when available. Without a name, normal cloud-agent
+selection applies. Older VMs without an agent endpoint report that limitation.
+
+The gateway takes a five-minute JWT from `cloudAgentHarnessToken` on each
+WebSocket upgrade. A small local WebSocket bridge mints a fresh token on every
+TUI connection, including reconnects and session switches. This is a public
+WSS data path, with no SSH tunnel. The local bridge requires its own random
+capability, and both the bridge and its connections close when the TUI exits.
+An open conversation is not interrupted when the upgrade token expires.
+Expiring gate tokens are neither saved in `get-config` nor passed to the TUI.
+Model credentials and tool execution stay on the VM.
+
+Missing clients install automatically into `~/.railway/runtimes/railway-tui/`
+from the public [agent-releases repository](https://github.com/railwayapp/agent-releases/releases/tag/v0.1.15),
+with the bundled daemon alongside the TUI. The prototype pins the attach-capable
+TUI release `v0.1.15`; the VM image owns the server version. Downloads are checked
+against the release asset's SHA-256 digest. An installed TUI with that version
+is reused. This release supports Linux amd64/arm64 and Apple Silicon macOS;
+Intel macOS has no published asset, and Windows users need WSL or `remote`.
+
+The TUI opens directly, outside the CA conversation sidebar.
+`--connection-json` returns the public URL, remote directory, client version,
+and token-minting metadata, without credentials. Use the reconnect command from
+`get-config` to open it again. Bare `railway ca` and passthrough harness
+arguments retain their existing VM-hosted behavior.
+
 ## Coding backend and app endpoints
 
 The `code-*` endpoint is optional and configured only at VM creation.
