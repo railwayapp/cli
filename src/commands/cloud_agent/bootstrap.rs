@@ -12,6 +12,14 @@ use crate::{
 };
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap save dev --agent my-box
+  railway ca bootstrap default dev
+  railway code --codex --bootstrap dev
+
+A bootstrap captures a running VM for reuse when creating new VMs.
+The default is saved on this machine for the selected project/environment.
+Use --no-bootstrap when creating a VM to skip that default."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Command,
@@ -38,6 +46,11 @@ struct ListArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap save dev --agent my-box --default
+
+The source VM must be running. Reusing a name saves a new version.
+--default selects it locally after the capture succeeds."#)]
 struct SaveArgs {
     /// Bootstrap name, unique within this environment
     name: String,
@@ -62,6 +75,7 @@ struct SaveArgs {
 
 #[derive(Parser)]
 struct DefaultArgs {
+    /// Name of a ready bootstrap in this environment
     name: String,
     #[clap(flatten)]
     target: TargetArgs,

@@ -40,11 +40,23 @@ mod codex_config;
 mod opencode_config;
 pub(crate) use opencode_config::configure_installed as configure_installed_opencode;
 
-/// Set up a desktop coding app to work on a cloud agent over SSH
+/// Connect a desktop coding app to a cloud agent
 #[derive(Parser)]
-#[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude\n  railway ca desktop --codex\n  railway ca desktop --opencode\n  railway ca desktop --opencode --new\n  railway ca desktop --opencode2 --new\n  railway ca desktop --opencode --agent my-box\n  railway ca desktop --claude --codex\n\nReuses and wakes the selected agent, creating one if needed. --new always\ncreates a fresh agent. --agent selects an existing box.\n\nClaude and Codex use the generated SSH configuration. Restart Claude after setup.\nCodex also imports the SSH connection and remote project through\n$CODEX_HOME/codex-app/config.json (default ~/.codex/codex-app/config.json).\nSetup saves configuration in the background without opening Codex Desktop.\nThe app imports it on its next startup.\nFind Railway: <agent-name> in Codex's project sidebar.\n\nOpenCode setup requests a code endpoint on newly created VMs (default port 4096).\nExisting VMs use their configured endpoint, or the app port (8080) without one.\nSetup saves the URL, credentials, default server, and project in\nstandard OpenCode with --opencode, or OpenCode2 [Beta] with --opencode2.\nBeta downloads its latest official runtime onto the agent at startup.\nYou may need to restart OpenCode Desktop to load the updated configuration.\nOpen Home → Projects → Railway: <agent-name> → /app (or --dir) → New session.\nSetting a default server does not move existing chats.\nYou can close this terminal after setup. Rerun setup after sleeping or\nrestarting the agent. An occupied server port fails without stopping its process.\n\n--dry-run previews setup without creating, waking, or changing an agent.\n--remove stops the managed OpenCode server on a running agent and removes\nlocal desktop configuration, including the managed OpenCode server entry.\nFor Codex it removes the import declaration; remove already-imported hosts\nand projects in Codex Settings → Connections and the sidebar.\n--ssh-config selects the SSH file used during setup.\n\nThe agent stays awake after setup. `railway ca sleep <name>` stops its compute bill."
-)]
+#[clap(after_help = r#"Examples:
+  railway ca desktop --claude
+  railway ca desktop --codex
+  railway ca desktop --opencode --agent my-box
+  railway ca desktop --opencode2 --new
+
+Sets up the selected app's connection and credentials without opening the app.
+Uses an existing VM when available; --new creates one, --agent selects one.
+Restart the app after setup to load its connection. The VM stays running;
+railway ca sleep <agent> stops compute. Rerun setup after sleep or restart.
+
+--dry-run previews changes without modifying the VM or local configuration.
+--remove removes local configuration and stops the managed OpenCode server.
+Already-imported Codex connections must also be removed in the app.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
 pub struct Args {
     /// Configure Claude Code Desktop
     #[clap(long)]

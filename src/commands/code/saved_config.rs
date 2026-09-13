@@ -40,7 +40,7 @@ pub(crate) fn client_connection(
         })
 }
 
-/// Replay locally saved connection details without creating or waking an agent
+/// Show locally saved connection details without creating or waking an agent
 #[derive(Parser)]
 #[clap(
     after_help = "Examples:\n  railway code get-config\n  railway code get-config my-box\n  railway code get-config my-box --json\n\nReads local snapshots from any directory, without login or network access.\nOmit the agent to show the latest snapshot; use an ID for ambiguous names.\nSnapshots include credentials and are removed by railway logout."
