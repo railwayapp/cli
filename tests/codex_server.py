@@ -17,7 +17,7 @@ bootstrap = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
 
 FAKE = r'''
-import base64, hashlib, http.server, os, pathlib, sys
+import base64, hashlib, http.server, os, pathlib, socket, socketserver, sys
 if "--help" in sys.argv:
     print("--listen" if os.environ.get("FAKE_OLD") else "--listen --ws-auth --ws-token-file")
     sys.exit()
@@ -47,8 +47,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         key = self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         self.send_header("Sec-WebSocket-Accept", base64.b64encode(hashlib.sha1(key.encode()).digest()).decode())
         self.end_headers()
-http.server.HTTPServer.allow_reuse_address = True
-http.server.HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+class LocalHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
+
+    def server_bind(self):
+        # HTTPServer resolves the bound address with socket.getfqdn(). On macOS
+        # CI that loopback lookup can stall each disposable server for ~30s.
+        # This fixture needs real sockets, but never a resolved hostname.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+if os.environ.get("FAKE_FORBID_DNS"):
+    def forbid_dns(*args, **kwargs):
+        raise AssertionError("fake Codex server must not resolve hostnames")
+    socket.getfqdn = socket.gethostbyaddr = socket.getaddrinfo = forbid_dns
+
+LocalHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 '''
 
 
@@ -131,6 +146,13 @@ else:
 
     def start(self, **extra):
         return bootstrap.setup(dict(directory=str(self.directory), token=self.token, **extra), self.home)
+
+    def test_server_starts_and_authenticates_without_dns(self):
+        with patch.dict(os.environ, {"FAKE_FORBID_DNS": "1"}):
+            first = self.start()
+            self.assertTrue(bootstrap.healthy(self.port, first["token"]))
+            self.assertTrue(self.start(action="connect")["reused"])
+            self.assertEqual(len(self.children), 1)
 
     def test_start_reuse_inspect_and_restart_preserve_identity_and_credentials(self):
         first = self.start()
