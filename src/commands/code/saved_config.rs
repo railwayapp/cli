@@ -40,6 +40,17 @@ pub(crate) fn client_connection(
         })
 }
 
+pub(super) fn railway_connection(
+    agent_id: &str,
+    environment_id: &str,
+) -> Option<super::railway_client::Connection> {
+    let saved = SavedConfig::load_in(&dirs::home_dir()?, Some(agent_id)).ok()?;
+    if saved.agent_id != agent_id || saved.environment_id != environment_id {
+        return None;
+    }
+    saved.railway
+}
+
 /// Replay locally saved connection details without creating or waking an agent
 #[derive(Parser)]
 #[clap(
@@ -69,6 +80,8 @@ pub(super) struct SavedConfig {
     opencode: Option<OpenCodeConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     codex: Option<CodexConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    railway: Option<super::railway_client::Connection>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -165,7 +178,13 @@ impl SavedConfig {
             ssh_config: config,
             opencode: None,
             codex: None,
+            railway: None,
         })
+    }
+
+    pub(super) fn with_railway(mut self, connection: &super::railway_client::Connection) -> Self {
+        self.railway = Some(connection.clone());
+        self
     }
 
     pub(super) fn with_opencode(
@@ -355,8 +374,15 @@ impl SavedConfig {
                 )?;
             }
         }
+        if let Some(c) = &self.railway {
+            writeln!(
+                out,
+                "\nRailway agent endpoint:\n  Server:    {}\n  Directory: {}\n  TUI:       {}\nThe local launcher refreshes gate authentication on every connection.",
+                c.url, c.directory, c.client_version
+            )?;
+        }
         // Only SSH-based sessions need the SSH panel, in both creation and replay.
-        let show_ssh = self.codex.is_none() && self.opencode.is_none();
+        let show_ssh = self.codex.is_none() && self.opencode.is_none() && self.railway.is_none();
         if show_ssh {
             writeln!(
                 out,
@@ -377,7 +403,7 @@ impl SavedConfig {
             )?;
         }
         writeln!(out, "\n{}", "Connect with the Railway CLI:".bold())?;
-        if self.codex.is_some() || self.opencode.is_some() {
+        if self.codex.is_some() || self.opencode.is_some() || self.railway.is_some() {
             writeln!(
                 out,
                 "  {}",
@@ -519,6 +545,29 @@ pub(super) fn clear_in(home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn railway_snapshot_preserves_public_endpoint_without_expiring_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let connection = super::super::railway_client::Connection {
+            directory: "/app/a project".into(),
+            url: "wss://agent.example.com/agent".into(),
+            client_version: "0.1.15".into(),
+        };
+        let saved = SavedConfig::new("id", "my-box", "env", "railway", None)
+            .unwrap()
+            .with_railway(&connection);
+        saved.save_in(home.path()).unwrap();
+        let loaded = SavedConfig::load_in(home.path(), Some("my-box")).unwrap();
+        assert_eq!(
+            loaded.railway.as_ref().unwrap().url,
+            "wss://agent.example.com/agent"
+        );
+        let rendered = loaded.render().unwrap();
+        assert!(rendered.contains("railway code --railway connect my-box"));
+        assert!(rendered.contains("/app/a project"));
+        assert!(!rendered.contains("SSH config block"));
+    }
 
     fn saved(id: &str, name: &str) -> SavedConfig {
         SavedConfig::new(id, name, "env", "codex", None).unwrap()

@@ -90,6 +90,7 @@ pub(crate) mod client;
 /// everywhere else it hands the terminal straight to ssh.
 mod names;
 mod plumbing;
+mod railway_client;
 pub(crate) mod saved_config;
 
 pub(crate) fn clear_saved_config() {
@@ -138,6 +139,9 @@ pub async fn command(args: Args) -> Result<()> {
     }
     let mut args = args.launch;
     if let Some(action) = args.prepare_code_launch()? {
+        if args.railway && !matches!(action, ClientAction::Remote) {
+            return railway_client::command(args, action).await;
+        }
         let harness = if args.codex {
             client::Harness::Codex
         } else if args.opencode2 {
@@ -185,7 +189,9 @@ pub(crate) async fn codex_desktop_only(
 /// CA's launch flags and the clients' `remote` action keep the in-agent UI.
 pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
     if args.connection_json {
-        bail!("--connection-json requires railway code --codex or --opencode2 [connect].");
+        bail!(
+            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+        );
     }
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
@@ -213,7 +219,7 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2"]).multiple(true)),
+    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2", "railway"]).multiple(true)),
     after_help = r#"Examples:
 
   railway ca                        # launch your configured default
@@ -230,12 +236,14 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
   railway code --claude             # agent VM + your Claude setup-token
   railway code --grok               # agent VM + your local Grok sign-in
   railway code --opencode           # remote OpenCode server + local client
+  railway code --railway            # public Railway agent endpoint + local TUI
+  railway code --railway connect my-box
+  railway code --railway remote     # run the Railway UI inside the VM
   railway code --opencode2          # same, with OpenCode2 Beta
   railway code --opencode remote    # run client and server inside Railway CA
   railway code --opencode2 --name my-box
   railway code --opencode2 connect
   railway code --opencode connect my-box
-  railway code --railway            # Railway's own agent, no sign-in needed
   railway code --codex --new        # optional: harness launches already create a VM
   railway code --codex --variable DB_URL=postgres.DATABASE_URL
   railway code --codex --env-file .env
@@ -248,7 +256,7 @@ the directory has no link.
 
 Each `railway code` launch with an explicit harness flag creates a fresh VM by
 default, including `remote` and `--` passthrough commands. Use `connect [agent]`
-for an existing Codex/OpenCode server, or `railway ca ssh <agent>` for a shell.
+for an existing Codex/OpenCode/Railway server, or `railway ca ssh <agent>` for a shell.
 `--new` is optional for harness launches; an explicit `--agent` selects an existing
 VM for server setup.
 
@@ -261,7 +269,12 @@ the selected thread. Missing OpenCode
 clients can be installed after confirmation. `connect [agent]` reconnects locally;
 `remote` runs the client on the VM over SSH. `--dir` selects the remote directory
 (default /app).
-`--connection-json` returns credentials as JSON for Codex or OpenCode2.
+`--railway` installs the local Railway TUI and connects to the VM's existing
+public agent endpoint. It shares the dashboard's persistent daemon and opens
+directly in your terminal. Gate authentication refreshes on every connection.
+Model credentials and tool execution stay on the VM.
+`--connection-json` returns credentials as JSON for Codex or OpenCode2, or
+public endpoint and authentication metadata for Railway.
 Codex setup and connect also register and verify its SSH host and save its remote
 project in the background. Codex Desktop imports it on its next startup;
 setup never launches or activates the app.
@@ -306,8 +319,8 @@ pub struct LaunchArgs {
     #[clap(long)]
     opencode2: bool,
 
-    /// Return verified Codex or OpenCode2 connection details as JSON, including credentials,
-    /// without launching a local client. Progress is written to stderr.
+    /// Return verified connection details as JSON without launching a local client.
+    /// Codex/OpenCode2 output includes credentials; progress is written to stderr.
     #[clap(long, requires = "client_json_harness")]
     connection_json: bool,
 
@@ -322,8 +335,8 @@ pub struct LaunchArgs {
     #[clap(long)]
     grok: bool,
 
-    /// Launch Railway's own agent — no sign-in needed; it uses credentials
-    /// already on the VM
+    /// Launch a local Railway TUI connected to the VM's public agent endpoint.
+    /// Installs the client if needed; model credentials stay on the VM
     #[clap(long)]
     railway: bool,
 
@@ -492,35 +505,34 @@ impl LaunchArgs {
     fn client_action(&self) -> Result<Option<ClientAction>> {
         let verb = self.agent_args.first().map(String::as_str);
         if self.connection_json
-            && ((!self.codex && !self.opencode2)
+            && ((!self.codex && !self.opencode2 && !self.railway)
                 || self.rm
                 || self.app_mode
                 || !(matches!(verb, None | Some("connect"))
                     || (self.codex && verb == Some("desktop-only"))))
         {
             bail!(
-                "--connection-json requires railway code --codex or --opencode2 [connect], or --codex desktop-only."
+                "--connection-json requires railway code --codex, --opencode2, or --railway [connect], or --codex desktop-only."
             );
         }
         let reserved = matches!(verb, Some("remote" | "connect" | "desktop-only"));
-        let selected = self.codex || self.opencode || self.opencode2;
+        let selected = self.codex || self.opencode || self.opencode2 || self.railway;
         if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
             if self.remote_dir.is_some() || self.remote_agent.is_some() {
-                bail!("--dir and --agent require a Codex or OpenCode client command.");
+                bail!("--dir and --agent require a Codex, OpenCode, or Railway client command.");
             }
             return Ok(None);
         }
-        if [self.codex, self.opencode, self.opencode2]
+        if [self.codex, self.opencode, self.opencode2, self.railway]
             .into_iter()
             .filter(|selected| *selected)
             .count()
             != 1
             || self.claude
             || self.grok
-            || self.railway
             || self.shell
         {
-            bail!("Pick exactly one client: --codex, --opencode, or --opencode2.");
+            bail!("Pick exactly one client: --codex, --opencode, --opencode2, or --railway.");
         }
         if self.rm || self.initial_prompt.is_some() {
             bail!("Local-client commands cannot be combined with --rm or an initial prompt.");
@@ -545,7 +557,7 @@ impl LaunchArgs {
             Some("remote") => {
                 if self.agent_args.len() != 1 || self.remote_dir.is_some() {
                     bail!(
-                        "Use railway code --codex remote (or --opencode/--opencode2) to open the UI inside the cloud agent; --dir is for local clients."
+                        "Use railway code --codex remote (or --opencode/--opencode2/--railway) to open the UI inside the cloud agent; --dir is for local clients."
                     );
                 }
                 Ok(Some(ClientAction::Remote))
@@ -562,7 +574,7 @@ impl LaunchArgs {
                     || self.remote_dir.is_some()
                 {
                     bail!(
-                        "connect uses an existing server. Use railway code --codex, --opencode, or --opencode2 to set one up on a fresh VM."
+                        "connect uses an existing server. Use railway code --codex, --opencode, --opencode2, or --railway to set one up on a fresh VM."
                     );
                 }
                 let positional = self.agent_args.get(1).cloned();
@@ -3019,7 +3031,9 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     use colored::Colorize;
 
     if args.connection_json {
-        bail!("--connection-json requires railway code --codex or --opencode2 [connect].");
+        bail!(
+            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+        );
     }
 
     // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
@@ -4348,7 +4362,7 @@ mod tests {
 
     #[test]
     fn code_connect_and_explicit_targets_do_not_request_new_agents() {
-        for flag in ["--codex", "--opencode", "--opencode2"] {
+        for flag in ["--codex", "--opencode", "--opencode2", "--railway"] {
             for (extra, selector) in [
                 (vec!["connect"], None),
                 (vec!["connect", "my-box"], Some("my-box".to_string())),
@@ -4421,7 +4435,7 @@ mod tests {
 
     #[test]
     fn connection_json_only_accepts_server_connection_actions() {
-        for flag in ["--codex", "--opencode2"] {
+        for flag in ["--codex", "--opencode2", "--railway"] {
             for extra in [vec![], vec!["connect", "box"], vec!["--new"]] {
                 let args = LaunchArgs::try_parse_from(
                     [vec!["code", flag, "--connection-json"], extra].concat(),
@@ -4510,7 +4524,7 @@ mod tests {
 
     #[test]
     fn client_actions_separate_local_clients_from_cloud_terminal_sessions() {
-        for flag in ["--codex", "--opencode", "--opencode2"] {
+        for flag in ["--codex", "--opencode", "--opencode2", "--railway"] {
             let local =
                 LaunchArgs::try_parse_from(["code", flag, "--new", "--dir", "/app/project"])
                     .unwrap();
