@@ -134,9 +134,17 @@ railway code --codex --bootstrap dev
 railway ca create my-box --from-checkpoint <checkpoint-id>
 ```
 
+`railway ca bootstrap list` shows saved names, capture status, and last-saved
+times. An asterisk marks this machine's default. Use `--environment staging`
+to select another environment or `--json` for structured output.
+
 Bootstraps capture running VMs for reuse. Saving the same name creates a new
-version. `railway ca bootstrap default dev` selects a ready bootstrap as this
-machine's default for the environment. `--no-bootstrap` skips the default.
+version. Save waits for the capture to finish, and `--default` changes only after
+success. Variables supplied with `--variable` or `--env-file` are saved with the
+bootstrap; explicit variables override matching file entries.
+
+`railway ca bootstrap default dev` selects a ready bootstrap as this machine's default for future VM creation in the environment; existing VMs are
+unaffected. `--no-bootstrap` skips the default.
 `--from-checkpoint` on `ca create` accepts a cloud-agent checkpoint ID and bypasses
 the default bootstrap.
 

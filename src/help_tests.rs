@@ -54,7 +54,7 @@ fn focused_help_retains_side_effects_and_workflow_examples() {
         ),
         (
             vec!["ca", "bootstrap", "default"],
-            vec!["Name of a ready bootstrap"],
+            vec!["Name of a ready bootstrap", "does not change existing VMs"],
         ),
         (
             vec!["ca", "create"],
@@ -123,6 +123,28 @@ fn documented_examples_parse_without_executing_commands() {
             "--default",
         ],
         vec!["ca", "bootstrap", "default", "dev"],
+        vec![
+            "ca",
+            "bootstrap",
+            "default",
+            "dev",
+            "--environment",
+            "staging",
+        ],
+        vec!["ca", "bootstrap", "list", "--environment", "staging"],
+        vec!["ca", "bootstrap", "list", "--json"],
+        vec![
+            "ca",
+            "bootstrap",
+            "save",
+            "dev",
+            "--agent",
+            "my-box",
+            "--env-file",
+            ".env",
+            "--variable",
+            "MODE=dev",
+        ],
         vec!["code", "--codex", "--bootstrap", "dev"],
         vec![
             "ca",
