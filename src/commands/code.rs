@@ -117,7 +117,29 @@ pub(crate) fn save_desktop_configuration(
 
 /// Launch a coding agent on a Railway cloud agent VM
 #[derive(Parser)]
-#[clap(args_conflicts_with_subcommands = true)]
+#[clap(
+    args_conflicts_with_subcommands = true,
+    after_help = r#"Examples:
+  railway code --codex                    # start Codex on a new VM
+  railway code --claude                   # start Claude Code on a new VM
+  railway code --codex connect my-box     # connect to an existing server
+  railway code --codex desktop-only       # configure Codex Desktop
+  railway code get-config my-box          # show saved connection details
+
+An explicit agent flag creates a new VM unless you use connect or --agent.
+Without an agent flag, uses the default from railway ca setup.
+Flags override preferences; the linked project overrides the saved project.
+
+Codex and OpenCode open a local client connected to the VM, with command
+approvals disabled. Use remote to run the client on the VM, or -- to pass
+arguments to the agent. Available local credentials are copied to the VM;
+Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
+detected Desktop installs.
+
+Disconnecting leaves the VM running. Use railway ca sleep <agent> to stop compute.
+Requires Cloud Agents access.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
+)]
 pub struct Args {
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -213,130 +235,51 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2"]).multiple(true)),
-    after_help = r#"Examples:
-
-  railway ca                        # launch your configured default
-  railway ca setup                  # choose the default agent and skills
-  railway code --codex              # remote Codex server + local terminal client
-  railway code --codex connect      # choose a running Codex server
-  railway code --codex connect my-box
-  railway code --codex desktop-only # backend + Desktop configuration, then exit
-  railway code --codex desktop-only --agent my-box --dir /app
-  railway code get-config           # replay the latest saved connection
-  railway code get-config my-box    # replay a specific agent (name or ID)
-  railway code get-config my-box --json
-  railway code --codex remote       # run the Codex UI inside Railway CA
-  railway code --claude             # agent VM + your Claude setup-token
-  railway code --grok               # agent VM + your local Grok sign-in
-  railway code --opencode           # remote OpenCode server + local client
-  railway code --opencode2          # same, with OpenCode2 Beta
-  railway code --opencode remote    # run client and server inside Railway CA
-  railway code --opencode2 --name my-box
-  railway code --opencode2 connect
-  railway code --opencode connect my-box
-  railway code --railway            # Railway's own agent, no sign-in needed
-  railway code --codex --new        # optional: harness launches already create a VM
-  railway code --codex --variable DB_URL=postgres.DATABASE_URL
-  railway code --codex --env-file .env
-  railway code --codex -- exec "explain this codebase"
-
-With no agent flag, the default saved by `railway ca setup` is used
-(RAILWAY_CA_AGENT overrides it for one run). With no project or environment
-flag, this directory's linked project is used, and your default project when
-the directory has no link.
-
-Each `railway code` launch with an explicit harness flag creates a fresh VM by
-default, including `remote` and `--` passthrough commands. Use `connect [agent]`
-for an existing Codex/OpenCode server, or `railway ca ssh <agent>` for a shell.
-`--new` is optional for harness launches; an explicit `--agent` selects an existing
-VM for server setup.
-
-`railway code --codex`, `--opencode`, and `--opencode2` prepare a server, print
-connection details, and automatically open your local client with command
-approvals disabled. Codex updates its server at startup and automatically matches
-the local client version and trusts the remote project. All three clients open
-inside the Railway CA frame, whose sidebar lists conversation titles and resumes
-the selected thread. Missing OpenCode
-clients can be installed after confirmation. `connect [agent]` reconnects locally;
-`remote` runs the client on the VM over SSH. `--dir` selects the remote directory
-(default /app).
-`--connection-json` returns credentials as JSON for Codex or OpenCode2.
-Codex setup and connect also register and verify its SSH host and save its remote
-project in the background. Codex Desktop imports it on its next startup;
-setup never launches or activates the app.
-`railway code --codex desktop-only` prepares the same backend and Desktop
-connection, then exits without prompting for or launching a local terminal client.
-`railway ca desktop --codex` is an alias for this setup.
-OpenCode launch and connect automatically save the connection in the matching
-Desktop edition when its settings file or database is detected. The final output
-reports success or a non-fatal configuration failure. You may need to restart
-OpenCode Desktop to load the updated configuration.
-
-Sessions running inside `railway ca` open in its manage screen with the
-tree collapsed, so it has the whole window and the other agents are one key
-away — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`
-passthrough, and piped in-VM sessions take the terminal directly instead;
-so does `railway ca start`, which never draws the TUI.
-
-Agents persist between runs and stay running when you disconnect, so your
-sessions survive to reattach to. `railway ca sleep <agent>` stops the compute
-bill; `railway code --rm` destroys it.
-
-Claude auth is minted once (`claude setup-token`), cached locally, and reused —
-including the copy already on a reused agent. `--refresh-auth` clears both
-caches and re-mints.
-
-Carrying a sign-in from this machine is optional. With no local credential,
-sign in on the agent using the harness's login flow.
-
-Note: requires the CLOUD_AGENTS feature to be enabled."#
+    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2"]).multiple(true))
 )]
 pub struct LaunchArgs {
-    /// Prepare a Codex server and launch your local client, carrying your ChatGPT sign-in
-    /// (~/.codex/auth.json) when there is one to carry
-    #[clap(long)]
+    /// Select Codex
+    #[clap(long, help_heading = "Agent")]
     codex: bool,
 
-    /// Launch OpenCode, carrying your local provider sign-ins when available
-    #[clap(long)]
+    /// Select OpenCode
+    #[clap(long, help_heading = "Agent")]
     opencode: bool,
 
-    /// Launch the latest OpenCode2 Beta, downloaded onto the agent at startup
-    #[clap(long)]
+    /// Select OpenCode2 Beta
+    #[clap(long, help_heading = "Agent")]
     opencode2: bool,
 
-    /// Return verified Codex or OpenCode2 connection details as JSON, including credentials,
-    /// without launching a local client. Progress is written to stderr.
-    #[clap(long, requires = "client_json_harness")]
+    /// Return Codex/OpenCode2 connection credentials as JSON without opening a client
+    #[clap(
+        long,
+        requires = "client_json_harness",
+        help_heading = "Authentication and output"
+    )]
     connection_json: bool,
 
-    /// Launch Claude Code — runs `claude setup-token` for you to mint a
-    /// token for the VM (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
-    /// variables skip that when set)
-    #[clap(long)]
+    /// Select Claude Code
+    #[clap(long, help_heading = "Agent")]
     claude: bool,
 
-    /// Launch Grok CLI, carrying your local sign-in (~/.grok/auth.json) when
-    /// there is one to carry
-    #[clap(long)]
+    /// Select Grok CLI
+    #[clap(long, help_heading = "Agent")]
     grok: bool,
 
-    /// Launch Railway's own agent — no sign-in needed; it uses credentials
-    /// already on the VM
-    #[clap(long)]
+    /// Select Railway Agent (uses credentials already on the VM)
+    #[clap(long, help_heading = "Agent")]
     railway: bool,
 
-    /// Create a fresh agent (already the default for railway code with a harness flag)
-    #[clap(long)]
+    /// Create a new VM
+    #[clap(long, help_heading = "VM creation")]
     pub new: bool,
 
-    /// Create a VM from this named bootstrap instead of your local environment default
-    #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"])]
+    /// Create from a named bootstrap instead of the local default
+    #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"], help_heading = "VM creation")]
     bootstrap: Option<String>,
 
-    /// Create a clean VM without your local environment default bootstrap
-    #[clap(long, conflicts_with_all = ["remote_agent", "rm"])]
+    /// Create without the local default bootstrap
+    #[clap(long, conflicts_with_all = ["remote_agent", "rm"], help_heading = "VM creation")]
     no_bootstrap: bool,
 
     /// Accepted for compatibility; agents now always stay running on
@@ -344,27 +287,24 @@ pub struct LaunchArgs {
     #[clap(long, hide = true)]
     keep_awake: bool,
 
-    /// Destroy this environment's agent and exit. Its disk goes with it.
-    /// Superseded by `railway ca delete`, which can name any agent and asks
-    /// before it destroys one
-    #[clap(long)]
+    /// Delete this environment's agent and disk (prefer railway ca delete)
+    #[clap(long, help_heading = "Lifecycle")]
     rm: bool,
 
-    /// Re-mint the Claude credential even if the agent already has a working
-    /// one, clearing our local token cache first. Use after revoking a token,
-    /// or when auth fails on an existing agent
-    #[clap(long)]
+    /// Replace cached Claude credentials with a new setup token
+    #[clap(long, help_heading = "Authentication and output")]
     refresh_auth: bool,
 
     /// Name for a newly created agent (defaults to a generated one)
-    #[clap(long)]
+    #[clap(long, help_heading = "VM creation")]
     name: Option<String>,
 
-    /// Set a variable on the agent (repeatable, comma-separable). Values
-    /// may reference other variables — `DB_URL=postgres.DATABASE_URL` or the
-    /// full `${{postgres.DATABASE_URL}}` form — resolved server-side at
-    /// create time. Applies to newly created agents
-    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    /// Set variables on a new VM; repeat or separate with commas (supports service references)
+    #[clap(
+        long = "variable",
+        value_name = "KEY=VALUE[,KEY=VALUE...]",
+        help_heading = "VM creation"
+    )]
     variables: Vec<String>,
 
     /// Internal create-time variables supplied by desktop setup. These are
@@ -372,21 +312,20 @@ pub struct LaunchArgs {
     #[clap(skip)]
     pub(crate) boot_variables: std::collections::BTreeMap<String, String>,
 
-    /// Provision the code endpoint on a new VM (automatic for managed clients)
-    #[clap(long, requires = "new")]
+    /// Enable a code endpoint on port 4096 (requires --new; automatic for local clients)
+    #[clap(long, requires = "new", help_heading = "VM creation")]
     pub(crate) code_endpoint: bool,
 
-    /// Provision a new VM's code endpoint on this port (defaults to 4096)
-    #[clap(long, requires = "new", value_parser = ca::parse_code_port)]
+    /// Enable a code endpoint on this port (requires --new)
+    #[clap(long, requires = "new", value_parser = ca::parse_code_port, help_heading = "VM creation")]
     code_port: Option<u16>,
 
-    /// Load variables from a .env file (repeatable). `--variable` flags
-    /// override file entries with the same key
-    #[clap(long = "env-file", value_name = "PATH")]
+    /// Load a .env file (repeatable; --variable overrides file values)
+    #[clap(long = "env-file", value_name = "PATH", help_heading = "VM creation")]
     env_files: Vec<std::path::PathBuf>,
 
     /// Environment name or ID (defaults to the linked environment)
-    #[clap(long, short)]
+    #[clap(long, short, help_heading = "Target")]
     pub environment: Option<String>,
 
     /// Preserve directory-based naming when Desktop/the TUI pins a resolved target.
@@ -394,18 +333,23 @@ pub struct LaunchArgs {
     pub(crate) local_name_project: Option<String>,
 
     /// Project ID (defaults to the linked project)
-    #[clap(long, short)]
+    #[clap(long, short, help_heading = "Target")]
     pub project: Option<String>,
 
-    /// Client action: `remote`, `connect [AGENT]`, or Codex `desktop-only`
+    /// Client action: remote, connect [AGENT], desktop-only (Codex); or agent arguments after --
     agent_args: Vec<String>,
 
     /// Remote project directory for Codex/OpenCode server mode (default: /app)
-    #[clap(long = "dir", value_name = "PATH")]
+    #[clap(long = "dir", value_name = "PATH", help_heading = "Target")]
     remote_dir: Option<String>,
 
     /// Existing cloud agent for a local Codex/OpenCode client, by name or ID
-    #[clap(long = "agent", value_name = "NAME_OR_ID", conflicts_with = "new")]
+    #[clap(
+        long = "agent",
+        value_name = "NAME_OR_ID",
+        conflicts_with = "new",
+        help_heading = "Target"
+    )]
     remote_agent: Option<String>,
 
     /// A task to hand the agent as it starts. Set by the TUI's prompt box, not

@@ -75,6 +75,14 @@ pub struct ListArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca create my-box
+  railway ca create my-box --bootstrap dev
+  railway ca create my-box --from-checkpoint <checkpoint-id>
+
+Creates a VM without connecting. Uses the local default bootstrap unless
+--no-bootstrap or --from-checkpoint is given. --bootstrap accepts a name;
+--from-checkpoint requires a cloud-agent checkpoint ID."#)]
 pub struct CreateArgs {
     /// Name for the agent (defaults to a generated one)
     #[clap(value_name = "NAME")]
@@ -154,6 +162,13 @@ pub struct SleepArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca ssh my-box                    # open a shell
+  railway ca ssh my-box --session          # attach to or start a session
+  railway ca ssh my-box --resume           # resume the latest Claude conversation
+  railway ca ssh my-box -- ls -la /app     # run a command
+
+Disconnecting leaves the VM running. Sleep ends its processes and keeps its disk."#)]
 pub struct SshArgs {
     /// Agent name or ID (defaults to this directory's, or your only one)
     #[clap(value_name = "AGENT")]
@@ -163,9 +178,7 @@ pub struct SshArgs {
     #[clap(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "", conflicts_with = "command")]
     session: Option<String>,
 
-    /// Resume the agent's most recent Claude conversation in a fresh session
-    /// (after a sleep or reboot ended the terminal it ran in), instead of
-    /// starting a new one or being asked
+    /// Resume the most recent Claude conversation in a new terminal session
     #[clap(long, conflicts_with_all = ["session", "command"])]
     resume: bool,
 

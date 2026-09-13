@@ -12,6 +12,16 @@ use crate::{
 };
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap list
+  railway ca bootstrap save dev --agent my-box
+  railway ca bootstrap default dev
+  railway code --codex --bootstrap dev
+
+A bootstrap captures a running VM for reuse when creating new VMs.
+The default is saved on this machine for the selected project/environment.
+Project/environment flags override the linked directory and saved preferences.
+Use --no-bootstrap when creating a VM to skip that default."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Command,
@@ -19,16 +29,23 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Command {
-    /// List bootstraps in the linked project/environment
+    /// List saved bootstraps and their status in an environment
     #[clap(visible_alias = "ls")]
     List(ListArgs),
     /// Save a running VM as a named bootstrap (or a new version of that name)
     Save(SaveArgs),
-    /// Select the local default bootstrap for the linked project/environment
+    /// Choose the default bootstrap for new VMs in an environment
     Default(DefaultArgs),
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap list
+  railway ca bootstrap list --environment staging
+  railway ca bootstrap list --json
+
+Lists names, capture status, and last-saved times. An asterisk marks this
+machine's default for the environment. Only READY bootstraps can be used."#)]
 struct ListArgs {
     #[clap(flatten)]
     target: TargetArgs,
@@ -38,6 +55,14 @@ struct ListArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap save dev --agent my-box
+  railway ca bootstrap save dev --agent my-box --default
+  railway ca bootstrap save dev --agent my-box --env-file .env --variable MODE=dev
+
+The source VM must be running. Reusing a name saves a new version.
+Waits for the capture to finish; --default changes only after it succeeds.
+Variables are saved with the bootstrap; --variable overrides matching file values."#)]
 struct SaveArgs {
     /// Bootstrap name, unique within this environment
     name: String,
@@ -47,7 +72,7 @@ struct SaveArgs {
     /// Make this the local default after its capture succeeds
     #[clap(long)]
     default: bool,
-    /// Bootstrap variables; --variable overrides entries from --env-file
+    /// Set bootstrap variables (repeatable or comma-separated; supports service references)
     #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
     variables: Vec<String>,
     /// Load bootstrap variables from a .env file (repeatable)
@@ -61,7 +86,15 @@ struct SaveArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca bootstrap default dev
+  railway ca bootstrap default dev --environment staging
+
+Selects a READY bootstrap for future VM creation in this environment.
+The choice is local to this machine and does not change existing VMs.
+Use --bootstrap <name> or --no-bootstrap when creating a VM to override it."#)]
 struct DefaultArgs {
+    /// Name of a ready bootstrap in this environment
     name: String,
     #[clap(flatten)]
     target: TargetArgs,

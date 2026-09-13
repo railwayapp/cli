@@ -24,9 +24,16 @@ use crate::util::shell::shell_join;
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
-#[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox checkpoint create my-setup       # capture the active sandbox's disk\n  railway sandbox create --checkpoint my-setup     # boot a new sandbox from it\n  railway sandbox checkpoint list   # list named checkpoints in the environment\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
-)]
+#[clap(after_help = r#"Examples:
+  railway sandbox create                 # create and select the active sandbox
+  railway sandbox ssh                    # connect to the active sandbox
+  railway sandbox exec -- ls -la         # run a command
+  railway sandbox fork                   # fork and select the new sandbox
+  railway sandbox destroy                # delete the active sandbox
+
+Commands use the active sandbox unless you specify an ID.
+Use railway sandbox <command> --help for options and examples.
+Requires Sandboxes access."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -77,6 +84,16 @@ enum Commands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox create --private-network --domain 3000
+  railway sandbox create --template dev
+  railway sandbox create --checkpoint my-setup
+  railway sandbox create --env-file .env --variable MODE=dev
+
+--domain publishes an HTTP port and requires --private-network.
+Use --domain web:3000 for a hostname prefix; repeat for multiple ports.
+Build templates with railway sandbox template build; capture checkpoints with
+railway sandbox checkpoint create."#)]
 struct CreateArgs {
     /// Minutes the sandbox may sit idle before it is auto-destroyed
     #[clap(long)]
@@ -111,7 +128,7 @@ struct CreateArgs {
     private_network: bool,
 
     /// Publish an HTTP domain on a port, optionally with a prefix (repeatable).
-    /// Requires --private-network; forks do not inherit source domains
+    /// Requires --private-network
     #[clap(
         long = "domain",
         value_name = "[PREFIX:]PORT",
@@ -147,6 +164,9 @@ enum TemplateCommands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait
+  railway sandbox create --template dev"#)]
 struct TemplateBuildArgs {
     /// Shell instruction to run while building (repeatable, runs in order;
     /// each step must exit 0 within 10 minutes)
@@ -203,6 +223,11 @@ enum CheckpointCommands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox checkpoint create my-setup
+  railway sandbox create --checkpoint my-setup
+
+Reusing a name replaces the previous checkpoint."#)]
 struct CheckpointCreateArgs {
     /// Name for the checkpoint, usable with `railway sandbox create
     /// --checkpoint <name>` (64-character hex names are reserved for
@@ -269,6 +294,13 @@ struct TemplateListArgs {
 /// Fork has no trailing command, so a positional id is unambiguous; `--id` is
 /// also accepted. Omitted → the active sandbox is the fork source.
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox fork
+  railway sandbox fork <id> --private-network --domain web:3000
+  railway sandbox fork <id> --env-file .env
+
+The fork becomes active. Variables, private-network mode, and public domains
+are not inherited; supply them again as needed."#)]
 struct ForkArgs {
     /// Source sandbox ID to fork (defaults to the active sandbox)
     #[clap(value_name = "ID")]
@@ -359,6 +391,10 @@ struct SshArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox exec -- ls -la
+  railway sandbox exec --detach -- npm run build
+  railway sandbox exec --session <name>"#)]
 struct ExecArgs {
     /// Sandbox ID to run in (defaults to the active sandbox)
     #[clap(long = "id", value_name = "ID")]
@@ -394,6 +430,10 @@ struct ExecArgs {
 /// Ports are positional so the common case stays short; `--id` selects a
 /// sandbox other than the active one.
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox forward 3000            # localhost:3000 to sandbox port 3000
+  railway sandbox forward 8080:3000       # localhost:8080 to sandbox port 3000
+  railway sandbox forward 3000 5432       # forward several ports"#)]
 struct ForwardArgs {
     /// Ports to forward: `REMOTE` (same port locally) or `LOCAL:REMOTE`
     #[clap(value_name = "[LOCAL:]REMOTE", required = true)]

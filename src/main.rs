@@ -24,6 +24,8 @@ mod controllers;
 mod errors;
 mod exec_context;
 mod gql;
+#[cfg(test)]
+mod help_tests;
 mod oauth;
 mod resources;
 mod subscription;

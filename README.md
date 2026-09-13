@@ -89,6 +89,9 @@ railway setup agent -y --local
 railway mcp install --local --agent cursor
 ```
 
+For VM launch, reconnection, Desktop setup, and authentication details, see the
+[cloud-agent command guide](docs/cloud-agents.md).
+
 ## Update progress and status
 
 `railway upgrade` presents CLI installation and managed skill synchronization as
