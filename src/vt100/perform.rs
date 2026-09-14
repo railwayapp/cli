@@ -171,6 +171,9 @@ impl<CB: super::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bel_terminated: bool) {
         match params {
+            [b"8", _, uri @ ..] if !uri.is_empty() => {
+                self.screen.set_hyperlink(&uri.join(&b';'));
+            }
             [b"0", s] => {
                 self.callbacks.set_window_icon_name(&mut self.screen, s);
                 self.callbacks.set_window_title(&mut self.screen, s);

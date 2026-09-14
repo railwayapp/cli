@@ -414,6 +414,7 @@ pub struct Session {
     pub client_thread: Option<client_sessions::Thread>,
     pub client_bridge: Option<codex::bridge::Bridge>,
     pub opencode_bridge: Option<crate::commands::cloud_agent::opencode::bridge::Bridge>,
+    pub railway_bridge: Option<crate::commands::code::railway_client::bridge::Bridge>,
     /// How this pane connected, kept so the same session can be reopened
     /// full-screen without rebuilding the relay plumbing.
     pub ssh_target: String,
@@ -463,6 +464,7 @@ impl Session {
     pub(super) fn sync_console_name(&mut self) {
         if self.client_bridge.is_none()
             && self.opencode_bridge.is_none()
+            && self.railway_bridge.is_none()
             && let Some(name) = self
                 .announced_console
                 .lock()
@@ -573,12 +575,16 @@ impl Session {
             match &mut local_connection {
                 client_sessions::Connection::Codex(c) => c.url = url.into(),
                 client_sessions::Connection::OpenCode(c, _) => c.url = url.into(),
+                client_sessions::Connection::Railway(c) => c.connection.url = url.into(),
             }
         }
         cmd.args(local_connection.args(thread_id));
         if let Some(prompt) = prompt {
             match connection {
                 client_sessions::Connection::Codex(_) => {
+                    cmd.args(["--", prompt]);
+                }
+                client_sessions::Connection::Railway(_) => {
                     cmd.args(["--", prompt]);
                 }
                 client_sessions::Connection::OpenCode(_, true) => {
@@ -596,6 +602,7 @@ impl Session {
                 cmd.env("OPENCODE_SERVER_USERNAME", &c.username);
                 cmd.env("OPENCODE_SERVER_PASSWORD", &c.password);
             }
+            client_sessions::Connection::Railway(_) => {}
         }
         let name = client_sessions::name(connection.harness(), &agent_id, thread_id);
         Self::spawn_pty(
@@ -745,6 +752,7 @@ impl Session {
             client_thread: None,
             client_bridge: None,
             opencode_bridge: None,
+            railway_bridge: None,
             agent_id,
             agent_name,
             harness,
@@ -913,13 +921,18 @@ impl Session {
     /// routinely longer than the pane is wide, so the interesting case is
     /// always a link split across two or three rows; matching within one row
     /// finds only the fragment up to the wrap, which is not a URL anybody can
-    /// open. Text only: vt100 0.15 does not surface OSC 8 hyperlinks, so a link
-    /// whose visible text is not the URL cannot be found this way.
+    /// open. OSC 8 destinations take precedence over visible text, including
+    /// shortened URLs and descriptive labels emitted by native clients.
     pub fn url_at(&self, row: u16, col: u16) -> Option<String> {
         self.with_screen(|screen| {
             let (rows, cols) = screen.size();
             if row >= rows || col >= cols {
                 return None;
+            }
+            if let Some(uri) = screen.cell(row, col)?.hyperlink() {
+                let url = url::Url::parse(uri).ok()?;
+                return (matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+                    .then(|| uri.to_owned());
             }
             // The run of rows the emulator says are one wrapped line.
             let mut start = row;
@@ -1242,6 +1255,7 @@ impl Session {
             client_thread: None,
             client_bridge: None,
             opencode_bridge: None,
+            railway_bridge: None,
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
             harness: "claude".to_string(),
@@ -1582,6 +1596,132 @@ mod tests {
         assert!(app.sessions[0].scrolled_back());
         assert!(!app.resizing_sidebar());
         assert_eq!(app.focus, ManageFocus::Session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires RAILWAY_TEST_TUI_BIN; uses the real client's offline mock transport"]
+    fn railway_tui_paints_without_input_after_startup_and_resize() {
+        let binary = std::env::var("RAILWAY_TEST_TUI_BIN").expect("set RAILWAY_TEST_TUI_BIN");
+        let root = tempfile::tempdir().unwrap();
+        let mut cmd = CommandBuilder::new(binary);
+        cmd.arg("--mock");
+        cmd.cwd(root.path());
+        cmd.env("HOME", root.path());
+        let mut pane = Session::spawn_pty(
+            "ca_1".into(),
+            "railway-render-test".into(),
+            "railway".into(),
+            "",
+            None,
+            &[],
+            false,
+            "railway-render-test",
+            cmd,
+            24,
+            80,
+            || {},
+        )
+        .unwrap();
+        let wait_for = |pane: &Session, text: &str, timeout: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            loop {
+                let screen = pane.with_screen(|s| s.contents()).unwrap();
+                if screen.contains(text) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "missing {text:?}:\n{screen}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        };
+        wait_for(&pane, "Ask anything", 10);
+        for (rows, cols) in [(34, 134), (34, 102), (28, 96), (34, 134)] {
+            pane.resize(rows, cols);
+            // A retained pre-resize frame must not satisfy the repaint assertion.
+            pane.parser.lock().unwrap().process(b"\x1b[2J\x1b[H");
+            wait_for(&pane, "Ask anything", 2);
+        }
+        pane.send(b"run the demo");
+        pane.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for(&pane, "cargo build --release", 10);
+        pane.resize(30, 102);
+        wait_for(&pane, "allow once", 20);
+        pane.send(b"y");
+        wait_for(&pane, "Try ctrl+t", 20);
+        pane.send(b"\x04");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn railway_local_client_runs_inside_the_ca_pty_with_resize_and_input() {
+        use crate::commands::code::railway_client::{ClientConnection, Connection};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("fake railway tui");
+        std::fs::write(&binary, r#"#!/usr/bin/env python3
+import os, sys
+assert sys.argv[1:] == ['--attach', 'ws://127.0.0.1:54321/_railway/agent?token=capability&session_id=thread-1', '--', 'explain this']
+print('Railway ready', flush=True)
+assert input() == 'hello'
+size = os.get_terminal_size()
+assert (size.lines, size.columns) == (30, 100), size
+print('Railway complete', flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let connection = client_sessions::Connection::Railway(ClientConnection::new(
+            Connection {
+                url: "wss://agent.example.com/agent".into(),
+                directory: "/app/project".into(),
+                client_version: "0.1.16".into(),
+            },
+            "agent-id",
+            "env-id",
+        ));
+        let mut pane = Session::spawn_client(
+            "agent-id".into(),
+            "box".into(),
+            &binary,
+            &connection,
+            Some("ws://127.0.0.1:54321/_railway/agent?token=capability"),
+            Some("thread-1"),
+            Some("explain this"),
+            24,
+            80,
+            || {},
+        )
+        .unwrap();
+        assert_eq!(pane.harness, "railway");
+        assert_eq!(pane.durable_name, "client-thread:railway:agent-id:thread-1");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pane
+            .with_screen(|s| s.contents().contains("Railway ready"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        pane.resize(30, 100);
+        pane.write_raw(b"hello\n");
+        while !pane.finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            pane.with_screen(|s| s.contents().contains("Railway complete"))
+                .unwrap()
+        );
+        assert_eq!(pane.exit_success(), Some(true));
     }
 
     #[cfg(unix)]
@@ -2119,6 +2259,31 @@ assert (size.lines, size.columns) == (30, 100)
         assert_eq!(url_in(line, 0), None);
         assert_eq!(url_in(line, 2), None, "\"see\" is not a link");
         assert_eq!(url_in(line, line.len() - 2), None);
+    }
+
+    #[test]
+    fn osc_links_resolve_labels_and_shortened_urls_to_the_full_destination() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(6, 60);
+        session.parser.lock().unwrap().process(
+            b"\x1b]8;;https://railway.com/project/full-destination\x07railway.com/short\x1b]8;;\x07 plain\r\n\x1b]8;;https://example.com/docs\x1b\\Read docs\x1b]8;;\x1b\\",
+        );
+        assert_eq!(
+            session.url_at(0, 5).as_deref(),
+            Some("https://railway.com/project/full-destination")
+        );
+        assert_eq!(
+            session.url_at(1, 3).as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(session.url_at(0, 20), None);
+        // Keep the existing web-only click behavior for explicit destinations too.
+        session
+            .parser
+            .lock()
+            .unwrap()
+            .process(b"\r\n\x1b]8;;file:///tmp/example\x07https://example.com\x1b]8;;\x07");
+        assert_eq!(session.url_at(2, 4), None);
     }
 
     /// Punctuation after a link belongs to the sentence.

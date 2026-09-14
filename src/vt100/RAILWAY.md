@@ -1,4 +1,4 @@
-# Railway terminal history patch
+# Railway terminal history and hyperlink patches
 
 This is the crates.io `vt100` 0.16.2 source, under its original MIT license.
 It is compiled as an internal module so the scrollback fix ships in both release
@@ -23,3 +23,9 @@ unchanged. The now-unused `scroll_region_active` helper was removed.
 
 Regression coverage lives in `src/commands/cloud_agent/tui/session.rs`, including
 an opt-in test against an installed Codex binary (`RAILWAY_TEST_CODEX_BIN`).
+
+OSC 8 destinations are retained on cells for CA's link hit testing, including
+links whose labels differ from their URLs. Cells share the destination allocation;
+scrolling, insertion, deletion, and resizing carry it with the text, while erasing
+or overwriting cells clears it. Link state is independent of SGR styling. CA opens
+HTTP(S) links on click and continues to detect plain URLs without OSC metadata.

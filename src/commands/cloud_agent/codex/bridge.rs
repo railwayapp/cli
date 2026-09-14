@@ -1,6 +1,6 @@
-//! Per-pane loopback bridge for the native Codex client. Observe only the
-//! replies to that client's thread selections, so /new and /resume update the
-//! CA row without guessing from account-wide activity or terminal text.
+//! Per-pane loopback bridge for the native Codex client. Apply VM permissions
+//! when selecting a thread and observe the corresponding replies so /new and
+//! /resume update the CA row without guessing from account-wide activity.
 use anyhow::{Context, Result};
 use async_tungstenite::tungstenite::handshake::server::{Request, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -109,8 +109,11 @@ async fn relay(
         tokio::select! {
             frame = local.next() => {
                 let Some(frame) = frame else { break; };
-                let message: Message = frame?.try_into()?;
-                if let Message::Text(text) = &message { selections.request(text); }
+                let mut message: Message = frame?.try_into()?;
+                if let Message::Text(text) = &mut message {
+                    if let Some(request) = full_access_request(text) { *text = request; }
+                    selections.request(text);
+                }
                 remote.send(message).await?;
             }
             frame = remote.next() => {
@@ -123,6 +126,30 @@ async fn relay(
         }
     }
     Ok(())
+}
+
+/// The native TUI sends local permission defaults on start and omits them on resume.
+/// Apply Railway's VM policy at thread selection, before the server's response becomes
+/// the TUI's turn configuration. CLI permission flags cannot be used with remote resume.
+fn full_access_request(text: &str) -> Option<String> {
+    let mut request: Value = serde_json::from_str(text).ok()?;
+    if request.get("id").is_none()
+        || !matches!(
+            request["method"].as_str(),
+            Some("thread/start" | "thread/resume" | "thread/fork")
+        )
+    {
+        return None;
+    }
+    if request["params"].is_null() {
+        request["params"] = serde_json::json!({});
+    }
+    let params = request["params"].as_object_mut()?;
+    params.insert("approvalPolicy".into(), Value::String("never".into()));
+    params.insert("sandbox".into(), Value::String("danger-full-access".into()));
+    // Named profiles and the legacy sandbox field are mutually exclusive.
+    params.remove("permissions");
+    serde_json::to_string(&request).ok()
 }
 
 #[derive(Default)]
@@ -185,6 +212,46 @@ impl Selections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_selection_uses_full_vm_permissions_without_changing_other_requests() {
+        for method in ["thread/start", "thread/resume", "thread/fork"] {
+            for params in [
+                Value::Null,
+                serde_json::json!({"cwd":"/app/project", "threadId":"existing",
+                    "approvalPolicy":"on-request", "sandbox":"read-only", "permissions":"restricted"}),
+            ] {
+                let original =
+                    serde_json::json!({"id":"selection", "method":method, "params":params});
+                let request: Value =
+                    serde_json::from_str(&full_access_request(&original.to_string()).unwrap())
+                        .unwrap();
+                assert_eq!(request["id"], original["id"]);
+                assert_eq!(request["method"], method);
+                assert_eq!(request["params"]["approvalPolicy"], "never");
+                assert_eq!(request["params"]["sandbox"], "danger-full-access");
+                assert!(request["params"].get("permissions").is_none());
+                if original["params"].is_object() {
+                    assert_eq!(request["params"]["cwd"], original["params"]["cwd"]);
+                    assert_eq!(
+                        request["params"]["threadId"],
+                        original["params"]["threadId"]
+                    );
+                }
+            }
+        }
+        // An explicit in-session permission change and approval replies still reach Codex.
+        for request in [
+            r#"{"id":1,"method":"turn/start","params":{"approvalPolicy":"on-request"}}"#,
+            r#"{"id":2,"method":"config/value/write","params":{"keyPath":"approval_policy","value":"on-request"}}"#,
+            r#"{"id":3,"result":{"decision":"decline"}}"#,
+            r#"{"id":4,"method":"thread/start","params":[]}"#,
+            "not JSON",
+        ] {
+            assert!(full_access_request(request).is_none(), "{request}");
+        }
+    }
+
     #[test]
     fn only_this_clients_successful_selection_changes_its_row() {
         let mut selections = Selections::default();
@@ -251,10 +318,15 @@ mod tests {
             )
             .await
             .unwrap();
-            let request = ws.next().await.unwrap().unwrap();
-            let body: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
-            assert_eq!(body["method"], "thread/start");
-            ws.send(async_tungstenite::tungstenite::Message::Text(serde_json::json!({"id":body["id"],"result":{"thread":{"id":"thread-1","cwd":"/app","name":"Native title"}}}).to_string().into())).await.unwrap();
+            for method in ["thread/start", "thread/resume", "thread/fork"] {
+                let request = ws.next().await.unwrap().unwrap();
+                let body: Value = serde_json::from_str(request.to_text().unwrap()).unwrap();
+                assert_eq!(body["method"], method);
+                assert_eq!(body["params"]["approvalPolicy"], "never");
+                assert_eq!(body["params"]["sandbox"], "danger-full-access");
+                assert!(body["params"].get("permissions").is_none());
+                ws.send(async_tungstenite::tungstenite::Message::Text(serde_json::json!({"id":body["id"],"result":{"thread":{"id":"thread-1","cwd":"/app","name":"Native title"}}}).to_string().into())).await.unwrap();
+            }
             let _ = ws.next().await;
             let _ = closed_tx.send(());
         });
@@ -283,19 +355,18 @@ mod tests {
             .into_websocket()
             .await
             .unwrap();
-        ws.send(Message::Text(
-            r#"{"id":7,"method":"thread/start","params":{"cwd":"/app"}}"#.into(),
-        ))
-        .await
-        .unwrap();
-        let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(matches!(reply, Message::Text(text) if text.contains("Native title")));
-        let thread = rx.recv().await.unwrap();
-        assert_eq!(thread.id, "thread-1");
+        for method in ["thread/start", "thread/resume", "thread/fork"] {
+            ws.send(Message::Text(serde_json::json!({"id":method,"method":method,
+                "params":{"cwd":"/app", "approvalPolicy":"on-request", "sandbox":"read-only", "permissions":"restricted"}}).to_string())).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(reply, Message::Text(text) if text.contains("Native title")));
+            let thread = rx.recv().await.unwrap();
+            assert_eq!(thread.id, "thread-1");
+        }
         drop(bridge);
         tokio::time::timeout(Duration::from_secs(2), closed_rx)
             .await

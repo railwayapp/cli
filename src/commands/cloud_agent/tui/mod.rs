@@ -469,6 +469,18 @@ fn open_client(
     } else {
         None
     };
+    let railway_bridge = if let ClientConnection::Railway(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        Some(connection.bridge(move |thread| {
+            let _ = updates.send(Message::ClientThreadSelected {
+                client_id: id.clone(),
+                thread,
+            });
+        })?)
+    } else {
+        None
+    };
     let mut session = session::Session::spawn_client(
         pane.agent_id.clone(),
         pane.agent_name,
@@ -477,7 +489,8 @@ fn open_client(
         bridge
             .as_ref()
             .map(|bridge| bridge.url.as_str())
-            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str())),
+            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str()))
+            .or_else(|| railway_bridge.as_ref().map(|bridge| bridge.url.as_str())),
         pane.thread.as_ref().map(|t| t.id.as_str()),
         pane.prompt.as_deref(),
         24,
@@ -497,6 +510,7 @@ fn open_client(
     session.client_thread = pane.thread;
     session.client_bridge = bridge;
     session.opencode_bridge = opencode_bridge;
+    session.railway_bridge = railway_bridge;
     if background {
         app.attach_session_background(session, pane.agent_id.clone());
     } else {
@@ -516,14 +530,21 @@ fn reconnect_client(
         let result = async {
             let (harness, _, thread_id) = client_sessions::parse_name(&connect.session_name)
                 .ok_or_else(|| anyhow::anyhow!("Invalid client conversation identity"))?;
-            let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
-            let mut connection = if harness == "codex" {
-                ClientConnection::Codex(super::codex::reconnect(&info).await?)
-            } else {
-                ClientConnection::OpenCode(
-                    super::opencode::reconnect(&info, harness == "opencode2").await?,
-                    harness == "opencode2",
+            let mut connection = if harness == "railway" {
+                ClientConnection::Railway(
+                    code::railway_client::reconnect(&connect.agent_id, &connect.environment_id)
+                        .await?,
                 )
+            } else {
+                let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+                if harness == "codex" {
+                    ClientConnection::Codex(super::codex::reconnect(&info).await?)
+                } else {
+                    ClientConnection::OpenCode(
+                        super::opencode::reconnect(&info, harness == "opencode2").await?,
+                        harness == "opencode2",
+                    )
+                }
             };
             let binary = match &connection {
                 ClientConnection::Codex(c) => {
@@ -531,6 +552,11 @@ fn reconnect_client(
                 }
                 ClientConnection::OpenCode(_, beta) => {
                     super::opencode::local::ensure_client_quiet(*beta).await?
+                }
+                ClientConnection::Railway(_) => {
+                    code::railway_client::installer::ensure_client(&ChannelProgress(tx.clone()))
+                        .await?
+                        .binary
                 }
             };
             let thread = if let Some(id) = thread_id {
@@ -754,7 +780,10 @@ fn spawn_prepare(req: LaunchRequest, sink: mpsc::UnboundedSender<Message>) {
         let args = launch_args_for(&req);
         let progress = ChannelProgress(sink.clone());
         if !args.client_on_agent
-            && matches!(req.harness.as_str(), "codex" | "opencode" | "opencode2")
+            && matches!(
+                req.harness.as_str(),
+                "codex" | "opencode" | "opencode2" | "railway"
+            )
         {
             let message = match code::client::prepare_pane(args, &req.harness, &progress).await {
                 Ok(pane) => Message::ClientReady {
@@ -1546,7 +1575,7 @@ pub async fn run(
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
                 if client_sessions::parse_name(&session_name).is_some_and(|(h, _, _)| {
-                    matches!(h, "claude" | "grok" | "railway")
+                    matches!(h, "claude" | "grok")
                         || code::saved_config::client_connection(&agent_id, &environment_id)
                             .is_none_or(|c| c.harness() != h)
                 }) {

@@ -8283,6 +8283,30 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_named_hyperlink_opens_its_destination_when_the_agent_captures_mouse_input() {
+        let mut a = mouse_aware_app();
+        a.focus = ManageFocus::Session;
+        a.sessions[0].send(
+            b"\x1b[10;1Hsee \x1b]8;;https://railway.com/deploy\x07Deployment\x1b]8;;\x07 now\r\n",
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while a.sessions[0].url_at(9, 8).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "hyperlink did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (col, row) = (34 + 8, 3 + 9);
+        assert_eq!(a.on_mouse(MouseAction::Down, col, row), None);
+        assert_eq!(
+            a.on_mouse(MouseAction::Up, col, row),
+            Some(Effect::OpenUrl("https://railway.com/deploy".into()))
+        );
+    }
+
     /// An app with a session whose agent has mouse reporting on.
     #[cfg(unix)]
     fn mouse_aware_app() -> App {

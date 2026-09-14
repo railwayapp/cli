@@ -353,9 +353,8 @@ pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
         TOKEN_ENV.into(),
         "--cd".into(),
         connection.directory.clone(),
-        // Permission policy belongs to the remote app-server. Passing client
-        // overrides makes Codex reject resumed remote tasks, including a
-        // prompt-created thread that the pane reconnects to.
+        // The bridge applies VM permissions to thread start/resume/fork requests.
+        // CLI permission overrides make Codex reject resumed remote tasks.
     ]
 }
 

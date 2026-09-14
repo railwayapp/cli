@@ -121,6 +121,60 @@ accepted but optional. Use `connect [agent]` for an existing backend,
 for a shell. Bare launches and shared CA/Desktop provisioning retain their
 existing targeting behavior.
 
+## Local Railway TUI prototype
+
+```bash
+railway code --railway                       # new VM, local TUI on its public agent endpoint
+railway code --railway --agent my-box --dir /app/project
+railway code --railway connect my-box        # connect to an existing VM; wake it if asleep
+railway code --railway remote                # run the TUI on a new VM over SSH
+railway code --railway --connection-json     # setup and verify, without opening a TUI
+railway code get-config my-box               # replay saved connection details
+```
+
+`railway code --railway` creates a new VM and opens the client in the Railway
+CA session pane, using the same setup progress and terminal frame as Codex and
+OpenCode. `connect` is only for reusing an existing VM; it is not required for
+the normal launch. Use `--agent my-box` to target a specific existing VM during
+setup. The conversation sidebar lists and resumes the daemon's native sessions.
+
+The local `railway-agent-tui` connects over WebSocket to the existing
+`CloudAgent.agentWsUrl` (`wss://<agent-domain>/agent`). It shares the
+platform-supervised `railway-agent serve` daemon and persistent sessions with
+dashboard chat and the VM's TUI. Creating or waking the VM starts that daemon;
+the launcher verifies the public control protocol with `get_state` before
+opening the TUI. It does not start a second daemon or require a `code-*` domain.
+`--dir` selects the remote project, defaulting to `/app`; reconnect uses the
+locally saved directory when available. Without a name, normal cloud-agent
+selection applies. Older VMs without an agent endpoint report that limitation.
+
+The gateway takes a five-minute JWT from `cloudAgentHarnessToken` on each
+WebSocket upgrade. A small local WebSocket bridge mints a fresh token on every
+TUI connection, including reconnects and session switches. This is a public
+WSS data path, with no SSH tunnel. The local bridge requires its own random
+capability, and both the bridge and its connections close when the TUI exits.
+An open conversation is not interrupted when the upgrade token expires.
+Expiring gate tokens are neither saved in `get-config` nor passed to the TUI.
+Model credentials and tool execution stay on the VM.
+
+Every local launch, reconnect, and `--connection-json` invocation checks the
+latest stable release in the public
+[agent-releases repository](https://github.com/railwayapp/agent-releases/releases).
+Missing or outdated clients install automatically into
+`~/.railway/runtimes/railway-tui/<version>/`, with the bundled daemon alongside
+the TUI. An installed client is reused when it matches the latest version.
+Downloads are checked against the release asset's SHA-256 digest before replacing
+any files; a failed download leaves previously installed versions intact.
+The client requires an attach-capable release (`v0.1.15` or newer); the VM image
+owns the server version. A release must include an asset for your platform;
+Windows users need WSL or `remote`.
+
+The TUI opens inside the CA frame, with the conversation sidebar a key away.
+`--connection-json` returns the public URL, remote directory, client version,
+and token-minting metadata, without credentials. Use the reconnect command from
+`get-config` to open it again. Explicit `remote` and passthrough harness
+arguments retain their VM-hosted behavior.
+
 ## Coding backend and app endpoints
 
 The `code-*` endpoint is optional and configured only at VM creation.
@@ -230,11 +284,12 @@ the connection details. Installations initiated inside the frame run quietly.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
-(Beta); Codex uses `codex-railg-3ed`: the first five letters/digits of the project
-name, lowercase, plus a random three-character suffix. When using your default
-cloud agents project, the label comes from the local repository or directory
-instead. Existing names are checked before creation; `--name` overrides the
-generated name. The same naming applies to `remote` and `railway ca desktop`.
+(Beta); Codex uses `codex-railg-3ed`, Claude Code uses `cc-railg-3ed`, and
+Railway uses `rlwy-railg-3ed`: the first five letters/digits of the project name,
+lowercase, plus a random three-character suffix. When using your default cloud
+agents project, the label comes from the local repository or directory instead.
+Existing names are checked before creation; `--name` overrides the generated
+name. The same naming applies to `remote` and `railway ca desktop`.
 
 Reconnect to an existing server using your local client:
 
@@ -414,7 +469,8 @@ handshake, and automatically launches the local client inside the Railway CA
 frame. Tools, files, and threads live on the VM. Use `/resume` in Codex or select
 a conversation in the CA sidebar to reopen a remote thread. `connect` discovers
 running Codex servers; an explicit agent also wakes and restarts a previously
-configured server as needed.
+configured server as needed. Click web links in the pane to open them in your
+browser, including shortened URLs and labeled links.
 
 The remote terminal client uses a separate, persistent `CODEX_HOME` under
 `~/.railway/codex-client/<backend-id>/`. The VM owns its tools and sessions;
@@ -465,12 +521,12 @@ Closing the local client leaves the server running. Use `railway ca sleep my-box
 to stop compute, then `railway code --codex connect my-box` to wake and reconnect.
 Codex currently marks its remote App Server transport experimental.
 
-Local connections enable automatic command permissions: Codex uses
-`--ask-for-approval never --sandbox danger-full-access`, standard OpenCode
-configures remote permissions while preserving explicit denies, and OpenCode2
-uses `--auto`. These settings also apply on reconnect. Codex records trust for
-the remote project directory, including a different repository selected when
-resuming a thread.
+Local connections enable automatic command permissions. Codex starts, resumes,
+and forks conversations with full VM access and approvals disabled. Standard
+OpenCode configures remote permissions while preserving explicit denies, and
+OpenCode2 uses `--auto`. These settings also apply on reconnect. Codex records
+trust for the remote project directory, including a different repository
+selected when resuming a thread.
 
 Fresh OpenCode and OpenCode2 launches open the native home/splash screen. A
 conversation is created when you submit a prompt; a launch with an initial
