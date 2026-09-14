@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use super::log_store::{LogRef, LogStore, StoredLogLine};
 use crate::controllers::develop::LogLine;
+use crate::tui_theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -74,6 +75,7 @@ pub struct TuiApp {
     image_count: usize,
     log_area_top: u16,
     log_area_height: u16,
+    pub theme: &'static Theme,
 }
 
 impl TuiApp {
@@ -115,6 +117,7 @@ impl TuiApp {
             image_count,
             log_area_top: 0,
             log_area_height: 0,
+            theme: Theme::load_preference(),
         }
     }
 
@@ -241,6 +244,12 @@ impl TuiApp {
                 if self.follow_mode {
                     self.scroll_to_bottom();
                 }
+            }
+
+            // Cycle colour theme
+            KeyCode::Char('t') => {
+                self.theme = self.theme.next();
+                let _ = self.theme.save_preference();
             }
 
             _ => {}
