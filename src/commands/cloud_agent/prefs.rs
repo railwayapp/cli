@@ -43,8 +43,11 @@ pub struct AgentPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_project: Option<DefaultProject>,
 
-    /// TUI colour theme slug. `None` means the default; an unknown value is
-    /// ignored rather than treated as an error.
+    /// Legacy TUI colour theme slug. No longer written: the theme choice now
+    /// lives in the shared `~/.railway/tui-prefs.json` (see
+    /// [`crate::tui_theme`]), which every ratatui screen reads, not just this
+    /// one. Kept here, and still read once, so a file from before that file
+    /// existed migrates its theme instead of silently resetting it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
 
