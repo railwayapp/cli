@@ -22,7 +22,10 @@ mod cache;
 pub mod session;
 pub mod settings;
 mod terminal_palette;
-pub mod theme;
+/// `Theme` now lives at [`crate::tui_theme`] — shared by every ratatui
+/// screen, not just this one — but the ~5 files under `cloud_agent/tui/`
+/// that do `use super::theme::{Theme, THEMES}` keep working unchanged.
+pub use crate::tui_theme as theme;
 mod ui;
 pub mod wizard;
 
@@ -119,7 +122,10 @@ fn save_setup(
             environment_id: p.environment_id.clone(),
             environment_name: p.environment_name.clone(),
         }),
-        theme: Some(outcome.theme.clone()),
+        // The theme lives in the shared `tui-prefs.json` now (see
+        // `crate::tui_theme`), not here — every ratatui screen reads it, not
+        // just this one.
+        theme: None,
         hide_tabs: outcome.hide_tabs,
         sidebar_width: app.sidebar_width,
     };
@@ -149,7 +155,7 @@ fn save_settings(
         environment_id: p.environment_id.clone(),
         environment_name: p.environment_name.clone(),
     });
-    prefs.theme = Some(outcome.theme.clone());
+    // See `save_setup`: the theme is shared state now, not cloud-agent's own.
     prefs.hide_tabs = outcome.hide_tabs;
     prefs.save_in(&home)?;
     Ok(prefs)
@@ -168,6 +174,7 @@ fn apply_settings(app: &mut App, outcome: &wizard::Outcome) {
     }
     app.set_harness(Some(&outcome.agent));
     app.set_theme(Some(&outcome.theme));
+    let _ = app.theme.save_preference();
     app.skills_enabled = outcome.skills;
     app.hide_tabs = outcome.hide_tabs;
     match &outcome.project {
@@ -1724,6 +1731,7 @@ pub async fn run(
                 // would still offer the harness they replaced.
                 app.set_harness(Some(&outcome.agent));
                 app.set_theme(Some(&outcome.theme));
+                let _ = app.theme.save_preference();
                 // A default project is a target, and the tree now leads with it.
                 if let Some(project) = outcome.project {
                     app.default_project = Some(project.project_id.clone());

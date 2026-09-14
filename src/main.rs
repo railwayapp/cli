@@ -32,6 +32,7 @@ mod subscription;
 mod table;
 #[cfg(test)]
 mod testkit;
+pub mod tui_theme;
 mod util;
 mod vt100;
 mod workspace;

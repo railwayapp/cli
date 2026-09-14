@@ -444,7 +444,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
         tree,
         target,
         saved.agent.as_deref(),
-        saved.theme.as_deref(),
+        Some(crate::tui_theme::Theme::load_preference().slug),
         default_project_id,
         !first_run,
     );
@@ -518,7 +518,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
                 // setting — persist it on the way out rather than making the
                 // user set it again next time. Best-effort: failing to save it
                 // is not worth an error on exit.
-                persist_theme(&home, app.theme.slug);
+                let _ = app.theme.save_preference();
                 // A quit that closed a finished session says so here, on the
                 // restored terminal — the agent is still running (and billing)
                 // even though its session is over.
@@ -619,15 +619,6 @@ async fn check_ssh_key(client: &reqwest::Client, configs: &Configs) -> tui::app:
         fingerprint: key.fingerprint.clone(),
         public_key: key.public_key.to_string(),
     })
-}
-
-fn persist_theme(home: &std::path::Path, slug: &str) {
-    let mut prefs = AgentPrefs::load_in(home).unwrap_or_default();
-    if prefs.theme.as_deref() == Some(slug) {
-        return;
-    }
-    prefs.theme = Some(slug.to_string());
-    let _ = prefs.save_in(home);
 }
 
 /// Hold the restored terminal until the user is ready, so whatever the launcher
