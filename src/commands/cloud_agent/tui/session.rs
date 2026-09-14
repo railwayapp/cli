@@ -921,13 +921,18 @@ impl Session {
     /// routinely longer than the pane is wide, so the interesting case is
     /// always a link split across two or three rows; matching within one row
     /// finds only the fragment up to the wrap, which is not a URL anybody can
-    /// open. Text only: vt100 0.15 does not surface OSC 8 hyperlinks, so a link
-    /// whose visible text is not the URL cannot be found this way.
+    /// open. OSC 8 destinations take precedence over visible text, including
+    /// shortened URLs and descriptive labels emitted by native clients.
     pub fn url_at(&self, row: u16, col: u16) -> Option<String> {
         self.with_screen(|screen| {
             let (rows, cols) = screen.size();
             if row >= rows || col >= cols {
                 return None;
+            }
+            if let Some(uri) = screen.cell(row, col)?.hyperlink() {
+                let url = url::Url::parse(uri).ok()?;
+                return (matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+                    .then(|| uri.to_owned());
             }
             // The run of rows the emulator says are one wrapped line.
             let mut start = row;
@@ -2254,6 +2259,31 @@ assert (size.lines, size.columns) == (30, 100)
         assert_eq!(url_in(line, 0), None);
         assert_eq!(url_in(line, 2), None, "\"see\" is not a link");
         assert_eq!(url_in(line, line.len() - 2), None);
+    }
+
+    #[test]
+    fn osc_links_resolve_labels_and_shortened_urls_to_the_full_destination() {
+        let mut session = Session::for_test("ca", "test").unwrap();
+        session.resize(6, 60);
+        session.parser.lock().unwrap().process(
+            b"\x1b]8;;https://railway.com/project/full-destination\x07railway.com/short\x1b]8;;\x07 plain\r\n\x1b]8;;https://example.com/docs\x1b\\Read docs\x1b]8;;\x1b\\",
+        );
+        assert_eq!(
+            session.url_at(0, 5).as_deref(),
+            Some("https://railway.com/project/full-destination")
+        );
+        assert_eq!(
+            session.url_at(1, 3).as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert_eq!(session.url_at(0, 20), None);
+        // Keep the existing web-only click behavior for explicit destinations too.
+        session
+            .parser
+            .lock()
+            .unwrap()
+            .process(b"\r\n\x1b]8;;file:///tmp/example\x07https://example.com\x1b]8;;\x07");
+        assert_eq!(session.url_at(2, 4), None);
     }
 
     /// Punctuation after a link belongs to the sentence.

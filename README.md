@@ -469,7 +469,8 @@ handshake, and automatically launches the local client inside the Railway CA
 frame. Tools, files, and threads live on the VM. Use `/resume` in Codex or select
 a conversation in the CA sidebar to reopen a remote thread. `connect` discovers
 running Codex servers; an explicit agent also wakes and restarts a previously
-configured server as needed.
+configured server as needed. Click web links in the pane to open them in your
+browser, including shortened URLs and labeled links.
 
 The remote terminal client uses a separate, persistent `CODEX_HOME` under
 `~/.railway/codex-client/<backend-id>/`. The VM owns its tools and sessions;
@@ -520,12 +521,12 @@ Closing the local client leaves the server running. Use `railway ca sleep my-box
 to stop compute, then `railway code --codex connect my-box` to wake and reconnect.
 Codex currently marks its remote App Server transport experimental.
 
-Local connections enable automatic command permissions: Codex uses
-`--ask-for-approval never --sandbox danger-full-access`, standard OpenCode
-configures remote permissions while preserving explicit denies, and OpenCode2
-uses `--auto`. These settings also apply on reconnect. Codex records trust for
-the remote project directory, including a different repository selected when
-resuming a thread.
+Local connections enable automatic command permissions. Codex starts, resumes,
+and forks conversations with full VM access and approvals disabled. Standard
+OpenCode configures remote permissions while preserving explicit denies, and
+OpenCode2 uses `--auto`. These settings also apply on reconnect. Codex records
+trust for the remote project directory, including a different repository
+selected when resuming a thread.
 
 Fresh OpenCode and OpenCode2 launches open the native home/splash screen. A
 conversation is created when you submit a prompt; a launch with an initial

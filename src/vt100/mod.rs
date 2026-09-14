@@ -45,6 +45,9 @@ mod row;
 mod screen;
 mod term;
 
+#[cfg(test)]
+mod hyperlink_tests;
+
 pub use attrs::Color;
 pub use callbacks::Callbacks;
 pub use cell::Cell;

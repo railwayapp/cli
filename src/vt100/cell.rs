@@ -1,6 +1,7 @@
+use std::sync::Arc;
 use unicode_width::UnicodeWidthChar as _;
 
-// chosen to make the size of the cell struct 32 bytes
+// The text and style occupy 32 bytes; hyperlink metadata adds one shared pointer.
 const CONTENT_BYTES: usize = 22;
 
 const IS_WIDE: u8 = 0b1000_0000;
@@ -13,8 +14,9 @@ pub struct Cell {
     contents: [u8; CONTENT_BYTES],
     len: u8,
     attrs: super::attrs::Attrs,
+    hyperlink: Option<Arc<String>>,
 }
-const _: () = assert!(std::mem::size_of::<Cell>() == 32);
+const _: () = assert!(std::mem::size_of::<Cell>() == 32 + std::mem::size_of::<usize>());
 
 impl PartialEq<Self> for Cell {
     fn eq(&self, other: &Self) -> bool {
@@ -22,6 +24,9 @@ impl PartialEq<Self> for Cell {
             return false;
         }
         if self.attrs != other.attrs {
+            return false;
+        }
+        if self.hyperlink != other.hyperlink {
             return false;
         }
         let len = self.len();
@@ -35,6 +40,7 @@ impl Cell {
             contents: Default::default(),
             len: 0,
             attrs: super::attrs::Attrs::default(),
+            hyperlink: None,
         }
     }
 
@@ -43,6 +49,7 @@ impl Cell {
     }
 
     pub(crate) fn set(&mut self, c: char, a: super::attrs::Attrs) {
+        self.hyperlink = None;
         self.len = 0;
         self.append_char(0, c);
         // strings in this context should always be an arbitrary character
@@ -76,6 +83,16 @@ impl Cell {
     pub(crate) fn clear(&mut self, attrs: super::attrs::Attrs) {
         self.len = 0;
         self.attrs = attrs;
+        self.hyperlink = None;
+    }
+
+    /// The OSC 8 destination attached to this cell, independent of its visible text.
+    pub fn hyperlink(&self) -> Option<&str> {
+        self.hyperlink.as_deref().map(String::as_str)
+    }
+
+    pub(crate) fn set_hyperlink(&mut self, hyperlink: Option<Arc<String>>) {
+        self.hyperlink = hyperlink;
     }
 
     /// Returns the text contents of the cell.

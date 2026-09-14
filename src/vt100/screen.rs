@@ -58,6 +58,7 @@ pub struct Screen {
 
     attrs: super::attrs::Attrs,
     saved_attrs: super::attrs::Attrs,
+    hyperlink: Option<std::sync::Arc<String>>,
 
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
@@ -74,6 +75,7 @@ impl Screen {
 
             attrs: super::attrs::Attrs::default(),
             saved_attrs: super::attrs::Attrs::default(),
+            hyperlink: None,
 
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
@@ -650,10 +652,19 @@ impl Screen {
 }
 
 impl Screen {
+    pub(crate) fn set_hyperlink(&mut self, uri: &[u8]) {
+        // OSC state is separate from SGR: a style reset inside a link must not end it.
+        self.hyperlink = std::str::from_utf8(uri)
+            .ok()
+            .filter(|uri| !uri.is_empty() && !uri.chars().any(char::is_control))
+            .map(|uri| std::sync::Arc::new(uri.to_owned()));
+    }
+
     pub(crate) fn text(&mut self, c: char) {
         let pos = self.grid().pos();
         let size = self.grid().size();
         let attrs = self.attrs;
+        let hyperlink = self.hyperlink.clone();
 
         let width = c.width();
         if width.is_none() && (u32::from(c)) < 256 {
@@ -828,6 +839,7 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            cell.set_hyperlink(hyperlink.clone());
             self.grid_mut().col_inc(1);
             if width > 1 {
                 let pos = self.grid().pos();
@@ -884,6 +896,7 @@ impl Screen {
                     .unwrap();
                 next_cell.clear(super::attrs::Attrs::default());
                 next_cell.set_wide_continuation(true);
+                next_cell.set_hyperlink(hyperlink);
                 self.grid_mut().col_inc(1);
             }
         }
