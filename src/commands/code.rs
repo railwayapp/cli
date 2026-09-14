@@ -121,6 +121,7 @@ pub(crate) fn save_desktop_configuration(
 #[clap(
     args_conflicts_with_subcommands = true,
     after_help = r#"Examples:
+  railway code                            # new VM with railway-agent-tui
   railway code --codex                    # start Codex on a new VM
   railway code --claude                   # start Claude Code on a new VM
   railway code --codex connect my-box     # connect to an existing server
@@ -128,7 +129,7 @@ pub(crate) fn save_desktop_configuration(
   railway code get-config my-box          # show saved connection details
 
 An explicit agent flag creates a new VM unless you use connect or --agent.
-Without an agent flag, uses the default from railway ca setup.
+Without an agent flag, opens railway-agent-tui on a new VM.
 Flags override preferences; the linked project overrides the saved project.
 
 Codex and OpenCode open a local client connected to the VM, with command
@@ -414,6 +415,17 @@ impl LaunchArgs {
     /// here rather than in clap or provisioning, which CA, Desktop, and SSH also
     /// use when opening sessions on an existing VM.
     fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
+        if !self.codex
+            && !self.opencode
+            && !self.opencode2
+            && !self.claude
+            && !self.grok
+            && !self.railway
+            && !self.shell
+            && !self.rm
+        {
+            self.railway = true;
+        }
         let action = self.client_action()?;
         if matches!(action, Some(ClientAction::Connect(_)))
             && (self.bootstrap.is_some() || self.no_bootstrap)
@@ -4339,9 +4351,34 @@ mod tests {
     }
 
     #[test]
-    fn code_creation_default_is_scoped_to_harness_launches() {
+    fn bare_code_creates_a_new_vm_with_the_railway_client() {
         for argv in [
             vec!["code"],
+            vec!["code", "--new"],
+            vec!["code", "--project", "demo"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert_eq!(
+                args.prepare_code_launch().unwrap(),
+                Some(ClientAction::Local)
+            );
+            assert!(args.railway);
+            assert!(args.new);
+        }
+        for argv in [
+            vec!["code", "connect", "my-box"],
+            vec!["code", "--agent", "my-box"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            args.prepare_code_launch().unwrap();
+            assert!(args.railway);
+            assert!(!args.new);
+        }
+    }
+
+    #[test]
+    fn code_creation_default_preserves_removal_and_ca_launches() {
+        for argv in [
             vec!["code", "--rm"],
             vec!["code", "--codex", "--rm"],
             vec!["code", "--claude", "--rm"],

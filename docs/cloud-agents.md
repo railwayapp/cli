@@ -7,13 +7,15 @@ is required. Run any command with `--help` for its options.
 ## Launch and reconnect
 
 ```sh
+railway code                         # new VM with railway-agent-tui
 railway code --codex
 railway code --opencode
 railway code --claude
 railway code --codex connect my-box
 ```
 
-An explicit agent flag on `railway code` creates a new VM unless `connect` or
+Bare `railway code` opens `railway-agent-tui` on a new VM. An explicit agent
+flag also creates a new VM unless `connect` or
 `--agent` selects an existing one. `connect [agent]` connects to an existing
 Codex/OpenCode server; `--agent <name-or-id>` selects a VM for server setup.
 
@@ -156,3 +158,9 @@ repeated flags, and service references such as `DB_URL=postgres.DATABASE_URL` or
 Local clients request their code endpoint automatically. When configuring one
 explicitly on `railway code` or `ca start`, `--code-endpoint` and `--code-port`
 require an explicit `--new`, even when the launcher would create a VM by default.
+
+In the `railway ca` main screen, press `n` for a new VM. Below the agent list,
+use the arrow keys and Enter or click to toggle **Use bootstrap**. When enabled,
+**Select Bootstrap** appears below it (`b` opens the list). **Select Project**
+(`p`) chooses the project and environment for this VM, with the saved default
+project first. This choice does not change your saved default project.

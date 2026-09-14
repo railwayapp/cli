@@ -814,13 +814,34 @@ mod tests {
             app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
             let out = draw(&mut app, width, height, "new-vm");
             assert!(out.contains("ChatGPT Codex"), "{out}");
+            assert!(out.contains("OpenCode"), "{out}");
+            assert!(out.contains("Shell"), "{out}");
             assert!(out.contains("Use bootstrap"), "{out}");
             assert!(out.contains("Select Bootstrap"), "{out}");
             let checkbox = app.panes.harness_use_bootstrap;
-            assert_eq!(checkbox.x, app.panes.harness_list.x + 2);
-            assert_eq!(app.panes.harness_bootstrap.x, app.panes.harness_list.x + 2);
+            assert_eq!(checkbox.x, app.panes.harness_list.x);
+            assert_eq!(
+                checkbox.y,
+                app.panes.harness_list.y + app.panes.harness_list.h + 2
+            );
+            assert!(out.contains("Select Project"), "{out}");
+            assert_eq!(app.panes.harness_bootstrap.x, checkbox.x);
             app.on_mouse(MouseAction::Down, checkbox.x, checkbox.y);
             assert!(!app.harness_use_bootstrap);
+            let out = draw(&mut app, width, height, "clean-vm");
+            assert!(!out.contains("Select Bootstrap"), "{out}");
+            assert_eq!(app.panes.harness_bootstrap.h, 0);
+            app.on_mouse(
+                MouseAction::Down,
+                checkbox.x,
+                app.panes.harness_use_bootstrap.y,
+            );
+            draw(&mut app, width, height, "bootstrap-enabled");
+            let project = app.panes.harness_project;
+            app.on_mouse(MouseAction::Down, project.x, project.y);
+            assert_eq!(app.screen, Screen::TargetPick);
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            draw(&mut app, width, height, "project-cancelled");
             let list = app.panes.harness_list;
             app.on_mouse(MouseAction::Down, list.x, list.y + 2);
             assert_eq!(
