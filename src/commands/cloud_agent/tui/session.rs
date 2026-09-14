@@ -1202,6 +1202,26 @@ impl Session {
         self.spawned_at = std::time::Instant::now() - by;
     }
 
+    /// Wait for complete fixture output before inspecting links or history.
+    /// ConPTY startup and delivery can take seconds on a loaded Windows runner.
+    /// Check the screen rather than sleeping a fixed amount or silently moving
+    /// on after a polling loop expires. Call this with the live view selected.
+    #[track_caller]
+    pub fn wait_for_output(&self, text: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let contents = self.with_screen(|s| s.contents()).expect("fixture screen");
+            if contents.contains(text) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY did not deliver {text:?}; screen contents: {contents:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// A session backed by a local `cat` instead of ssh, so the state machine
     /// around sessions can be tested without a relay or a network.
     pub fn for_test(agent_id: &str, agent_name: &str) -> Result<Self> {
@@ -2157,24 +2177,8 @@ assert (size.lines, size.columns) == (30, 100)
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(6, 60);
         session.send(b"open https://railway.com/deploy now\r\n");
-        // PTY startup and delivery can exceed 400 ms on a loaded Windows
-        // runner. Wait for the entire line (including the URL's terminator)
-        // so this checks hit testing rather than process scheduling or a
-        // partially delivered URL.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let line = session
-                .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .unwrap_or_default();
-            if line.contains("open https://railway.com/deploy now") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "PTY did not deliver the complete link line: {line:?}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // Include the URL's terminator so a partial delivery cannot look ready.
+        session.wait_for_output("open https://railway.com/deploy now");
 
         assert_eq!(
             session.url_at(0, 10).as_deref(),
@@ -2198,15 +2202,8 @@ assert (size.lines, size.columns) == (30, 100)
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(24, 40);
         session.send(format!("{url}\r\n").as_bytes());
+        session.wait_for_output(url);
         let rows = url.len().div_ceil(40) as u16;
-        for _ in 0..100 {
-            // The echo, then the copy: waiting for the second guarantees the
-            // first is whole.
-            if session.url_at(rows, 0).is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
 
         // Every row it covers, and every column within them, resolves to the
         // whole link — clicking the tail is as natural as clicking the head.
@@ -2232,7 +2229,7 @@ assert (size.lines, size.columns) == (30, 100)
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(8, 20);
         session.send(b"the quick brown fox jumps over the lazy dog\r\n");
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        session.wait_for_output("the quick brown fox jumps over the lazy dog");
         for row in 0..3 {
             for col in 0..20 {
                 assert_eq!(session.url_at(row, col), None, "row {row} col {col}");
@@ -2253,16 +2250,7 @@ assert (size.lines, size.columns) == (30, 100)
         for i in 0..40 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        // Give the reader thread a moment to fold them in.
-        for _ in 0..50 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-39"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-39");
         let live = session.with_screen(|s| s.contents()).unwrap();
         assert!(live.contains("line-39"), "expected the tail:\n{live}");
         assert!(!session.scrolled_back());
@@ -2292,15 +2280,7 @@ assert (size.lines, size.columns) == (30, 100)
         for i in 0..120 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-119"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-119");
 
         // Ask for infinitely far back; the emulator clamps to what exists.
         session.scroll_by(isize::MAX);
@@ -2385,15 +2365,7 @@ assert (size.lines, size.columns) == (30, 100)
         for i in 0..60 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-59"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-59");
 
         // No mouse reporting and no alternate screen here, so each wheel goes
         // to the emulator's own scrollback.
@@ -2427,15 +2399,7 @@ assert (size.lines, size.columns) == (30, 100)
         for i in 0..100 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-99"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-99");
 
         session.scroll_by(60);
         assert!(session.scroll > 10, "start well past one screen");
@@ -2493,16 +2457,11 @@ assert (size.lines, size.columns) == (30, 100)
             );
         }
 
-        // Wait for the tail so the final checks see settled history.
-        for _ in 0..100 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("round-4-line-39"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        // Send a fresh marker after the final resize. Shrinking the screen can
+        // discard its bottom rows, including the last round's tail if it was
+        // already delivered. Sending also returns the viewport to live output.
+        session.send(b"CHURN-DRAINED-MARKER\r\n");
+        session.wait_for_output("CHURN-DRAINED-MARKER");
 
         session.scroll_by(isize::MAX);
         let top = session.with_screen(|s| s.contents()).unwrap();
@@ -2526,15 +2485,7 @@ assert (size.lines, size.columns) == (30, 100)
         for i in 0..4200 {
             session.send(format!("line-{i}\r\n").as_bytes());
         }
-        for _ in 0..300 {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            let seen = session
-                .with_screen(|screen| screen.contents().contains("line-4199"))
-                .unwrap_or(false);
-            if seen {
-                break;
-            }
-        }
+        session.wait_for_output("line-4199");
 
         session.scroll_by(isize::MAX);
         assert_eq!(

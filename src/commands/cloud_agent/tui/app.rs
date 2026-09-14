@@ -8321,14 +8321,7 @@ mod tests {
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
         session.resize(6, 60);
         session.send(b"see https://railway.com/deploy now\r\n");
-        // ConPTY can deliver the echoed URL in several reads on a busy runner.
-        // Wait for the complete link, rather than clicking a partial hostname.
-        for _ in 0..500 {
-            if session.url_at(0, 8).as_deref() == Some("https://railway.com/deploy") {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        session.wait_for_output("see https://railway.com/deploy now");
         assert_eq!(
             session.url_at(0, 8).as_deref(),
             Some("https://railway.com/deploy")
@@ -8366,15 +8359,7 @@ mod tests {
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
         session.resize(6, 60);
         session.send(b"see https://railway.com/deploy now\r\n");
-        for _ in 0..40 {
-            if session
-                .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("railway.com"))
-            {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        session.wait_for_output("see https://railway.com/deploy now");
         a.attach_session(session, "ca_1".into());
         a.panes.session = PaneBox {
             x: 34,
@@ -8403,7 +8388,7 @@ mod tests {
         let mut session = super::super::session::Session::for_test("ca_1", "nimble-otter").unwrap();
         session.resize(6, 60);
         session.send(b"just some output\r\n");
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        session.wait_for_output("just some output");
         a.attach_session(session, "ca_1".into());
         a.panes.session = PaneBox {
             x: 34,
