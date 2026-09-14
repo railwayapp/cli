@@ -165,7 +165,7 @@ pub fn railway_managed_names(home: &Path) -> BTreeSet<String> {
 
 /// Pack the skills a launch should carry, or `None` when there is nothing to
 /// send (sync off, no source, or every skill excluded).
-pub fn pack(prefs: &AgentPrefs, home: &Path) -> Result<Option<PackedSkills>> {
+pub fn pack(prefs: &AgentPrefs, home: &Path, note: &dyn Fn(&str)) -> Result<Option<PackedSkills>> {
     if !prefs.skills.enabled {
         return Ok(None);
     }
@@ -180,10 +180,10 @@ pub fn pack(prefs: &AgentPrefs, home: &Path) -> Result<Option<PackedSkills>> {
     };
     let source_dir = source.path_in(home);
     if !source_dir.is_dir() {
-        eprintln!(
+        note(&format!(
             "Skipping skills sync: {} is gone (re-run `railway ca setup`).",
             source_dir.display()
-        );
+        ));
         return Ok(None);
     }
 
@@ -232,10 +232,10 @@ pub fn pack(prefs: &AgentPrefs, home: &Path) -> Result<Option<PackedSkills>> {
         );
     }
     if tarball.len() > WARN_BYTES {
-        eprintln!(
+        note(&format!(
             "Note: syncing {} of skills — this adds time to every launch.",
             human_bytes(tarball.len())
-        );
+        ));
     }
 
     Ok(Some(PackedSkills {
@@ -479,7 +479,9 @@ mod tests {
         plant_skill(&dir, "alpha", "a");
         plant_skill(&dir, "beta", "b");
 
-        let packed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let packed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         assert_eq!(packed.names, vec!["alpha".to_string(), "beta".to_string()]);
         assert!(!packed.tarball.is_empty());
         assert_eq!(packed.hash.len(), 64);
@@ -492,11 +494,11 @@ mod tests {
 
         let mut off = prefs_with("claude");
         off.skills.enabled = false;
-        assert!(pack(&off, home.path()).unwrap().is_none());
+        assert!(pack(&off, home.path(), &|_| {}).unwrap().is_none());
 
         let mut sourceless = prefs_with("claude");
         sourceless.skills.source = None;
-        assert!(pack(&sourceless, home.path()).unwrap().is_none());
+        assert!(pack(&sourceless, home.path(), &|_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -508,7 +510,7 @@ mod tests {
 
         let mut prefs = prefs_with("claude");
         prefs.skills.exclude = vec!["use-railway".into()];
-        let packed = pack(&prefs, home.path()).unwrap().unwrap();
+        let packed = pack(&prefs, home.path(), &|_| {}).unwrap().unwrap();
         assert_eq!(packed.names, vec!["alpha".to_string()]);
     }
 
@@ -522,7 +524,9 @@ mod tests {
         plant_skill(&dir, "mine", "mine");
 
         assert!(!AgentPrefs::path_in(home.path()).exists());
-        let packed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let packed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         assert_eq!(packed.names, vec!["mine".to_string()]);
     }
 
@@ -540,7 +544,9 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("real").join("SKILL.md"), hollow.join("SKILL.md"))
             .unwrap();
 
-        let packed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let packed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         assert_eq!(packed.names, vec!["real".to_string()]);
     }
 
@@ -554,7 +560,7 @@ mod tests {
         );
         let mut prefs = prefs_with("claude");
         prefs.skills.exclude = vec!["use-railway".into()];
-        assert!(pack(&prefs, home.path()).unwrap().is_none());
+        assert!(pack(&prefs, home.path(), &|_| {}).unwrap().is_none());
     }
 
     #[test]
@@ -579,19 +585,25 @@ mod tests {
         let dir = home.path().join(".claude").join("skills");
         plant_skill(&dir, "alpha", "a");
 
-        let first = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
-        let again = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let first = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
+        let again = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         assert_eq!(first.hash, again.hash);
 
         std::fs::write(dir.join("alpha").join("SKILL.md"), "changed").unwrap();
-        let changed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let changed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         assert_ne!(first.hash, changed.hash);
     }
 
     #[test]
     fn unknown_source_slug_is_an_error() {
         let home = tempfile::tempdir().unwrap();
-        let err = pack(&prefs_with("nonsense"), home.path()).unwrap_err();
+        let err = pack(&prefs_with("nonsense"), home.path(), &|_| {}).unwrap_err();
         assert!(err.to_string().contains("Unknown skills source"), "{err}");
     }
 
@@ -657,7 +669,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(".claude").join("skills");
         plant_skill(&dir, "mine", "mine-body");
-        let packed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let packed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
 
         // Stand-in for the agent: a harness skills dir that already holds a
         // skill of the same name, plus one it has never seen.
@@ -741,7 +755,9 @@ mod tests {
         )
         .unwrap();
 
-        let packed = pack(&prefs_with("claude"), home.path()).unwrap().unwrap();
+        let packed = pack(&prefs_with("claude"), home.path(), &|_| {})
+            .unwrap()
+            .unwrap();
         let decoder = flate2::read::GzDecoder::new(packed.tarball.as_slice());
         let mut archive = tar::Archive::new(decoder);
         let mut paths: Vec<String> = archive

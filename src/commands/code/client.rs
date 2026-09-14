@@ -1,4 +1,4 @@
-//! Shared local-client flow for Codex and OpenCode. CA terminal sessions use `prepare`.
+//! Shared local-client flow. CA terminal sessions use `prepare`.
 use std::{collections::HashMap, fmt, time::Duration};
 
 use anyhow::{Context, Result, bail};
@@ -59,6 +59,7 @@ impl Connection {
         identity: Option<&std::path::Path>,
         options: &desktop::CodexOptions,
         desktop_only: bool,
+        progress: &dyn Progress,
     ) -> SavedConfig {
         match self {
             Self::Codex(connection) => {
@@ -68,6 +69,7 @@ impl Connection {
                     identity,
                     &connection.directory,
                     options,
+                    progress,
                 )
                 .await;
                 saved.with_codex(connection, desktop_only, &desktop)
@@ -82,10 +84,11 @@ impl Connection {
                 .await;
                 saved.with_opencode(connection, *beta, &desktop)
             }
+            Self::Railway(c) => saved.with_railway(&c.connection),
         }
     }
 
-    fn show(&self, saved: &SavedConfig, persisted: &Result<()>) -> Result<()> {
+    pub(super) fn show(&self, saved: &SavedConfig, persisted: &Result<()>) -> Result<()> {
         saved.show()?;
         if let Err(error) = persisted {
             eprintln!("Could not save connection details for railway code get-config: {error:#}");
@@ -102,6 +105,11 @@ impl Connection {
             Self::OpenCode(c, _) => serde_json::json!({
                 "url": c.url, "username": c.username, "password": c.password,
                 "directory": c.directory, "reused": c.reused,
+            }),
+            Self::Railway(c) => serde_json::json!({
+                "transport": "wss", "url": c.connection.url,
+                "directory": c.connection.directory, "clientVersion": c.connection.client_version,
+                "authentication": "cloudAgentHarnessToken", "tokenLifetimeSeconds": 300,
             }),
         }
     }
@@ -131,6 +139,9 @@ pub(crate) async fn prepare_pane(
     harness: &str,
     progress: &dyn Progress,
 ) -> Result<crate::commands::cloud_agent::tui::ClientPane> {
+    if harness == "railway" {
+        return super::railway_client::prepare_pane(args, progress).await;
+    }
     let beta = harness == "opencode2";
     let directory = args.remote_dir.take();
     let password = opencode::generate_password();
@@ -160,12 +171,14 @@ pub(crate) async fn prepare_pane(
                 beta,
             )
         };
+        progress.step("Saving connection settings");
         let saved = connection
             .configure_snapshot(
                 SavedConfig::from_prepared(&prepared)?,
                 prepared.identity.as_deref(),
                 &desktop::CodexOptions::default(),
                 false,
+                progress,
             )
             .await;
         saved.save()?;
@@ -173,6 +186,7 @@ pub(crate) async fn prepare_pane(
         let binary = match &connection {
             Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
             Connection::OpenCode(_, beta) => local::ensure_client_quiet(*beta).await?,
+            Connection::Railway(_) => unreachable!("Railway prepares its public endpoint above"),
         };
         let thread = connection
             .new_thread(args.initial_prompt.as_deref())
@@ -263,6 +277,7 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
             prepared.identity.as_deref(),
             &desktop_options,
             desktop_only,
+            &progress,
         )
         .await;
     let persisted = saved.save();
@@ -306,24 +321,24 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
     Ok(())
 }
 
-fn interactive() -> bool {
+pub(super) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// Preserve diagnostics on failures and keep redirected output free of escapes.
-fn clear_setup_output() {
+pub(super) fn clear_setup_output() {
     if interactive() {
         let _ = console::Term::stdout().clear_screen();
     }
 }
 
-struct ConnectionProgress {
+pub(super) struct ConnectionProgress {
     json: bool,
     cli: CliProgress,
 }
 
 impl ConnectionProgress {
-    fn new(json: bool) -> Self {
+    pub(super) fn new(json: bool) -> Self {
         Self {
             json,
             cli: CliProgress::default(),
@@ -366,7 +381,7 @@ fn connection_json(
     })
 }
 
-fn print_connection_json(
+pub(super) fn print_connection_json(
     connection: &Connection,
     id: &str,
     name: &str,
@@ -390,12 +405,32 @@ async fn launch(
     let binary = match connection {
         Connection::Codex(c) => Some(codex::local::ensure_client(&c.version).await?),
         Connection::OpenCode(_, beta) => local::ensure_client(*beta).await?,
+        Connection::Railway(_) => unreachable!("Railway checks its client before provisioning"),
     };
     let Some(binary) = binary else {
         clear_setup_output();
         return connection.show(saved, persisted);
     };
-    println!("Launching local {}…", harness.edition());
+    launch_binary(
+        connection,
+        saved,
+        persisted,
+        prompt,
+        binary,
+        harness.edition(),
+    )
+    .await
+}
+
+pub(super) async fn launch_binary(
+    connection: &Connection,
+    saved: &SavedConfig,
+    persisted: &Result<()>,
+    prompt: Option<String>,
+    binary: std::path::PathBuf,
+    edition: &str,
+) -> Result<()> {
+    println!("Launching local {edition}…");
     let thread = connection.new_thread(prompt.as_deref()).await?;
     let prompt = connection.initial_prompt(thread.as_ref(), prompt).await?;
     let result = crate::commands::cloud_agent::launch_client_in_pane(
@@ -627,6 +662,7 @@ pub(super) async fn connect(
             relay.identity.as_deref(),
             &desktop::CodexOptions::default(),
             false,
+            &ConnectionProgress::new(json),
         )
         .await;
     let persisted = saved.save();

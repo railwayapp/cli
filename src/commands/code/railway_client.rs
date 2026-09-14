@@ -1,12 +1,10 @@
 //! Local Railway TUI attached to the platform-owned daemon through its public gate.
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use is_terminal::IsTerminal;
 use reqwest_websocket::{Message, RequestBuilderExt};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{ClientAction, LaunchArgs, Progress, SessionStyle, saved_config::SavedConfig};
 use crate::{
@@ -17,13 +15,13 @@ use crate::{
     gql::{mutations, queries},
 };
 
-mod bridge;
-
-// Known attach-capable public release. Server lifecycle/version is owned by the VM image.
-const VERSION: &str = "0.1.15";
+pub(crate) mod bridge;
+pub(crate) mod installer;
+mod sessions;
+pub(crate) use sessions::ClientConnection;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Connection {
+pub(crate) struct Connection {
     pub url: String,
     pub directory: String,
     pub client_version: String,
@@ -38,92 +36,132 @@ struct Target {
     connection: Connection,
 }
 
-struct ProgressReporter;
-impl Progress for ProgressReporter {
-    fn step(&self, text: &str) {
-        eprintln!("{text}");
-    }
-    fn note(&self, text: &str) {
-        eprintln!("{text}");
-    }
-    fn finish(&self) {}
-}
-
 pub(super) async fn command(mut args: LaunchArgs, action: ClientAction) -> Result<()> {
-    let interactive =
-        !args.connection_json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    if args.code_endpoint || args.code_port.is_some() {
-        bail!(
-            "Railway uses its existing agent endpoint; --code-endpoint and --code-port are unnecessary"
-        );
-    }
+    use super::client::{self, ConnectionProgress};
+    let json = args.connection_json;
+    let interactive = !json && client::interactive();
+    validate_args(&args)?;
     let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    access::ensure_enabled(&client, &configs).await?;
-    // Install before creating a VM, so an unavailable platform/release costs no VM.
-    let binary = if interactive {
-        Some(ensure_client(VERSION).await?)
-    } else {
-        None
-    };
-    let (saved, directory) = match action {
-        ClientAction::Local => {
-            super::client::pin_agent(&mut args).await?;
-            let directory = args.remote_dir.take().unwrap_or_else(|| "/app".into());
-            args.app_mode = true;
-            let prepared =
-                super::prepare(&args, &ProgressReporter, SessionStyle::FullTerminal).await?;
-            (SavedConfig::from_prepared(&prepared)?, directory)
-        }
-        ClientAction::Connect(selector) => {
-            let mut configs = configs;
-            let scope = if args.project.is_some() || args.environment.is_some() {
-                Some(
-                    super::resolve_project_and_env(
-                        &mut configs,
-                        &client,
-                        args.project.take(),
-                        args.environment.take(),
+    let gql = GQLClient::new_authorized(&configs)?;
+    access::ensure_enabled(&gql, &configs).await?;
+    let progress = ConnectionProgress::new(json);
+    let result: Result<_> = async {
+        // Check before provisioning, including JSON and reconnect invocations.
+        let installed = installer::ensure_client(&progress).await?;
+        let saved = match action {
+            ClientAction::Local => {
+                client::pin_agent(&mut args).await?;
+                args.app_mode = true;
+                let prepared = super::prepare(&args, &progress, SessionStyle::FullTerminal).await?;
+                SavedConfig::from_prepared(&prepared)?
+            }
+            ClientAction::Connect(selector) => {
+                let mut configs = configs;
+                let scope = if args.project.is_some() || args.environment.is_some() {
+                    Some(
+                        super::resolve_project_and_env(
+                            &mut configs,
+                            &gql,
+                            args.project.take(),
+                            args.environment.take(),
+                        )
+                        .await?
+                        .1,
                     )
-                    .await?
-                    .1,
-                )
-            } else {
-                None
-            };
-            let (agent, _) =
-                ca::resolve(&configs, &client, selector.as_deref(), scope.as_deref()).await?;
-            if !agent.status.is_live() {
-                bail!("{} is {}", agent.name, agent.status.label());
-            }
-            if agent.status == ca::Status::Sleeping {
-                eprintln!("Waking {}…", agent.name);
-                ca::wake(&client, &configs.get_backboard(), &agent.id).await?;
-            }
-            let directory =
-                super::saved_config::railway_connection(&agent.id, &agent.environment_id)
-                    .map(|c| c.directory)
-                    .unwrap_or_else(|| "/app".into());
-            (
+                } else {
+                    None
+                };
+                let (agent, _) =
+                    ca::resolve(&configs, &gql, selector.as_deref(), scope.as_deref()).await?;
+                if !agent.status.is_live() {
+                    bail!("{} is {}", agent.name, agent.status.label());
+                }
+                if agent.status == ca::Status::Sleeping {
+                    progress.step(&format!("Waking {}", agent.name));
+                    ca::wake(&gql, &configs.get_backboard(), &agent.id).await?;
+                }
                 SavedConfig::new(
                     &agent.id,
                     &agent.name,
                     &agent.environment_id,
                     "railway",
                     None,
-                )?,
-                directory,
-            )
+                )?
+            }
+            _ => bail!("Unsupported Railway local-client action"),
+        };
+        let connection = prepare_connection(
+            &saved,
+            args.remote_dir.as_deref(),
+            &installed.version,
+            &progress,
+        )
+        .await?;
+        Ok((
+            installed,
+            saved.with_railway(&connection.connection),
+            connection,
+        ))
+    }
+    .await;
+    progress.finish();
+    let (installed, saved, connection) = result?;
+    let persisted = saved.save();
+    let connection = crate::commands::cloud_agent::client_sessions::Connection::Railway(connection);
+    if json {
+        if let Err(error) = &persisted {
+            eprintln!("Could not save connection details for railway code get-config: {error:#}");
         }
-        _ => bail!("Unsupported Railway local-client action"),
-    };
+        return client::print_connection_json(
+            &connection,
+            &saved.agent_id,
+            &saved.agent_name,
+            &saved.environment_id,
+        );
+    }
+    client::clear_setup_output();
+    connection.show(&saved, &persisted)?;
+    if interactive {
+        client::launch_binary(
+            &connection,
+            &saved,
+            &persisted,
+            None,
+            installed.binary,
+            "Railway",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn validate_args(args: &LaunchArgs) -> Result<()> {
+    if args.code_endpoint || args.code_port.is_some() {
+        bail!(
+            "Railway uses its existing agent endpoint; --code-endpoint and --code-port are unnecessary"
+        );
+    }
+    Ok(())
+}
+
+async fn prepare_connection(
+    saved: &SavedConfig,
+    directory: Option<&str>,
+    version: &str,
+    progress: &dyn Progress,
+) -> Result<ClientConnection> {
     let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
-    eprintln!(
-        "Connecting to Railway's agent endpoint on {}…",
-        saved.agent_name
-    );
+    progress.step("Checking Railway's public endpoint");
     let url = endpoint(&client, &backboard, &saved.agent_id, &saved.environment_id).await?;
+    let directory = directory
+        .map(str::to_owned)
+        .or_else(|| {
+            super::saved_config::railway_connection(&saved.agent_id, &saved.environment_id)
+                .map(|c| c.directory)
+        })
+        .unwrap_or_else(|| "/app".into());
     let mut target = Target {
         client,
         backboard,
@@ -132,40 +170,57 @@ pub(super) async fn command(mut args: LaunchArgs, action: ClientAction) -> Resul
         connection: Connection {
             url,
             directory,
-            client_version: VERSION.into(),
+            client_version: version.into(),
         },
     };
     target.connection.directory = verify_connection(&target).await?;
-    let saved = saved.with_railway(&target.connection);
-    saved.save()?;
-    if args.connection_json {
-        println!(
-            "{}",
-            serde_json::json!({"schemaVersion": 1,
-            "agent": {"id": saved.agent_id, "name": saved.agent_name, "environmentId": saved.environment_id},
-            "connection": {"transport": "wss", "url": target.connection.url,
-                "directory": target.connection.directory, "clientVersion": VERSION,
-                "authentication": "cloudAgentHarnessToken", "tokenLifetimeSeconds": 300}})
-        );
-        return Ok(());
-    }
-    saved.show()?;
-    if let Some(binary) = binary {
-        // A local protocol bridge adds a freshly minted gate token on every dial.
-        // It carries no SSH traffic and never runs a local agent daemon.
-        let bridge = bridge::Bridge::start(target)?;
-        eprintln!("Launching local Railway TUI…");
-        let status = tokio::process::Command::new(binary)
-            .args(["--attach", &bridge.url])
-            .kill_on_drop(true)
-            .status()
-            .await
-            .context("Launching the local Railway TUI; the remote daemon is still running")?;
-        if !status.success() {
-            bail!("Railway TUI exited with {status}; rerun connect to reattach");
-        }
-    }
-    Ok(())
+    Ok(ClientConnection::new(
+        target.connection,
+        &saved.agent_id,
+        &saved.environment_id,
+    ))
+}
+
+pub(crate) async fn prepare_pane(
+    mut args: LaunchArgs,
+    progress: &dyn Progress,
+) -> Result<crate::commands::cloud_agent::tui::ClientPane> {
+    validate_args(&args)?;
+    let installed = installer::ensure_client(progress).await?;
+    super::client::pin_agent(&mut args).await?;
+    args.app_mode = true;
+    let prepared = super::prepare(&args, progress, SessionStyle::Pane).await?;
+    let saved = SavedConfig::from_prepared(&prepared)?;
+    let connection = prepare_connection(
+        &saved,
+        args.remote_dir.as_deref(),
+        &installed.version,
+        progress,
+    )
+    .await?;
+    saved.with_railway(&connection.connection).save()?;
+    Ok(crate::commands::cloud_agent::tui::ClientPane {
+        agent_id: prepared.agent_id,
+        agent_name: prepared.agent_name,
+        environment_id: prepared.environment_id,
+        binary: installed.binary,
+        connection: crate::commands::cloud_agent::client_sessions::Connection::Railway(connection),
+        thread: None,
+        prompt: args.initial_prompt,
+    })
+}
+
+pub(crate) async fn reconnect(agent_id: &str, environment_id: &str) -> Result<ClientConnection> {
+    let saved = super::saved_config::railway_connection(agent_id, environment_id)
+        .context("No saved local Railway connection; run railway code --railway connect first")?;
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let url = endpoint(&client, &configs.get_backboard(), agent_id, environment_id).await?;
+    Ok(ClientConnection::new(
+        Connection { url, ..saved },
+        agent_id,
+        environment_id,
+    ))
 }
 
 async fn endpoint(
@@ -321,118 +376,6 @@ async fn verify_connection(target: &Target) -> Result<String> {
     .await
     .context("Railway daemon state check timed out")?
 }
-fn validate_version(version: &str) -> Result<()> {
-    if !regex::Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$")?.is_match(version) {
-        bail!("Unsupported Railway agent version");
-    }
-    Ok(())
-}
-
-fn platform() -> Result<String> {
-    let os = match std::env::consts::OS {
-        "linux" => "linux",
-        "macos" => "darwin",
-        _ => bail!("Railway TUI releases support macOS and Linux; use WSL or --railway remote"),
-    };
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        _ => bail!("Railway TUI releases require amd64 or arm64"),
-    };
-    Ok(format!("{os}-{arch}"))
-}
-
-async fn compatible(binary: &std::path::Path, version: &str) -> bool {
-    let mut cmd = tokio::process::Command::new(binary);
-    cmd.arg("--version").kill_on_drop(true);
-    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(5), cmd.output()).await else {
-        return false;
-    };
-    output.status.success()
-        && String::from_utf8_lossy(&output.stdout).trim() == format!("railway-agent-tui {version}")
-}
-
-async fn ensure_client(version: &str) -> Result<PathBuf> {
-    validate_version(version)?;
-    let platform = platform()?;
-    let root = dirs::home_dir()
-        .context("Unable to get home directory")?
-        .join(".railway/runtimes/railway-tui")
-        .join(version);
-    let binary = root.join("railway-agent-tui");
-    if compatible(&binary, version).await {
-        return Ok(binary);
-    }
-    if let Ok(candidate) = which::which("railway-agent-tui") {
-        if compatible(&candidate, version).await {
-            return Ok(candidate);
-        }
-    }
-    eprintln!("Installing Railway TUI {version} for {platform}…");
-    let tag = format!("v{version}");
-    let name = format!("railway-agent-tui-{tag}-{platform}.tar.gz");
-    let client = reqwest::Client::builder()
-        .user_agent("railway-cli")
-        .timeout(Duration::from_secs(120))
-        .build()?;
-    let release: serde_json::Value = client
-        .get(format!(
-            "https://api.github.com/repos/railwayapp/agent-releases/releases/tags/{tag}"
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let asset = release["assets"]
-        .as_array()
-        .and_then(|assets| assets.iter().find(|a| a["name"] == name))
-        .with_context(|| {
-            format!("Railway {tag} has no TUI release for {platform}; use --railway remote")
-        })?;
-    let digest = asset["digest"]
-        .as_str()
-        .context("Release asset is missing its checksum")?;
-    let data = client
-        .get(format!(
-            "https://github.com/railwayapp/agent-releases/releases/download/{tag}/{name}"
-        ))
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    if format!("sha256:{:x}", Sha256::digest(&data)) != digest {
-        bail!("Railway TUI download checksum mismatch");
-    }
-    std::fs::create_dir_all(&root)?;
-    // Extract only the two regular executable files into a private temporary directory.
-    let temporary = tempfile::tempdir_in(&root)?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(data.as_ref()));
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let name = entry.path()?.into_owned();
-        if ["railway-agent-tui", "railway-agent"]
-            .iter()
-            .any(|expected| name == std::path::Path::new(expected))
-        {
-            if !entry.header().entry_type().is_file() {
-                bail!("Invalid Railway release archive");
-            }
-            entry.unpack(temporary.path().join(name))?;
-        }
-    }
-    if !compatible(&temporary.path().join("railway-agent-tui"), version).await
-        || !temporary.path().join("railway-agent").is_file()
-    {
-        bail!("Downloaded Railway TUI does not match its server");
-    }
-    for name in ["railway-agent", "railway-agent-tui"] {
-        std::fs::rename(temporary.path().join(name), root.join(name))?;
-    }
-    Ok(binary)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,19 +392,8 @@ mod tests {
             assert!(validate_url(bad).is_err(), "{bad}");
         }
         assert!(validate_url("wss://agent.example.com/agent").is_ok());
-        for bad in ["../1.2.3", "latest", "1.2.3/elsewhere", "1.2.3 --flag"] {
-            assert!(validate_version(bad).is_err());
-        }
-        assert!(validate_version(VERSION).is_ok());
     }
 
-    #[tokio::test]
-    #[ignore = "downloads the official Railway TUI release"]
-    async fn official_client_installs_and_is_reused() {
-        let binary = ensure_client(VERSION).await.unwrap();
-        assert!(compatible(&binary, VERSION).await);
-        assert_eq!(binary, ensure_client(VERSION).await.unwrap());
-    }
     #[tokio::test]
     #[ignore = "requires an existing live Railway VM in RAILWAY_CLOUD_AGENT_ID and RAILWAY_ENVIRONMENT_ID"]
     async fn live_gate_reports_remote_directory() {
@@ -481,7 +413,7 @@ mod tests {
             connection: Connection {
                 url,
                 directory: "/app".into(),
-                client_version: VERSION.into(),
+                client_version: "0.1.15".into(),
             },
         };
         assert_eq!(verify_connection(&target).await.unwrap(), "/app");

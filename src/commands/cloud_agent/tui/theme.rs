@@ -29,6 +29,8 @@ pub struct Theme {
     /// rather than as something sitting on top of the screen. A step lighter
     /// than the page it floats over, so it reads as raised.
     pub surface: Color,
+    /// Solid neutral background for the resizable navigation sidebar.
+    pub sidebar: Color,
     /// Row highlight in the tree.
     pub selection: Color,
     pub running: Color,
@@ -47,6 +49,7 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xef, 0xec, 0xf6),
         on_accent: Color::Rgb(0x18, 0x12, 0x28),
         surface: Color::Rgb(0x25, 0x1d, 0x39),
+        sidebar: Color::Rgb(0x1c, 0x1d, 0x21),
         selection: Color::Rgb(0x37, 0x2a, 0x50),
         running: Color::Rgb(0x6e, 0xe7, 0xa8),
         sleeping: Color::Rgb(0x7d, 0x77, 0x8f),
@@ -68,6 +71,7 @@ pub const THEMES: &[Theme] = &[
         surface: Color::Black,
         // Nothing darker than black to fall back on, so the shade is a grey
         // one — the only depth cue the sixteen colours can carry.
+        sidebar: Color::Black,
         selection: Color::DarkGray,
         running: Color::Green,
         sleeping: Color::Gray,
@@ -83,6 +87,7 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xf6, 0xf1, 0xe8),
         on_accent: Color::Rgb(0x24, 0x18, 0x06),
         surface: Color::Rgb(0x2c, 0x22, 0x14),
+        sidebar: Color::Rgb(0x1c, 0x1d, 0x21),
         selection: Color::Rgb(0x45, 0x2d, 0x10),
         running: Color::Rgb(0x9a, 0xd8, 0x6a),
         sleeping: Color::Rgb(0x86, 0x7c, 0x6e),
@@ -99,6 +104,7 @@ pub const THEMES: &[Theme] = &[
         fg: Color::Rgb(0xf2, 0xf2, 0xf2),
         on_accent: Color::Rgb(0x10, 0x10, 0x10),
         surface: Color::Rgb(0x23, 0x23, 0x23),
+        sidebar: Color::Rgb(0x1c, 0x1d, 0x21),
         selection: Color::Rgb(0x33, 0x33, 0x33),
         running: Color::Rgb(0xe6, 0xe6, 0xe6),
         sleeping: Color::Rgb(0x77, 0x77, 0x77),

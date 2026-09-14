@@ -30,6 +30,8 @@ impl Backboard {
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut reader = BufReader::new(&mut stream);
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
                 let mut length = 0;
                 loop {
                     let mut line = String::new();
@@ -48,7 +50,37 @@ impl Backboard {
                 seen.lock().unwrap().push(request.clone());
                 let operation = request["operationName"].as_str().unwrap();
                 let id = request["variables"]["id"].as_str().unwrap_or_default();
+                if operation.starts_with("AgentBootstrap") {
+                    assert!(
+                        request_line.starts_with("POST /graphql/internal "),
+                        "{request_line}"
+                    );
+                    assert!(
+                        !request["query"]
+                            .as_str()
+                            .unwrap()
+                            .contains("agentBootstrapDefault")
+                    );
+                }
                 let response = match operation {
+                    "Project" => {
+                        let project = request["variables"]["id"].as_str().unwrap();
+                        json!({"data": {"project": {
+                            "id": project, "name": project, "workspaceId": "workspace", "deletedAt": null,
+                            "workspace": {"name": "workspace"}, "buckets": {"edges": []}, "services": {"edges": []},
+                            "environments": {"edges": [{"node": {
+                                "id": format!("{project}-env"), "name": "production", "canAccess": true,
+                                "deletedAt": null, "unmergedChangesCount": 0
+                            }}]}
+                        }}})
+                    }
+                    "AgentBootstraps" => {
+                        let environment = request["variables"]["environmentId"].as_str().unwrap();
+                        json!({"data": {"agentBootstraps": [{
+                            "id": "bootstrap", "name": "dev", "environmentId": environment,
+                            "status": "READY", "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z"
+                        }]}})
+                    }
                     "MyCloudAgents" => json!({"data": {"myCloudAgents": inventory}}),
                     "CloudAgentSleep" | "CloudAgentWake" if refused.as_deref() == Some(id) => {
                         json!({"errors": [{"message": "mutation refused"}]})
@@ -212,4 +244,95 @@ fn missing_remembered_agent_stops_ssh_before_replacement_creation() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("remembered"));
     assert!(server.ids_for("CloudAgentCreate").is_empty());
+}
+
+#[test]
+fn bootstrap_list_uses_directory_link_before_preferences_and_flags_before_link() {
+    let server = Backboard::new(vec![], None, "RUNNING");
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".railway");
+    std::fs::create_dir_all(&config).unwrap();
+    // `railway link` records current_dir(), which resolves macOS's /var and
+    // /tmp symlinks. Match that path instead of the temporary directory alias.
+    let linked_directory = home.path().canonicalize().unwrap();
+    let path = linked_directory.to_str().unwrap();
+    std::fs::write(config.join("config.json"), json!({
+        "projects": {path: {"projectPath": path, "project": "linked", "environment": "linked-env"}},
+        "user": {}
+    }).to_string()).unwrap();
+    std::fs::write(
+        config.join("agent-prefs.json"),
+        json!({
+            "version": 1, "defaultProject": {"projectId": "preferred", "projectName": "preferred",
+                "environmentId": "preferred-env", "environmentName": "production"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for (args, expected) in [
+        (vec!["bootstrap", "list", "--json"], "linked-env"),
+        (
+            vec![
+                "bootstrap",
+                "list",
+                "--json",
+                "--project",
+                "explicit",
+                "--environment",
+                "production",
+            ],
+            "explicit-env",
+        ),
+    ] {
+        let output = server.run(home.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows[0]["name"], "dev");
+        assert_eq!(rows[0]["environmentId"], expected);
+        assert_eq!(rows[0]["isDefault"], false);
+    }
+    let output = server.run(home.path(), &["bootstrap", "default", "dev", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let selected: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(selected["isDefault"], true);
+    for (args, expected_default) in [
+        (vec!["bootstrap", "list", "--json"], true),
+        (
+            vec![
+                "bootstrap",
+                "list",
+                "--json",
+                "--project",
+                "explicit",
+                "--environment",
+                "production",
+            ],
+            false,
+        ),
+    ] {
+        let output = server.run(home.path(), &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows[0]["isDefault"], expected_default);
+    }
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(config.join("config.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["agentBootstrapDefaults"]["railway.com:linked-env"],
+        "bootstrap"
+    );
+    let requests = server.requests.lock().unwrap();
+    assert!(!requests.iter().any(|r| r["variables"]["id"] == "preferred"));
 }

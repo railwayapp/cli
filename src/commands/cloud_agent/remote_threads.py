@@ -321,6 +321,19 @@ def opencode_server_threads():
         seen.add(cursor)
 
 
+def primary_harness():
+    # The VM's login launcher records its configured agent. Read this as
+    # metadata only: never source a shell file or infer from the user's prefs.
+    names = {"railway-agent-tui": "railway", "railway-agent": "railway",
+             "claude": "claude", "codex": "codex", "grok": "grok",
+             "opencode": "opencode", "opencode2": "opencode2", "bash": "shell"}
+    try:
+        with (Path.home() / ".railway-code-agent").open() as file:
+            return names.get(file.read(128).strip())
+    except (OSError, UnicodeError):
+        return None
+
+
 def discover():
     roots = config_roots()
     rows, warnings, failed = [], [], []
@@ -344,7 +357,8 @@ def discover():
     newest = {}
     for row in sorted(rows, key=lambda r: r["thread"]["updated_at"], reverse=True):
         newest.setdefault((row["harness"], row["thread"]["id"]), row)
-    return {"threads": list(newest.values()), "warnings": warnings, "failed": failed}
+    return {"threads": list(newest.values()), "warnings": warnings, "failed": failed,
+            "primary_harness": primary_harness()}
 
 
 def run_delete_command(args, environment, directory=None):

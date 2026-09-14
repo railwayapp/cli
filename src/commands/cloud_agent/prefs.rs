@@ -52,6 +52,9 @@ pub struct AgentPrefs {
     /// between sessions. A settings-card choice; the wizard never asks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_tabs: bool,
+    /// Sidebar width in terminal columns, including its border.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
 }
 
 impl Default for AgentPrefs {
@@ -64,6 +67,7 @@ impl Default for AgentPrefs {
             default_project: None,
             theme: None,
             hide_tabs: false,
+            sidebar_width: None,
         }
     }
 }
@@ -145,6 +149,14 @@ impl AgentPrefs {
         serde_json::from_str(&raw).ok()
     }
 
+    /// Reload before changing one layout preference so settings saved by
+    /// another screen or CLI process are preserved.
+    pub fn save_sidebar_width_in(home: &Path, width: u16) -> Result<()> {
+        let mut prefs = Self::load_in(home).unwrap_or_default();
+        prefs.sidebar_width = Some(width);
+        prefs.save_in(home)
+    }
+
     pub fn save_in(&self, home: &Path) -> Result<()> {
         let path = Self::path_in(home);
         let contents = serde_json::to_string_pretty(self)?;
@@ -191,9 +203,35 @@ mod tests {
             default_project: None,
             theme: Some("ember".into()),
             hide_tabs: true,
+            sidebar_width: Some(46),
         };
         prefs.save_in(home.path()).unwrap();
         assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), prefs);
+    }
+
+    #[test]
+    fn sidebar_width_persists_and_preserves_other_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let path = AgentPrefs::path_in(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version":1,"agent":"codex","theme":"ember","hideTabs":true,"mcp":{"enabled":false,"exclude":["local"]}}"#).unwrap();
+        let mut expected = AgentPrefs::load_in(home.path()).unwrap();
+        assert_eq!(
+            expected.sidebar_width, None,
+            "older preferences retain the original width"
+        );
+        AgentPrefs::save_sidebar_width_in(home.path(), 58).unwrap();
+        expected.sidebar_width = Some(58);
+        assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), expected);
+        expected.agent = Some("claude".into());
+        expected.save_in(home.path()).unwrap();
+        AgentPrefs::save_sidebar_width_in(home.path(), 42).unwrap();
+        expected.sidebar_width = Some(42);
+        assert_eq!(
+            AgentPrefs::load_in(home.path()).unwrap(),
+            expected,
+            "resize reloads newer agent settings before saving"
+        );
     }
 
     #[test]

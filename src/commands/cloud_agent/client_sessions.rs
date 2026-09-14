@@ -10,6 +10,7 @@ use super::{codex, opencode};
 pub(crate) enum Connection {
     Codex(codex::Connection),
     OpenCode(opencode::Connection, bool),
+    Railway(crate::commands::code::railway_client::ClientConnection),
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -66,6 +67,7 @@ impl Connection {
             Self::Codex(_) => "codex",
             Self::OpenCode(_, false) => "opencode",
             Self::OpenCode(_, true) => "opencode2",
+            Self::Railway(_) => "railway",
         }
     }
 
@@ -73,6 +75,7 @@ impl Connection {
         match self {
             Self::Codex(c) => &c.directory,
             Self::OpenCode(c, _) => &c.directory,
+            Self::Railway(c) => &c.connection.directory,
         }
     }
 
@@ -80,6 +83,7 @@ impl Connection {
         match self {
             Self::Codex(c) => c.directory = directory.into(),
             Self::OpenCode(c, _) => c.directory = directory.into(),
+            Self::Railway(c) => c.connection.directory = directory.into(),
         }
     }
 
@@ -87,11 +91,13 @@ impl Connection {
         let mut args = match self {
             Self::Codex(c) => codex::attach_args(c),
             Self::OpenCode(c, beta) => opencode::attach_args(c, *beta),
+            Self::Railway(c) => return c.args(thread),
         };
         if let Some(thread) = thread {
             match self {
                 Self::Codex(_) => args.extend(["resume".into(), thread.into()]),
                 Self::OpenCode(_, _) => args.extend(["--session".into(), thread.into()]),
+                Self::Railway(_) => unreachable!("Railway selects its thread in the attach URL"),
             }
         }
         args
@@ -107,6 +113,7 @@ impl Connection {
     async fn list_inner(&self) -> Result<Vec<Thread>> {
         let mut rows = Vec::new();
         match self {
+            Self::Railway(c) => rows = c.list().await?,
             Self::Codex(c) => {
                 let mut rpc = codex::Rpc::connect(c).await?;
                 let mut cursor = Value::Null;
@@ -174,6 +181,7 @@ impl Connection {
     pub(crate) async fn thread(&self, id: &str) -> Result<Thread> {
         validate_id(id)?;
         match self {
+            Self::Railway(c) => c.thread(id).await,
             Self::Codex(c) => {
                 let mut rpc = codex::Rpc::connect(c).await?;
                 let result = rpc
@@ -204,6 +212,7 @@ impl Connection {
         validate_id(id)?;
         tokio::time::timeout(Duration::from_secs(30), async {
             match self {
+                Self::Railway(c) => c.delete_thread(id).await?,
                 Self::Codex(c) => {
                     let mut rpc = codex::Rpc::connect(c).await?;
                     if let Err(error) = rpc.call("thread/delete", json!({"threadId": id})).await
@@ -239,7 +248,7 @@ impl Connection {
             return Ok(None);
         }
         match self {
-            Self::Codex(_) => Ok(None),
+            Self::Codex(_) | Self::Railway(_) => Ok(None),
             Self::OpenCode(c, beta) => {
                 let body = if *beta {
                     json!({"location": {"directory": c.directory}})
@@ -278,7 +287,7 @@ impl Connection {
     }
 }
 
-pub(super) fn validate_id(id: &str) -> Result<()> {
+pub(crate) fn validate_id(id: &str) -> Result<()> {
     if id.is_empty()
         || !id
             .bytes()
@@ -289,7 +298,7 @@ pub(super) fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn title(value: Option<&str>, fallback: &str) -> String {
+pub(crate) fn title(value: Option<&str>, fallback: &str) -> String {
     value
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -407,6 +416,46 @@ async fn opencode_request(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn codex_prompt_launches_and_resumes_use_the_remote_permission_policy() {
+        let connection = Connection::Codex(codex::Connection {
+            url: "wss://agent.example.com".into(),
+            token: "fixture-token".into(),
+            directory: "/app/project".into(),
+            version: "0.153.4".into(),
+            reused: true,
+        });
+        let prompt = "Fix the startup error";
+        assert!(connection.new_thread(Some(prompt)).await.unwrap().is_none());
+        assert_eq!(
+            connection
+                .initial_prompt(None, Some(prompt.into()))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(prompt)
+        );
+        for thread in [None, Some("thread-123")] {
+            let args = connection.args(thread);
+            for forbidden in [
+                "--ask-for-approval",
+                "--sandbox",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--full-auto",
+            ] {
+                assert!(!args.iter().any(|arg| arg == forbidden), "{args:?}");
+            }
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--remote", "wss://agent.example.com"])
+            );
+            assert_eq!(args.iter().any(|arg| arg == "resume"), thread.is_some());
+            if let Some(thread) = thread {
+                assert_eq!(args.last().unwrap(), thread);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn deletion_rejects_non_native_ids_before_connecting() {
         for beta in [false, true] {

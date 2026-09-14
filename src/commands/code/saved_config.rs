@@ -38,6 +38,15 @@ pub(crate) fn client_connection(
                 .opencode
                 .map(|c| Connection::OpenCode(c.connection, c.beta))
         })
+        .or_else(|| {
+            saved.railway.map(|c| {
+                Connection::Railway(super::railway_client::ClientConnection::new(
+                    c,
+                    agent_id,
+                    environment_id,
+                ))
+            })
+        })
 }
 
 pub(super) fn railway_connection(
@@ -51,7 +60,7 @@ pub(super) fn railway_connection(
     saved.railway
 }
 
-/// Replay locally saved connection details without creating or waking an agent
+/// Show locally saved connection details without creating or waking an agent
 #[derive(Parser)]
 #[clap(
     after_help = "Examples:\n  railway code get-config\n  railway code get-config my-box\n  railway code get-config my-box --json\n\nReads local snapshots from any directory, without login or network access.\nOmit the agent to show the latest snapshot; use an ID for ambiguous names.\nSnapshots include credentials and are removed by railway logout."

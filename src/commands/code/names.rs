@@ -1,4 +1,4 @@
-//! Readable defaults for newly created Codex and OpenCode agents.
+//! Readable defaults for newly created Codex, OpenCode, Claude Code, and Railway agents.
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Result, bail};
@@ -10,7 +10,7 @@ use crate::{
     controllers::{cloud_agent, project::get_project},
 };
 
-pub(super) struct Target {
+pub(crate) struct Target {
     pub project_id: String,
     pub environment_id: String,
     pub use_local_name: bool,
@@ -35,6 +35,8 @@ fn prefix(agent: Agent) -> Option<&'static str> {
         Agent::Codex => Some("codex"),
         Agent::OpenCode => Some("oc"),
         Agent::OpenCode2 => Some("oc2"),
+        Agent::Claude => Some("cc"),
+        Agent::Railway => Some("rlwy"),
         _ => None,
     }
 }
@@ -145,9 +147,18 @@ mod tests {
     fn editions_and_fragments_follow_the_lowercase_format() {
         assert_eq!(prefix(Agent::OpenCode), Some("oc"));
         assert_eq!(prefix(Agent::OpenCode2), Some("oc2"));
-        assert_eq!(prefix(Agent::Claude), None);
+        assert_eq!(prefix(Agent::Claude), Some("cc"));
+        assert_eq!(prefix(Agent::Grok), None);
+        assert_eq!(prefix(Agent::Shell), None);
         assert_eq!(prefix(Agent::Codex), Some("codex"));
-        for agent in [Agent::Codex, Agent::OpenCode, Agent::OpenCode2] {
+        assert_eq!(prefix(Agent::Railway), Some("rlwy"));
+        for agent in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::OpenCode2,
+            Agent::Claude,
+            Agent::Railway,
+        ] {
             let prefix = prefix(agent).unwrap();
             assert_eq!(
                 available_name(prefix, "Railgun", &HashSet::new(), 4405).unwrap(),
@@ -167,7 +178,7 @@ mod tests {
 
     #[test]
     fn collisions_wrap_without_changing_the_project_or_edition() {
-        for prefix in ["codex", "oc", "oc2"] {
+        for prefix in ["codex", "oc", "oc2", "cc", "rlwy"] {
             let existing =
                 HashSet::from([format!("{prefix}-railg-zzz"), format!("{prefix}-railg-000")]);
             assert_eq!(
@@ -244,7 +255,13 @@ mod tests {
             name: Some("My-Name".into()),
             ..Default::default()
         };
-        for agent in [Agent::Codex, Agent::OpenCode, Agent::OpenCode2] {
+        for agent in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::OpenCode2,
+            Agent::Claude,
+            Agent::Railway,
+        ] {
             assert_eq!(
                 for_launch(&client, &configs, &args, agent, &target)
                     .await
@@ -253,17 +270,13 @@ mod tests {
                 Some("My-Name")
             );
         }
-        assert!(
-            for_launch(
-                &client,
-                &configs,
-                &LaunchArgs::default(),
-                Agent::Claude,
-                &target
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
+        for agent in [Agent::Grok, Agent::Shell] {
+            assert!(
+                for_launch(&client, &configs, &LaunchArgs::default(), agent, &target)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 }

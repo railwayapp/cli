@@ -10,7 +10,7 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 
 type Open = Arc<dyn Fn(Option<String>) -> BoxFuture<'static, Result<WebSocket>> + Send + Sync>;
 
-pub(super) struct Bridge {
+pub(crate) struct Bridge {
     pub url: String,
     task: tokio::task::JoinHandle<()>,
 }
@@ -22,14 +22,23 @@ impl Drop for Bridge {
 }
 
 impl Bridge {
-    pub(super) fn start(target: super::Target) -> Result<Self> {
-        Self::bind(Arc::new(move |session| {
-            let target = target.clone();
-            Box::pin(async move { target.open(session.as_deref()).await })
-        }))
+    pub(super) fn start(
+        target: super::Target,
+        selected: impl Fn(crate::commands::cloud_agent::client_sessions::Thread) + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::bind(
+            Arc::new(move |session| {
+                let target = target.clone();
+                Box::pin(async move { target.open(session.as_deref()).await })
+            }),
+            Arc::new(selected),
+        )
     }
 
-    fn bind(open: Open) -> Result<Self> {
+    fn bind(
+        open: Open,
+        selected: Arc<dyn Fn(crate::commands::cloud_agent::client_sessions::Thread) + Send + Sync>,
+    ) -> Result<Self> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         listener.set_nonblocking(true)?;
         let token = crate::commands::cloud_agent::opencode::generate_password();
@@ -47,10 +56,11 @@ impl Bridge {
                         if peers.len() >= 8 { continue; }
                         let open = open.clone();
                         let token = token.clone();
+                        let selected = selected.clone();
                         peers.spawn(async move {
                             // Do not print into the active terminal UI, or expose gate URLs
                             // with credentials. Closing the peer triggers the TUI's reconnect.
-                            let _ = relay(stream, &token, open).await;
+                            let _ = relay(stream, &token, open, selected).await;
                         });
                     }
                     _ = peers.join_next(), if !peers.is_empty() => {}
@@ -86,7 +96,12 @@ fn local_session(request: &Request, token: &str) -> Option<Option<String>> {
 }
 
 #[allow(clippy::result_large_err)]
-async fn relay(stream: tokio::net::TcpStream, token: &str, open: Open) -> Result<()> {
+async fn relay(
+    stream: tokio::net::TcpStream,
+    token: &str,
+    open: Open,
+    selected: Arc<dyn Fn(crate::commands::cloud_agent::client_sessions::Thread) + Send + Sync>,
+) -> Result<()> {
     let mut session = None;
     let mut local = tokio::time::timeout(
         Duration::from_secs(10),
@@ -124,7 +139,11 @@ async fn relay(stream: tokio::net::TcpStream, token: &str, open: Open) -> Result
             }
             frame = remote.next() => {
                 let Some(frame) = frame else { break; };
-                local.send(frame?.into()).await?;
+                let frame = frame?;
+                if let Some(thread) = super::sessions::selected_thread(&frame) {
+                    selected(thread);
+                }
+                local.send(frame.into()).await?;
             }
         }
     }
@@ -185,24 +204,36 @@ mod tests {
                 .await
                 .unwrap();
                 let message = ws.next().await.unwrap().unwrap();
+                let state = serde_json::json!({"type":"response", "command":"get_state", "success":true,
+                    "data":{"session_id":message.to_text().unwrap(), "cwd":"/app/project", "title":"A session"}}).to_string();
                 ws.send(message).await.unwrap();
+                ws.send(async_tungstenite::tungstenite::Message::Text(state.into()))
+                    .await
+                    .unwrap();
                 let _ = ws.next().await;
             }
         });
         let calls = Arc::new(AtomicUsize::new(0));
         let minted = calls.clone();
-        let bridge = Bridge::bind(Arc::new(move |session| {
-            let n = minted.fetch_add(1, Ordering::SeqCst) + 1;
-            Box::pin(async move {
-                let mut url = url::Url::parse(&format!("ws://{address}/agent")).unwrap();
-                url.query_pairs_mut()
-                    .append_pair("token", &format!("fresh-{n}"));
-                if let Some(session) = session {
-                    url.query_pairs_mut().append_pair("session_id", &session);
-                }
-                super::super::open_gate(url).await
-            })
-        }))
+        let selected = Arc::new(Mutex::new(Vec::new()));
+        let selections = selected.clone();
+        let bridge = Bridge::bind(
+            Arc::new(move |session| {
+                let n = minted.fetch_add(1, Ordering::SeqCst) + 1;
+                Box::pin(async move {
+                    let mut url = url::Url::parse(&format!("ws://{address}/agent")).unwrap();
+                    url.query_pairs_mut()
+                        .append_pair("token", &format!("fresh-{n}"));
+                    if let Some(session) = session {
+                        url.query_pairs_mut().append_pair("session_id", &session);
+                    }
+                    super::super::open_gate(url).await
+                })
+            }),
+            Arc::new(move |thread| {
+                selections.lock().unwrap().push(thread.id);
+            }),
+        )
         .unwrap();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut unauthenticated = url::Url::parse(&bridge.url).unwrap();
@@ -229,6 +260,15 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(matches!(echoed, Message::Text(text) if text == session));
+            let state = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                super::super::sessions::selected_thread(&state).unwrap().id,
+                session
+            );
             SinkExt::close(&mut ws).await.unwrap();
         }
         tokio::time::timeout(Duration::from_secs(5), upstream)
@@ -236,6 +276,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let received = received.lock().unwrap();
+        assert_eq!(*selected.lock().unwrap(), ["first", "second"]);
         assert_eq!(
             *received,
             [

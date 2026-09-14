@@ -25,6 +25,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
 use crate::commands::cloud_agent::{client_sessions, codex};
 use crate::commands::ssh::native;
+use crate::vt100;
 
 use super::terminal_palette;
 
@@ -413,6 +414,7 @@ pub struct Session {
     pub client_thread: Option<client_sessions::Thread>,
     pub client_bridge: Option<codex::bridge::Bridge>,
     pub opencode_bridge: Option<crate::commands::cloud_agent::opencode::bridge::Bridge>,
+    pub railway_bridge: Option<crate::commands::code::railway_client::bridge::Bridge>,
     /// How this pane connected, kept so the same session can be reopened
     /// full-screen without rebuilding the relay plumbing.
     pub ssh_target: String,
@@ -462,6 +464,7 @@ impl Session {
     pub(super) fn sync_console_name(&mut self) {
         if self.client_bridge.is_none()
             && self.opencode_bridge.is_none()
+            && self.railway_bridge.is_none()
             && let Some(name) = self
                 .announced_console
                 .lock()
@@ -572,12 +575,16 @@ impl Session {
             match &mut local_connection {
                 client_sessions::Connection::Codex(c) => c.url = url.into(),
                 client_sessions::Connection::OpenCode(c, _) => c.url = url.into(),
+                client_sessions::Connection::Railway(c) => c.connection.url = url.into(),
             }
         }
         cmd.args(local_connection.args(thread_id));
         if let Some(prompt) = prompt {
             match connection {
                 client_sessions::Connection::Codex(_) => {
+                    cmd.args(["--", prompt]);
+                }
+                client_sessions::Connection::Railway(_) => {
                     cmd.args(["--", prompt]);
                 }
                 client_sessions::Connection::OpenCode(_, true) => {
@@ -595,6 +602,7 @@ impl Session {
                 cmd.env("OPENCODE_SERVER_USERNAME", &c.username);
                 cmd.env("OPENCODE_SERVER_PASSWORD", &c.password);
             }
+            client_sessions::Connection::Railway(_) => {}
         }
         let name = client_sessions::name(connection.harness(), &agent_id, thread_id);
         Self::spawn_pty(
@@ -744,6 +752,7 @@ impl Session {
             client_thread: None,
             client_bridge: None,
             opencode_bridge: None,
+            railway_bridge: None,
             agent_id,
             agent_name,
             harness,
@@ -1241,6 +1250,7 @@ impl Session {
             client_thread: None,
             client_bridge: None,
             opencode_bridge: None,
+            railway_bridge: None,
             agent_id: agent_id.to_string(),
             agent_name: agent_name.to_string(),
             harness: "claude".to_string(),
@@ -1480,6 +1490,235 @@ pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// Run with RAILWAY_TEST_CODEX_BIN pointing to a local Codex binary. Uses
+    /// only /status in an isolated home; no credentials or model turns.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires an installed Codex binary"]
+    fn real_codex_scrollback_survives_panel_focus_and_a_lost_resize_release() {
+        use crate::commands::cloud_agent::tui::{
+            app::{App, ManageFocus, MouseAction},
+            ui,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+        let binary = std::env::var("RAILWAY_TEST_CODEX_BIN").expect("set RAILWAY_TEST_CODEX_BIN");
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().canonicalize().unwrap();
+        std::fs::write(root.path().join("config.toml"), format!(
+            "check_for_update_on_startup = false\nmodel_provider = \"scroll_probe\"\nmodel = \"test\"\n[model_providers.scroll_probe]\nname = \"Scroll probe\"\nbase_url = \"http://127.0.0.1:9/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = false\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            serde_json::to_string(&directory.to_string_lossy()).unwrap()
+        )).unwrap();
+        let mut cmd = CommandBuilder::new(binary);
+        cmd.env("CODEX_HOME", root.path());
+        cmd.arg("-C");
+        cmd.arg(&directory);
+        let pane = Session::spawn_pty(
+            "ca_1".into(),
+            "codex-scroll-probe".into(),
+            "codex".into(),
+            "",
+            None,
+            &[],
+            false,
+            "codex-test",
+            cmd,
+            34,
+            102,
+            || {},
+        )
+        .unwrap();
+        let mut app = App::new(Vec::new(), None, Some("codex"), None, None, true);
+        app.attach_session(pane, "ca_1".into());
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|f| app.panes = ui::render_with_layout(&app, f).0)
+            .unwrap();
+        let rect = app.panes.session;
+        app.sessions[0].resize(rect.h, rect.w);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !app.sessions[0]
+            .with_screen(|s| s.contents().contains("test default"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Codex startup: {:?}",
+                app.sessions[0].last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Generate enough terminal history without sending work to a model.
+        for _ in 0..6 {
+            app.sessions[0].send(b"/status");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.sessions[0].send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(!app.sessions[0].wants_mouse());
+        assert!(
+            !app.sessions[0]
+                .with_screen(|s| s.alternate_screen())
+                .unwrap()
+        );
+        let live = app.sessions[0].with_screen(|s| s.contents()).unwrap();
+        for _ in 0..8 {
+            app.on_mouse(MouseAction::ScrollUp, rect.x + 4, rect.y + 4);
+        }
+        assert!(
+            app.sessions[0].scrolled_back(),
+            "Codex history must scroll through the app handler: active={:?}, focus={:?}, screen={live}",
+            app.active,
+            app.focus
+        );
+        assert_ne!(app.sessions[0].with_screen(|s| s.contents()).unwrap(), live);
+        let offset = app.sessions[0].scroll;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        terminal
+            .draw(|f| app.panes = ui::render_with_layout(&app, f).0)
+            .unwrap();
+        assert_eq!(
+            app.sessions[0].scroll, offset,
+            "redrawing preserves the history view"
+        );
+        for _ in 0..8 {
+            app.on_mouse(MouseAction::ScrollDown, rect.x + 4, rect.y + 4);
+        }
+        assert!(!app.sessions[0].scrolled_back());
+        let divider = app.panes.sidebar_divider;
+        app.on_mouse(MouseAction::Down, divider.x, divider.y);
+        app.on_mouse(MouseAction::Drag, divider.x + 4, divider.y);
+        app.on_mouse(MouseAction::ScrollUp, rect.x + 8, rect.y + 4);
+        assert!(app.sessions[0].scrolled_back());
+        assert!(!app.resizing_sidebar());
+        assert_eq!(app.focus, ManageFocus::Session);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "requires RAILWAY_TEST_TUI_BIN; uses the real client's offline mock transport"]
+    fn railway_tui_paints_without_input_after_startup_and_resize() {
+        let binary = std::env::var("RAILWAY_TEST_TUI_BIN").expect("set RAILWAY_TEST_TUI_BIN");
+        let root = tempfile::tempdir().unwrap();
+        let mut cmd = CommandBuilder::new(binary);
+        cmd.arg("--mock");
+        cmd.cwd(root.path());
+        cmd.env("HOME", root.path());
+        let mut pane = Session::spawn_pty(
+            "ca_1".into(),
+            "railway-render-test".into(),
+            "railway".into(),
+            "",
+            None,
+            &[],
+            false,
+            "railway-render-test",
+            cmd,
+            24,
+            80,
+            || {},
+        )
+        .unwrap();
+        let wait_for = |pane: &Session, text: &str, timeout: u64| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            loop {
+                let screen = pane.with_screen(|s| s.contents()).unwrap();
+                if screen.contains(text) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "missing {text:?}:\n{screen}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        };
+        wait_for(&pane, "Ask anything", 10);
+        for (rows, cols) in [(34, 134), (34, 102), (28, 96), (34, 134)] {
+            pane.resize(rows, cols);
+            // A retained pre-resize frame must not satisfy the repaint assertion.
+            pane.parser.lock().unwrap().process(b"\x1b[2J\x1b[H");
+            wait_for(&pane, "Ask anything", 2);
+        }
+        pane.send(b"run the demo");
+        pane.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        wait_for(&pane, "cargo build --release", 10);
+        pane.resize(30, 102);
+        wait_for(&pane, "allow once", 20);
+        pane.send(b"y");
+        wait_for(&pane, "Try ctrl+t", 20);
+        pane.send(b"\x04");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn railway_local_client_runs_inside_the_ca_pty_with_resize_and_input() {
+        use crate::commands::code::railway_client::{ClientConnection, Connection};
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("fake railway tui");
+        std::fs::write(&binary, r#"#!/usr/bin/env python3
+import os, sys
+assert sys.argv[1:] == ['--attach', 'ws://127.0.0.1:54321/_railway/agent?token=capability&session_id=thread-1', '--', 'explain this']
+print('Railway ready', flush=True)
+assert input() == 'hello'
+size = os.get_terminal_size()
+assert (size.lines, size.columns) == (30, 100), size
+print('Railway complete', flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let connection = client_sessions::Connection::Railway(ClientConnection::new(
+            Connection {
+                url: "wss://agent.example.com/agent".into(),
+                directory: "/app/project".into(),
+                client_version: "0.1.16".into(),
+            },
+            "agent-id",
+            "env-id",
+        ));
+        let mut pane = Session::spawn_client(
+            "agent-id".into(),
+            "box".into(),
+            &binary,
+            &connection,
+            Some("ws://127.0.0.1:54321/_railway/agent?token=capability"),
+            Some("thread-1"),
+            Some("explain this"),
+            24,
+            80,
+            || {},
+        )
+        .unwrap();
+        assert_eq!(pane.harness, "railway");
+        assert_eq!(pane.durable_name, "client-thread:railway:agent-id:thread-1");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pane
+            .with_screen(|s| s.contents().contains("Railway ready"))
+            .unwrap_or(false)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        pane.resize(30, 100);
+        pane.write_raw(b"hello\n");
+        while !pane.finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{:?}",
+                pane.last_line()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            pane.with_screen(|s| s.contents().contains("Railway complete"))
+                .unwrap()
+        );
+        assert_eq!(pane.exit_success(), Some(true));
+    }
+
     #[cfg(unix)]
     #[test]
     fn codex_local_pty_handles_remote_args_auth_input_and_resize() {
@@ -1492,7 +1731,7 @@ assert os.isatty(0) and os.isatty(1)
 assert os.environ['RAILWAY_CODEX_SERVER_TOKEN'] == "secret ' $(echo injected)"
 backend = hashlib.sha256(b'wss://agent.example.com:443').hexdigest()[:16]
 assert pathlib.Path(os.environ['CODEX_HOME']) == pathlib.Path.home() / '.railway/codex-client' / backend
-assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', 'resume', 'thread-1']
+assert sys.argv[1:] == ['-c', 'check_for_update_on_startup=false', '--remote', 'ws://127.0.0.1:54321', '--remote-auth-token-env', 'RAILWAY_CODEX_SERVER_TOKEN', '--cd', '/app/a project', 'resume', 'thread-1']
 print('Codex ready', flush=True)
 assert input() == 'hello'
 size = os.get_terminal_size()
@@ -2053,17 +2292,22 @@ assert (size.lines, size.columns) == (30, 100)
         let mut session = Session::for_test("ca", "test").unwrap();
         session.resize(6, 60);
         session.send(b"open https://railway.com/deploy now\r\n");
-        // Wait for the whole URL, not just the host. A pty delivers the line in
-        // whatever chunks it likes, and "railway.com" is already on screen while
-        // the path is still arriving — which left the assertion below comparing
-        // against a truncated `…/dep` on a loaded runner.
-        for _ in 0..40 {
-            if session
+        // PTY startup and delivery can exceed 400 ms on a loaded Windows
+        // runner. Wait for the entire line (including the URL's terminator)
+        // so this checks hit testing rather than process scheduling or a
+        // partially delivered URL.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let line = session
                 .with_screen(|s| s.contents_between(0, 0, 0, u16::MAX))
-                .is_some_and(|line| line.contains("https://railway.com/deploy"))
-            {
+                .unwrap_or_default();
+            if line.contains("open https://railway.com/deploy now") {
                 break;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "PTY did not deliver the complete link line: {line:?}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -2216,6 +2460,58 @@ assert (size.lines, size.columns) == (30, 100)
 
     /// Successive wheel notches keep going past one screenful, through the
     /// same entry point the mouse uses.
+    #[test]
+    fn top_scrolling_regions_preserve_history_and_the_fixed_composer() {
+        let mut parser = pane_parser(6, 30, 20);
+        parser.process(b"\x1b[5;1Hcomposer\x1b[6;1Hfooter\x1b[1;4r\x1b[1;1H");
+        for i in 0..40 {
+            parser.process(format!("\x1b[31mline-{i:02}\x1b[0m\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().cell(4, 0).unwrap().contents(), "c");
+        assert_eq!(parser.screen().cell(5, 0).unwrap().contents(), "f");
+        assert!(parser.screen().contents().contains("line-39"));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(
+            parser.screen().scrollback(),
+            20,
+            "retention remains bounded"
+        );
+        assert!(parser.screen().contents().contains("line-17"));
+        assert_eq!(
+            parser.screen().cell(0, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(1)
+        );
+        let history = parser.screen().contents();
+        // New output keeps the scrolled view anchored and the composer intact.
+        parser.process(b"line-40\r\n");
+        assert!(parser.screen().scrollback() > 0);
+        assert_ne!(
+            parser.screen().contents(),
+            history,
+            "oldest retained row was evicted"
+        );
+        parser.screen_mut().set_scrollback(0);
+        assert!(parser.screen().contents().contains("line-40"));
+        assert_eq!(parser.screen().cell(4, 0).unwrap().contents(), "c");
+        assert_eq!(parser.screen().cell(5, 0).unwrap().contents(), "f");
+    }
+
+    #[test]
+    fn scrolling_below_a_header_and_on_alternate_screens_stays_out_of_history() {
+        for setup in [
+            b"\x1b[2;4r\x1b[2;1H".as_slice(),
+            b"\x1b[?1049h\x1b[1;4r\x1b[1;1H".as_slice(),
+        ] {
+            let mut parser = pane_parser(6, 30, 20);
+            parser.process(setup);
+            for i in 0..40 {
+                parser.process(format!("line-{i:02}\r\n").as_bytes());
+            }
+            parser.screen_mut().set_scrollback(usize::MAX);
+            assert_eq!(parser.screen().scrollback(), 0);
+        }
+    }
+
     #[test]
     fn scrolling_walks_past_one_screenful() {
         let mut session = Session::for_test("ca", "test").unwrap();

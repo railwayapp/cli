@@ -24,6 +24,8 @@ mod controllers;
 mod errors;
 mod exec_context;
 mod gql;
+#[cfg(test)]
+mod help_tests;
 mod oauth;
 mod resources;
 mod subscription;
@@ -31,6 +33,7 @@ mod table;
 #[cfg(test)]
 mod testkit;
 mod util;
+mod vt100;
 mod workspace;
 
 #[macro_use]

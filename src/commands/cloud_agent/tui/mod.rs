@@ -17,6 +17,7 @@
 
 mod activity;
 pub mod app;
+pub(crate) mod bootstrap_setup;
 mod cache;
 pub mod session;
 pub mod settings;
@@ -120,8 +121,8 @@ fn save_setup(
         }),
         theme: Some(outcome.theme.clone()),
         hide_tabs: outcome.hide_tabs,
+        sidebar_width: app.sidebar_width,
     };
-    let _ = app;
     prefs.save_in(&home)?;
     Ok(prefs)
 }
@@ -306,6 +307,17 @@ enum Message {
         agent_id: String,
         result: Result<SessionInventory, String>,
     },
+    BootstrapDefaultLoaded(String, bootstrap_setup::DefaultState),
+    BootstrapStep(String),
+    BootstrapDone(
+        String,
+        Result<crate::controllers::agent_bootstrap::Bootstrap, String>,
+    ),
+    BootstrapsLoaded(
+        String,
+        Result<Vec<crate::controllers::agent_bootstrap::Bootstrap>, String>,
+    ),
+    BootstrapSelected(String, Result<(), String>),
     LaunchStep(String),
     LaunchReady(Box<Prepared>, Box<LaunchRequest>),
     LaunchFailed(String),
@@ -457,6 +469,18 @@ fn open_client(
     } else {
         None
     };
+    let railway_bridge = if let ClientConnection::Railway(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        Some(connection.bridge(move |thread| {
+            let _ = updates.send(Message::ClientThreadSelected {
+                client_id: id.clone(),
+                thread,
+            });
+        })?)
+    } else {
+        None
+    };
     let mut session = session::Session::spawn_client(
         pane.agent_id.clone(),
         pane.agent_name,
@@ -465,7 +489,8 @@ fn open_client(
         bridge
             .as_ref()
             .map(|bridge| bridge.url.as_str())
-            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str())),
+            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str()))
+            .or_else(|| railway_bridge.as_ref().map(|bridge| bridge.url.as_str())),
         pane.thread.as_ref().map(|t| t.id.as_str()),
         pane.prompt.as_deref(),
         24,
@@ -485,6 +510,7 @@ fn open_client(
     session.client_thread = pane.thread;
     session.client_bridge = bridge;
     session.opencode_bridge = opencode_bridge;
+    session.railway_bridge = railway_bridge;
     if background {
         app.attach_session_background(session, pane.agent_id.clone());
     } else {
@@ -504,14 +530,21 @@ fn reconnect_client(
         let result = async {
             let (harness, _, thread_id) = client_sessions::parse_name(&connect.session_name)
                 .ok_or_else(|| anyhow::anyhow!("Invalid client conversation identity"))?;
-            let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
-            let mut connection = if harness == "codex" {
-                ClientConnection::Codex(super::codex::reconnect(&info).await?)
-            } else {
-                ClientConnection::OpenCode(
-                    super::opencode::reconnect(&info, harness == "opencode2").await?,
-                    harness == "opencode2",
+            let mut connection = if harness == "railway" {
+                ClientConnection::Railway(
+                    code::railway_client::reconnect(&connect.agent_id, &connect.environment_id)
+                        .await?,
                 )
+            } else {
+                let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+                if harness == "codex" {
+                    ClientConnection::Codex(super::codex::reconnect(&info).await?)
+                } else {
+                    ClientConnection::OpenCode(
+                        super::opencode::reconnect(&info, harness == "opencode2").await?,
+                        harness == "opencode2",
+                    )
+                }
             };
             let binary = match &connection {
                 ClientConnection::Codex(c) => {
@@ -519,6 +552,11 @@ fn reconnect_client(
                 }
                 ClientConnection::OpenCode(_, beta) => {
                     super::opencode::local::ensure_client_quiet(*beta).await?
+                }
+                ClientConnection::Railway(_) => {
+                    code::railway_client::installer::ensure_client(&ChannelProgress(tx.clone()))
+                        .await?
+                        .binary
                 }
             };
             let thread = if let Some(id) = thread_id {
@@ -614,6 +652,7 @@ fn reconnect_remote_thread(
 
 #[derive(Default)]
 struct SessionInventory {
+    primary_harness: Option<String>,
     rows: Vec<ConsoleSession>,
     remote: Vec<RemoteThread>,
     warnings: Vec<String>,
@@ -624,9 +663,7 @@ impl Progress for ChannelProgress {
     fn step(&self, text: &str) {
         let _ = self.0.send(Message::LaunchStep(text.to_string()));
     }
-    fn note(&self, text: &str) {
-        let _ = self.0.send(Message::LaunchStep(text.to_string()));
-    }
+    fn note(&self, _text: &str) {}
     fn finish(&self) {}
 }
 
@@ -679,6 +716,61 @@ impl InflightLaunch {
     }
 }
 
+struct BootstrapProgress(mpsc::UnboundedSender<Message>);
+impl Progress for BootstrapProgress {
+    fn finish(&self) {}
+    fn step(&self, text: &str) {
+        let _ = self.0.send(Message::BootstrapStep(text.into()));
+    }
+    fn note(&self, _text: &str) {}
+}
+
+fn load_bootstrap_default(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let targets = [
+        app.target.clone(),
+        app.bootstrap_target(),
+        app.harness_pick_target.clone(),
+    ];
+    for target in targets.into_iter().flatten() {
+        let env = target.environment_id;
+        if app.bootstrap_defaults.contains_key(&env) {
+            continue;
+        }
+        app.bootstrap_defaults
+            .insert(env.clone(), bootstrap_setup::DefaultState::Loading);
+        let (tx, client, url) = (tx.clone(), client.clone(), backboard.to_owned());
+        tokio::spawn(async move {
+            use crate::controllers::agent_bootstrap as bootstrap;
+            use bootstrap_setup::DefaultState;
+            let result = async {
+                let configs = Configs::new()?;
+                let rows = bootstrap::list(&configs, &client, &url, &env).await?;
+                if rows.is_empty() {
+                    return Ok(DefaultState::Missing);
+                }
+                Ok(
+                    match rows
+                        .into_iter()
+                        .find(|b| b.is_default && b.status == "READY")
+                    {
+                        Some(b) => DefaultState::Ready(b.name),
+                        None => DefaultState::Available,
+                    },
+                )
+            }
+            .await;
+            let state =
+                result.unwrap_or_else(|e: anyhow::Error| DefaultState::Failed(format!("{e:#}")));
+            let _ = tx.send(Message::BootstrapDefaultLoaded(env, state));
+        });
+    }
+}
+
 /// Run the prepare pipeline for `req`, streaming progress and the outcome into
 /// `sink` as loop messages. Shared by [`start_launch`] (sink = the loop's own
 /// channel) and [`begin_launch_early`] (sink = a buffer the loop adopts later).
@@ -688,7 +780,10 @@ fn spawn_prepare(req: LaunchRequest, sink: mpsc::UnboundedSender<Message>) {
         let args = launch_args_for(&req);
         let progress = ChannelProgress(sink.clone());
         if !args.client_on_agent
-            && matches!(req.harness.as_str(), "codex" | "opencode" | "opencode2")
+            && matches!(
+                req.harness.as_str(),
+                "codex" | "opencode" | "opencode2" | "railway"
+            )
         {
             let message = match code::client::prepare_pane(args, &req.harness, &progress).await {
                 Ok(pane) => Message::ClientReady {
@@ -1036,6 +1131,14 @@ async fn fetch_sessions(
                     .push(format!("Couldn't read {harness} history: {error:#}"));
             }
         }
+        if inventory.primary_harness.is_none()
+            && inventory
+                .rows
+                .iter()
+                .all(|row| row.harness_slug().is_none_or(|h| h == harness))
+        {
+            inventory.primary_harness = Some(harness.into());
+        }
     }
     inventory.rows.sort_by(|a, b| {
         b.snapshot
@@ -1172,6 +1275,7 @@ fn merge_remote_threads(
             .map(|row| ConsoleSession::client_thread(agent_id, &row.harness, Some(&row.thread))),
     );
     SessionInventory {
+        primary_harness: discovery.primary_harness,
         rows: consoles,
         remote,
         warnings: discovery.warnings,
@@ -1197,6 +1301,7 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     // Re-entry has a new reply channel; requests owned by the previous loop
     // cannot finish into this one. Keep their cached rows, release their locks.
+    app.bootstrap_defaults.clear();
     app.refreshing = false;
     app.thread_polls.clear();
     app.activity = Default::default();
@@ -1229,6 +1334,7 @@ pub async fn run(
     let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
 
     loop {
+        load_bootstrap_default(app, &tx, &client, &backboard);
         // Coalesce frames under load: with more messages already waiting,
         // painting now just repeats a screen that is about to change again.
         // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown
@@ -1327,6 +1433,8 @@ pub async fn run(
             // "creating…" spinners, and the tree's connecting rows too.
             _ = tokio::time::sleep(SPINNER_TICK), if app.loading.active
                 || !app.connecting.is_empty()
+                || app.bootstrap_form.as_ref().is_some_and(|f| f.running)
+                || app.bootstrap_picker.as_ref().is_some_and(|p| p.loading || p.saving)
                 || app.wizard.as_ref().is_some_and(|w| w.busy.is_some())
                 || app.settings.as_ref().is_some_and(|s| s.busy.is_some()) => {
                 app.tick();
@@ -1467,7 +1575,7 @@ pub async fn run(
                 // row that does nothing for it reads as a dead key.
                 app.connecting.insert(session_name.clone());
                 if client_sessions::parse_name(&session_name).is_some_and(|(h, _, _)| {
-                    matches!(h, "claude" | "grok" | "railway")
+                    matches!(h, "claude" | "grok")
                         || code::saved_config::client_connection(&agent_id, &environment_id)
                             .is_none_or(|c| c.harness() != h)
                 }) {
@@ -1627,6 +1735,14 @@ pub async fn run(
                     });
                 }
             }
+            Some(Effect::SaveSidebarWidth(width)) => {
+                let result = dirs::home_dir()
+                    .context("No home directory")
+                    .and_then(|home| super::prefs::AgentPrefs::save_sidebar_width_in(&home, width));
+                if let Err(error) = result {
+                    app.toast_error(format!("Couldn't save sidebar width: {error:#}"));
+                }
+            }
             Some(Effect::SaveSettings(outcome)) => {
                 apply_settings(app, &outcome);
             }
@@ -1653,7 +1769,10 @@ pub async fn run(
                     }
                 }
             }
-            Some(Effect::RefreshAll) => start_refresh(app, &tx, &client, &backboard),
+            Some(Effect::RefreshAll) => {
+                app.bootstrap_defaults.clear();
+                start_refresh(app, &tx, &client, &backboard);
+            }
             Some(Effect::OpenUrl(url)) => {
                 // Best-effort: a machine with no browser is a normal way to run
                 // this, and the ssh command in the toast is still copyable.
@@ -1803,6 +1922,80 @@ pub async fn run(
                         op,
                         error,
                     });
+                });
+            }
+            Some(Effect::LoadBootstraps { environment_id }) => {
+                let (tx, client, url) = (tx.clone(), client.clone(), backboard.clone());
+                tokio::spawn(async move {
+                    let result = async {
+                        let configs = Configs::new()?;
+                        crate::controllers::agent_bootstrap::list(
+                            &configs,
+                            &client,
+                            &url,
+                            &environment_id,
+                        )
+                        .await
+                    }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapsLoaded(environment_id, result));
+                });
+            }
+            Some(Effect::SelectBootstrap { environment_id, id }) => {
+                let (tx, client, url) = (tx.clone(), client.clone(), backboard.clone());
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut configs = Configs::new()?;
+                        if let Some(id) = id {
+                            let rows = crate::controllers::agent_bootstrap::list(
+                                &configs,
+                                &client,
+                                &url,
+                                &environment_id,
+                            )
+                            .await?;
+                            let b = rows.iter().find(|b| b.id == id).context(
+                                "This bootstrap is no longer available. Refresh the list.",
+                            )?;
+                            b.require_ready()?;
+                            configs
+                                .set_agent_bootstrap_default(&environment_id, &id, false)
+                                .await?;
+                        } else {
+                            configs
+                                .clear_agent_bootstrap_default(&environment_id)
+                                .await?;
+                        }
+                        Ok(())
+                    }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapSelected(environment_id, result));
+                });
+            }
+            Some(Effect::CreateBootstrap(req)) => {
+                if req.snapshot.is_none()
+                    && app.hold_for_ssh_key(HeldConnect::Bootstrap(req.clone()))
+                {
+                    if app.ssh_gate.is_none()
+                        && let Some(form) = app.bootstrap_form.as_mut()
+                    {
+                        form.running = false;
+                        form.error = Some(
+                            "No SSH key found. Run `ssh-keygen -t ed25519`, then retry setup."
+                                .into(),
+                        );
+                    }
+                    continue;
+                }
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let env = req.target.environment_id.clone();
+                    let result = code::bootstrap_setup::create(req, &BootstrapProgress(tx.clone()))
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapDone(env, result));
                 });
             }
             Some(Effect::Launch(req)) => dispatch_launch(app, req, &tx, &client, &backboard),
@@ -2252,6 +2445,11 @@ fn handle_message(
         } => {
             match result {
                 Ok(mut inventory) => {
+                    if let Some(harness) = inventory.primary_harness.take() {
+                        app.primary_harnesses.insert(agent_id.clone(), harness);
+                    } else {
+                        app.primary_harnesses.remove(&agent_id);
+                    }
                     app.remote_threads_loaded(&agent_id, &inventory.remote);
                     app.preserve_failed_threads(&agent_id, &inventory.failed, &mut inventory.rows);
                     app.sessions_loaded(path, &agent_id, Ok(inventory.rows));
@@ -2261,6 +2459,100 @@ fn handle_message(
                 }
                 Err(error) => app.sessions_loaded(path, &agent_id, Err(error)),
             }
+            app.finish_agent_connect(&agent_id)
+        }
+        Message::BootstrapDefaultLoaded(env, state) => {
+            app.bootstrap_defaults.insert(env, state);
+            None
+        }
+        Message::BootstrapsLoaded(env, result) => {
+            if let Some(picker) = app
+                .bootstrap_picker
+                .as_mut()
+                .filter(|p| p.target.environment_id == env && p.loading)
+            {
+                picker.loaded(result.clone());
+                if picker.for_launch {
+                    use bootstrap_setup::LaunchChoice;
+                    picker.cursor = match &app.harness_bootstrap {
+                        LaunchChoice::Named(name) => picker
+                            .entries
+                            .iter()
+                            .position(|b| b.name == *name)
+                            .map_or(0, |i| i + 1),
+                        LaunchChoice::None => picker.entries.len() + 1,
+                        LaunchChoice::Default => 0,
+                    };
+                }
+            }
+            if let Some(form) = app
+                .bootstrap_form
+                .as_mut()
+                .filter(|f| f.target.environment_id == env && f.defaults_loading)
+            {
+                match result {
+                    Ok(entries) => {
+                        form.make_default = !entries.iter().any(|b| b.is_default);
+                        form.defaults_loading = false;
+                    }
+                    Err(error) => {
+                        // Keep submission disabled until the user retries with a fresh form.
+                        form.error = Some(format!(
+                            "Could not load the current default: {error}. Press Esc and try again."
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        Message::BootstrapSelected(env, result) => {
+            app.bootstrap_defaults.remove(&env);
+            if let Some(picker) = app
+                .bootstrap_picker
+                .as_mut()
+                .filter(|p| p.target.environment_id == env)
+            {
+                picker.saving = false;
+                match result {
+                    Ok(()) => {
+                        app.bootstrap_picker = None;
+                        app.screen = Screen::Manage;
+                        app.toast("Bootstrap default updated");
+                    }
+                    Err(error) => picker.error = Some(error),
+                }
+            }
+            None
+        }
+        Message::BootstrapStep(text) => {
+            if let Some(form) = app.bootstrap_form.as_mut() {
+                if form.steps.last() != Some(&text) {
+                    form.steps.push(text);
+                }
+            }
+            None
+        }
+        Message::BootstrapDone(env, result) => {
+            app.bootstrap_defaults.remove(&env);
+            if let Some(form) = app
+                .bootstrap_form
+                .as_mut()
+                .filter(|f| f.target.environment_id == env)
+            {
+                form.running = false;
+                match result {
+                    Ok(b) => {
+                        form.finished = true;
+                        form.steps = vec![if b.is_default {
+                            format!("'{}' is your default for new Cloud Agents.", b.name)
+                        } else {
+                            format!("'{}' is ready to use. Your default is unchanged.", b.name)
+                        }];
+                    }
+                    Err(error) => form.error = Some(error),
+                }
+            }
+            start_refresh(app, tx, client, backboard);
             None
         }
         Message::LaunchStep(text) => {
@@ -2432,6 +2724,12 @@ fn handle_message(
                 then.map(HeldConnect::into_effect)
             }
             Err(message) => {
+                if matches!(then, Some(HeldConnect::Bootstrap(_)))
+                    && let Some(form) = app.bootstrap_form.as_mut()
+                {
+                    form.running = false;
+                    form.error = Some(format!("SSH key registration failed: {message}"));
+                }
                 // Still unregistered: the next connect raises the gate again.
                 // The toast gets the first line; register_ssh_key already maps
                 // the duplicate-fingerprint rejection to something actionable.
@@ -2912,7 +3210,9 @@ async fn close_session(app: &mut App, index: usize, _client: &reqwest::Client, _
 /// draw, when the layout that produced the pane is known. A mismatch here is
 /// what makes a remote TUI wrap in the wrong place.
 fn sync_session_size(app: &mut App, terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) {
-    let Some((rows, cols)) = ui::session_pane_size(terminal.size().ok(), app.pane_is_full()) else {
+    let Some((rows, cols)) =
+        ui::session_pane_size(terminal.size().ok(), app.pane_is_full(), app.sidebar_width)
+    else {
         return;
     };
     // Every session gets the pane's shape, not just the visible one: a
@@ -3022,6 +3322,107 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_default_loading_and_selection_stay_in_the_tui() {
+        let target = Target {
+            project_id: "project".into(),
+            project_name: "Demo".into(),
+            environment_id: "env".into(),
+            environment_name: "production".into(),
+        };
+        let mut app = App::new(
+            vec![],
+            Some(target.clone()),
+            Some("claude"),
+            None,
+            None,
+            true,
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = reqwest::Client::new();
+        let stop = StopFlag::default();
+        for has_default in [false, true] {
+            let mut form = bootstrap_setup::Form::new(target.clone(), 0);
+            form.snapshot = Some(bootstrap_setup::Snapshot {
+                agent_id: "vm".into(),
+                agent_name: "selected".into(),
+            });
+            form.defaults_loading = true;
+            app.bootstrap_form = Some(form);
+            app.screen = Screen::BootstrapSetup;
+            let entries = if has_default {
+                vec![crate::controllers::agent_bootstrap::Bootstrap {
+                    id: "saved".into(),
+                    name: "dev".into(),
+                    environment_id: "env".into(),
+                    status: "READY".into(),
+                    failure_reason: None,
+                    updated_at: chrono::Utc::now(),
+                    is_default: true,
+                    source_agent_id: None,
+                    checkpoint_id: None,
+                }]
+            } else {
+                vec![]
+            };
+            handle_message(
+                &mut app,
+                Message::BootstrapsLoaded("env".into(), Ok(entries)),
+                &tx,
+                &client,
+                "unused",
+                &stop,
+            );
+            let form = app.bootstrap_form.as_ref().unwrap();
+            assert_eq!(form.make_default, !has_default);
+            assert!(!form.defaults_loading);
+            assert_eq!(app.screen, Screen::BootstrapSetup);
+        }
+        app.bootstrap_form = None;
+        app.bootstrap_picker = Some(bootstrap_setup::Picker::new(target, false));
+        app.screen = Screen::BootstrapPick;
+        handle_message(
+            &mut app,
+            Message::BootstrapSelected("env".into(), Err("cannot save".into())),
+            &tx,
+            &client,
+            "unused",
+            &stop,
+        );
+        assert_eq!(app.screen, Screen::BootstrapPick);
+        assert_eq!(
+            app.bootstrap_picker.as_ref().unwrap().error.as_deref(),
+            Some("cannot save")
+        );
+        handle_message(
+            &mut app,
+            Message::BootstrapSelected("env".into(), Ok(())),
+            &tx,
+            &client,
+            "unused",
+            &stop,
+        );
+        assert_eq!(app.screen, Screen::Manage);
+        assert!(app.bootstrap_picker.is_none());
+    }
+
+    #[test]
+    fn bootstrap_and_launch_progress_send_stages_without_detail_notes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let progress = ChannelProgress(tx.clone());
+        progress.note("Using bootstrap 'dev'");
+        progress.step("Creating a cloud agent");
+        assert!(
+            matches!(rx.try_recv(), Ok(Message::LaunchStep(s)) if s == "Creating a cloud agent")
+        );
+        assert!(rx.try_recv().is_err());
+        let progress = BootstrapProgress(tx);
+        progress.note("Copied the selected coding agent settings");
+        progress.step("Saving checkpoint");
+        assert!(matches!(rx.try_recv(), Ok(Message::BootstrapStep(s)) if s == "Saving checkpoint"));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn history_survives_console_exit_and_native_switches_replace_the_console_row() {
