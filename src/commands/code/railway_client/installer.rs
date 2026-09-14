@@ -126,18 +126,92 @@ async fn ensure_client_from(
 /// Fetch and parse the latest-release metadata from GitHub. Isolated so the caller can fall back to
 /// an already-installed client when *this* step fails (rate limit, network, offline) without also
 /// swallowing a later integrity failure during install.
+///
+/// Anonymous first; a token is used ONLY to get past the anonymous rate limit, never attached to the
+/// normal request. The anonymous REST limit is 60/hr per IP, which a shared IP or a burst of launches
+/// can exhaust; when that specific limit is what we hit, retry once authenticated (5000/hr for the
+/// token's account — see [`github_token`]). Any other failure, and the rate-limit case with no token
+/// available, propagates so the caller can fall back to an installed client.
 async fn fetch_latest_release(
     client: &reqwest::Client,
     latest_url: &str,
 ) -> Result<serde_json::Value> {
-    Ok(client
+    let response = client
         .get(latest_url)
         .timeout(Duration::from_secs(15))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
+        .await?;
+    if is_rate_limited(&response) {
+        if let Some(token) = github_token().await {
+            return Ok(client
+                .get(latest_url)
+                .timeout(Duration::from_secs(15))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?);
+        }
+    }
+    Ok(response.error_for_status()?.json().await?)
+}
+
+/// Whether a response is GitHub's rate limit (as opposed to some other 403). GitHub returns 403 (and,
+/// for secondary limits, 429) and sets `x-ratelimit-remaining: 0` on a primary-limit hit. A 403 with
+/// remaining still above zero is a different kind of forbidden and not worth re-sending with a token;
+/// a 403/429 with the header absent (a proxy, a secondary limit) is treated as rate-limited.
+fn is_rate_limited(response: &reqwest::Response) -> bool {
+    let status = response.status();
+    if status != reqwest::StatusCode::FORBIDDEN && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return false;
+    }
+    match response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(remaining) => remaining.trim() == "0",
+        None => true,
+    }
+}
+
+/// A GitHub token to authenticate the release-metadata request, raising the API rate limit from the
+/// anonymous 60/hr per IP to 5000/hr for the token's account. Resolved, in order:
+///   1. `GH_TOKEN`, then `GITHUB_TOKEN` — the same precedence the `gh` CLI itself uses.
+///   2. the signed-in `gh` CLI (`gh auth token`), best-effort — skipped silently when `gh` is not
+///      installed or not logged in.
+/// `None` when nothing is available, in which case the request goes out anonymously as before.
+async fn github_token() -> Option<String> {
+    if let Some(token) = token_from_env(|var| std::env::var(var).ok()) {
+        return Some(token);
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new("gh")
+            .args(["auth", "token"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// The first non-empty of `GH_TOKEN`, `GITHUB_TOKEN` read through `read`. Split out from
+/// [`github_token`] so the precedence is testable without mutating the process environment.
+fn token_from_env(read: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find_map(|var| {
+        read(var)
+            .map(|value| value.trim().to_string())
+            .filter(|token| !token.is_empty())
+    })
 }
 
 /// The newest already-installed client under `root` (`…/railway-tui/<version>/railway-agent-tui`)
@@ -274,6 +348,32 @@ mod tests {
         ] {
             assert!(!matches_release(output, "0.1.16"), "{output}");
         }
+    }
+
+    #[test]
+    fn token_from_env_prefers_gh_token_then_github_token_and_ignores_blanks() {
+        let env = |pairs: &[(&str, &str)]| {
+            let map: std::collections::HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            token_from_env(move |var| map.get(var).cloned())
+        };
+        // GH_TOKEN wins over GITHUB_TOKEN.
+        assert_eq!(
+            env(&[("GH_TOKEN", "gh"), ("GITHUB_TOKEN", "gha")]),
+            Some("gh".into())
+        );
+        // GITHUB_TOKEN used when GH_TOKEN is absent.
+        assert_eq!(env(&[("GITHUB_TOKEN", "gha")]), Some("gha".into()));
+        // A blank GH_TOKEN falls through to GITHUB_TOKEN rather than short-circuiting to None.
+        assert_eq!(
+            env(&[("GH_TOKEN", "   "), ("GITHUB_TOKEN", "gha")]),
+            Some("gha".into())
+        );
+        // Trimmed; nothing set yields None.
+        assert_eq!(env(&[("GH_TOKEN", "  tok\n")]), Some("tok".into()));
+        assert_eq!(env(&[]), None);
     }
 
     #[derive(Default)]
@@ -442,25 +542,31 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn serve_status_once(status: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    async fn serve_rate_limited() -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                request.push(stream.read_u8().await.unwrap());
+        // Answer every request with GitHub's rate-limit shape (403 + `x-ratelimit-remaining: 0`), so
+        // both the anonymous call and any authenticated retry see the limit and the outcome is the
+        // same whether or not the test host happens to have a GitHub token. Detached: the task ends
+        // when the test's runtime shuts down.
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read_u8().await {
+                        Ok(byte) => request.push(byte),
+                        Err(_) => break,
+                    }
+                }
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 403 rate limit exceeded\r\nx-ratelimit-remaining: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
             }
-            stream
-                .write_all(
-                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                        .as_bytes(),
-                )
-                .await
-                .unwrap();
         });
-        (base, handle)
+        base
     }
 
     #[cfg(unix)]
@@ -473,7 +579,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("not-a-version")).unwrap();
         std::fs::create_dir_all(root.path().join("9.9.10")).unwrap();
 
-        let (base, server) = serve_status_once("403 rate limit exceeded").await;
+        let base = serve_rate_limited().await;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let progress = ProgressLog::default();
         let installed = ensure_client_from(
@@ -498,14 +604,13 @@ mod tests {
                 .any(|s| s.contains("using installed v9.9.9")),
             "should note the fallback to the installed client"
         );
-        server.await.unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn surfaces_the_error_when_rate_limited_with_no_installed_client() {
         let root = tempfile::tempdir().unwrap();
-        let (base, server) = serve_status_once("403 rate limit exceeded").await;
+        let base = serve_rate_limited().await;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let error = ensure_client_from(
             &client,
@@ -524,7 +629,6 @@ mod tests {
                 .contains("no working client is installed locally"),
             "got: {error}"
         );
-        server.await.unwrap();
     }
 
     #[tokio::test]
