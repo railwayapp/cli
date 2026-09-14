@@ -83,14 +83,32 @@ async fn ensure_client_from(
     progress: &dyn Progress,
 ) -> Result<InstalledClient> {
     progress.step("Checking for Railway client updates");
-    let release: serde_json::Value = client
-        .get(latest_url)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    // Resolving the latest release means reaching GitHub's API, which can fail for reasons unrelated
+    // to the client the user already has on disk: the unauthenticated API rate limit (60/hr per IP,
+    // which a burst of launches or a shared NAT can exhaust), a transient network blip, or being
+    // offline. `railway code` already installs versioned clients under `root`, so rather than block
+    // the launch entirely, fall back to the newest installed one that still runs. The fallback is
+    // scoped to this resolution step on purpose: once a release is resolved, a later failure —
+    // notably a download checksum mismatch — is a real integrity problem that must surface, never be
+    // papered over with an older binary.
+    let release = match fetch_latest_release(client, latest_url).await {
+        Ok(release) => release,
+        Err(err) => {
+            return match newest_installed_client(root).await {
+                Some(installed) => {
+                    progress.step(&format!(
+                        "Couldn't check for Railway client updates ({err}); using installed v{}",
+                        installed.version
+                    ));
+                    Ok(installed)
+                }
+                None => Err(err.context(
+                    "Couldn't reach GitHub to install the Railway client, and no working client is \
+                     installed locally to fall back to",
+                )),
+            };
+        }
+    };
     let version = release_version(&release)?;
     let binary = install_release(
         client,
@@ -103,6 +121,47 @@ async fn ensure_client_from(
     )
     .await?;
     Ok(InstalledClient { binary, version })
+}
+
+/// Fetch and parse the latest-release metadata from GitHub. Isolated so the caller can fall back to
+/// an already-installed client when *this* step fails (rate limit, network, offline) without also
+/// swallowing a later integrity failure during install.
+async fn fetch_latest_release(
+    client: &reqwest::Client,
+    latest_url: &str,
+) -> Result<serde_json::Value> {
+    Ok(client
+        .get(latest_url)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+/// The newest already-installed client under `root` (`…/railway-tui/<version>/railway-agent-tui`)
+/// that still runs and reports the version its directory is named for. Used as the offline /
+/// rate-limited fallback when the latest release can't be resolved. `None` when the directory is
+/// absent, empty, or holds nothing runnable.
+async fn newest_installed_client(root: &std::path::Path) -> Option<InstalledClient> {
+    let mut versions: Vec<String> = match std::fs::read_dir(root) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| validate_version(name).is_ok())
+            .collect(),
+        Err(_) => return None,
+    };
+    // Highest semver first, so the first runnable candidate is the newest.
+    versions.sort_by(|a, b| crate::util::compare_semver::compare_semver(b, a));
+    for version in versions {
+        let binary = root.join(&version).join("railway-agent-tui");
+        if compatible(&binary, &version).await {
+            return Some(InstalledClient { binary, version });
+        }
+    }
+    None
 }
 
 fn release_version(release: &serde_json::Value) -> Result<String> {
@@ -366,6 +425,106 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn install_fake_client(root: &std::path::Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = root.join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("railway-agent-tui");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' 'railway-agent-tui {version}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn serve_status_once(status: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        (base, handle)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn falls_back_to_newest_installed_client_when_latest_check_is_rate_limited() {
+        let root = tempfile::tempdir().unwrap();
+        install_fake_client(root.path(), "9.9.8");
+        install_fake_client(root.path(), "9.9.9");
+        // A non-version directory and a version dir with no runnable binary are both ignored.
+        std::fs::create_dir_all(root.path().join("not-a-version")).unwrap();
+        std::fs::create_dir_all(root.path().join("9.9.10")).unwrap();
+
+        let (base, server) = serve_status_once("403 rate limit exceeded").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let progress = ProgressLog::default();
+        let installed = ensure_client_from(
+            &client,
+            &format!("{base}/latest"),
+            &format!("{base}/download"),
+            root.path(),
+            "test-arm64",
+            &progress,
+        )
+        .await
+        .unwrap();
+        // Newest *runnable* installed version — not 9.9.10 (empty) — and unblocked by the 403.
+        assert_eq!(installed.version, "9.9.9");
+        assert!(compatible(&installed.binary, "9.9.9").await);
+        assert!(
+            progress
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.contains("using installed v9.9.9")),
+            "should note the fallback to the installed client"
+        );
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn surfaces_the_error_when_rate_limited_with_no_installed_client() {
+        let root = tempfile::tempdir().unwrap();
+        let (base, server) = serve_status_once("403 rate limit exceeded").await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let error = ensure_client_from(
+            &client,
+            &format!("{base}/latest"),
+            &format!("{base}/download"),
+            root.path(),
+            "test-arm64",
+            &ProgressLog::default(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("no working client is installed locally"),
+            "got: {error}"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]
