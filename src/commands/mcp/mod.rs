@@ -17,7 +17,7 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Install Railway's MCP server config into AI coding tools (Claude Code, Cursor, OpenCode, Codex)
+    /// Install Railway's MCP server config into AI coding tools (Claude Code, Cursor, OpenCode, Codex, Pi)
     Install(install::Args),
     /// Serve the in-process MCP server over stdio, without reaching mcp.railway.com
     Local,
