@@ -56,6 +56,12 @@ pub struct Theme {
     /// Delete confirmations, 5xx / p99, a Cancel button — the one role none
     /// of cloud-agent's original fields covered.
     pub danger: Color,
+    /// An ordered palette for charts that draw several simultaneous series
+    /// (CPU/memory limits aside, which reuse `accent`) — egress/ingress,
+    /// p50/p90/p95/p99, 2xx/3xx/4xx/5xx. Picked by index rather than named
+    /// per metric, so a chart with N series just takes `series[0..N]`
+    /// instead of the metrics TUI naming a colour per metric itself.
+    pub series: &'static [Color],
 }
 
 pub const THEMES: &[Theme] = &[
@@ -75,6 +81,12 @@ pub const THEMES: &[Theme] = &[
         sleeping: Color::Rgb(0x7d, 0x77, 0x8f),
         pending: Color::Rgb(0xf5, 0xc0, 0x6b),
         danger: Color::Rgb(0xf2, 0x6d, 0x6d),
+        series: &[
+            Color::Rgb(0x6d, 0x9d, 0xf2),
+            Color::Rgb(0xf5, 0xc0, 0x6b),
+            Color::Rgb(0xc9, 0x6b, 0xf2),
+            Color::Rgb(0xf2, 0x6d, 0x6d),
+        ],
     },
     // Terminal: no opinion about colour at all — everything resolves through
     // the user's own sixteen. The right choice on a themed or low-colour
@@ -98,6 +110,7 @@ pub const THEMES: &[Theme] = &[
         sleeping: Color::Gray,
         pending: Color::Yellow,
         danger: Color::Red,
+        series: &[Color::Blue, Color::Yellow, Color::Magenta, Color::Red],
     },
     // Ember: warm amber on near-black.
     Theme {
@@ -115,6 +128,12 @@ pub const THEMES: &[Theme] = &[
         sleeping: Color::Rgb(0x86, 0x7c, 0x6e),
         pending: Color::Rgb(0xf5, 0xd2, 0x6b),
         danger: Color::Rgb(0xe0, 0x5a, 0x4a),
+        series: &[
+            Color::Rgb(0x6a, 0x8c, 0xd6),
+            Color::Rgb(0xf5, 0xd2, 0x6b),
+            Color::Rgb(0xd6, 0x8c, 0xd6),
+            Color::Rgb(0xe0, 0x5a, 0x4a),
+        ],
     },
     // Mono: greyscale, for screenshots, recordings, and anyone who wants the
     // structure to carry the meaning instead of the colour.
@@ -133,6 +152,12 @@ pub const THEMES: &[Theme] = &[
         sleeping: Color::Rgb(0x77, 0x77, 0x77),
         pending: Color::Rgb(0xb4, 0xb4, 0xb4),
         danger: Color::Rgb(0xcf, 0xcf, 0xcf),
+        series: &[
+            Color::Rgb(0xd8, 0xd8, 0xd8),
+            Color::Rgb(0xb4, 0xb4, 0xb4),
+            Color::Rgb(0x90, 0x90, 0x90),
+            Color::Rgb(0xe6, 0xe6, 0xe6),
+        ],
     },
 ];
 
@@ -299,6 +324,26 @@ mod tests {
             assert_ne!(theme.danger, theme.running, "{}", theme.slug);
             assert_ne!(theme.danger, theme.pending, "{}", theme.slug);
             assert_ne!(theme.danger, theme.surface, "{}", theme.slug);
+        }
+    }
+
+    /// A chart that draws N series takes `series[0..N]` — they have to be
+    /// distinguishable from each other, and from the surface they're drawn
+    /// on, or the lines merge into an unreadable smear.
+    #[test]
+    fn series_has_at_least_four_distinct_colours() {
+        for theme in THEMES {
+            assert!(
+                theme.series.len() >= 4,
+                "{} needs at least 4 series colours",
+                theme.slug
+            );
+            for (i, a) in theme.series.iter().enumerate() {
+                assert_ne!(*a, theme.surface, "{} series[{i}]", theme.slug);
+                for b in &theme.series[i + 1..] {
+                    assert_ne!(a, b, "{} has a repeated series colour", theme.slug);
+                }
+            }
         }
     }
 
