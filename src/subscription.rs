@@ -14,24 +14,20 @@ where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
-    let configs = Configs::new()?;
+    let mut configs = Configs::new()?;
     let hostname = configs.get_host();
+    let oauth_base_url = crate::oauth::get_oauth_base_url(hostname);
+    let (header_name, header_value) = connect_auth_header(&mut configs, &oauth_base_url).await?;
+
     let client = reqwest::Client::default();
     // This timeout covers the whole upgrade handshake (DNS + TCP + TLS +
     // 101). On a CPU-starved machine — a CI runner at full load, or a
     // Railway VM mid-build — 1s is routinely missed even when the network
     // is fine, and every retry misses it the same way.
-    let mut request = client
+    let request = client
         .get(format!("wss://backboard.{hostname}/graphql/v2"))
-        .timeout(Duration::from_secs(10));
-
-    if let Some(token) = &Configs::get_railway_token() {
-        request = request.header("project-access-token", token);
-    } else if let Some(token) = configs.get_railway_auth_token() {
-        request = request.header("authorization", format!("Bearer {token}"));
-    } else {
-        bail!("Not authorized");
-    };
+        .timeout(Duration::from_secs(10))
+        .header(header_name, header_value);
 
     let resp = request
         .upgrade()
@@ -44,6 +40,39 @@ where
     Ok(Client::build(GraphQLWebSocket(web_socket))
         .subscribe(StreamingOperation::<T>::new(variables))
         .await?)
+}
+
+/// The credential header a (re)connect should present, after making sure it is
+/// current.
+///
+/// A WebSocket authenticates once, at the upgrade — so a connection opened with
+/// a good token keeps working past its expiry, and the staleness only bites on
+/// reconnect. `stream_http_logs_inner` retries a dropped stream up to twelve
+/// times, and without this refresh every one of those attempts re-presents the
+/// same expired bearer and fails the handshake identically: a `logs -f` that
+/// outlives its token dies at the first network blip. That gets worse, not
+/// better, with a subscription meant to stay open for a whole session.
+///
+/// A refresh failure is deliberately not fatal. The stored token may still be
+/// good (this only fires once local expiry has passed, which is conservative),
+/// and the handshake reports a genuinely dead credential better than a
+/// speculative refresh does.
+///
+/// Split out from [`subscribe_graphql`] so the refresh can be tested without
+/// standing up a WebSocket server.
+pub(crate) async fn connect_auth_header(
+    configs: &mut Configs,
+    oauth_base_url: &str,
+) -> Result<(&'static str, String)> {
+    let _ = crate::client::ensure_valid_token_at(configs, oauth_base_url).await;
+
+    if let Some(token) = Configs::get_railway_token() {
+        return Ok(("project-access-token", token));
+    }
+    if let Some(token) = configs.get_railway_auth_token() {
+        return Ok(("authorization", format!("Bearer {token}")));
+    }
+    bail!("Not authorized")
 }
 
 struct GraphQLWebSocket(WebSocket);
