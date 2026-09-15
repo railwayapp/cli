@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::controllers::regions::BucketRegion;
+
 use super::graph::{RailwayGraph, resource_addr, resource_name, resource_type};
 use super::json::{field, field_str, stable_stringify};
 use super::partial::{
@@ -111,6 +113,7 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
         }
         if previous.is_none() {
             diagnose_unsupported_custom_domains(resource, &mut diagnostics, None);
+            diagnose_new_bucket_region(resource, &mut diagnostics);
             changes.push(json!({
                 "kind": "resource.create",
                 "address": address,
@@ -1122,6 +1125,41 @@ fn bucket_region(resource: &Value) -> Option<String> {
     field(resource, "config")
         .and_then(|config| field_str(config, "region"))
         .map(str::to_string)
+}
+
+fn diagnose_new_bucket_region(resource: &Value, diagnostics: &mut Vec<Diagnostic>) {
+    if resource_type(resource) != "bucket" {
+        return;
+    }
+
+    let region = field(resource, "config").and_then(|config| field(config, "region"));
+    let supported = BucketRegion::all();
+    if region
+        .and_then(Value::as_str)
+        .is_some_and(|value| supported.iter().any(|region| region.code() == value))
+    {
+        return;
+    }
+
+    let valid_regions = supported
+        .iter()
+        .map(|region| region.code())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let name = resource_name(resource);
+    let message = match region {
+        None | Some(Value::Null) => {
+            format!("Bucket {name} is missing a region. Set one of: {valid_regions}.")
+        }
+        Some(value) => format!(
+            "Bucket {name} has an invalid region {value}. Valid object-storage regions are {valid_regions}."
+        ),
+    };
+    diagnostics.push(Diagnostic {
+        severity: "error".into(),
+        path: format!("resources.{}.config.region", resource_addr(resource)),
+        message,
+    });
 }
 
 fn database_region(resource: &Value) -> Option<String> {
