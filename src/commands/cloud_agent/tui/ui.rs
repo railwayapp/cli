@@ -1189,8 +1189,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
                 ("⌥o", "shell"),
-                ("n", "new VM"),
-                ("⌥n", "new session"),
+                ("n / ⌥n", "new VM"),
                 if sleeping {
                     ("w", "wake")
                 } else {

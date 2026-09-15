@@ -111,7 +111,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "copy an SSH shell command"),
             ("⌥b / b", "project bootstraps · save selected VM"),
             ("n", "new agent — pick its harness first"),
-            ("⌥n", "new session on this VM · choose its agent"),
+            ("⌥n", "new VM · choose agent, bootstrap, and project"),
             (
                 "⌥p",
                 "new session from a prompt, on the selected row's agent",
@@ -467,7 +467,7 @@ pub enum Screen {
     /// setup flow asks with — picking a target is the same question, so it
     /// should not send anyone through the whole management tree to answer it.
     TargetPick,
-    /// ⌥n on Manage: choosing which agent a new session runs, over the tree.
+    /// Choose an agent for a new VM or an existing connection, over the tree.
     HarnessPick,
     /// ⌥p on Manage: composing a prompt for a new session, over the tree —
     /// the launcher's prompt box, without the walk back to the New Session
@@ -1098,7 +1098,7 @@ pub struct App {
     pub bootstrap_picker: Option<super::bootstrap_setup::Picker>,
     pub bootstrap_defaults:
         std::collections::BTreeMap<String, super::bootstrap_setup::DefaultState>,
-    /// The VM selected for an Option+n session; None creates a fresh VM.
+    /// An explicitly selected existing VM; None creates a fresh VM.
     pub harness_pick_agent: Option<String>,
     pub harness_pick_connect: bool,
     /// VM-specific discovery, never the user's default coding agent.
@@ -5230,8 +5230,8 @@ impl App {
             }
             // The launchers float over the tree the launch aims at; the
             // New Session row's own prompt box covers the plain case.
-            // Option+n chooses a harness for a new session on the current VM.
-            'n' if self.screen == Screen::Manage => self.pick_new_session(),
+            // Option+n opens the new-VM picker from the current VM's project.
+            'n' if self.screen == Screen::Manage => self.pick_new_vm(),
             'p' if self.screen == Screen::Manage => {
                 self.manage_prompt = Some(String::new());
                 self.screen = Screen::ManagePrompt;
@@ -5674,8 +5674,6 @@ impl App {
             // then a fresh agent — in the row's own project when the cursor
             // names one (the footer advertises row-local behavior), falling
             // back to the prompt's target from the launcher and the tail.
-            // On an agent (or one of its threads) the box already exists, so
-            // the pick starts a new session ON it instead.
             KeyCode::Char('n') => {
                 if self.loading.active {
                     return None;
@@ -5849,23 +5847,22 @@ impl App {
         self.screen = Screen::HarnessPick;
     }
 
-    fn pick_new_session(&mut self) -> Option<Effect> {
+    fn pick_new_vm(&mut self) -> Option<Effect> {
         if self.loading.active {
             return None;
         }
-        let selected = if self.focus == ManageFocus::Session && self.active.is_some() {
-            self.active_session()
-                .and_then(|s| s.environment_id().map(|e| (s.agent_id.clone(), e)))
+        let environment = if self.focus == ManageFocus::Session && self.active.is_some() {
+            self.active_session().and_then(|s| s.environment_id())
         } else {
             match self.selected_row().map(|r| r.kind) {
-                Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => self
-                    .agent_at(w, p, e, a)
-                    .map(|(id, _)| (id, self.tree[w].projects[p].envs[e].id.clone())),
+                Some(RowKind::Agent(w, p, e, _) | RowKind::Session(w, p, e, _, _)) => {
+                    Some(self.tree[w].projects[p].envs[e].id.clone())
+                }
                 _ => None,
             }
         };
-        let Some((id, env)) = selected else {
-            self.toast_error("Select a VM to start a new session. Press n for a new VM.");
+        let Some(env) = environment else {
+            self.toast_error("Select a VM to use its project, or press n for a new VM.");
             return None;
         };
         let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
@@ -5878,7 +5875,7 @@ impl App {
             self.toast_error("The VM's project is unavailable. Refresh the tree and try again.");
             return None;
         };
-        self.begin_harness_pick(target, Some(id));
+        self.begin_harness_pick(target, None);
         None
     }
 
@@ -5893,7 +5890,7 @@ impl App {
         }
     }
 
-    /// Choose an agent for a new VM (`n`) or a session on the current VM (`⌥n`).
+    /// Choose an agent for a new VM (`n` / `⌥n`) or an existing connection.
     fn on_key_harness_pick(&mut self, key: KeyEvent) -> Option<Effect> {
         if self.harness_pick_agent.is_none() {
             if key.code == KeyCode::Char('p') {
@@ -10764,7 +10761,7 @@ mod tests {
     }
 
     #[test]
-    fn new_vm_controls_support_keyboard_navigation_and_project_selection() {
+    fn alt_n_controls_support_keyboard_navigation_and_project_selection() {
         let mut a = loaded_app();
         let mut other_project = a.tree[0].projects[0].clone();
         other_project.id = "other-project".into();
@@ -10774,7 +10771,14 @@ mod tests {
         a.tree[0].projects.push(other_project);
         let original = a.target_at((0, 0, 0)).unwrap();
         a.default_project = Some(original.project_id.clone());
-        a.begin_harness_pick(original.clone(), None);
+        let mut session = super::super::session::Session::for_test("ca_1", "builder").unwrap();
+        session.ssh_target = "agent:env_prod:ca_1".into();
+        a.sessions.push(session);
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(a.harness_pick_target, Some(original.clone()));
         a.harness_pick = Some(HARNESSES.len() - 1);
         a.on_key(key(KeyCode::Down));
         assert_eq!(a.harness_field, 1);
@@ -10813,10 +10817,12 @@ mod tests {
         a.on_key(key(KeyCode::Enter));
         a.on_key(key(KeyCode::Down));
         assert_eq!(a.harness_field, 2);
-        assert!(matches!(
+        assert_eq!(
             a.on_key(key(KeyCode::Enter)),
-            Some(Effect::LoadBootstraps { .. })
-        ));
+            Some(Effect::LoadBootstraps {
+                environment_id: chosen.environment_id.clone(),
+            })
+        );
         a.on_key(key(KeyCode::Esc));
         a.on_key(key(KeyCode::Up));
         a.on_key(key(KeyCode::Up));
@@ -10826,10 +10832,12 @@ mod tests {
         assert_eq!(req.environment_id, chosen.environment_id);
         assert_eq!(req.project_id, chosen.project_id);
         assert!(req.force_new);
+        assert!(!req.new_session);
+        assert_eq!(req.agent_id, None);
     }
 
     #[test]
-    fn alt_n_chooses_a_new_session_on_the_selected_vm() {
+    fn alt_n_chooses_a_new_vm_in_the_selected_vms_environment() {
         let mut a = loaded_app();
         a.cursor = a
             .rows()
@@ -10838,14 +10846,15 @@ mod tests {
             .unwrap();
         assert_eq!(a.on_key(alt('n')), None);
         assert_eq!(a.screen, Screen::HarnessPick);
-        assert_eq!(a.harness_pick_agent.as_deref(), Some("ca_1"));
+        assert_eq!(a.harness_pick_agent, None);
+        assert!(!a.harness_pick_connect);
         a.harness_pick = HARNESSES.iter().position(|h| *h == "codex");
         let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected a new session");
+            panic!("expected a new VM");
         };
-        assert!(!req.force_new);
-        assert!(req.new_session);
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert!(req.force_new);
+        assert!(!req.new_session);
+        assert_eq!(req.agent_id, None);
         assert_eq!(req.environment_id, "env_prod");
         assert_eq!(req.harness, "codex");
         assert_eq!(req.prompt, None);
@@ -11084,16 +11093,23 @@ mod tests {
             "closing the card returns to typing in the session"
         );
 
-        // Option+n chooses a new session on the focused VM.
+        // Option+n creates a new VM using the focused VM's environment.
         a.sessions[0].ssh_target = "agent:env_prod:ca_1".into();
+        a.target = a.target_at((0, 0, 1));
         assert_eq!(a.on_key(alt('n')), None);
         assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(
+            a.harness_pick_target.as_ref().unwrap().environment_id,
+            "env_prod"
+        );
+        assert_eq!(a.harness_pick_agent, None);
         let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected new session")
+            panic!("expected new VM")
         };
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
-        assert!(req.new_session);
-        assert!(!req.force_new);
+        assert_eq!(req.agent_id, None);
+        assert!(!req.new_session);
+        assert!(req.force_new);
+        assert_eq!(req.environment_id, "env_prod");
     }
 
     /// Releasing a focused session with ⇧esc also un-maximizes: focus moving

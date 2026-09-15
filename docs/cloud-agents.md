@@ -55,8 +55,10 @@ Use `railway ca ssh <agent>` for a shell, `--session [name]` to attach to or sta
 a terminal session, and `--resume` to resume the most recent Claude conversation
 in a fresh terminal session after sleep or restart.
 
-In the management interface, Option+F toggles the tree and Option+N starts another
-session. Piped sessions and agent arguments after `--` use the terminal directly.
+In the management interface, Option+F toggles the tree. Option+N opens the new-VM
+picker from an existing session, with agent, bootstrap, and project selection.
+It starts with the current VM's project and environment and creates a fresh VM.
+Piped sessions and agent arguments after `--` use the terminal directly.
 
 ## Authentication
 

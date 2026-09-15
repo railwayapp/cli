@@ -860,10 +860,19 @@ mod tests {
             draw(&mut app, width, height, "launch-bootstrap");
             app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            let mut session =
+                super::super::super::session::Session::for_test("ca_1", "builder").unwrap();
+            session.ssh_target = "agent:env_prod:ca_1".into();
+            app.sessions.push(session);
+            app.active = Some(0);
+            app.focus = super::super::super::app::ManageFocus::Session;
+            app.maximized = true;
             app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT));
-            let out = draw(&mut app, width, height, "new-session");
-            assert!(out.contains("New session"));
-            assert!(!out.contains("Use bootstrap"));
+            let out = draw(&mut app, width, height, "alt-new-vm");
+            assert!(out.contains("New Cloud Agent"));
+            assert!(out.contains("Use bootstrap"));
+            assert!(out.contains("Select Bootstrap"));
+            assert!(out.contains("Select Project"));
             assert!(out.contains("ChatGPT Codex"));
         }
     }
