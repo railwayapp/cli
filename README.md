@@ -354,8 +354,9 @@ Press **n** in the tree or bootstrap list to choose an agent for a **new VM**.
 The picker includes **ChatGPT Codex**, a **Use bootstrap** checkbox, and an **Option+B**
 shortcut to use the project default, select another bootstrap, or start clean.
 These launch choices do not change the stored default. Press **Option+N** on
-a VM, its session, or inside its focused terminal to choose an agent for a
-**new session on that same VM**.
+a VM, its session, or inside its focused terminal to open the same **new VM**
+picker with bootstrap and project selection. It starts with the current VM's
+project and environment; launching creates a fresh machine.
 
 Failed captures are hidden from the TUI bootstrap pickers. Ready bootstraps and
 captures still saving appear before **No Default**, with **Create New** last.

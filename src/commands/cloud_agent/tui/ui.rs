@@ -8,7 +8,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Padding,
+    Paragraph, Wrap,
 };
 
 use super::app::{
@@ -1018,7 +1019,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
     }
     if app.screen == Screen::HarnessPick {
         let mut hints = vec![
-            ("↑↓", "choose agent"),
+            ("↑↓", "navigate"),
             (
                 "enter",
                 if app.harness_pick_connect {
@@ -1026,7 +1027,12 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 } else if app.harness_pick_agent.is_some() {
                     "new session"
                 } else {
-                    "create VM"
+                    match app.harness_field {
+                        1 => "toggle bootstrap",
+                        2 => "select bootstrap",
+                        3 => "select project",
+                        _ => "create VM",
+                    }
                 },
             ),
             ("esc", "back"),
@@ -1183,8 +1189,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             Some(RowKind::Agent(..)) => vec![
                 ("enter", "connect"),
                 ("⌥o", "shell"),
-                ("n", "new VM"),
-                ("⌥n", "new session"),
+                ("n / ⌥n", "new VM"),
                 if sleeping {
                     ("w", "wake")
                 } else {
@@ -1552,7 +1557,14 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(Clear, host);
     let area = centered(
         64,
-        indices.len() as u16 + if existing { 7 } else { 11 },
+        indices.len() as u16
+            + if existing {
+                7
+            } else if app.harness_use_bootstrap {
+                12
+            } else {
+                10
+            },
         host,
     );
     f.render_widget(Clear, area);
@@ -1571,11 +1583,16 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     f.render_widget(block, area);
     let rows = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(if existing { 1 } else { 0 }),
         Constraint::Length(1),
         Constraint::Length(indices.len() as u16),
         Constraint::Length(1),
         Constraint::Length(if existing { 0 } else { 1 }),
+        Constraint::Length(if existing || !app.harness_use_bootstrap {
+            0
+        } else {
+            2
+        }),
         Constraint::Length(if existing { 0 } else { 2 }),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -1616,24 +1633,39 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         })
         .collect();
     let mut state = ListState::default();
-    state.select(indices.iter().position(|i| *i == cursor));
+    state.select(
+        (existing || app.harness_field == 0)
+            .then(|| indices.iter().position(|i| *i == cursor))
+            .flatten(),
+    );
     f.render_stateful_widget(
-        List::new(items).highlight_symbol("› ").highlight_style(
-            Style::default()
-                .fg(theme.accent)
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD),
-        ),
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD),
+            ),
         rows[3],
         &mut state,
     );
     rects.harness_list = whole(rows[3]);
     if !existing {
-        // List text starts after its two-column selection marker.
-        let controls =
-            |row: Rect| Rect::new(row.x + 2, row.y, row.width.saturating_sub(2), row.height);
-        let checkbox = controls(rows[5]);
-        let selector = controls(rows[6]);
+        let checkbox = rows[5];
+        let selector = rows[6];
+        let project = rows[7];
+        let control_style = |field| {
+            if app.harness_field == field {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            }
+        };
         let default_name = target.and_then(|t| app.bootstrap_defaults.get(&t.environment_id));
         let selected = match &app.harness_bootstrap {
             LaunchChoice::Named(name) => name.clone(),
@@ -1645,28 +1677,46 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
             },
         };
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                chord_badge(theme, "space"),
-                Span::raw(if app.harness_use_bootstrap {
-                    " [✓] Use bootstrap"
-                } else {
-                    " [ ] Use bootstrap · clean VM"
-                }),
-            ])),
+            Paragraph::new(Line::from(vec![Span::raw(if app.harness_use_bootstrap {
+                " [✓] Use bootstrap"
+            } else {
+                " [ ] Use bootstrap · clean VM"
+            })]))
+            .alignment(Alignment::Center)
+            .style(control_style(1)),
             checkbox,
         );
+        if app.harness_use_bootstrap {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        chord_badge(theme, "b"),
+                        Span::raw(" Select Bootstrap"),
+                    ]),
+                    Line::from(selected).style(Style::default().fg(theme.dim)),
+                ])
+                .alignment(Alignment::Center)
+                .style(control_style(2)),
+                selector,
+            );
+            rects.harness_bootstrap = whole(selector);
+        }
         f.render_widget(
             Paragraph::new(vec![
-                Line::from(vec![
-                    chord_badge(theme, "⌥b"),
-                    Span::raw(" Select Bootstrap"),
-                ]),
-                Line::from(selected).style(Style::default().fg(theme.dim)),
-            ]),
-            selector,
+                Line::from(vec![chord_badge(theme, "p"), Span::raw(" Select Project")]),
+                Line::from(
+                    target
+                        .map(|t| t.label())
+                        .unwrap_or_else(|| "Choose a project".into()),
+                )
+                .style(Style::default().fg(theme.dim)),
+            ])
+            .alignment(Alignment::Center)
+            .style(control_style(3)),
+            project,
         );
         rects.harness_use_bootstrap = whole(checkbox);
-        rects.harness_bootstrap = whole(selector);
+        rects.harness_project = whole(project);
     }
 }
 
