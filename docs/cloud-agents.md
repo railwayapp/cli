@@ -19,6 +19,11 @@ flag also creates a new VM unless `connect` or
 `--agent` selects an existing one. `connect [agent]` connects to an existing
 Codex/OpenCode server; `--agent <name-or-id>` selects a VM for server setup.
 
+The local Railway Agent client checks for updates on each launch. If GitHub
+rate-limits the check, the CLI retries with available GitHub authentication.
+If the update check still fails, including when offline, it uses the newest
+working client already installed on your machine.
+
 Codex, OpenCode, and OpenCode2 normally run a local client connected to the VM.
 Their clients run inside the Railway CA interface with command approvals disabled.
 Codex matches the local client to its server version and trusts the remote project.
