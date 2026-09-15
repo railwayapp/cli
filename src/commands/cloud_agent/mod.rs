@@ -13,6 +13,7 @@ pub mod bootstrap;
 pub(crate) mod client_sessions;
 pub(crate) mod codex;
 pub mod desktop;
+mod herdr;
 pub mod lifecycle;
 pub mod mcp_sync;
 pub(crate) mod opencode;
@@ -115,6 +116,9 @@ Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
     /// Delete an agent and everything on its disk
     #[clap(visible_alias = "rm")]
     Delete(lifecycle::DeleteArgs),
+
+    /// Show cloud agents in herdr as machines (herdr 0.9+)
+    Herdr(herdr::Args),
 }
 
 /// Shared launch arguments have different help in CA's in-VM execution path.
@@ -167,6 +171,8 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Command::Wake(a)) => tracked("wake", lifecycle::wake(a)).await,
         Some(Command::Sleep(a)) => tracked("sleep", lifecycle::sleep(a)).await,
         Some(Command::Delete(a)) => tracked("delete", lifecycle::delete(a)).await,
+        // Untracked: herdr runs these as hooks many times an hour.
+        Some(Command::Herdr(a)) => herdr::command(a).await,
         None if args.launch.is_bare() && is_stdout_terminal() => browse().await,
         // Flags given, or no terminal to draw on: behave like `railway code`,
         // which means the pane on a terminal and a plain ssh session off one.
