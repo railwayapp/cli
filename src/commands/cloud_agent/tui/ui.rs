@@ -8,7 +8,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Padding,
+    Paragraph, Wrap,
 };
 
 use super::app::{
@@ -1584,9 +1585,9 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(if existing { 1 } else { 0 }),
-        Constraint::Length(if existing { 1 } else { 0 }),
+        Constraint::Length(1),
         Constraint::Length(indices.len() as u16),
-        Constraint::Length(if existing { 1 } else { 2 }),
+        Constraint::Length(1),
         Constraint::Length(if existing { 0 } else { 1 }),
         Constraint::Length(if existing || !app.harness_use_bootstrap {
             0
@@ -1639,12 +1640,15 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
             .flatten(),
     );
     f.render_stateful_widget(
-        List::new(items).highlight_symbol("› ").highlight_style(
-            Style::default()
-                .fg(theme.accent)
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD),
-        ),
+        List::new(items)
+            .highlight_symbol("› ")
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_style(
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD),
+            ),
         rows[3],
         &mut state,
     );

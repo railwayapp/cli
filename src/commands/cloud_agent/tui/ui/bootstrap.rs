@@ -822,7 +822,7 @@ mod tests {
             assert_eq!(checkbox.x, app.panes.harness_list.x);
             assert_eq!(
                 checkbox.y,
-                app.panes.harness_list.y + app.panes.harness_list.h + 2
+                app.panes.harness_list.y + app.panes.harness_list.h + 1
             );
             assert!(out.contains("Select Project"), "{out}");
             assert_eq!(app.panes.harness_bootstrap.x, checkbox.x);
