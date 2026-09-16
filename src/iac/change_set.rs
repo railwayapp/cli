@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use super::graph::{RailwayGraph, resource_addr, resource_name, resource_type};
+use super::graph::{RailwayGraph, resource_addr, resource_address, resource_name, resource_type};
 use super::json::{field, field_str, stable_stringify};
 use super::partial::{
     IacPartials, effective_partial, foreign_resource_message, has_named_partials,
@@ -53,17 +53,17 @@ pub struct DiffOptions<'a> {
 pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
     let mut changes = Vec::new();
     let mut diagnostics = Vec::new();
-    let current_by: Map<String, Value> = options
-        .current
-        .resources
-        .iter()
-        .map(|resource| (resource_addr(resource), resource.clone()))
-        .collect();
     let desired_by: Map<String, Value> = options
         .desired
         .resources
         .iter()
         .map(|resource| (resource_addr(resource), resource.clone()))
+        .collect();
+    let current_by: Map<String, Value> = options
+        .current
+        .resources
+        .iter()
+        .map(|resource| (paired_address(resource, &desired_by), resource.clone()))
         .collect();
     let p = effective_partial(options.partial).to_string();
     let declared: Vec<String> = options
@@ -122,7 +122,37 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
             }));
             continue;
         }
-        let previous = previous.unwrap();
+        let mut previous = previous.unwrap().clone();
+        if resource_type(&previous) != resource_type(resource) {
+            // Paired across service/database: same service on Railway, only
+            // the CLI's classification differs. Diff it as the declared kind so
+            // edits still apply; the server never sees a type change.
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                path: format!("resources.{address}"),
+                message: format!(
+                    "{} exists on Railway as a {} but is declared as a {}. Changes are still applied; declare it with {}() so the config matches Railway.",
+                    resource_name(resource),
+                    resource_type(&previous),
+                    resource_type(resource),
+                    resource_type(&previous)
+                ),
+            });
+            // Database nodes carry the image as top-level `image`; service
+            // nodes as `source.image`. Mirror it so the source diff is honest.
+            let image = field_str(&previous, "image")
+                .or_else(|| field_str(previous.get("source").unwrap_or(&Value::Null), "image"))
+                .map(str::to_string);
+            if let Some(image) = image {
+                previous["image"] = json!(image);
+                if previous.get("source").is_none() {
+                    previous["source"] = json!({ "type": "image", "image": image });
+                }
+            }
+            previous["type"] = json!(resource_type(resource));
+            previous["address"] = json!(address);
+        }
+        let previous = &previous;
         if field_str(previous, "name") != field_str(resource, "name") {
             changes.push(update(
                 &address,
@@ -179,7 +209,7 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
     }
 
     for resource in &options.current.resources {
-        let address = resource_addr(resource);
+        let address = paired_address(resource, &desired_by);
         if desired_by.contains_key(&address) {
             continue;
         }
@@ -216,6 +246,27 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
     }
 
     change_set_result(changes, diagnostics, options.partial, declared)
+}
+
+/// A Railway-managed database and a plain service with the same name are the
+/// same service on Railway; only the CLI's classification differs. Match them
+/// by name so the plan never proposes deleting one to create the other.
+fn paired_address(resource: &Value, desired_by: &Map<String, Value>) -> String {
+    let address = resource_addr(resource);
+    if desired_by.contains_key(&address) {
+        return address;
+    }
+    let sibling = match resource_type(resource) {
+        "service" => "database",
+        "database" => "service",
+        _ => return address,
+    };
+    let sibling = resource_address(sibling, resource_name(resource));
+    if desired_by.contains_key(&sibling) {
+        sibling
+    } else {
+        address
+    }
 }
 
 fn change_set_result(
