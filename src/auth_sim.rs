@@ -574,6 +574,48 @@ async fn expired_token_refreshes_and_new_bearer_reaches_the_wire() {
     );
 }
 
+/// A WebSocket authenticates once, at the upgrade, so an expired token only
+/// bites on reconnect — and `stream_http_logs_inner` reconnects a dropped
+/// stream up to twelve times. Without a refresh, every attempt re-presents the
+/// same dead bearer and fails the handshake identically, so a `railway logs -f`
+/// that outlives its token dies at the first network blip.
+#[tokio::test]
+async fn a_subscription_connect_presents_a_refreshed_bearer() {
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = Fixture::new();
+    let mut configs = fixture.load();
+    assert!(configs.is_token_expired(), "fixture starts expired");
+
+    let (name, value) =
+        crate::subscription::connect_auth_header(&mut configs, &token_endpoint.base_url)
+            .await
+            .unwrap();
+
+    assert_eq!(name, "authorization");
+    assert_eq!(
+        value, "Bearer new-access",
+        "the connect must carry the refreshed token, not the expired one it found on disk"
+    );
+    assert_eq!(token_endpoint.hits(), 1);
+}
+
+/// The mirror case: a live token must not cost a refresh on every reconnect.
+#[tokio::test]
+async fn a_subscription_connect_with_a_live_token_does_not_refresh() {
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let (name, value) =
+        crate::subscription::connect_auth_header(&mut configs, &token_endpoint.base_url)
+            .await
+            .unwrap();
+
+    assert_eq!(name, "authorization");
+    assert_eq!(value, "Bearer live-access");
+    assert_eq!(token_endpoint.hits(), 0, "nothing to refresh");
+}
+
 /// Load guard for the per-tool-call sync: the expiry predicate that gates the
 /// network call must report a freshly-saved token as valid, so the steady-state
 /// path does no refresh I/O at all.

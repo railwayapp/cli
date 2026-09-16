@@ -342,6 +342,13 @@ pub(crate) fn auth_failure_error() -> RailwayError {
 /// config and re-check expiry after acquiring the lock: whichever process wins
 /// the lock performs the single refresh, and the others pick up its result.
 pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
+    let base_url = oauth::get_oauth_base_url(configs.get_host());
+    ensure_valid_token_at(configs, &base_url).await
+}
+
+/// [`ensure_valid_token`] against an explicit token endpoint, for callers that
+/// have already resolved one (and for tests, which point at a scripted one).
+pub(crate) async fn ensure_valid_token_at(configs: &mut Configs, base_url: &str) -> Result<()> {
     // Env var tokens are not managed by us
     if Configs::is_using_token_auth() {
         return Ok(());
@@ -352,7 +359,7 @@ pub async fn ensure_valid_token(configs: &mut Configs) -> Result<()> {
         return Ok(());
     }
 
-    match refresh_locked(configs, false).await {
+    match refresh_locked_at(configs, base_url, false).await {
         RefreshOutcome::Refreshed | RefreshOutcome::AlreadyFresh => Ok(()),
         RefreshOutcome::SessionExpired(e) | RefreshOutcome::Transient(e) => Err(e.into()),
         RefreshOutcome::NoRefreshToken => {
