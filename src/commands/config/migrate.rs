@@ -416,7 +416,16 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
         if !is_cac_config_file(config_file) {
             continue;
         }
-        let rel = config_file.trim_start_matches("./");
+        let Some(rel) = normalize_config_file_path(config_file) else {
+            eprintln!(
+                "{} Railway Config File path {} for service {} escapes the repository; skipping.",
+                "Warning:".yellow().bold(),
+                config_file.cyan(),
+                names.get(id).cloned().unwrap_or_else(|| id.clone()).cyan()
+            );
+            continue;
+        };
+        let rel = rel.as_str();
         let name = names
             .get(id)
             .cloned()
@@ -431,6 +440,26 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
         );
     }
     Ok(index)
+}
+
+/// The platform stores `configFile` as repo-root-relative, but users commonly
+/// write a leading `/` (or `./`). Strip those so `root.join(rel)` doesn't
+/// discard `root`. Returns `None` for paths with `..` segments.
+fn normalize_config_file_path(config_file: &str) -> Option<String> {
+    let mut rel = config_file.trim();
+    loop {
+        let next = rel.trim_start_matches('/').trim_start_matches("./");
+        #[cfg(windows)]
+        let next = next.trim_start_matches('\\').trim_start_matches(".\\");
+        if next.len() == rel.len() {
+            break;
+        }
+        rel = next;
+    }
+    if rel.split(['/', '\\']).any(|segment| segment == "..") {
+        return None;
+    }
+    Some(rel.to_string())
 }
 
 fn is_cac_config_file(path: &str) -> bool {
@@ -820,6 +849,36 @@ mod tests {
             service_id: None,
             cac,
         }
+    }
+
+    #[test]
+    fn normalizes_config_file_paths_relative_to_root() {
+        let root = Path::new("/repo");
+        for input in [
+            "/frontend/railway.json",
+            "./frontend/railway.json",
+            "frontend/railway.json",
+        ] {
+            let rel = normalize_config_file_path(input).unwrap();
+            assert_eq!(
+                root.join(rel),
+                root.join("frontend/railway.json"),
+                "{input}"
+            );
+        }
+        for input in ["/railway.toml", "./railway.toml", "railway.toml"] {
+            let rel = normalize_config_file_path(input).unwrap();
+            assert_eq!(root.join(rel), root.join("railway.toml"), "{input}");
+        }
+    }
+
+    #[test]
+    fn rejects_config_file_paths_escaping_root() {
+        assert_eq!(normalize_config_file_path("../x/railway.json"), None);
+        assert_eq!(
+            normalize_config_file_path("/frontend/../../x/railway.json"),
+            None
+        );
     }
 
     #[test]
