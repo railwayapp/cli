@@ -21,9 +21,25 @@ use serde::Deserialize;
 use super::exec::{exec_in_container, exec_probe_in_container};
 use super::project::{ServiceContext, find_service_instance, get_environment_instances};
 
-/// Per-member probe/switchover timeout. Keeps `status`/`switchover`
-/// responsive against an unreachable or wedged member instead of hanging.
+/// Per-member read-probe timeout. Keeps `status` responsive against an
+/// unreachable or wedged member instead of hanging.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long curl may wait for Patroni's `POST /switchover` response.
+///
+/// Patroni holds the HTTP connection open while it polls the failover
+/// result for up to `2 * max(10, loop_wait)` seconds (≈20s with the
+/// default `loop_wait=10`) before answering 200 or 503. Cutting that off
+/// earlier surfaces `HTTP_STATUS:000` / curl exit 28 even when the
+/// switchover already succeeded — which is exactly what an 8s budget did
+/// in the wild. Stay above Patroni's own poll window; the outer
+/// [`SWITCHOVER_TIMEOUT`] covers SSH overhead on top.
+const SWITCHOVER_CURL_MAX_TIME_SECS: u64 = 30;
+
+/// Wall-clock budget for the whole switchover exec (curl + SSH). Slightly
+/// above [`SWITCHOVER_CURL_MAX_TIME_SECS`] so a slow relay does not kill a
+/// still-in-flight Patroni response.
+const SWITCHOVER_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// A single member entry from Patroni's `GET /cluster` response. Every field
 /// is optional/defaulted -- this is a best-effort live probe, not a
@@ -136,8 +152,9 @@ const RESTAPI_AUTH_PRELUDE: &str = concat!(
 /// piped into curl on every run; curl reads it only when `$@` says `-K -`.
 fn switchover_command(body: &str) -> String {
     format!(
-        r#"{prelude}printf '%s\n' "$PATRONI_REST_CFG" | curl -s --max-time 8 -w '\nHTTP_STATUS:%{{http_code}}' "$@" -X POST localhost:8008/switchover -H 'Content-Type: application/json' -d '{body}'"#,
+        r#"{prelude}printf '%s\n' "$PATRONI_REST_CFG" | curl -s --max-time {max_time} -w '\nHTTP_STATUS:%{{http_code}}' "$@" -X POST localhost:8008/switchover -H 'Content-Type: application/json' -d '{body}'"#,
         prelude = RESTAPI_AUTH_PRELUDE,
+        max_time = SWITCHOVER_CURL_MAX_TIME_SECS,
     )
 }
 
@@ -149,14 +166,34 @@ pub async fn switchover(instance_id: &str, leader: &str, candidate: &str) -> Res
     let body = serde_json::json!({ "leader": leader, "candidate": candidate }).to_string();
     let command = switchover_command(&body);
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(10),
+    let output = match tokio::time::timeout(
+        SWITCHOVER_TIMEOUT,
         exec_in_container(instance_id, &command),
     )
     .await
-    .context("Timed out requesting switchover")??;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => return map_switchover_exec_error(err),
+        Err(_elapsed) => bail!(
+            "Timed out requesting switchover. The failover may still be in progress — check `ha status`."
+        ),
+    };
 
     parse_switchover_response(&output)
+}
+
+/// curl exit 28 (`--max-time`) fails the SSH wrapper before we can parse
+/// `HTTP_STATUS:000`. By then Patroni has often already accepted the
+/// handoff and is still polling — surface that, don't call it a hard fail.
+fn map_switchover_exec_error(err: anyhow::Error) -> Result<String> {
+    let detail = format!("{err:#}");
+    if detail.contains("exit code 28") || detail.contains("HTTP_STATUS:000") {
+        bail!(
+            "Patroni did not answer the switchover in time. \
+             The failover may still be in progress — check `ha status`."
+        );
+    }
+    Err(err)
 }
 
 /// Splits the probe's `<body>\nHTTP_STATUS:<code>` (from `curl -w`) shape
@@ -171,6 +208,13 @@ fn parse_switchover_response(output: &str) -> Result<String> {
 
     match status {
         Some(200..=299) => Ok(response_body),
+        // curl writes `000` when it gave up before any HTTP response. Patroni
+        // may already have accepted the handoff by then — the poll just
+        // outlived the client — so point the operator at `ha status`.
+        Some(0) => bail!(
+            "Patroni did not answer the switchover in time. \
+             The failover may still be in progress — check `ha status`."
+        ),
         Some(code) => bail!("Patroni switchover failed ({code}): {response_body}"),
         None => bail!("Patroni switchover returned an unexpected response: {response_body}"),
     }
@@ -420,6 +464,13 @@ mod tests {
             .expect("curl reads the config document from stdin");
         let post = cmd.find("-X POST").expect("the POST survives");
         assert!(pipe < post, "the credential must precede the request");
+        // Stay above Patroni's ~20s poll window (2 * max(10, loop_wait)).
+        assert!(
+            cmd.contains(&format!("--max-time {SWITCHOVER_CURL_MAX_TIME_SECS}")),
+            "switchover curl budget too short: {cmd}"
+        );
+        assert!(SWITCHOVER_CURL_MAX_TIME_SECS >= 20);
+        assert!(SWITCHOVER_TIMEOUT.as_secs() > SWITCHOVER_CURL_MAX_TIME_SECS);
     }
 
     /// An enforcing member gets HTTP Basic auth built from its own env, with
@@ -560,5 +611,33 @@ mod tests {
     #[test]
     fn switchover_response_rejects_unparseable_status_code() {
         assert!(parse_switchover_response("body\nHTTP_STATUS:abc").is_err());
+    }
+
+    #[test]
+    fn switchover_response_treats_curl_timeout_as_maybe_in_progress() {
+        let err = parse_switchover_response("HTTP_STATUS:000").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("may still be in progress"), "{msg}");
+        assert!(msg.contains("ha status"), "{msg}");
+    }
+
+    #[test]
+    fn switchover_exec_timeout_exit_is_maybe_in_progress() {
+        let err = map_switchover_exec_error(anyhow::anyhow!(
+            "SSH command failed (exit code 28): HTTP_STATUS:000"
+        ))
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("may still be in progress"), "{msg}");
+        assert!(!msg.contains("exit code 28"), "{msg}");
+    }
+
+    #[test]
+    fn switchover_exec_other_failures_pass_through() {
+        let err = map_switchover_exec_error(anyhow::anyhow!(
+            "SSH command failed (exit code 127): sh: curl: command not found"
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("command not found"));
     }
 }
