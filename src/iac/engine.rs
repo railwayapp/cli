@@ -348,6 +348,8 @@ async fn import_current_environment(
 /// Backboard reports a failed apply through `status` (top-level or per change)
 /// rather than through an error. Fold that into `ok` and a diagnostic so JSON
 /// consumers and the exit code see the failure instead of `ok: true`.
+/// Status vocabulary is backboard's ChangeSetApplyResultShape:
+/// `staged | applying | applied | partially_applied | failed`.
 fn record_apply_outcome(apply_result: &Value, diagnostics: &mut Vec<Value>) -> bool {
     let status = apply_result
         .get("status")
@@ -371,7 +373,7 @@ fn record_apply_outcome(apply_result: &Value, diagnostics: &mut Vec<Value>) -> b
                 .to_string()
         })
         .collect::<Vec<_>>();
-    let succeeded = matches!(status, "applied" | "succeeded" | "noop") && failed_changes.is_empty();
+    let succeeded = matches!(status, "applied" | "staged") && failed_changes.is_empty();
     if succeeded {
         return true;
     }
@@ -742,15 +744,24 @@ mod tests {
         );
         assert_eq!(wire["ok"], false);
         assert!(has_apply_failed_diagnostic(&wire));
+    }
 
-        let wire = wire_after_apply(true, json!({ "status": "partial", "changes": [] }));
-        assert_eq!(wire["ok"], false);
-        assert!(has_apply_failed_diagnostic(&wire));
+    #[test]
+    fn partially_applied_or_missing_status_sets_ok_false() {
+        for result in [
+            json!({ "status": "partially_applied", "changes": [] }),
+            json!({ "status": "applying", "changes": [] }),
+            json!({ "changes": [] }),
+        ] {
+            let wire = wire_after_apply(true, result.clone());
+            assert_eq!(wire["ok"], false, "{result}");
+            assert!(has_apply_failed_diagnostic(&wire), "{result}");
+        }
     }
 
     #[test]
     fn successful_apply_result_keeps_ok_true() {
-        for status in ["applied", "succeeded", "noop"] {
+        for status in ["applied", "staged"] {
             let wire = wire_after_apply(
                 true,
                 json!({ "status": status, "changes": [{ "kind": "x", "status": "applied" }] }),
