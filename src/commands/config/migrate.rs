@@ -549,7 +549,7 @@ fn emit_railway_py(project_name: &str, services: &[CacService], named_partial: b
     }
     let partial = if named_partial {
         format!(
-            "\n# Last resort for a per-service CaC repo. Prefer one .railway file for the\n# project and drop this if you later combine services into that file.\nPARTIAL = {}\n",
+            "\n# This repository manages only its own resources in the environment. Other\n# repositories export their own partial name.\n# See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nPARTIAL = {}\n",
             js_string(&services[0].name)
         )
     } else {
@@ -597,7 +597,7 @@ fn emit_railway_go(project_name: &str, services: &[CacService], named_partial: b
     }
     let partial = if named_partial {
         format!(
-            "\n// Last resort for a per-service CaC repo. Prefer one .railway file for the\n// project and drop this if you later combine services into that file.\nconst Partial = {}\n",
+            "\n// This repository manages only its own resources in the environment. Other\n// repositories export their own partial name.\n// See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nconst Partial = {}\n",
             js_string(&services[0].name)
         )
     } else {
@@ -694,7 +694,7 @@ fn emit_railway_ts(project_name: &str, services: &[CacService], named_partial: b
     }
     let partial = if named_partial {
         format!(
-            "\n// Last resort for a per-service CaC repo. Prefer one .railway file for the\n// project and drop this if you later combine services into that file.\nexport const partial = {};\n",
+            "\n// This repository manages only its own resources in the environment. Other\n// repositories export their own partial name.\n// See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nexport const partial = {};\n",
             js_string(&services[0].name)
         )
     } else {
