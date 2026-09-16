@@ -122,24 +122,37 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
             }));
             continue;
         }
-        let previous = previous.unwrap();
-        if resource_type(previous) != resource_type(resource) {
-            // Paired across service/database. The shapes differ too much to
-            // field-diff, and the server cannot convert one into the other, so
-            // say so instead of planning a delete + create.
+        let mut previous = previous.unwrap().clone();
+        if resource_type(&previous) != resource_type(resource) {
+            // Paired across service/database: same service on Railway, only
+            // the CLI's classification differs. Diff it as the declared kind so
+            // edits still apply; the server never sees a type change.
             diagnostics.push(Diagnostic {
                 severity: "warning".into(),
                 path: format!("resources.{address}"),
                 message: format!(
-                    "{} exists on Railway as a {} but is declared as a {}. It is kept as-is; declare it with {}() so the config matches Railway.",
+                    "{} exists on Railway as a {} but is declared as a {}. Changes are still applied; declare it with {}() so the config matches Railway.",
                     resource_name(resource),
-                    resource_type(previous),
+                    resource_type(&previous),
                     resource_type(resource),
-                    resource_type(previous)
+                    resource_type(&previous)
                 ),
             });
-            continue;
+            // Database nodes carry the image as top-level `image`; service
+            // nodes as `source.image`. Mirror it so the source diff is honest.
+            let image = field_str(&previous, "image")
+                .or_else(|| field_str(previous.get("source").unwrap_or(&Value::Null), "image"))
+                .map(str::to_string);
+            if let Some(image) = image {
+                previous["image"] = json!(image);
+                if previous.get("source").is_none() {
+                    previous["source"] = json!({ "type": "image", "image": image });
+                }
+            }
+            previous["type"] = json!(resource_type(resource));
+            previous["address"] = json!(address);
         }
+        let previous = &previous;
         if field_str(previous, "name") != field_str(resource, "name") {
             changes.push(update(
                 &address,

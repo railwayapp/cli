@@ -432,13 +432,37 @@ fn service_declared_over_managed_database_is_not_replaced() {
     assert_eq!(result.diagnostics[0].severity, "warning");
     assert_eq!(result.diagnostics[0].path, "resources.service.cache");
 
+    // Edits on the mismatched pair still apply as the same service.
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({
+            "source": image("railwayapp/redis:8.2"),
+            "variables": { "MAXMEMORY": { "type": "literal", "value": "1gb" } }
+        }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_only_variable_set(&result, "MAXMEMORY", "service.cache");
+
     // And the other way round: a plain service declared as database().
     let current = env_config(json!({
         "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
     }));
     let result = diff(&current, &graph_from(vec![redis("cache")]));
-    assert!(!kinds(&result).contains(&"resource.delete".to_string()));
-    assert!(!kinds(&result).contains(&"resource.create".to_string()));
+    assert!(result.changes.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+
+    let mut cache = redis("cache");
+    cache["variables"] = json!({ "MAXMEMORY": { "type": "literal", "value": "1gb" } });
+    let result = diff(&current, &graph_from(vec![cache]));
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_only_variable_set(&result, "MAXMEMORY", "database.cache");
+}
+
+fn assert_only_variable_set(result: &super::change_set::ChangeSet, variable: &str, address: &str) {
+    assert_eq!(kinds(result), vec!["variable.set".to_string()]);
+    assert_eq!(result.changes[0]["variable"], variable);
+    assert_eq!(result.changes[0]["address"], address);
 }
 
 #[test]
