@@ -24,6 +24,11 @@ pub struct EnvironmentConfigToGraphOptions {
     pub bucket_names_by_id: Map<String, Value>,
     pub bucket_group_ids_by_id: Map<String, Value>,
     pub custom_domains_by_service_id: Map<String, Value>,
+    /// Railway-managed databases are deployed from the official database
+    /// templates, so a service carries a `templateServiceId` iff it came from a
+    /// template. This is the only provenance the API exposes; without it a
+    /// `redis:7` image is just a service.
+    pub template_service_ids_by_id: Map<String, Value>,
 }
 
 pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
@@ -617,12 +622,17 @@ pub fn environment_config_to_graph(
             let image_name = service
                 .get("source")
                 .and_then(|source| field_str(source, "image"));
-            let looks_like_database = image_name.is_some_and(|image| {
-                image.contains("postgres")
-                    || image.contains("mysql")
-                    || image.contains("redis")
-                    || image.contains("mongo")
-            });
+            let from_template = options
+                .template_service_ids_by_id
+                .get(service_id)
+                .is_some_and(|id| !id.is_null());
+            let looks_like_database = from_template
+                && image_name.is_some_and(|image| {
+                    image.contains("postgres")
+                        || image.contains("mysql")
+                        || image.contains("redis")
+                        || image.contains("mongo")
+                });
             if looks_like_database {
                 let image = image_name.unwrap_or("postgres:16");
                 let engine = if image.contains("mysql") {

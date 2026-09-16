@@ -112,6 +112,25 @@ fn env_config(config: Value) -> super::graph::RailwayGraph {
     )
 }
 
+/// Import `config` with every service keyed by name and marked as deployed
+/// from a template, which is how Railway-managed databases show up.
+fn managed_db_config(config: Value) -> super::graph::RailwayGraph {
+    let ids: Vec<&str> = config["services"]
+        .as_object()
+        .map(|services| services.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    environment_config_to_graph(
+        &config,
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            template_service_ids_by_id: super::compiler::map_from_str(
+                &ids.iter().map(|id| (*id, "tpl")).collect::<Vec<_>>(),
+            ),
+            ..Default::default()
+        },
+    )
+}
+
 fn diff(
     current: &super::graph::RailwayGraph,
     desired: &super::graph::RailwayGraph,
@@ -271,6 +290,7 @@ fn imported_database_without_explicit_region_is_clean() {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             service_names_by_id: super::compiler::map_from_str(&[("db-id", "postgres")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db-id", "tpl-postgres")]),
             ..Default::default()
         },
     );
@@ -335,6 +355,7 @@ fn imported_postgres(networking: Option<Value>) -> super::graph::RailwayGraph {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             service_names_by_id: super::compiler::map_from_str(&[("db-id", "postgres")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db-id", "tpl-postgres")]),
             ..Default::default()
         },
     )
@@ -354,7 +375,7 @@ fn empty_database_tcp_proxies_converge_when_no_proxy_exists() {
     )]);
     assert!(diff(&current, &desired).changes.is_empty());
 
-    let current = env_config(json!({
+    let current = managed_db_config(json!({
         "services": {
             "cache": {
                 "source": { "image": "railwayapp/redis:8.2" },
@@ -367,6 +388,57 @@ fn empty_database_tcp_proxies_converge_when_no_proxy_exists() {
         json!({ "tcpProxies": {} }),
     )]);
     assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn redis_image_without_template_provenance_imports_as_service() {
+    let current = env_config(json!({
+        "services": { "cache": { "source": { "image": "redis:7" } } }
+    }));
+    let cache = &current.resources[0];
+    assert_eq!(cache["address"], "service.cache");
+    assert_eq!(cache["type"], "service");
+    assert_eq!(cache["source"], image("redis:7"));
+
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({ "source": image("redis:7") }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn redis_image_with_template_provenance_imports_as_database() {
+    let current = managed_db_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let cache = &current.resources[0];
+    assert_eq!(cache["address"], "database.cache");
+    assert_eq!(cache["engine"], "redis");
+}
+
+#[test]
+fn service_declared_over_managed_database_is_not_replaced() {
+    let current = managed_db_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({ "source": image("railwayapp/redis:8.2") }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(result.changes.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(result.diagnostics[0].severity, "warning");
+    assert_eq!(result.diagnostics[0].path, "resources.service.cache");
+
+    // And the other way round: a plain service declared as database().
+    let current = env_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let result = diff(&current, &graph_from(vec![redis("cache")]));
+    assert!(!kinds(&result).contains(&"resource.delete".to_string()));
+    assert!(!kinds(&result).contains(&"resource.create".to_string()));
 }
 
 #[test]
@@ -541,7 +613,7 @@ fn round_tripped_config_plans_no_changes() {
 
 #[test]
 fn template_database_start_command_does_not_churn() {
-    let current = env_config(json!({
+    let current = managed_db_config(json!({
         "services": {
             "cache": {
                 "source": { "image": "ghcr.io/railwayapp-templates/redis:8" },
@@ -656,6 +728,7 @@ fn never_deletes_database_realized_volume() {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             volume_names_by_id: super::compiler::map_from_str(&[("vol-1", "postgres-volume")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db", "tpl-postgres")]),
             ..Default::default()
         },
     );

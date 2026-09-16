@@ -123,6 +123,8 @@ struct Named {
     name: Option<String>,
     #[serde(default)]
     group_id: Option<String>,
+    #[serde(default)]
+    template_service_id: Option<String>,
 }
 
 pub struct NativeRun {
@@ -421,7 +423,7 @@ async fn fill_name_maps(
     let services = post_graphql_raw::<ProjectServicesQuery, _>(
         client,
         endpoint,
-        "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name } } } } }",
+        "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name templateServiceId } } } } }",
         json!({ "projectId": project_id }),
     )
     .await
@@ -430,7 +432,12 @@ async fn fill_name_maps(
         if let Some(name) = edge.node.name {
             options
                 .service_names_by_id
-                .insert(edge.node.id, json!(name));
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(template_service_id) = edge.node.template_service_id {
+            options
+                .template_service_ids_by_id
+                .insert(edge.node.id, json!(template_service_id));
         }
     }
 
