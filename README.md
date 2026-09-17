@@ -573,6 +573,9 @@ Selecting a Claude or Grok thread reconnects to its verified live terminal when
 available, or resumes its native UI from the recorded project and configuration
 directory. Claude background jobs use `claude attach`. Live metadata and hooks
 update thread status and associate native panes with their conversation IDs.
+Grok launches and resumed conversations use `--trust --always-approve` on the
+cloud VM, skipping folder-trust and tool-approval prompts. SSH autostart uses
+the same flags after the next `railway code` provision; local settings are unchanged.
 Native Codex and OpenCode client actions update the pane's exact conversation
 identity through a per-pane authenticated bridge.
 History belongs to the VM where it was saved; wake a sleeping agent before

@@ -923,10 +923,11 @@ const CLAUDE_ENV_GUARD: &str =
 
 /// Grok-specific VM seed: the credential is the user's local
 /// `~/.grok/auth.json`, arriving on stdin into a 0600 file like codex. grok's
-/// always-approve posture (`permission_mode = "bypassPermissions"`) and its MCP
-/// servers are reconciled into `~/.grok/config.toml` at boot by express-agent,
-/// and the image puts `~/.grok/bin` on PATH via `/etc/environment`, so neither
-/// the old `[ui] yolo` merge nor a `/usr/local/bin` symlink is needed.
+/// MCP servers and configuration are reconciled at boot by express-agent.
+/// Launches also pass Grok's native folder-trust and tool-approval switches
+/// (see `grok_invocation`); folder trust is separate from permission mode.
+/// The image puts `~/.grok/bin` on PATH via `/etc/environment`, so neither
+/// a config merge nor a `/usr/local/bin` symlink is needed here.
 const GROK_SEED: &str = r#"mkdir -p ~/.grok
 cat > ~/.grok/auth.json"#;
 
@@ -966,11 +967,13 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 ///   keeps scp-style and command sessions out. The trailing printf restores
 ///   terminal state a TUI can leave behind on an unclean exit (kitty keyboard
 ///   mode et al) — see `TERMINAL_RESET`.
-/// The autostart block is versioned: the v4 marker gates the append, and the
+///
+/// The autostart block is versioned: the v5 marker gates the append, and the
 /// sed strips any earlier version first (comment line through the closing
 /// `fi` at column zero), so an agent provisioned on v2/v3 (which skipped the
 /// carried token when an on-agent `/login` looked newer) picks the
 /// unconditional export back up on its next provision.
+/// v5 also applies Grok's folder-trust and tool-approval switches on reconnect.
 ///
 /// v3 added the `~/.railway-app-mode` guard. `railway ca desktop` hands the
 /// agent to an external app that bootstraps through the login shell, so an
@@ -980,11 +983,11 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 /// `~/.railway-code-agent`, because a later `railway code` on the same agent
 /// would write that file straight back.
 const COMMON_SEED: &str = r#"grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
-if ! grep -q "railway-code agent autostart v4" ~/.profile 2>/dev/null; then
+if ! grep -q "railway-code agent autostart v5" ~/.profile 2>/dev/null; then
 sed -i '/# railway-code agent autostart/,/^fi$/d' ~/.profile 2>/dev/null || true
 cat >> ~/.profile <<'PROFEOF'
 
-# railway-code agent autostart v4 (connecting drops into the agent; exit it for a shell)
+# railway-code agent autostart v5 (connecting drops into the agent; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-mode" ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
   [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
@@ -992,7 +995,11 @@ if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-
     export RAILWAY_CODE_AUTOSTARTED=1
     [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
     [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
-    "$agent"
+    if [ "$agent" = grok ]; then
+      "$agent" --trust --always-approve
+    else
+      "$agent"
+    fi
     printf '\033[<u\033[<u\033[=0;1u\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?25h'
   fi
 fi
@@ -1163,6 +1170,33 @@ pub(crate) fn harness_env_prefix() -> String {
     )
 }
 
+/// Grok runs in an already-isolated cloud VM. Trust the actual working
+/// directory (including a resumed thread's directory) and approve tool calls
+/// without rewriting the user's config or trusting anything on their laptop.
+/// Keep explicit arguments intact, avoiding duplicate boolean flags/aliases
+/// that Grok's parser would reject. Arguments after `--` are literal text.
+pub(crate) fn grok_invocation(args: &[String]) -> Vec<String> {
+    let mut invocation = vec!["grok".into()];
+    for aliases in [
+        &["--trust", "--trust-folder"][..],
+        &[
+            "--always-approve",
+            "--yolo",
+            "--dangerously-skip-permissions",
+        ][..],
+    ] {
+        if !args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| aliases.contains(&arg.as_str()))
+        {
+            invocation.push(aliases[0].into());
+        }
+    }
+    invocation.extend_from_slice(args);
+    invocation
+}
+
 /// The command the launch session runs on the VM. Three shapes, and the
 /// difference between them is whether you are left in a session afterwards:
 ///
@@ -1206,10 +1240,12 @@ fn remote_command(
     // would collide on the one empty-string id — the exact shared-
     // conversation bug the flag exists to fix. The `-- args` exec form below
     // is left alone: its arguments are the caller's, flags included.
+    let grok = shell_join(&grok_invocation(&[]));
     let name = match agent {
         // Beta and standard share a background-service discovery file.
         // Each Beta terminal session must use its freshly selected runtime.
         Agent::OpenCode2 => "opencode2 --standalone",
+        Agent::Grok => &grok,
         Agent::Railway => {
             "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\""
         }
@@ -1245,6 +1281,12 @@ fn remote_command(
         ),
         None if agent_args.is_empty() => {
             format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {reset}{after}")
+        }
+        None if agent == Agent::Grok => {
+            format!(
+                "{env_prefix}exec {}",
+                shell_join(&grok_invocation(agent_args))
+            )
         }
         None => format!(
             "{env_prefix}exec {} {}",
@@ -4883,8 +4925,73 @@ cat
             );
             assert!(guard.contains(".claude-code-env"), "{guard}");
         }
-        assert!(COMMON_SEED.contains("railway-code agent autostart v4"));
+        assert!(COMMON_SEED.contains("railway-code agent autostart v5"));
         assert!(COMMON_SEED.contains("sed -i '/# railway-code agent autostart/,/^fi$/d'"));
+    }
+
+    // Provisioning runs on Linux VMs and uses GNU sed's `-i` syntax.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autostart_upgrades_existing_profiles_and_trusts_only_grok() {
+        let home = tempfile::tempdir().unwrap();
+        let profile_path = home.path().join(".profile");
+        let before = "# user profile before\n";
+        let after = "# user profile after\n";
+        std::fs::write(
+            &profile_path,
+            format!(
+                "{before}# railway-code agent autostart v4\nif true; then\n  old-agent\nfi\n{after}"
+            ),
+        )
+        .unwrap();
+        // Skip only the system COLORTERM seed; exercise the actual profile
+        // migration against an isolated home, never this machine's config.
+        let seed = COMMON_SEED.split_once('\n').unwrap().1;
+        let mut profile = String::new();
+        for attempt in 0..2 {
+            let output = std::process::Command::new("sh")
+                .args(["-c", seed])
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let updated = std::fs::read_to_string(&profile_path).unwrap();
+            assert!(updated.starts_with(&format!("{before}{after}")));
+            assert!(!updated.contains("old-agent"));
+            assert!(!updated.contains("autostart v4"));
+            assert_eq!(updated.matches("autostart v5").count(), 1);
+            if attempt > 0 {
+                assert_eq!(updated, profile, "re-provisioning must be idempotent");
+            }
+            profile = updated;
+        }
+
+        // Simulate the interactive terminal check, keeping the actual agent
+        // selection, app-mode guard, and launch arguments unchanged.
+        let profile = profile.replace("[ -t 1 ]", "true");
+        for agent in ["grok", "claude"] {
+            std::fs::write(home.path().join(".railway-code-agent"), agent).unwrap();
+            for disabled in [false, true] {
+                let script = format!(
+                    "{agent}() {{ printf 'START:{agent}'; for arg do printf '<%s>' \"$arg\"; done; printf '\\n'; }};\n{profile}"
+                );
+                let output = std::process::Command::new("sh")
+                    .args(["-c", &script])
+                    .env("HOME", home.path())
+                    .env("RAILWAY_CODE_AUTOSTARTED", if disabled { "1" } else { "" })
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                if disabled {
+                    assert!(stdout.is_empty());
+                } else if agent == "grok" {
+                    assert!(stdout.starts_with("START:grok<--trust><--always-approve>\n"));
+                } else {
+                    assert!(stdout.starts_with("START:claude\n"));
+                }
+            }
+        }
     }
 
     /// `railway ca desktop` hands the login shell to an external app, so the
@@ -5288,6 +5395,84 @@ cat
             "{railway_exec}"
         );
         assert!(!railway_exec.contains("--session"), "{railway_exec}");
+    }
+
+    #[test]
+    fn grok_trust_flags_preserve_explicit_arguments_and_aliases() {
+        for trust in ["--trust", "--trust-folder"] {
+            for approval in [
+                "--always-approve",
+                "--yolo",
+                "--dangerously-skip-permissions",
+            ] {
+                let args = vec![
+                    trust.into(),
+                    approval.into(),
+                    "--resume".into(),
+                    "id".into(),
+                ];
+                let mut expected = vec!["grok".to_string()];
+                expected.extend_from_slice(&args);
+                assert_eq!(grok_invocation(&args), expected);
+            }
+        }
+        // Flag-looking text after the separator is a prompt, not an option.
+        let args = vec!["--".into(), "--trust".into()];
+        assert_eq!(
+            grok_invocation(&args),
+            ["grok", "--trust", "--always-approve", "--", "--trust"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_grok_launch_trusts_the_workspace_and_approves_tools() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let executable = bin.path().join("grok");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 42\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let text = "keep 'quotes'; $(not-a-command)";
+        for style in [SessionStyle::FullTerminal, SessionStyle::Pane] {
+            for (prompt, resume, args, expected) in [
+                (None, None, vec![], vec![]),
+                (Some(text), None, vec![], vec![text]),
+                (None, Some(text), vec![], vec!["--resume", text]),
+                (None, None, vec!["-p", text], vec!["-p", text]),
+            ] {
+                let args = args
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>();
+                let command = remote_command(Agent::Grok, "", prompt, resume, &args, style);
+                // Full-terminal sessions intentionally open a login shell on
+                // exit. Verify that suffix, then stub it out for this test.
+                let command = if args.is_empty() && matches!(style, SessionStyle::FullTerminal) {
+                    assert!(command.ends_with("; exec bash -l"));
+                    command.replace("; exec bash -l", "; exit \"$railway_code_status\"")
+                } else {
+                    command
+                };
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-c", &command])
+                    .env("PATH", bin.path())
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(42), "{command}: {output:?}");
+                let mut expected_args = vec!["--trust", "--always-approve"];
+                expected_args.extend(expected);
+                let mut expected = format!("{}\n", expected_args.join("\n"));
+                if args.is_empty() {
+                    expected.push_str(TERMINAL_RESET);
+                }
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    expected,
+                    "{command}"
+                );
+            }
+        }
     }
 
     /// Resuming reopens a specific conversation: the id must be quoted, the

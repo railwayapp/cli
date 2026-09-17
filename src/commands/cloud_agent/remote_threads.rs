@@ -46,6 +46,9 @@ impl RemoteThread {
             .filter(|_| self.harness == "claude")
         {
             Some(id) => vec!["claude".into(), "attach".into(), id.into()],
+            None if self.harness == "grok" => {
+                code::grok_invocation(&["--resume".into(), self.thread.id.clone()])
+            }
             None if self.harness == "codex" => vec![
                 "codex".into(),
                 "--ask-for-approval".into(),
@@ -213,19 +216,12 @@ pub(crate) mod tests {
             let command = thread.resume_command("pane-id").unwrap();
             let words = shlex::split(&command).unwrap();
             let cd = words.iter().position(|w| w == "cd").unwrap();
-            assert_eq!(
-                &words[cd..],
-                &[
-                    "cd",
-                    "--",
-                    "/app/it's a project",
-                    "&&",
-                    "exec",
-                    harness,
-                    "--resume",
-                    "saved-id"
-                ]
-            );
+            let mut expected = vec!["cd", "--", "/app/it's a project", "&&", "exec", harness];
+            if harness == "grok" {
+                expected.extend(["--trust", "--always-approve"]);
+            }
+            expected.extend(["--resume", "saved-id"]);
+            assert_eq!(&words[cd..], &expected);
             assert!(
                 words
                     .iter()
