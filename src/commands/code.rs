@@ -32,10 +32,9 @@ use crate::util::shell::shell_join;
 // (claude, codex, grok, cursor, droid, opencode, pi, railway-agent), and the
 // `express-agent serve --agents` entrypoint reconciles their config on every
 // boot: MCP servers (including Railway's own platform tools), hooks, the
-// onboarding/trust flags, and the autonomy posture. So this command installs
-// nothing, updates nothing, and seeds no harness config — doing any of that
-// would fight the reconciler for ownership of the same files. What is left is
-// the one thing only the user's laptop has: their credential.
+// onboarding/trust flags, and the autonomy posture. This command leaves that
+// config to the reconciler, prepares launch-time runtimes (OpenCode2 and Grok),
+// and carries the one thing only the user's laptop has: their credential.
 //
 // Auth shape: Codex copies the user's existing local sign-in
 // (`~/.codex/auth.json`) — the flow OpenAI documents for remote machines.
@@ -162,6 +161,13 @@ pub async fn command(args: Args) -> Result<()> {
     }
     let mut args = args.launch;
     if let Some(action) = args.prepare_code_launch()? {
+        if args.client_starts_in_pane(&action, client::interactive()) {
+            if args.codex {
+                crate::commands::cloud_agent::desktop::preflight_codex_desktop()?;
+            }
+            client::pin_agent(&mut args).await?;
+            return crate::commands::cloud_agent::launch_in_pane(args).await;
+        }
         if args.railway && !matches!(action, ClientAction::Remote) {
             return railway_client::command(args, action).await;
         }
@@ -411,6 +417,12 @@ enum ClientAction {
 }
 
 impl LaunchArgs {
+    /// Interactive starts share CA's background preparation and loading pane.
+    /// JSON, Desktop-only, and connect retain their dedicated output/lifecycle.
+    fn client_starts_in_pane(&self, action: &ClientAction, interactive: bool) -> bool {
+        interactive && !self.connection_json && matches!(action, ClientAction::Local)
+    }
+
     /// Apply the public `railway code` launch policy before dispatch. Keep it
     /// here rather than in clap or provisioning, which CA, Desktop, and SSH also
     /// use when opening sessions on an existing VM.
@@ -1005,6 +1017,7 @@ const CLAUDE_CREDENTIAL_PROBE: &str =
 ///
 /// Standard harnesses are baked into `cloud-agent-base`. OpenCode2 is a
 /// separate shim which downloads the latest official Beta when launched.
+/// Grok updates its baked-in install before each new launch.
 ///
 /// `write_credential` is false when the agent already holds a working credential
 /// and we are reusing it. The seed must then be omitted entirely rather than run
@@ -1028,11 +1041,7 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let mcp_marker = mcp_sync::REMOTE_HASH_MARKER;
     let mcp_file = mcp_sync::REMOTE_HASH_FILE;
     let mode_seed = mode_seed(agent, app_mode);
-    let runtime_seed = if agent == Agent::OpenCode2 {
-        crate::commands::cloud_agent::opencode2::seed_script()
-    } else {
-        "true".to_string()
-    };
+    let runtime_seed = runtime_seed(agent);
     format!(
         r#"umask 077
 {HARNESS_PATH}
@@ -1064,11 +1073,7 @@ fn provision_script_with_skills(
     };
     let name = agent.name();
     let mode_seed = mode_seed(agent, app_mode);
-    let runtime_seed = if agent == Agent::OpenCode2 {
-        crate::commands::cloud_agent::opencode2::seed_script()
-    } else {
-        "true".to_string()
-    };
+    let runtime_seed = runtime_seed(agent);
     let sync = skills_sync::sync_body(skills_hash);
     format!(
         r#"umask 077
@@ -1083,6 +1088,36 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
 {sync}"#
     )
 }
+
+fn runtime_seed(agent: Agent) -> String {
+    match agent {
+        Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::seed_script(),
+        Agent::Grok => GROK_UPDATE.to_string(),
+        _ => "true".to_string(),
+    }
+}
+
+// Use Grok's official updater and verify the installed release afterwards.
+// Never let it consume the credential/skills stream, or launch a stale binary
+// after a failed update. The VM image already includes Grok.
+const GROK_UPDATE: &str = r#"if ! grok update --stable </dev/null; then
+    printf '%s\n' 'Could not update Grok to the latest stable release. Retry the launch.' >&2
+    exit 1
+fi
+grok_update_status=$(grok update --check --json </dev/null) || exit 1
+if ! printf '%s' "$grok_update_status" | python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+latest = status.get("latestVersion")
+sys.exit(not (
+    status.get("error") is None and status.get("channel") == "stable"
+    and status.get("updateAvailable") is False and isinstance(latest, str)
+    and bool(latest) and status.get("currentVersion") == latest
+))
+'; then
+    printf '%s\n' 'Grok could not confirm the latest stable release is installed. Check grok update on the agent and retry.' >&2
+    exit 1
+fi"#;
 
 /// The autostart in COMMON_SEED reads both: the sentinel disables it
 /// outright, and `~/.railway-code-agent` is what it would otherwise launch.
@@ -3401,7 +3436,11 @@ async fn prepare_inner(
     };
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
-    progress.step("Finalizing Configuration...");
+    progress.step(if agent == Agent::Grok {
+        "Updating Grok to the latest stable release"
+    } else {
+        "Finalizing Configuration..."
+    });
     // One relay handshake per launch: when a readiness probe won the wait, its
     // marker-verified connection is already a master and both the provision
     // and the session ride it. When no probe ran (agent already RUNNING, or
@@ -4266,6 +4305,24 @@ mod tests {
     }
 
     #[test]
+    fn interactive_client_starts_use_the_loading_pane() {
+        for flag in ["--codex", "--opencode", "--opencode2", "--railway"] {
+            for extra in [vec![], vec!["--agent", "my-box", "--dir", "/app/project"]] {
+                let mut args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                let action = args.prepare_code_launch().unwrap().unwrap();
+                assert!(args.client_starts_in_pane(&action, true), "{flag}");
+                assert!(!args.client_starts_in_pane(&action, false), "piped {flag}");
+                assert!(!args.client_starts_in_pane(&ClientAction::Connect(None), true));
+                assert!(!args.client_starts_in_pane(&ClientAction::DesktopOnly, true));
+                assert!(!args.client_starts_in_pane(&ClientAction::Remote, true));
+                args.connection_json = true;
+                assert!(!args.client_starts_in_pane(&action, true), "JSON {flag}");
+            }
+        }
+    }
+
+    #[test]
     fn code_harness_launches_create_new_agents_by_default() {
         for flag in [
             "--codex",
@@ -4616,6 +4673,82 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn grok_update_verifies_success_and_blocks_stale_or_failed_launches() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let current = r#"{"currentVersion":"1.2.3","latestVersion":"1.2.3","channel":"stable","updateAvailable":false,"error":null}"#;
+        for (exit_code, status, success) in [
+            (0, current, true),
+            (1, current, false),
+            (
+                0,
+                r#"{"currentVersion":"1.2.2","latestVersion":"1.2.3","channel":"stable","updateAvailable":false}"#,
+                false,
+            ),
+            (
+                0,
+                r#"{"currentVersion":"1.2.3","latestVersion":null,"channel":"stable","updateAvailable":false}"#,
+                false,
+            ),
+            (0, "not json", false),
+        ] {
+            // A shell function supplies the official CLI's responses without
+            // downloading or modifying any real runtime/configuration.
+            let script = format!(
+                r#"
+grok() {{
+    [ -z "$(cat)" ] || return 90
+    case "$*" in
+        'update --stable') return {exit_code} ;;
+        'update --check --json') printf '%s' "$TEST_GROK_STATUS" ;;
+        *) return 91 ;;
+    esac
+}}
+{GROK_UPDATE}
+printf 'AGENT-READY\n'
+cat
+"#
+            );
+            let mut child = Command::new("sh")
+                .args(["-c", &script])
+                .env("TEST_GROK_STATUS", status)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"untouched input")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if success {
+                assert_eq!(output.stdout, b"AGENT-READY\nuntouched input");
+            } else {
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("AGENT-READY"));
+            }
+        }
+        for script in [
+            provision_script(Agent::Grok, true, false),
+            provision_script(Agent::Grok, false, false),
+            provision_script_with_skills(Agent::Grok, Some(42), false, "hash"),
+            provision_script_with_skills(Agent::Grok, None, false, "hash"),
+        ] {
+            assert!(script.find(GROK_UPDATE).unwrap() < script.find("echo AGENT-READY").unwrap());
+        }
+    }
+
+    #[test]
     fn opencode2_launch_seeds_the_shim_and_preserves_prompt_arguments() {
         let args = LaunchArgs::for_app_mode("opencode2", None, None);
         assert_eq!(
@@ -4725,11 +4858,8 @@ mod tests {
             assert!(!script.contains("cd \"$HOME\""));
             assert!(!script.contains("cd ~"));
 
-            // Cloud agent VMs bake every harness and reconcile its config at
-            // boot, so this script must install nothing and configure nothing:
-            // touching those files fights express-agent for ownership, and
-            // installing races the image's own copy. These assertions are the
-            // guard on that boundary, not incidental.
+            // Updates use the harness's own updater. Configuration and system
+            // package installation stay owned by the image/reconciler.
             assert!(!script.contains("npm install"));
             assert!(!script.contains("install.sh"));
             assert!(!script.contains("apt-get"));

@@ -1,4 +1,4 @@
-//! Readable defaults for newly created Codex, OpenCode, Claude Code, and Railway agents.
+//! Readable defaults for newly created coding agents.
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Result, bail};
@@ -36,6 +36,7 @@ fn prefix(agent: Agent) -> Option<&'static str> {
         Agent::OpenCode => Some("oc"),
         Agent::OpenCode2 => Some("oc2"),
         Agent::Claude => Some("cc"),
+        Agent::Grok => Some("grok"),
         Agent::Railway => Some("rlwy"),
         _ => None,
     }
@@ -148,7 +149,7 @@ mod tests {
         assert_eq!(prefix(Agent::OpenCode), Some("oc"));
         assert_eq!(prefix(Agent::OpenCode2), Some("oc2"));
         assert_eq!(prefix(Agent::Claude), Some("cc"));
-        assert_eq!(prefix(Agent::Grok), None);
+        assert_eq!(prefix(Agent::Grok), Some("grok"));
         assert_eq!(prefix(Agent::Shell), None);
         assert_eq!(prefix(Agent::Codex), Some("codex"));
         assert_eq!(prefix(Agent::Railway), Some("rlwy"));
@@ -157,6 +158,7 @@ mod tests {
             Agent::OpenCode,
             Agent::OpenCode2,
             Agent::Claude,
+            Agent::Grok,
             Agent::Railway,
         ] {
             let prefix = prefix(agent).unwrap();
@@ -178,7 +180,7 @@ mod tests {
 
     #[test]
     fn collisions_wrap_without_changing_the_project_or_edition() {
-        for prefix in ["codex", "oc", "oc2", "cc", "rlwy"] {
+        for prefix in ["codex", "oc", "oc2", "cc", "grok", "rlwy"] {
             let existing =
                 HashSet::from([format!("{prefix}-railg-zzz"), format!("{prefix}-railg-000")]);
             assert_eq!(
@@ -260,6 +262,7 @@ mod tests {
             Agent::OpenCode,
             Agent::OpenCode2,
             Agent::Claude,
+            Agent::Grok,
             Agent::Railway,
         ] {
             assert_eq!(
@@ -270,13 +273,17 @@ mod tests {
                 Some("My-Name")
             );
         }
-        for agent in [Agent::Grok, Agent::Shell] {
-            assert!(
-                for_launch(&client, &configs, &LaunchArgs::default(), agent, &target)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
+        assert!(
+            for_launch(
+                &client,
+                &configs,
+                &LaunchArgs::default(),
+                Agent::Shell,
+                &target
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
     }
 }

@@ -742,8 +742,7 @@ pub enum RowKind {
     Session(usize, usize, usize, usize, usize),
     /// A non-selectable line under an environment: loading, empty, or failed.
     Note(usize, usize, usize),
-    /// The collapsible tail of projects with no agents — where `n` goes to
-    /// start somewhere new.
+    /// The collapsible list of all projects — where `n` creates an agent.
     OtherProjects,
     /// A non-selectable line that belongs to no environment: the empty state.
     Hint,
@@ -1257,9 +1256,7 @@ pub struct App {
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
     pub cursor: usize,
-    /// Whether the projects tail is open. `None` decides automatically: open
-    /// while there are no agents to show — the tail is the whole tree then —
-    /// and folded away once agent groups exist to lead with.
+    /// Whether the projects list is open. Defaults to open, even with agents.
     pub others_expanded: Option<bool>,
     /// Transient one-line message shown in the header.
     pub status: String,
@@ -1400,9 +1397,8 @@ impl App {
             others_expanded: None,
             status: String::new(),
         };
-        // Open the first workspace so the projects tail is never a wall of
-        // collapsed rows on a multi-workspace account.
-        if let Some(ws) = app.tree.first_mut() {
+        // Make every project's create target visible on multi-workspace accounts.
+        for ws in &mut app.tree {
             ws.expanded = true;
         }
         app.clamp_cursor();
@@ -1840,9 +1836,8 @@ impl App {
     /// any is promoted to a top-level group — always open, never a level to
     /// expand. The containers survive as context rather than navigation: the
     /// group is labelled with its project (and environment, when that adds
-    /// something), and projects with nothing in them wait in a collapsible
-    /// tail at the bottom, which is where `n` goes to start an agent
-    /// somewhere new.
+    /// something). All projects remain selectable in the collapsible list
+    /// below, where `n` creates another agent in any environment.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         // The launcher, pinned first: where the cursor starts, and where it
@@ -1978,34 +1973,16 @@ impl App {
         }
     }
 
-    /// The projects with agent-less environments, folded under one heading at
-    /// the bottom.
-    ///
-    /// This is the browse-to-create surface the groups can't be: selecting a
-    /// project or environment here and pressing `n` is how the first agent
-    /// gets somewhere new. A project appears whenever it has an environment
-    /// that is not a group above — usually because it has no agents at all,
-    /// but also when its staging sits empty next to an occupied production;
-    /// every environment stays reachable for `n`, `t`, and `r`. Workspaces
-    /// appear as a level only when there is more than one to tell apart.
+    /// Every project and environment stays reachable for `n`, `t`, and `r`,
+    /// including those already hosting agents in the thread list above.
+    /// Workspaces appear as a level only when there is more than one.
     fn push_project_tail(&self, rows: &mut Vec<Row>, groups: &[(usize, usize, usize)]) {
         let default_project = self.default_project.as_deref();
         let tails: Vec<(usize, Vec<usize>)> = self
             .tree
             .iter()
             .enumerate()
-            .map(|(w, ws)| {
-                let order = sorted_projects(ws, default_project)
-                    .into_iter()
-                    .filter(|&p| {
-                        ws.projects[p]
-                            .envs
-                            .iter()
-                            .any(|env| env.agents_vec().is_empty())
-                    })
-                    .collect();
-                (w, order)
-            })
+            .map(|(w, ws)| (w, sorted_projects(ws, default_project)))
             .collect();
         let total: usize = tails.iter().map(|(_, order)| order.len()).sum();
         if total == 0 {
@@ -2014,17 +1991,11 @@ impl App {
         if !groups.is_empty() {
             rows.push(separator_row());
         }
-        let open = self.others_expanded.unwrap_or(groups.is_empty());
+        let open = self.others_expanded.unwrap_or(true);
         rows.push(Row {
             depth: 0,
             kind: RowKind::OtherProjects,
-            // "Other" is relative to the groups; without any there is nothing
-            // for these to be other than.
-            label: if groups.is_empty() {
-                "projects".into()
-            } else {
-                "other projects".into()
-            },
+            label: "projects".into(),
             note: format!("({total})"),
             status: None,
             expanded: Some(open),
@@ -2070,25 +2041,15 @@ impl App {
                     },
                     status: None,
                     expanded: Some(proj.expanded),
-                    // Everything here is empty, so everything recedes — except
-                    // the default, which is where agents go and has to be
-                    // findable even while empty.
-                    dimmed: !is_default,
+                    dimmed: !is_default && proj.envs.iter().all(|env| env.agents_vec().is_empty()),
                 });
                 if !proj.expanded {
                     continue;
                 }
                 for (e, env) in proj.envs.iter().enumerate() {
-                    // An environment with agents is a group above; repeating
-                    // it down here would be the same thing twice.
-                    if !env.agents_vec().is_empty() {
-                        continue;
-                    }
                     let note = match &env.agents {
                         Load::Loading => "…".into(),
                         Load::Failed(_) => "!".into(),
-                        // Everything left here is empty, and a marker against
-                        // every empty environment would be noise.
                         _ => String::new(),
                     };
                     rows.push(Row {
@@ -2424,9 +2385,8 @@ impl App {
 
     /// Put the cursor back on the row it was on, wherever that row now sits.
     ///
-    /// A row can be gone entirely — a load can fold the projects tail the
-    /// cursor was in — and then the nearest selectable row is the best that
-    /// can be done.
+    /// A row can be gone entirely after a deletion or collapse; then use the
+    /// nearest selectable row.
     fn restore_cursor(&mut self, anchor: Option<RowKind>) {
         if let Some(kind) = anchor {
             let rows = self.rows();
@@ -12127,8 +12087,7 @@ mod tests {
         assert_eq!(project_order(&a), ["Alpha", "beta", "mono", "zebra"]);
     }
 
-    /// A project that gains agents leaves the tail and leads the tree as a
-    /// group — groups with something running first.
+    /// Agent groups lead with running agents, while every project stays visible.
     #[test]
     fn projects_with_agents_lead_the_thread_list() {
         let mut a = ordering_app();
@@ -12143,15 +12102,15 @@ mod tests {
             .collect();
         assert_eq!(threads, ["two", "one"], "running leads");
 
-        // Threads exist now, so the untouched tail folded itself away…
-        assert_eq!(project_order(&a), Vec::<String>::new());
-        // …and holds the rest once opened.
-        a.others_expanded = Some(true);
-        assert_eq!(project_order(&a), ["Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
 
         // An environment that answers with nothing does not promote anyone.
         a.agents_loaded((0, 1, 0), Ok(Vec::new()));
-        assert_eq!(project_order(&a), ["Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
+
+        // Users can still fold the project list explicitly.
+        a.others_expanded = Some(false);
+        assert!(project_order(&a).is_empty());
     }
 
     /// Empty projects are de-emphasised, and stop being so the moment they
@@ -12167,11 +12126,9 @@ mod tests {
         );
 
         a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        // With an agent, mono's thread is on the list and its project row is
-        // gone from the tail.
         let rows = a.rows();
         assert!(rows.iter().any(|r| r.label == "one"), "{rows:#?}");
-        assert!(!rows.iter().any(|r| r.label == "mono"));
+        assert!(!rows.iter().find(|r| r.label == "mono").unwrap().dimmed);
     }
 
     /// Re-ordering must not move the selection to a different row: the cursor
@@ -12188,8 +12145,7 @@ mod tests {
         assert_eq!(a.selected_row().unwrap().label, "one");
     }
 
-    /// The tail header counts the projects folded under it, and says what
-    /// they are other than once there are groups to be other than.
+    /// The project count is independent of agent discovery.
     #[test]
     fn the_tail_header_counts_its_projects() {
         let mut a = ordering_app();
@@ -12203,8 +12159,9 @@ mod tests {
         assert_eq!(header(&a).note, "(4)");
 
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(header(&a).label, "other projects");
-        assert_eq!(header(&a).note, "(3)");
+        assert_eq!(header(&a).label, "projects");
+        assert_eq!(header(&a).note, "(4)");
+        assert_eq!(header(&a).expanded, Some(true));
     }
 
     /// Expanding an agent asks the platform what is running on it, every time:
@@ -13312,10 +13269,9 @@ mod tests {
         assert!(toast.text.contains("502 from backboard"), "{}", toast.text);
     }
 
-    /// A project with agents in one environment still shows its empty ones in
-    /// the tail — they have to stay reachable for `n`, `t`, and `r`.
+    /// All environments stay selectable, including when every one has agents.
     #[test]
-    fn empty_environments_of_a_grouped_project_stay_reachable() {
+    fn all_environments_of_a_grouped_project_stay_reachable() {
         let mut a = loaded_app();
         a.others_expanded = Some(true);
         let rows = a.rows();
@@ -13324,13 +13280,11 @@ mod tests {
                 .any(|r| r.kind == RowKind::Environment(0, 0, 1) && r.label == "staging"),
             "{rows:#?}"
         );
-        // The occupied environment is a group above, not a tail row too.
-        assert!(!rows.iter().any(|r| r.kind == RowKind::Environment(0, 0, 0)));
+        assert!(rows.iter().any(|r| r.kind == RowKind::Environment(0, 0, 0)));
 
-        // Once every environment has agents the project leaves the tail.
         a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_9", "niner", "running")]));
         assert!(
-            !a.rows()
+            a.rows()
                 .iter()
                 .any(|r| matches!(r.kind, RowKind::Project(..)))
         );
@@ -13347,10 +13301,9 @@ mod tests {
         assert_eq!(a.screen, Screen::TargetPick, "no target: ask for one");
     }
 
-    /// Loading an environment from the tail can promote it into a group; the
-    /// cursor follows it up rather than being stranded in the folded tail.
+    /// Agent discovery preserves the selected environment as a create target.
     #[test]
-    fn the_cursor_follows_an_environment_promoted_to_a_group() {
+    fn the_cursor_stays_on_an_environment_after_agent_discovery() {
         let mut a = app();
         a.screen = Screen::Manage;
         a.cursor = a.rows().iter().position(|r| r.label == "devtools").unwrap();
@@ -13362,9 +13315,54 @@ mod tests {
             .unwrap();
         a.on_key(key(KeyCode::Right));
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        // The environment left the tail for the thread list; the cursor lands
-        // on a row that still exists rather than the one that vanished.
-        assert!(a.selected_row().unwrap().selectable(), "{:#?}", a.rows());
+        assert_eq!(
+            a.selected_row().unwrap().kind,
+            RowKind::Environment(0, 0, 0)
+        );
+        a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::HarnessPick);
+        let target = a.harness_pick_target.as_ref().unwrap();
+        assert_eq!(target.project_id, "proj_1");
+        assert_eq!(target.environment_id, "env_prod");
+    }
+
+    #[test]
+    fn projects_in_every_workspace_can_create_agents_even_when_occupied() {
+        let mut workspaces = tree();
+        let mut second = workspaces[0].clone();
+        second.id = "ws_other".into();
+        second.name = "Other workspace".into();
+        second.projects[0].id = "proj_other".into();
+        second.projects[0].envs[0].id = "env_other".into();
+        workspaces.push(second);
+        let mut a = App::new(workspaces, None, Some("grok"), None, None, true);
+        a.screen = Screen::Manage;
+        for w in 0..2 {
+            for e in 0..2 {
+                a.agents_loaded(
+                    (w, 0, e),
+                    Ok(vec![agent(&format!("ca_{w}_{e}"), "occupied", "running")]),
+                );
+            }
+        }
+        for w in 0..2 {
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.kind == RowKind::Project(w, 0))
+                .unwrap();
+            a.on_key(key(KeyCode::Char('n')));
+            assert_eq!(a.screen, Screen::HarnessPick);
+            let target = a.harness_pick_target.as_ref().unwrap();
+            assert_eq!(target.project_id, a.tree[w].projects[0].id);
+            assert_eq!(target.environment_id, a.tree[w].projects[0].envs[0].id);
+            let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+                panic!("expected launch in selected project");
+            };
+            assert_eq!(req.project_id, a.tree[w].projects[0].id);
+            assert!(req.force_new);
+            assert!(req.agent_id.is_none());
+        }
     }
 
     /// "None yet" is a definitive claim: the hint searches while anything is

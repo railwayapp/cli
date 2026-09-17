@@ -66,6 +66,18 @@ picker from an existing session, with agent, bootstrap, and project selection.
 It starts with the current VM's project and environment and creates a fresh VM.
 Piped sessions and agent arguments after `--` use the terminal directly.
 
+Interactive `railway code` starts show provisioning, configuration, and client
+preparation in the session pane's loading screen for every agent. The sidebar's
+projects section opens by default and lists all accessible projects, including
+those already hosting agents. Select a project or environment and press `n` to
+create an agent there.
+
+Grok uses the shared generated name format, such as `grok-railg-3ed`, unless
+`--name` is supplied. Each Grok launch runs the [official updater](https://docs.x.ai/build/cli/reference)
+on the VM to install the latest stable release before opening the session. An
+update failure stops the launch with an error so it cannot silently run an old
+version. Credentials, skills, and MCP settings remain in their existing locations.
+
 ## Authentication
 
 Local sign-ins are optional: without one, sign in using the agent's login flow

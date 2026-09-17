@@ -274,19 +274,18 @@ details; rerun the command to retry.
 The CLI also prints the server URL, username, password, and project directory
 for manual setup, plus a Railway reconnect command:
 `railway code --opencode connect <agent>` (or `--opencode2` for Beta).
-After successful setup in an interactive terminal, it clears the setup messages
-and shows the connection details, with the Desktop update confirmation inside
-the result panel. Failed setup keeps its diagnostic output visible.
 The matching local terminal client launches automatically inside the Railway CA
-frame. If that client is missing, Railway offers to install it first. Declining,
-Esc, or Ctrl+C at the installation prompt leaves the server running and prints
-the connection details. Installations initiated inside the frame run quietly.
+frame. Interactive starts show provisioning and client setup in its loading
+pane, installing a missing client quietly. Reconnecting with `connect` offers
+to install a missing client first; declining leaves the server running and
+prints the connection details. Use `railway code get-config` to view saved
+connection and Desktop settings. Failed setup keeps its diagnostic output visible.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
-(Beta); Codex uses `codex-railg-3ed`, Claude Code uses `cc-railg-3ed`, and
-Railway uses `rlwy-railg-3ed`: the first five letters/digits of the project name,
-lowercase, plus a random three-character suffix. When using your default cloud
+(Beta); Codex uses `codex-railg-3ed`, Claude Code uses `cc-railg-3ed`, Grok uses
+`grok-railg-3ed`, and Railway uses `rlwy-railg-3ed`: the first five letters/digits
+of the project name, lowercase, plus a random three-character suffix. When using your default cloud
 agents project, the label comes from the local repository or directory instead.
 Existing names are checked before creation; `--name` overrides the generated
 name. The same naming applies to `remote` and `railway ca desktop`.
