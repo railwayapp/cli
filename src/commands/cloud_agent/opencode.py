@@ -6,11 +6,14 @@ The child has its own session and closed SSH descriptors; no tunnel is needed.
 import base64
 import fcntl
 import http.client
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -57,8 +60,7 @@ def owned_process(state):
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
 
 
-def health(port, credentials=None, harness="opencode"):
-    path = "api/health" if harness == "opencode2" else "global/health"
+def probe(port, credentials, path):
     request = urllib.request.Request(f"http://127.0.0.1:{port}/{path}")
     if credentials:
         token = base64.b64encode(
@@ -69,11 +71,84 @@ def health(port, credentials=None, harness="opencode"):
         # Loopback probes must never pass credentials to an HTTP_PROXY.
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=1) as response:
             body = json.loads(response.read(65536))
-            return response.status, body.get("healthy") is True and (harness != "opencode2" or isinstance(body.get("version"), str))
+            return response.status, body
     except urllib.error.HTTPError as error:
-        return error.code, False
+        return error.code, {}
     except (OSError, ValueError):
-        return None, False
+        return None, {}
+
+
+def server_status(port, credentials=None, harness="opencode"):
+    if harness != "opencode2":
+        return probe(port, credentials, "global/health")
+    status, body = probe(port, credentials, "api/status")
+    # Read legacy health only to discover/upgrade existing pre-V2 servers.
+    return probe(port, credentials, "api/health") if status == 404 else (status, body)
+
+
+def health(port, credentials=None, harness="opencode"):
+    status, body = server_status(port, credentials, harness)
+    ready = body.get("healthy") is True
+    if harness == "opencode2":
+        ready = isinstance(body.get("version"), str) and (
+            ready or (type(body.get("pid")) is int and isinstance(body.get("urls"), list))
+        )
+    return status, ready
+
+
+def stop_owned(state):
+    if not owned_process(state):
+        return
+    try:
+        os.killpg(state["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while owned_process(state) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if owned_process(state):
+        os.killpg(state["pid"], signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while owned_process(state) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if owned_process(state):
+            raise SetupError("The old OpenCode server did not stop; retry the upgrade.")
+
+
+def prepare_v2(request, home):
+    source = request.get("runtime_shim")
+    if not source:
+        return None
+    path = home / ".local/bin/opencode2"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(source)
+    temporary.chmod(0o700)
+    temporary.replace(path)
+    spec = importlib.util.spec_from_file_location(
+        "railway_opencode2", path,
+        loader=importlib.machinery.SourceFileLoader("railway_opencode2", str(path)),
+    )
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    version = request.get("version") or runtime.latest_release()
+    # Download and verify before stopping a working older server.
+    return runtime.ensure_runtime(version), version
+
+
+def reject_downgrade(current, requested):
+    if current and requested and current != requested and not current.startswith("0.0.0-beta-"):
+        if tuple(map(int, current.split("."))) > tuple(map(int, requested.split("."))):
+            raise SetupError(f"The cloud server is newer ({current}) than the requested client ({requested}); upgrade the local client to reconnect.")
+
+
+def backup_database(home, root):
+    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "opencode"
+    database = data / os.environ.get("OPENCODE_DB", "opencode.db")
+    if database.is_file():
+        backup = root / f"opencode-before-upgrade-{time.time_ns()}.db"
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as source, sqlite3.connect(backup) as target:
+            source.backup(target)
 
 
 def port_available(port):
@@ -202,19 +277,7 @@ def setup(request, home):
         if owned_process(state) and state.get("harness", "opencode") != harness:
             raise SetupError("This agent is running another OpenCode edition. Use --new, or --remove with that edition's flag first.")
         if request.get("action") == "stop":
-            if owned_process(state):
-                try:
-                    os.killpg(state["pid"], signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                deadline = time.monotonic() + 5
-                while owned_process(state) and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                if owned_process(state):
-                    try:
-                        os.killpg(state["pid"], signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            stop_owned(state)
             state.pop("pid", None)
             state.pop("start", None)
             if state:
@@ -246,6 +309,21 @@ def setup(request, home):
         if not all(isinstance(value, str) and value for value in credentials.values()):
             raise SetupError("OpenCode requires a nonempty username and password.")
 
+        runtime = None
+        if harness == "opencode2" and request.get("runtime_shim"):
+            if not port_available(port) and not owned_process(state):
+                raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
+            current = server_status(port, credentials, harness)[1].get("version") if owned_process(state) else None
+            requested = request.get("version")
+            reject_downgrade(current, requested)
+            if not current or not requested or current != requested:
+                runtime = prepare_v2(request, home)
+                previous = current or state.get("version")
+                reject_downgrade(previous, runtime[1])
+                if current != runtime[1]:
+                    if previous != runtime[1]:
+                        backup_database(home, root)
+                    stop_owned(state)
         reused = False
         if not port_available(port):
             if owned_process(state) and health(port, credentials, harness) == (200, True) and health(port, harness=harness)[0] == 401:
@@ -262,12 +340,16 @@ def setup(request, home):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+            if runtime:
+                environment["RAILWAY_OPENCODE_VERSION"] = runtime[1]
             state = dict(credentials, harness=harness, directory=directory, port=port,
                          vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"))
+            if runtime:
+                state["version"] = runtime[1]
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
-                    [harness, "serve", "--hostname", "0.0.0.0", "--port", str(port)],
+                    [str(runtime[0]) if runtime else harness, "serve", "--hostname", "0.0.0.0", "--port", str(port)],
                     cwd=directory, env=environment, stdin=subprocess.DEVNULL,
                     stdout=log, stderr=subprocess.STDOUT, close_fds=True,
                     start_new_session=True,

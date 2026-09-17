@@ -3,17 +3,20 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 
 #[cfg(test)]
 use super::Connection;
 use crate::config::Configs;
+#[cfg(test)]
+use std::process::Command;
 
 pub(crate) fn confirm(message: &str) -> Result<bool> {
     match inquire::Confirm::new(message)
@@ -67,26 +70,88 @@ pub(crate) fn find_client(beta: bool) -> Option<PathBuf> {
         })
 }
 
+fn v2_version(output: &str) -> Option<&str> {
+    let version = output.trim().strip_prefix("opencode v")?;
+    valid_v2_version(version).then_some(version)
+}
+
+fn valid_v2_version(version: &str) -> bool {
+    let parts = version.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && parts[0].parse::<u64>().is_ok_and(|major| major >= 2)
+}
+
+async fn find_v2_client() -> Result<Option<(PathBuf, String)>> {
+    let home = dirs::home_dir().context("Unable to get home directory")?;
+    let mut candidates = Vec::new();
+    candidates.extend(which::which("opencode2").ok());
+    candidates.extend(client_paths(&home, true));
+    candidates.extend(which::which("opencode").ok());
+    for binary in candidates {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::process::Command::new(&binary)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if let Ok(Ok(output)) = result
+            && output.status.success()
+            && let Some(version) = v2_version(&String::from_utf8_lossy(&output.stdout))
+        {
+            return Ok(Some((binary, version.into())));
+        }
+    }
+    Ok(None)
+}
+
+/// The local V2 client chooses the remote release. Never replace a newer local
+/// installation with the old, independently managed beta server's version.
+pub(crate) async fn server_version() -> Result<Option<String>> {
+    Ok(find_v2_client().await?.map(|(_, version)| version))
+}
+
 pub(crate) async fn ensure_client(beta: bool) -> Result<Option<PathBuf>> {
-    let name = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
-    let detail = if beta && cfg!(windows) {
-        " (includes the Beta Desktop package)"
+    let found = if beta {
+        find_v2_client().await?.map(|(binary, _)| binary)
     } else {
-        ""
+        find_client(false)
     };
-    ensure_client_with(find_client(beta),
-        || confirm(&format!("{name} is not installed locally. Install it from OpenCode's official release{detail}?")),
+    let name = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
+    ensure_client_with(
+        found,
+        || {
+            confirm(&format!(
+                "{name} is not installed locally. Install it from OpenCode's official release?"
+            ))
+        },
         || async {
             let home = dirs::home_dir().context("Unable to get home directory")?;
-            let installed = if beta { install_beta(&runtime_root(&home)).await? } else { install_standard(&home).await? };
+            let installed = if beta {
+                install_beta(&runtime_root(&home)).await?
+            } else {
+                install_standard(&home).await?
+            };
             println!("Installed {name}: {}", installed.display());
             Ok(installed)
-        }).await
+        },
+    )
+    .await
 }
 
 /// Installation while the CA frame owns the terminal must not print or prompt.
 pub(crate) async fn ensure_client_quiet(beta: bool) -> Result<PathBuf> {
-    if let Some(binary) = find_client(beta) {
+    let found = if beta {
+        find_v2_client().await?.map(|(binary, _)| binary)
+    } else {
+        find_client(false)
+    };
+    if let Some(binary) = found {
         return Ok(binary);
     }
     let home = dirs::home_dir().context("Unable to get home directory")?;
@@ -189,84 +254,71 @@ async fn install_standard(home: &Path) -> Result<PathBuf> {
 }
 
 fn beta_asset_name(os: &str, arch: &str) -> Result<String> {
+    let os = match os {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => bail!("No OpenCode V2 package for {os}/{arch}"),
+    };
     let arch = match arch {
         "aarch64" => "arm64",
-        "x86_64" => "x64",
-        other => bail!("No OpenCode2 Beta package for {os}/{other}"),
+        "x86_64" => "x64-baseline",
+        _ => bail!("No OpenCode V2 package for {os}/{arch}"),
     };
-    Ok(match os {
-        "macos" => format!("opencode-desktop-mac-{arch}.app.tar.gz"),
-        "linux" => format!(
-            "opencode-desktop-linux-{}.deb",
-            if arch == "x64" { "amd64" } else { arch }
-        ),
-        "windows" => format!("opencode-desktop-win-{arch}.exe"),
-        _ => bail!("No OpenCode2 Beta package for {os}/{arch}"),
-    })
+    Ok(format!("cli-{os}-{arch}"))
 }
 
 struct Asset {
     url: String,
-    digest: String,
+    digest: Vec<u8>,
 }
 
-fn beta_asset(releases: &[Value], name: &str) -> Result<Asset> {
-    let release = releases
-        .iter()
-        .find(|r| {
-            r["draft"] == false
-                && r["tag_name"]
-                    .as_str()
-                    .is_some_and(|tag| tag.starts_with("v0.0.0-beta-"))
-        })
-        .context("No published OpenCode2 Beta release was found")?;
-    let tag = release["tag_name"]
-        .as_str()
-        .context("Missing Beta release tag")?;
-    let asset = release["assets"]
-        .as_array()
-        .context("Missing Beta assets")?
-        .iter()
-        .find(|a| a["name"] == name)
-        .with_context(|| format!("The latest Beta has no {name} package"))?;
-    let url = asset["browser_download_url"]
-        .as_str()
-        .context("Missing Beta package URL")?;
-    if url != format!("https://github.com/anomalyco/opencode-beta/releases/download/{tag}/{name}") {
-        bail!("OpenCode2 Beta returned an unexpected download address");
+fn beta_asset(package: &Value, name: &str, version: &str) -> Result<Asset> {
+    if !valid_v2_version(version)
+        || package["name"] != format!("@opencode/{name}")
+        || package["version"] != version
+    {
+        bail!("OpenCode V2 returned an unexpected package identity");
     }
-    let digest = asset["digest"]
+    let url = format!("https://registry.npmjs.org/@opencode/{name}/-/{name}-{version}.tgz");
+    if package["dist"]["tarball"] != url {
+        bail!("OpenCode V2 returned an unexpected download address");
+    }
+    let digest = package["dist"]["integrity"]
         .as_str()
-        .and_then(|s| s.strip_prefix("sha256:"))
-        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .context("Beta package has no valid SHA-256 digest")?;
-    Ok(Asset {
-        url: url.into(),
-        digest: digest.into(),
-    })
+        .and_then(|value| value.strip_prefix("sha512-"))
+        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+        .filter(|value| value.len() == 64)
+        .context("OpenCode V2 package has no valid SHA-512 integrity digest")?;
+    Ok(Asset { url, digest })
 }
 
 async fn download(client: &reqwest::Client, asset: &Asset, package: &Path) -> Result<()> {
     let mut response = client.get(&asset.url).send().await?.error_for_status()?;
     let mut file = fs::File::create(package)?;
-    let mut digest = Sha256::new();
+    let mut digest = Sha512::new();
     while let Some(chunk) = response.chunk().await? {
         digest.update(&chunk);
         file.write_all(&chunk)?;
     }
     file.sync_all()?;
-    if format!("{:x}", digest.finalize()) != asset.digest {
-        bail!("OpenCode2 Beta checksum did not match; nothing was installed");
+    if digest.finalize().as_slice() != asset.digest {
+        bail!("OpenCode V2 checksum did not match; nothing was installed");
     }
     Ok(())
 }
 
-fn extract_mac(package: &Path, output: &Path) -> Result<()> {
+fn extract_beta(package: &Path, output: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(fs::File::open(package)?);
     for entry in tar::Archive::new(decoder).entries()? {
         let mut entry = entry?;
         if entry.header().entry_type().is_file()
-            && entry.path()?.ends_with("Contents/Resources/opencode-cli")
+            && entry.path()?
+                == Path::new(if cfg!(windows) {
+                    "package/bin/opencode.exe"
+                } else {
+                    "package/bin/opencode"
+                })
         {
             let mut target = fs::File::create(output)?;
             std::io::copy(&mut entry, &mut target)?;
@@ -274,61 +326,7 @@ fn extract_mac(package: &Path, output: &Path) -> Result<()> {
             return Ok(());
         }
     }
-    bail!("The Beta package contains no standalone CLI executable")
-}
-
-fn extract_linux(package: &Path, output: &Path, temporary: &Path) -> Result<()> {
-    // ar/tar handle Debian's compression without adding a platform codec to
-    // Railway. Extract just one file to stdout; archive paths never write to
-    // the user's filesystem.
-    let listing = Command::new("ar")
-        .arg("t")
-        .arg(package)
-        .output()
-        .context("Beta installation requires ar (binutils) and tar")?;
-    if !listing.status.success() {
-        bail!("Could not read the Beta Debian package");
-    }
-    let listing = String::from_utf8(listing.stdout)?;
-    let member = listing
-        .lines()
-        .find(|s| {
-            matches!(
-                *s,
-                "data.tar.xz" | "data.tar.gz" | "data.tar.zst" | "data.tar"
-            )
-        })
-        .context("Beta Debian package contains no data archive")?;
-    let archive = temporary.join(member);
-    let status = Command::new("ar")
-        .arg("p")
-        .arg(package)
-        .arg(member)
-        .stdout(fs::File::create(&archive)?)
-        .status()?;
-    if !status.success() {
-        bail!("Could not extract the Beta data archive");
-    }
-    let listing = Command::new("tar").arg("-tf").arg(&archive).output()?;
-    if !listing.status.success() {
-        bail!("Could not read the Beta data archive; install tar with xz support");
-    }
-    let listing = String::from_utf8(listing.stdout)?;
-    let member = listing
-        .lines()
-        .find(|s| s.ends_with("/resources/opencode-cli"))
-        .context("Beta package contains no standalone CLI")?;
-    let status = Command::new("tar")
-        .arg("-xOf")
-        .arg(&archive)
-        .arg("--")
-        .arg(member)
-        .stdout(fs::File::create(output)?)
-        .status()?;
-    if !status.success() {
-        bail!("Could not extract the Beta CLI");
-    }
-    Ok(())
+    bail!("The OpenCode V2 package contains no standalone CLI executable")
 }
 
 async fn install_beta(root: &Path) -> Result<PathBuf> {
@@ -342,59 +340,56 @@ async fn install_beta(root: &Path) -> Result<PathBuf> {
         .user_agent("railway-opencode2-client")
         .timeout(Duration::from_secs(600))
         .build()?;
-    let releases: Vec<Value> = client
-        .get("https://api.github.com/repos/anomalyco/opencode-beta/releases?per_page=5")
+    let latest: Value = client
+        .get("https://registry.npmjs.org/@opencode%2fcli/latest")
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
+    let version = latest["version"]
+        .as_str()
+        .filter(|version| valid_v2_version(version))
+        .context("No published OpenCode V2 release was found")?;
     let name = beta_asset_name(std::env::consts::OS, std::env::consts::ARCH)?;
-    let asset = beta_asset(&releases, &name)?;
-    println!("Downloading the latest official OpenCode2 Beta client…");
+    let package: Value = client
+        .get(format!(
+            "https://registry.npmjs.org/@opencode%2f{name}/{version}"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let asset = beta_asset(&package, &name, version)?;
     let temporary = tempfile::tempdir_in(root)?;
-    let package = temporary.path().join(&name);
+    let package = temporary.path().join("package.tgz");
     download(&client, &asset, &package).await?;
-    if cfg!(windows) {
-        let desktop = root.join("desktop");
-        let status = Command::new(&package)
-            .arg("/S")
-            .arg(format!("/D={}", desktop.display()))
-            .status()?;
-        if !status.success() {
-            bail!("The Beta installer exited with {status}");
-        }
-        let binary = desktop.join("resources/opencode-cli.exe");
-        if !binary.is_file() {
-            bail!(
-                "The Beta installer did not install its CLI in {}",
-                desktop.display()
-            );
-        }
-        return Ok(binary);
-    }
-    let staged = temporary.path().join("opencode2");
-    match std::env::consts::OS {
-        "macos" => extract_mac(&package, &staged)?,
-        "linux" => extract_linux(&package, &staged, temporary.path())?,
-        _ => bail!("Unsupported platform for OpenCode2 Beta"),
-    }
-    if fs::metadata(&staged)?.len() == 0 {
-        bail!("The Beta CLI package was empty");
-    }
+    let staged = temporary
+        .path()
+        .join(format!("opencode2{}", std::env::consts::EXE_SUFFIX));
+    extract_beta(&package, &staged)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&staged, fs::Permissions::from_mode(0o700))?;
     }
-    let version = Command::new(&staged)
-        .arg("--version")
-        .output()
-        .context("Checking the installed Beta client")?;
-    if !version.status.success() || !String::from_utf8_lossy(&version.stdout).contains("beta") {
-        bail!("The downloaded Beta client could not run on this computer");
+    let checked = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new(&staged)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("Checking OpenCode V2 timed out")??;
+    if !checked.status.success()
+        || v2_version(&String::from_utf8_lossy(&checked.stdout)) != Some(version)
+    {
+        bail!("The downloaded OpenCode V2 client could not run or returned an unexpected version");
     }
-    let binary = root.join("opencode2");
+    let binary = root.join(format!("opencode2{}", std::env::consts::EXE_SUFFIX));
     fs::rename(staged, &binary)?;
     Ok(binary)
 }
@@ -406,14 +401,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    #[ignore = "downloads the official Beta package and runs its CLI in a temporary directory"]
+    #[ignore = "downloads the official V2 package and runs its CLI in a temporary directory"]
     async fn official_beta_install_smoke() {
         let root = tempfile::tempdir().unwrap();
         let binary = install_beta(root.path()).await.unwrap();
         assert!(binary.starts_with(root.path()));
         let output = Command::new(binary).arg("--version").output().unwrap();
         assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("beta"));
+        assert!(v2_version(&String::from_utf8_lossy(&output.stdout)).is_some());
     }
 
     #[tokio::test]
@@ -459,34 +454,50 @@ mod tests {
         );
         assert_eq!(
             beta_asset_name("macos", "aarch64").unwrap(),
-            "opencode-desktop-mac-arm64.app.tar.gz"
+            "cli-darwin-arm64"
         );
         assert_eq!(
             beta_asset_name("linux", "x86_64").unwrap(),
-            "opencode-desktop-linux-amd64.deb"
+            "cli-linux-x64-baseline"
         );
         assert_eq!(
             beta_asset_name("windows", "aarch64").unwrap(),
-            "opencode-desktop-win-arm64.exe"
+            "cli-windows-arm64"
         );
         assert!(beta_asset_name("linux", "riscv64").is_err());
     }
 
     #[test]
     fn installer_requires_official_release_and_checksum() {
-        let name = "opencode-desktop-mac-arm64.app.tar.gz";
-        let release = json!({"draft":false,"tag_name":"v0.0.0-beta-test", "assets":[{"name":name,"browser_download_url":format!("https://github.com/anomalyco/opencode-beta/releases/download/v0.0.0-beta-test/{name}"),"digest":format!("sha256:{}", "a".repeat(64))}]});
-        assert!(beta_asset(std::slice::from_ref(&release), name).is_ok());
-        let mut hostile = release.clone();
-        hostile["assets"][0]["browser_download_url"] = json!("https://example.com/client");
-        assert!(beta_asset(&[hostile], name).is_err());
-        let mut missing = release;
-        missing["assets"][0]["digest"] = Value::Null;
-        assert!(beta_asset(&[missing], name).is_err());
+        let name = "cli-darwin-arm64";
+        let package = json!({"name":format!("@opencode/{name}"),"version":"2.0.5","dist":{
+            "tarball":format!("https://registry.npmjs.org/@opencode/{name}/-/{name}-2.0.5.tgz"),
+            "integrity":format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode([1u8;64]))}});
+        assert!(beta_asset(&package, name, "2.0.5").is_ok());
+        assert!(beta_asset(&package, name, "2.0.4").is_err());
+        let mut hostile = package.clone();
+        hostile["dist"]["tarball"] = json!("https://example.com/client");
+        assert!(beta_asset(&hostile, name, "2.0.5").is_err());
+        let mut missing = package;
+        missing["dist"]["integrity"] = Value::Null;
+        assert!(beta_asset(&missing, name, "2.0.5").is_err());
     }
 
     #[test]
-    fn mac_extraction_copies_only_the_regular_cli_file() {
+    fn v2_client_version_drives_the_server_without_accepting_legacy_beta() {
+        assert_eq!(v2_version("opencode v2.0.5\n"), Some("2.0.5"));
+        for output in [
+            "opencode2 v0.0.0-beta-19425",
+            "1.18.31",
+            "opencode v2.0.5/../../other",
+            "opencode v2.0.5?next=1",
+        ] {
+            assert_eq!(v2_version(output), None);
+        }
+    }
+
+    #[test]
+    fn beta_extraction_copies_only_the_regular_cli_file() {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("beta.tar.gz");
         let encoder = flate2::write::GzEncoder::new(
@@ -494,11 +505,9 @@ mod tests {
             flate2::Compression::fast(),
         );
         let mut archive = tar::Builder::new(encoder);
+        let member = format!("package/bin/opencode{}", std::env::consts::EXE_SUFFIX);
         for (name, data) in [
-            (
-                "OpenCode Beta.app/Contents/Resources/opencode-cli",
-                "binary",
-            ),
+            (member.as_str(), "binary"),
             ("OpenCode Beta.app/unrelated", "ignore"),
         ] {
             let mut header = tar::Header::new_gnu();
@@ -511,7 +520,7 @@ mod tests {
         }
         archive.into_inner().unwrap().finish().unwrap();
         let output = root.path().join("opencode2");
-        extract_mac(&package, &output).unwrap();
+        extract_beta(&package, &output).unwrap();
         assert_eq!(fs::read_to_string(output).unwrap(), "binary");
         assert!(!root.path().join("OpenCode Beta.app").exists());
     }
