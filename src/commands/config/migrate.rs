@@ -123,6 +123,16 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
             display_rel(&cwd, &service.path).cyan(),
             service.name.cyan()
         );
+        let untranslated = untranslated_fields(&service.cac, &args.lang);
+        if !untranslated.is_empty() {
+            eprintln!(
+                "{} {}: migration to {} does not translate: {}. These settings are NOT preserved in the generated configuration; copy them manually before running config apply.",
+                "Warning:".yellow().bold(),
+                service.name,
+                args.lang,
+                untranslated.join(", ")
+            );
+        }
     }
     if services.len() > 1 {
         eprintln!(
@@ -620,6 +630,39 @@ func Railway(ctx railway.Context) railway.Project {{
     )
 }
 
+/// Keep omissions visible for every language, including fields retained only as comments.
+fn untranslated_fields(cac: &CacFile, lang: &str) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    macro_rules! omitted {
+        ($value:expr, $name:literal) => {
+            if $value.is_some() {
+                fields.push($name);
+            }
+        };
+    }
+    omitted!(cac.build.builder, "build.builder");
+    omitted!(cac.build.dockerfile_path, "build.dockerfilePath");
+    omitted!(cac.build.watch_patterns, "build.watchPatterns");
+    omitted!(cac.build.nixpacks_config_path, "build.nixpacksConfigPath");
+    omitted!(cac.deploy.restart_policy_type, "deploy.restartPolicyType");
+    omitted!(
+        cac.deploy.restart_policy_max_retries,
+        "deploy.restartPolicyMaxRetries"
+    );
+    omitted!(cac.deploy.cron_schedule, "deploy.cronSchedule");
+    omitted!(cac.deploy.sleep_application, "deploy.sleepApplication");
+    omitted!(cac.deploy.draining_seconds, "deploy.drainingSeconds");
+    omitted!(cac.deploy.overlap_seconds, "deploy.overlapSeconds");
+    if lang != "ts" {
+        omitted!(cac.deploy.healthcheck_timeout, "deploy.healthcheckTimeout");
+        omitted!(cac.deploy.pre_deploy_command, "deploy.preDeployCommand");
+        omitted!(cac.deploy.num_replicas, "deploy.numReplicas");
+        omitted!(cac.deploy.region, "deploy.region");
+        omitted!(cac.deploy.multi_region_config, "deploy.multiRegionConfig");
+    }
+    fields
+}
+
 fn emit_service_fields(cac: &CacFile) -> Vec<String> {
     let mut fields: Vec<String> = Vec::new();
     if let Some(cmd) = &cac.build.build_command {
@@ -634,13 +677,16 @@ fn emit_service_fields(cac: &CacFile) -> Vec<String> {
     if let Some(timeout) = cac.deploy.healthcheck_timeout {
         fields.push(format!("    healthcheckTimeout: {timeout},"));
     }
-    if let Some(replicas) = cac.deploy.num_replicas {
-        fields.push(format!("    replicas: {replicas},"));
-    }
     if let Some(regions) = &cac.deploy.multi_region_config {
-        fields.push(format!("    replicas: {},", json_to_ts(regions)));
+        fields.push(format!(
+            "    replicas: {},",
+            render_replicas(regions, AuthoringLang::TypeScript)
+        ));
     } else if let Some(region) = &cac.deploy.region {
-        fields.push(format!("    replicas: {{ {}: 1 }},", js_string(region)));
+        let replicas = cac.deploy.num_replicas.unwrap_or(1);
+        fields.push(format!("    replicas: {{ {}: {replicas} }},", js_string(region)));
+    } else if let Some(replicas) = cac.deploy.num_replicas {
+        fields.push(format!("    replicas: {replicas},"));
     }
     if let Some(pre) = &cac.deploy.pre_deploy_command {
         let rendered = match pre {
@@ -908,6 +954,61 @@ mod tests {
         assert!(go.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(go.contains("railway.ServiceNamed"));
         assert!(go.contains("const Partial = \"api\""));
+    }
+
+    #[test]
+    fn preserves_replica_counts_without_duplicate_keys() {
+        for (deploy, expected) in [
+            (
+                json!({"numReplicas": 2, "region": "us-east4"}),
+                "replicas: { \"us-east4\": 2 }",
+            ),
+            (
+                json!({"region": "us-east4"}),
+                "replicas: { \"us-east4\": 1 }",
+            ),
+            (json!({"numReplicas": 2}), "replicas: 2"),
+            (
+                json!({
+                    "numReplicas": 2,
+                    "region": "ignored",
+                    "multiRegionConfig": {"us-east4": {"numReplicas": 3}}
+                }),
+                "replicas: { \"us-east4\": 3 }",
+            ),
+        ] {
+            let cac = serde_json::from_value(json!({"deploy": deploy})).unwrap();
+            let out = emit_railway_ts("app", &[svc("api", cac)], true);
+            assert_eq!(out.matches("replicas:").count(), 1, "{out}");
+            assert!(out.contains(expected), "{out}");
+        }
+    }
+
+    #[test]
+    fn reports_untranslated_fields_from_issue_1199() {
+        let cac = serde_json::from_value(json!({
+            "build": {"builder": "DOCKERFILE", "dockerfilePath": "custom/path/Dockerfile"},
+            "deploy": {
+                "restartPolicyType": "ON_FAILURE", "restartPolicyMaxRetries": 10,
+                "numReplicas": 2, "region": "us-east4"
+            }
+        }))
+        .unwrap();
+        let expected = vec![
+            "build.builder",
+            "build.dockerfilePath",
+            "deploy.restartPolicyType",
+            "deploy.restartPolicyMaxRetries",
+        ];
+        assert_eq!(untranslated_fields(&cac, "ts"), expected);
+        for lang in ["py", "go"] {
+            let mut expected = expected.clone();
+            expected.extend(["deploy.numReplicas", "deploy.region"]);
+            assert_eq!(untranslated_fields(&cac, lang), expected);
+        }
+        for lang in ["ts", "py", "go"] {
+            assert!(untranslated_fields(&CacFile::default(), lang).is_empty());
+        }
     }
 
     #[test]
