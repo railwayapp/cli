@@ -6,3 +6,5 @@ bin/railway
 .env
 .DS_Store
 test
+
+!pnpm-lock.yaml
