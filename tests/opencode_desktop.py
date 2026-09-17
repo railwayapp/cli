@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 # HTTPServer.server_bind does reverse DNS, which can stall on macOS CI.
 # The fake server must use loopback only, including hostname resolution.
 socket.getfqdn = lambda host: 'localhost'
+VERSION = '0.0.0-beta-19425'
 class Handler(BaseHTTPRequestHandler):
     def authenticated(self):
         expected = 'Basic ' + base64.b64encode((os.environ['OPENCODE_SERVER_USERNAME'] + ':' + os.environ['OPENCODE_SERVER_PASSWORD']).encode()).decode()
@@ -55,13 +57,20 @@ class Handler(BaseHTTPRequestHandler):
         return Path(os.environ['HOME']) / '.config/opencode/opencode.json'
     def do_GET(self):
         if not self.authenticated(): return
+        path = urlparse(self.path).path
+        if path == '/api/status' and VERSION.startswith('0.0.0-beta-'):
+            self.send_response(404)
+            self.end_headers()
+            return
         self.send_response(200)
         self.end_headers()
-        if urlparse(self.path).path in ('/config', '/global/config'):
+        if path == '/api/status':
+            self.wfile.write(json.dumps({'version': VERSION, 'pid': os.getpid(), 'urls': []}).encode())
+        elif path in ('/config', '/global/config'):
             path = self.config_path()
             self.wfile.write(path.read_bytes() if path.exists() else b'{}')
         else:
-            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': 'v0.0.0-beta-test'} if 'opencode2' in sys.argv[0] else {})}).encode())
+            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': VERSION} if 'opencode2' in sys.argv[0] else {})}).encode())
     def do_PATCH(self):
         if not self.authenticated(): return
         path = self.config_path()
@@ -151,6 +160,54 @@ class BootstrapTests(unittest.TestCase):
         restarted = self.run_bootstrap({'directory': str(self.directory), 'password': 'different'})
         self.assertFalse(restarted['reused'])
         self.assertEqual(restarted['password'], first['password'])
+
+    def v2_request(self, fail=False):
+        binary = self.home / 'opencode2-v2'
+        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '0.0.0-beta-19425'", "VERSION = '2.0.5'"))
+        binary.chmod(0o700)
+        runtime = ("raise RuntimeError('download failed')" if fail else 'return Path(' + repr(str(binary)) + ')')
+        shim = 'from pathlib import Path\ndef ensure_runtime(version):\n    ' + runtime + '\n'
+        return {'action': 'connect', 'harness': 'opencode2', 'version': '2.0.5', 'runtime_shim': shim}
+
+    def test_beta_upgrade_keeps_credentials_directory_and_database_and_reuses_matching_server(self):
+        self.harness = 'opencode2'
+        first = self.run_bootstrap()
+        old_pid = json.loads(self.state.read_text())['pid']
+        database = self.home / '.local/share/opencode/opencode.db'
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as db:
+            db.executescript("CREATE TABLE session (id TEXT); INSERT INTO session VALUES ('keep');")
+        upgraded = self.run_bootstrap(self.v2_request())
+        self.assertFalse(upgraded['reused'])
+        self.assertEqual(upgraded['password'], first['password'])
+        self.assertEqual(upgraded['directory'], first['directory'])
+        new_pid = json.loads(self.state.read_text())['pid']
+        self.assertNotEqual(new_pid, old_pid)
+        backups = list(self.state.parent.glob('opencode-before-upgrade-*.db'))
+        self.assertEqual(len(backups), 1)
+        with sqlite3.connect(backups[0]) as db:
+            self.assertEqual(db.execute('SELECT id FROM session').fetchone()[0], 'keep')
+        self.assertTrue(self.run_bootstrap(self.v2_request(fail=True))['reused'])
+        self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
+        request = self.v2_request()
+        request['version'] = '2.0.4'
+        rejected = self.run_bootstrap(request, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('server is newer', rejected.stderr)
+        self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
+        self.run_bootstrap({'action': 'stop'})
+        self.assertFalse(self.run_bootstrap(self.v2_request())['reused'])
+        self.assertEqual(len(list(self.state.parent.glob('opencode-before-upgrade-*.db'))), 1)
+
+    def test_failed_beta_download_preserves_live_server(self):
+        self.harness = 'opencode2'
+        self.run_bootstrap()
+        old_state = self.state.read_bytes()
+        rejected = self.run_bootstrap(self.v2_request(fail=True), check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('download failed', rejected.stderr)
+        self.assertEqual(self.state.read_bytes(), old_state)
+        self.assertTrue(self.run_bootstrap({'action': 'inspect'}))
 
     def test_beta_starts_its_own_binary_and_rejects_cross_edition_reuse_or_stop(self):
         self.harness = 'opencode2'

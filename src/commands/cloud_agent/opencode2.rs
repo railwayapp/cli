@@ -1,4 +1,4 @@
-//! Seed a separate executable shim; the beta runtime is fetched at launch.
+//! Seed a separate executable shim; the official V2 runtime is fetched at launch.
 use crate::util::shell::shell_join;
 
 pub(crate) mod auth;

@@ -28,7 +28,8 @@ Codex, OpenCode, and OpenCode2 normally run a local client connected to the VM.
 Their clients run inside the Railway CA interface with command approvals disabled.
 Codex matches the local client to its server version and trusts the remote project.
 Missing OpenCode clients can be installed after confirmation. OpenCode2 downloads
-its latest Beta runtime onto the VM at startup.
+its official V2 runtime onto the VM at startup. A local V2 client selects the
+remote version; reconnect upgrades older servers without downgrading the client.
 
 Use `remote` to run the client on the VM. Use `--` to pass arguments to the agent:
 
