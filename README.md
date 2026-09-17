@@ -548,6 +548,11 @@ when Option+F / Alt+F reveals the sidebar, and on explicit refresh. Loaded rows,
 their order, expansion choices, and the selected conversation stay in place.
 The machine's status icon always represents its machine state.
 
+Use **Option+R / Alt+R** to refresh agents and visible conversations from anywhere,
+including inside a session. It also finds agents in unopened projects; there is
+no separate discovery shortcut. Plain **r** refreshes the selected environment
+when the sidebar is focused.
+
 Press **x / X** on a saved conversation to delete it from its harness. The row
 disappears immediately while native deletion runs in the background; failures
 restore the row and show an error. This deletes the saved conversation, rather

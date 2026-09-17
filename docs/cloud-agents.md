@@ -72,6 +72,10 @@ projects section opens by default and lists all accessible projects, including
 those already hosting agents. Select a project or environment and press `n` to
 create an agent there.
 
+Option+R / Alt+R is the global refresh shortcut, including discovery in unopened
+projects. It works from the sidebar and inside sessions. Plain `r` refreshes the
+selected environment when the sidebar is focused.
+
 Grok uses the shared generated name format, such as `grok-railg-3ed`, unless
 `--name` is supplied. Each Grok launch runs the [official updater](https://docs.x.ai/build/cli/reference)
 on the VM to install the latest stable release before opening the session. An

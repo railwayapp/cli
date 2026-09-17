@@ -120,7 +120,6 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("d", "delete, with a confirmation"),
             ("⌥r", "refresh everything, from anywhere"),
             ("r", "refresh this environment"),
-            ("shift+r", "look for agents in every project"),
         ],
     ),
     (
@@ -984,13 +983,9 @@ pub enum Effect {
     SaveDefaultProject(Box<Target>),
     /// Open a link that was double-clicked in a session.
     OpenUrl(String),
-    /// Look for agents in every project, on request. See
-    /// [`App::scan_environments`].
-    ScanEverywhere,
     /// Ask the platform for everything again: one account-wide agent query,
     /// plus the sessions of the agents someone is actually looking at. Raised
-    /// by ⌥r, by the auto-refresh tick, and on re-entry after the TUI has
-    /// handed the terminal back. See [`super::start_refresh`].
+    /// by ⌥r and when revealing the sidebar. See [`super::start_refresh`].
     RefreshAll,
     /// Put an SSH shell command for this VM on the clipboard.
     CopySsh {
@@ -2310,8 +2305,7 @@ impl App {
     /// environment that already had a list gets the snapshot instead — that is
     /// what makes this a refresh rather than a first fill, and it is the only
     /// thing that can tell the tree an agent was created or deleted somewhere
-    /// else. (Skipping environments that already had a list is why `shift+r`
-    /// used to report "already loaded" and change nothing.)
+    /// else.
     ///
     /// A snapshot may not overwrite a newer request's answer or settle a
     /// mutation accepted after the request began. Both fetch paths compare
@@ -5701,9 +5695,6 @@ impl App {
             KeyCode::Char('s') => self.agent_op(AgentOp::Sleep),
             KeyCode::Char('w') => self.agent_op(AgentOp::Wake),
             KeyCode::Char('d') => self.agent_op(AgentOp::Delete),
-            // Startup loads only what a keypress needs, so this is how an agent
-            // in a project you haven't opened gets found.
-            KeyCode::Char('R') => Some(Effect::ScanEverywhere),
             KeyCode::Char('r') => {
                 let (w, p, e) = self.env_of(row?.kind)?;
                 let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
@@ -6115,47 +6106,22 @@ impl App {
         }
     }
 
-    /// Every environment that has not been fetched, as load requests.
-    ///
-    /// The whole-account scan, which is what `shift+r` asks for. Startup no
-    /// longer does this: it is one request per environment, so it costs a large
-    /// account hundreds of them. As a deliberate action the cost is the user's
-    /// to spend, and a rate limit stops it partway rather than pressing on.
-    pub fn scan_environments(&mut self) -> Vec<Effect> {
-        let mut out = Vec::new();
-        for w in 0..self.tree.len() {
-            for p in 0..self.tree[w].projects.len() {
-                for e in 0..self.tree[w].projects[p].envs.len() {
-                    let env = &mut self.tree[w].projects[p].envs[e];
-                    if env.agents != Load::NotLoaded {
-                        continue;
-                    }
-                    env.agents = Load::Loading;
-                    out.push(Effect::LoadAgents {
-                        environment_id: env.id.clone(),
-                        path: (w, p, e),
-                    });
-                }
-            }
-        }
-        out
-    }
-
     /// The environments a refresh should ask about again, one request each.
     ///
     /// Only for callers that cannot use the account-wide query — see
-    /// [`Self::account_query_unavailable`]. Scoped to environments that already
-    /// have an answer: those are the ones with rows on screen that could now be
-    /// wrong. Environments that have never loaded are left to `shift+r`, since
-    /// asking about all of them is the request-per-environment cost this TUI is
-    /// careful about. One still `Loading` is already on its way.
-    pub fn environments_to_refresh(&self) -> Vec<Effect> {
+    /// [`Self::account_query_unavailable`]. An explicit ⌥r also discovers
+    /// unopened environments; incidental refreshes only revisit answered ones,
+    /// avoiding an account-wide sweep just because the sidebar was revealed.
+    /// One still `Loading` is already on its way. Keep loaded rows visible.
+    pub fn environments_to_refresh(&mut self, discover_unloaded: bool) -> Vec<Effect> {
         let mut out = Vec::new();
-        for (w, ws) in self.tree.iter().enumerate() {
-            for (p, project) in ws.projects.iter().enumerate() {
-                for (e, env) in project.envs.iter().enumerate() {
-                    if !matches!(env.agents, Load::Loaded(_) | Load::Failed(_)) {
-                        continue;
+        for (w, ws) in self.tree.iter_mut().enumerate() {
+            for (p, project) in ws.projects.iter_mut().enumerate() {
+                for (e, env) in project.envs.iter_mut().enumerate() {
+                    match env.agents {
+                        Load::NotLoaded if discover_unloaded => env.agents = Load::Loading,
+                        Load::Loaded(_) | Load::Failed(_) => {}
+                        _ => continue,
                     }
                     out.push(Effect::LoadAgents {
                         environment_id: env.id.clone(),
@@ -12658,15 +12624,14 @@ mod tests {
         assert!(a.toast.is_none());
     }
 
-    /// Without `myCloudAgents` a refresh asks per environment — but only about
-    /// the ones with rows on screen. Sweeping the account is `shift+r`, which is
-    /// a deliberate act because it costs a request each.
+    /// Without `myCloudAgents` an incidental refresh only asks about answered
+    /// environments. Discovering unopened ones needs an explicit ⌥r.
     #[test]
     fn the_fallback_refresh_asks_only_about_answered_environments() {
         let mut a = loaded_app();
         // env_prod is loaded (loaded_app), env_stg has never been asked about.
         assert_eq!(
-            a.environments_to_refresh(),
+            a.environments_to_refresh(false),
             vec![Effect::LoadAgents {
                 environment_id: "env_prod".into(),
                 path: (0, 0, 0)
@@ -12675,7 +12640,7 @@ mod tests {
 
         // One still in flight is already on its way.
         a.tree[0].projects[0].envs[0].agents = Load::Loading;
-        assert!(a.environments_to_refresh().is_empty());
+        assert!(a.environments_to_refresh(false).is_empty());
     }
 
     /// ⌥enter hands the whole terminal over; `f` does the same, because
@@ -13160,25 +13125,47 @@ mod tests {
         }
     }
 
-    /// `shift+r` is how an agent in a project nobody has opened gets found: the
-    /// scan startup used to do, when the user asks for it.
     #[test]
-    fn shift_r_scans_every_environment() {
+    fn shift_r_no_longer_triggers_discovery() {
         let mut a = loaded_app();
-        // Off the launcher, where `R` is a letter for the prompt.
+        // Off the launcher, where R must not trigger another refresh action.
         a.on_key(key(KeyCode::Down));
+        assert_eq!(a.on_key(key(KeyCode::Char('R'))), None);
         assert_eq!(
-            a.on_key(key(KeyCode::Char('R'))),
-            Some(Effect::ScanEverywhere)
+            a.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            None
         );
+        assert!(!a.refresh_announce);
 
         let mut a = app();
-        let effects = a.scan_environments();
-        assert_eq!(effects.len(), 2, "every environment in the fixture");
+        assert_eq!(a.on_key(key(KeyCode::Char('R'))), None);
+        assert_eq!(a.prompt, "R", "uppercase R remains prompt text");
+    }
+
+    #[test]
+    fn explicit_fallback_refresh_also_discovers_unopened_environments() {
+        let mut a = loaded_app();
+        a.account_query_unavailable = true;
+        assert_eq!(a.on_key(alt('r')), Some(Effect::RefreshAll));
+        let discover_unloaded = std::mem::take(&mut a.refresh_announce);
+        let effects = a.environments_to_refresh(discover_unloaded);
+        assert_eq!(effects.len(), 2, "both loaded and unopened environments");
+        assert!(matches!(
+            a.tree[0].projects[0].envs[0].agents,
+            Load::Loaded(_)
+        ));
+        assert_eq!(a.tree[0].projects[0].envs[1].agents, Load::Loading);
+        // An incidental refresh cannot turn into another discovery scan, and
+        // a second explicit refresh must not duplicate an in-flight load.
+        assert!(!a.refresh_announce);
+        assert_eq!(a.environments_to_refresh(true).len(), 1);
+        a.tree[0].projects[0].envs[0].agents = Load::Loading;
         assert!(
-            a.scan_environments().is_empty(),
-            "a second scan must not refetch what is already in flight"
+            a.environments_to_refresh(true).is_empty(),
+            "do not refetch environments already in flight"
         );
+        a.tree[0].projects[0].envs[0].agents = Load::Failed("temporary error".into());
+        assert_eq!(a.environments_to_refresh(true).len(), 1, "retry failures");
     }
 
     /// A rate limit puts what was in flight back, so opening the row retries
