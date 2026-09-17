@@ -354,8 +354,9 @@ Press **n** in the tree or bootstrap list to choose an agent for a **new VM**.
 The picker includes **ChatGPT Codex**, a **Use bootstrap** checkbox, and an **Option+B**
 shortcut to use the project default, select another bootstrap, or start clean.
 These launch choices do not change the stored default. Press **Option+N** on
-a VM, its session, or inside its focused terminal to choose an agent for a
-**new session on that same VM**.
+a VM, its session, or inside its focused terminal to open the same **new VM**
+picker with bootstrap and project selection. It starts with the current VM's
+project and environment; launching creates a fresh machine.
 
 Failed captures are hidden from the TUI bootstrap pickers. Ready bootstraps and
 captures still saving appear before **No Default**, with **Create New** last.
@@ -664,17 +665,26 @@ in the background on the configured code port (default 4096, or 8080 for legacy 
 its public endpoint, and saves the URL,
 username, password, default server, and remote project in Desktop's settings.
 `--opencode` configures only standard OpenCode (`ai.opencode.desktop`).
-`--opencode2` configures only [OpenCode2 Beta](https://github.com/anomalyco/opencode-beta)
-(`ai.opencode.desktop.beta`), using its compatible server runtime. These two
+`--opencode2` configures OpenCode V2 (`ai.opencode.desktop.beta`), using its
+compatible server runtime. These two
 flags cannot be combined. JSON server settings and SQLite renderer state are
 supported; a drafts-only database does not change where settings are saved.
 
-For Beta, the CLI seeds an `opencode2` shim on the agent. Each new process checks
-the latest official Beta release, downloads the Linux Desktop package for the
-agent's architecture, verifies its published SHA-256, and extracts just the CLI
-executable. The first start can take several minutes. A verified cached version
-is reused until the release changes; running sessions keep their executable.
-A failed update reports an error and preserves the previous runtime.
+For V2, the CLI seeds an `opencode2` shim on the agent. It downloads the official
+`@opencode/cli` platform package, verifies its SHA-512 integrity, and extracts
+only the CLI executable. Releases are cached separately under
+`~/.railway/runtimes/opencode2/<version>/`.
+
+The installed local V2 client selects the server version. Setup and reconnect
+upgrade an older cloud server to that version, including servers installed from
+the retired beta release channel. The download is verified before the old server
+stops; credentials and the project directory are retained, and the server's
+SQLite database is backed up before migration. A matching running server is
+reused. Neither the local client nor a newer cloud server is downgraded.
+Without an installed V2 client, setup uses the current official V2 release.
+
+The VM image's standard `opencode` installation and the CLI-managed V2 runtime
+are separate: refreshing the base image does not update an existing V2 server.
 
 Use `railway ca --opencode2` for a terminal session. In the new-session picker,
 highlight OpenCode and press Tab to switch to **OpenCode2 [Beta]**. Tab also

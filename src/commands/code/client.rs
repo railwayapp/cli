@@ -253,7 +253,9 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
             harness.edition()
         );
         if harness == Harness::OpenCode2 {
-            println!("The first start downloads the latest Beta and can take several minutes.");
+            println!(
+                "The first start downloads the matching OpenCode V2 server and can take several minutes."
+            );
         }
     }
     let connection = match harness {

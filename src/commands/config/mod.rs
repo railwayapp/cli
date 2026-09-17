@@ -665,7 +665,9 @@ fn render_graph_as_railway(
         out.push('\n');
     }
 
-    let mut names = Vec::new();
+    // Source aliases share the module scope with resource idents; seed the pool so a
+    // repo `frontend` and a service `frontend` never both become `const frontend`.
+    let mut names: Vec<String> = source_aliases.keys().cloned().collect();
     let mut resource_names = std::collections::HashMap::new();
     let mut group_names = std::collections::HashMap::new();
     let import_names: std::collections::HashSet<&str> = imports.iter().copied().collect();
@@ -2176,6 +2178,26 @@ mod tests {
         assert!(rendered.contains("source: github"));
         assert!(rendered.contains("start: \"pnpm start\""));
         assert!(!rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn pull_renderer_never_reuses_a_source_alias_for_a_service_ident() {
+        let source = json!({ "repo": "org/frontend" });
+        let mut frontend = service_resource(source.clone(), json!({}));
+        frontend.address = Some("service.frontend".to_string());
+        frontend.name = "frontend".to_string();
+        let worker = service_resource(source, json!({}));
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources: vec![frontend, worker],
+        };
+
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript);
+
+        assert_eq!(rendered.matches("const frontend =").count(), 1);
+        assert!(rendered.contains("const frontend = github(\"org/frontend\")"));
+        assert!(rendered.contains("const frontend2 = service(\"frontend\""));
+        assert_eq!(rendered.matches("source: frontend,").count(), 2);
     }
 
     #[test]

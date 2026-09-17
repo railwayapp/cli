@@ -111,7 +111,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "copy an SSH shell command"),
             ("⌥b / b", "project bootstraps · save selected VM"),
             ("n", "new agent — pick its harness first"),
-            ("⌥n", "new session on this VM · choose its agent"),
+            ("⌥n", "new VM · choose agent, bootstrap, and project"),
             (
                 "⌥p",
                 "new session from a prompt, on the selected row's agent",
@@ -467,7 +467,7 @@ pub enum Screen {
     /// setup flow asks with — picking a target is the same question, so it
     /// should not send anyone through the whole management tree to answer it.
     TargetPick,
-    /// ⌥n on Manage: choosing which agent a new session runs, over the tree.
+    /// Choose an agent for a new VM or an existing connection, over the tree.
     HarnessPick,
     /// ⌥p on Manage: composing a prompt for a new session, over the tree —
     /// the launcher's prompt box, without the walk back to the New Session
@@ -572,6 +572,7 @@ impl TargetPicker {
                 }
             }
         }
+        options.sort_by_key(|t| Some(t.project_id.as_str()) != default_project);
         // Open on the current target, so Enter twice is a no-op rather than a
         // surprise change.
         let cursor = current
@@ -644,6 +645,7 @@ pub struct PaneRects {
     pub harness_list: PaneBox,
     pub harness_bootstrap: PaneBox,
     pub harness_use_bootstrap: PaneBox,
+    pub harness_project: PaneBox,
     /// The header's session tabs, drawn only while the pane is maximized. A
     /// fixed array so this stays `Copy`; sessions past the cap keep their
     /// ⌥⇧[ ⌥⇧] keys but aren't clickable.
@@ -1096,7 +1098,7 @@ pub struct App {
     pub bootstrap_picker: Option<super::bootstrap_setup::Picker>,
     pub bootstrap_defaults:
         std::collections::BTreeMap<String, super::bootstrap_setup::DefaultState>,
-    /// The VM selected for an Option+n session; None creates a fresh VM.
+    /// An explicitly selected existing VM; None creates a fresh VM.
     pub harness_pick_agent: Option<String>,
     pub harness_pick_connect: bool,
     /// VM-specific discovery, never the user's default coding agent.
@@ -1107,6 +1109,8 @@ pub struct App {
     pub harness_pick_target: Option<Target>,
     pub harness_bootstrap: super::bootstrap_setup::LaunchChoice,
     pub harness_use_bootstrap: bool,
+    /// 0: agent list, 1: checkbox, 2: bootstrap selector, 3: project selector.
+    pub harness_field: usize,
     /// ⌥p's draft while [`Screen::ManagePrompt`] is up.
     pub manage_prompt: Option<String>,
     /// The session pane has the whole screen: no tree, no detail column.
@@ -1328,6 +1332,7 @@ impl App {
             harness_pick_target: None,
             harness_bootstrap: Default::default(),
             harness_use_bootstrap: true,
+            harness_field: 0,
             harness_pick_agent: None,
             harness_pick_connect: false,
             primary_harnesses: HashMap::new(),
@@ -1554,6 +1559,9 @@ impl App {
                 LaunchChoice::Named(b.name.clone())
             };
             self.harness_use_bootstrap = !matches!(self.harness_bootstrap, LaunchChoice::None);
+            if !self.harness_use_bootstrap && self.harness_field == 2 {
+                self.harness_field = 1;
+            }
             self.bootstrap_picker = None;
             self.screen = Screen::HarnessPick;
             return None;
@@ -1661,7 +1669,11 @@ impl App {
         self.target_pick = Some(TargetPicker::new(
             &self.tree,
             self.default_project.as_deref(),
-            self.target.as_ref(),
+            if self.harness_pick.is_some() {
+                self.harness_pick_target.as_ref()
+            } else {
+                self.target.as_ref()
+            },
         ));
         self.screen = Screen::TargetPick;
     }
@@ -1678,6 +1690,18 @@ impl App {
             KeyCode::Enter => {
                 let picked = picker.options.get(picker.cursor).cloned();
                 self.target_pick = None;
+                if self.harness_pick.is_some() {
+                    self.screen = Screen::HarnessPick;
+                    if let Some(target) = picked {
+                        if self.harness_pick_target.as_ref().map(|t| &t.environment_id)
+                            != Some(&target.environment_id)
+                        {
+                            self.harness_bootstrap = Default::default();
+                        }
+                        self.harness_pick_target = Some(target);
+                    }
+                    return None;
+                }
                 self.screen = Screen::Manage;
                 // This card is where the default project is set, not just where
                 // this run is pointed: it is the same question setup asks, and
@@ -1692,7 +1716,11 @@ impl App {
             }
             KeyCode::Esc => {
                 self.target_pick = None;
-                self.screen = Screen::Manage;
+                self.screen = if self.harness_pick.is_some() {
+                    Screen::HarnessPick
+                } else {
+                    Screen::Manage
+                };
             }
             _ => {}
         }
@@ -3189,12 +3217,17 @@ impl App {
         if self.screen == Screen::HarnessPick {
             if kind == MouseAction::Down {
                 if self.panes.harness_use_bootstrap.contains(col, row) {
+                    self.harness_field = 1;
                     self.toggle_launch_bootstrap();
+                } else if self.panes.harness_project.contains(col, row) {
+                    self.harness_field = 3;
+                    self.start_target_pick();
                 } else if self.panes.harness_bootstrap.contains(col, row) {
                     return self.open_launch_bootstraps();
                 } else if self.panes.harness_list.contains(col, row) {
                     let visible = harness_picker_indices(self.harness_pick?);
                     if let Some(index) = visible.get((row - self.panes.harness_list.y) as usize) {
+                        self.harness_field = 0;
                         self.harness_pick = Some(*index);
                     }
                 }
@@ -5197,8 +5230,8 @@ impl App {
             }
             // The launchers float over the tree the launch aims at; the
             // New Session row's own prompt box covers the plain case.
-            // Option+n chooses a harness for a new session on the current VM.
-            'n' if self.screen == Screen::Manage => self.pick_new_session(),
+            // Option+n opens the new-VM picker from the current VM's project.
+            'n' if self.screen == Screen::Manage => self.pick_new_vm(),
             'p' if self.screen == Screen::Manage => {
                 self.manage_prompt = Some(String::new());
                 self.screen = Screen::ManagePrompt;
@@ -5641,8 +5674,6 @@ impl App {
             // then a fresh agent — in the row's own project when the cursor
             // names one (the footer advertises row-local behavior), falling
             // back to the prompt's target from the launcher and the tail.
-            // On an agent (or one of its threads) the box already exists, so
-            // the pick starts a new session ON it instead.
             KeyCode::Char('n') => {
                 if self.loading.active {
                     return None;
@@ -5812,26 +5843,26 @@ impl App {
         self.harness_pick = Some(self.harness);
         self.harness_bootstrap = Default::default();
         self.harness_use_bootstrap = true;
+        self.harness_field = 0;
         self.screen = Screen::HarnessPick;
     }
 
-    fn pick_new_session(&mut self) -> Option<Effect> {
+    fn pick_new_vm(&mut self) -> Option<Effect> {
         if self.loading.active {
             return None;
         }
-        let selected = if self.focus == ManageFocus::Session && self.active.is_some() {
-            self.active_session()
-                .and_then(|s| s.environment_id().map(|e| (s.agent_id.clone(), e)))
+        let environment = if self.focus == ManageFocus::Session && self.active.is_some() {
+            self.active_session().and_then(|s| s.environment_id())
         } else {
             match self.selected_row().map(|r| r.kind) {
-                Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) => self
-                    .agent_at(w, p, e, a)
-                    .map(|(id, _)| (id, self.tree[w].projects[p].envs[e].id.clone())),
+                Some(RowKind::Agent(w, p, e, _) | RowKind::Session(w, p, e, _, _)) => {
+                    Some(self.tree[w].projects[p].envs[e].id.clone())
+                }
                 _ => None,
             }
         };
-        let Some((id, env)) = selected else {
-            self.toast_error("Select a VM to start a new session. Press n for a new VM.");
+        let Some(env) = environment else {
+            self.toast_error("Select a VM to use its project, or press n for a new VM.");
             return None;
         };
         let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
@@ -5844,21 +5875,28 @@ impl App {
             self.toast_error("The VM's project is unavailable. Refresh the tree and try again.");
             return None;
         };
-        self.begin_harness_pick(target, Some(id));
+        self.begin_harness_pick(target, None);
         None
     }
 
     fn toggle_launch_bootstrap(&mut self) {
         use super::bootstrap_setup::LaunchChoice;
         self.harness_use_bootstrap = !self.harness_use_bootstrap;
+        if !self.harness_use_bootstrap && self.harness_field == 2 {
+            self.harness_field = 1;
+        }
         if self.harness_use_bootstrap && self.harness_bootstrap == LaunchChoice::None {
             self.harness_bootstrap = LaunchChoice::Default;
         }
     }
 
-    /// Choose an agent for a new VM (`n`) or a session on the current VM (`⌥n`).
+    /// Choose an agent for a new VM (`n` / `⌥n`) or an existing connection.
     fn on_key_harness_pick(&mut self, key: KeyEvent) -> Option<Effect> {
         if self.harness_pick_agent.is_none() {
+            if key.code == KeyCode::Char('p') {
+                self.start_target_pick();
+                return None;
+            }
             if key.code == KeyCode::Char('b') {
                 return self.open_launch_bootstraps();
             }
@@ -5870,13 +5908,47 @@ impl App {
         let cursor = self.harness_pick?;
         let visible = harness_picker_indices(cursor);
         let row = visible.iter().position(|index| *index == cursor)?;
+        if self.harness_pick_agent.is_none() && self.harness_field > 0 {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.harness_field = if self.harness_field == 3 && !self.harness_use_bootstrap {
+                        1
+                    } else {
+                        self.harness_field - 1
+                    };
+                    return None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.harness_field = if self.harness_field == 1 && !self.harness_use_bootstrap {
+                        3
+                    } else {
+                        (self.harness_field + 1).min(3)
+                    };
+                    return None;
+                }
+                KeyCode::Enter => {
+                    match self.harness_field {
+                        1 => self.toggle_launch_bootstrap(),
+                        2 => return self.open_launch_bootstraps(),
+                        3 => self.start_target_pick(),
+                        _ => {}
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.harness_pick = Some(visible[row.saturating_sub(1)]);
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.harness_pick = Some(visible[(row + 1).min(visible.len() - 1)]);
+                if row + 1 == visible.len() && self.harness_pick_agent.is_none() {
+                    self.harness_field = 1;
+                } else {
+                    self.harness_pick = Some(visible[(row + 1).min(visible.len() - 1)]);
+                }
                 None
             }
             KeyCode::Tab => {
@@ -10689,7 +10761,83 @@ mod tests {
     }
 
     #[test]
-    fn alt_n_chooses_a_new_session_on_the_selected_vm() {
+    fn alt_n_controls_support_keyboard_navigation_and_project_selection() {
+        let mut a = loaded_app();
+        let mut other_project = a.tree[0].projects[0].clone();
+        other_project.id = "other-project".into();
+        other_project.name = "Another project".into();
+        other_project.envs.truncate(1);
+        other_project.envs[0].id = "other-environment".into();
+        a.tree[0].projects.push(other_project);
+        let original = a.target_at((0, 0, 0)).unwrap();
+        a.default_project = Some(original.project_id.clone());
+        let mut session = super::super::session::Session::for_test("ca_1", "builder").unwrap();
+        session.ssh_target = "agent:env_prod:ca_1".into();
+        a.sessions.push(session);
+        a.active = Some(0);
+        a.focus = ManageFocus::Session;
+        assert_eq!(a.on_key(alt('n')), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(a.harness_pick_target, Some(original.clone()));
+        a.harness_pick = Some(HARNESSES.len() - 1);
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(a.harness_field, 1);
+        a.on_key(key(KeyCode::Enter));
+        assert!(!a.harness_use_bootstrap);
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(a.harness_field, 3);
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(a.screen, Screen::TargetPick);
+        assert_eq!(
+            a.target_pick.as_ref().unwrap().options[0].project_id,
+            original.project_id
+        );
+        let picker = a.target_pick.as_mut().unwrap();
+        picker.cursor = picker
+            .options
+            .iter()
+            .position(|t| t.project_id != original.project_id)
+            .unwrap();
+        let chosen = picker.options[picker.cursor].clone();
+        a.harness_bootstrap =
+            super::super::bootstrap_setup::LaunchChoice::Named("old-project".into());
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(a.harness_pick_target, Some(chosen.clone()));
+        assert_eq!(a.harness_bootstrap, Default::default());
+        assert_eq!(
+            a.default_project.as_deref(),
+            Some(original.project_id.as_str())
+        );
+        a.on_key(key(KeyCode::Char('p')));
+        a.on_key(key(KeyCode::Esc));
+        assert_eq!(a.harness_pick_target, Some(chosen.clone()));
+        a.on_key(key(KeyCode::Up));
+        assert_eq!(a.harness_field, 1);
+        a.on_key(key(KeyCode::Enter));
+        a.on_key(key(KeyCode::Down));
+        assert_eq!(a.harness_field, 2);
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::LoadBootstraps {
+                environment_id: chosen.environment_id.clone(),
+            })
+        );
+        a.on_key(key(KeyCode::Esc));
+        a.on_key(key(KeyCode::Up));
+        a.on_key(key(KeyCode::Up));
+        let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+            panic!("expected launch")
+        };
+        assert_eq!(req.environment_id, chosen.environment_id);
+        assert_eq!(req.project_id, chosen.project_id);
+        assert!(req.force_new);
+        assert!(!req.new_session);
+        assert_eq!(req.agent_id, None);
+    }
+
+    #[test]
+    fn alt_n_chooses_a_new_vm_in_the_selected_vms_environment() {
         let mut a = loaded_app();
         a.cursor = a
             .rows()
@@ -10698,14 +10846,15 @@ mod tests {
             .unwrap();
         assert_eq!(a.on_key(alt('n')), None);
         assert_eq!(a.screen, Screen::HarnessPick);
-        assert_eq!(a.harness_pick_agent.as_deref(), Some("ca_1"));
+        assert_eq!(a.harness_pick_agent, None);
+        assert!(!a.harness_pick_connect);
         a.harness_pick = HARNESSES.iter().position(|h| *h == "codex");
         let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected a new session");
+            panic!("expected a new VM");
         };
-        assert!(!req.force_new);
-        assert!(req.new_session);
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
+        assert!(req.force_new);
+        assert!(!req.new_session);
+        assert_eq!(req.agent_id, None);
         assert_eq!(req.environment_id, "env_prod");
         assert_eq!(req.harness, "codex");
         assert_eq!(req.prompt, None);
@@ -10886,13 +11035,13 @@ mod tests {
             environment_name: "production".into(),
         });
         a.on_key(key(KeyCode::Char('n')));
-        for _ in 0..HARNESSES.len() {
+        while a.harness_pick != Some(HARNESSES.len() - 1) {
             a.on_key(key(KeyCode::Down));
         }
         assert_eq!(
             a.harness_pick,
             Some(HARNESSES.len() - 1),
-            "the cursor bottoms out on shell"
+            "shell is the last agent before the creation controls"
         );
         let effect = a.on_key(key(KeyCode::Enter));
         let Some(Effect::Launch(req)) = effect else {
@@ -10944,16 +11093,23 @@ mod tests {
             "closing the card returns to typing in the session"
         );
 
-        // Option+n chooses a new session on the focused VM.
+        // Option+n creates a new VM using the focused VM's environment.
         a.sessions[0].ssh_target = "agent:env_prod:ca_1".into();
+        a.target = a.target_at((0, 0, 1));
         assert_eq!(a.on_key(alt('n')), None);
         assert_eq!(a.screen, Screen::HarnessPick);
+        assert_eq!(
+            a.harness_pick_target.as_ref().unwrap().environment_id,
+            "env_prod"
+        );
+        assert_eq!(a.harness_pick_agent, None);
         let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
-            panic!("expected new session")
+            panic!("expected new VM")
         };
-        assert_eq!(req.agent_id.as_deref(), Some("ca_1"));
-        assert!(req.new_session);
-        assert!(!req.force_new);
+        assert_eq!(req.agent_id, None);
+        assert!(!req.new_session);
+        assert!(req.force_new);
+        assert_eq!(req.environment_id, "env_prod");
     }
 
     /// Releasing a focused session with ⇧esc also un-maximizes: focus moving

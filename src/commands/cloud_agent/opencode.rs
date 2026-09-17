@@ -214,11 +214,12 @@ async fn start_with(
     password: &str,
     beta: bool,
 ) -> Result<Connection> {
-    let response = bootstrap(
-        command,
-        json!({ "directory": directory, "password": password, "harness": if beta { "opencode2" } else { "opencode" } }),
-    )
-    .await?;
+    let mut request = json!({ "directory": directory, "password": password, "harness": if beta { "opencode2" } else { "opencode" } });
+    if beta {
+        request["runtime_shim"] = super::opencode2::SHIM.into();
+        request["version"] = local::server_version().await?.into();
+    }
+    let response = bootstrap(command, request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
     // A fresh client carries no Railway API credentials. Never follow a
@@ -287,11 +288,13 @@ pub(crate) async fn reconnect(
     info: &crate::commands::code::ConnectInfo,
     beta: bool,
 ) -> Result<Connection> {
-    let response = bootstrap(
-        relay_command(info),
-        json!({"action": "connect", "harness": if beta {"opencode2"} else {"opencode"}}),
-    )
-    .await?;
+    let mut request =
+        json!({"action": "connect", "harness": if beta {"opencode2"} else {"opencode"}});
+    if beta {
+        request["runtime_shim"] = super::opencode2::SHIM.into();
+        request["version"] = local::server_version().await?.into();
+    }
+    let response = bootstrap(relay_command(info), request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
     validate_url(&connection.url)?;
@@ -321,7 +324,7 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
         .timeout(Duration::from_secs(5))
         .build()?;
     let health =
-        validate_url(&connection.url)?.join(if beta { "api/health" } else { "global/health" })?;
+        validate_url(&connection.url)?.join(if beta { "api/status" } else { "global/health" })?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let response = client
@@ -341,7 +344,13 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
                     .await
                     .ok()
                     .is_some_and(|body| {
-                        body["healthy"] == true && (!beta || body["version"].is_string())
+                        if beta {
+                            body["version"].is_string()
+                                && body["pid"].is_u64()
+                                && body["urls"].is_array()
+                        } else {
+                            body["healthy"] == true
+                        }
                     })
             {
                 let unauthenticated = client.get(health.clone()).send().await?;

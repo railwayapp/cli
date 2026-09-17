@@ -7,21 +7,29 @@ is required. Run any command with `--help` for its options.
 ## Launch and reconnect
 
 ```sh
+railway code                         # new VM with railway-agent-tui
 railway code --codex
 railway code --opencode
 railway code --claude
 railway code --codex connect my-box
 ```
 
-An explicit agent flag on `railway code` creates a new VM unless `connect` or
+Bare `railway code` opens `railway-agent-tui` on a new VM. An explicit agent
+flag also creates a new VM unless `connect` or
 `--agent` selects an existing one. `connect [agent]` connects to an existing
 Codex/OpenCode server; `--agent <name-or-id>` selects a VM for server setup.
+
+The local Railway Agent client checks for updates on each launch. If GitHub
+rate-limits the check, the CLI retries with available GitHub authentication.
+If the update check still fails, including when offline, it uses the newest
+working client already installed on your machine.
 
 Codex, OpenCode, and OpenCode2 normally run a local client connected to the VM.
 Their clients run inside the Railway CA interface with command approvals disabled.
 Codex matches the local client to its server version and trusts the remote project.
 Missing OpenCode clients can be installed after confirmation. OpenCode2 downloads
-its latest Beta runtime onto the VM at startup.
+its official V2 runtime onto the VM at startup. A local V2 client selects the
+remote version; reconnect upgrades older servers without downgrading the client.
 
 Use `remote` to run the client on the VM. Use `--` to pass arguments to the agent:
 
@@ -53,8 +61,10 @@ Use `railway ca ssh <agent>` for a shell, `--session [name]` to attach to or sta
 a terminal session, and `--resume` to resume the most recent Claude conversation
 in a fresh terminal session after sleep or restart.
 
-In the management interface, Option+F toggles the tree and Option+N starts another
-session. Piped sessions and agent arguments after `--` use the terminal directly.
+In the management interface, Option+F toggles the tree. Option+N opens the new-VM
+picker from an existing session, with agent, bootstrap, and project selection.
+It starts with the current VM's project and environment and creates a fresh VM.
+Piped sessions and agent arguments after `--` use the terminal directly.
 
 ## Authentication
 
@@ -156,3 +166,9 @@ repeated flags, and service references such as `DB_URL=postgres.DATABASE_URL` or
 Local clients request their code endpoint automatically. When configuring one
 explicitly on `railway code` or `ca start`, `--code-endpoint` and `--code-port`
 require an explicit `--new`, even when the launcher would create a VM by default.
+
+In the `railway ca` main screen, press `n` for a new VM. Below the agent list,
+use the arrow keys and Enter or click to toggle **Use bootstrap**. When enabled,
+**Select Bootstrap** appears below it (`b` opens the list). **Select Project**
+(`p`) chooses the project and environment for this VM, with the saved default
+project first. This choice does not change your saved default project.
