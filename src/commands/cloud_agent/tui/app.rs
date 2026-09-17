@@ -120,7 +120,6 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
             ("d", "delete, with a confirmation"),
             ("⌥r", "refresh everything, from anywhere"),
             ("r", "refresh this environment"),
-            ("shift+r", "look for agents in every project"),
         ],
     ),
     (
@@ -742,8 +741,7 @@ pub enum RowKind {
     Session(usize, usize, usize, usize, usize),
     /// A non-selectable line under an environment: loading, empty, or failed.
     Note(usize, usize, usize),
-    /// The collapsible tail of projects with no agents — where `n` goes to
-    /// start somewhere new.
+    /// The collapsible list of all projects — where `n` creates an agent.
     OtherProjects,
     /// A non-selectable line that belongs to no environment: the empty state.
     Hint,
@@ -985,13 +983,9 @@ pub enum Effect {
     SaveDefaultProject(Box<Target>),
     /// Open a link that was double-clicked in a session.
     OpenUrl(String),
-    /// Look for agents in every project, on request. See
-    /// [`App::scan_environments`].
-    ScanEverywhere,
     /// Ask the platform for everything again: one account-wide agent query,
     /// plus the sessions of the agents someone is actually looking at. Raised
-    /// by ⌥r, by the auto-refresh tick, and on re-entry after the TUI has
-    /// handed the terminal back. See [`super::start_refresh`].
+    /// by ⌥r and when revealing the sidebar. See [`super::start_refresh`].
     RefreshAll,
     /// Put an SSH shell command for this VM on the clipboard.
     CopySsh {
@@ -1257,9 +1251,7 @@ pub struct App {
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
     pub cursor: usize,
-    /// Whether the projects tail is open. `None` decides automatically: open
-    /// while there are no agents to show — the tail is the whole tree then —
-    /// and folded away once agent groups exist to lead with.
+    /// Whether the projects list is open. Defaults to open, even with agents.
     pub others_expanded: Option<bool>,
     /// Transient one-line message shown in the header.
     pub status: String,
@@ -1400,9 +1392,8 @@ impl App {
             others_expanded: None,
             status: String::new(),
         };
-        // Open the first workspace so the projects tail is never a wall of
-        // collapsed rows on a multi-workspace account.
-        if let Some(ws) = app.tree.first_mut() {
+        // Make every project's create target visible on multi-workspace accounts.
+        for ws in &mut app.tree {
             ws.expanded = true;
         }
         app.clamp_cursor();
@@ -1840,9 +1831,8 @@ impl App {
     /// any is promoted to a top-level group — always open, never a level to
     /// expand. The containers survive as context rather than navigation: the
     /// group is labelled with its project (and environment, when that adds
-    /// something), and projects with nothing in them wait in a collapsible
-    /// tail at the bottom, which is where `n` goes to start an agent
-    /// somewhere new.
+    /// something). All projects remain selectable in the collapsible list
+    /// below, where `n` creates another agent in any environment.
     pub fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         // The launcher, pinned first: where the cursor starts, and where it
@@ -1978,34 +1968,16 @@ impl App {
         }
     }
 
-    /// The projects with agent-less environments, folded under one heading at
-    /// the bottom.
-    ///
-    /// This is the browse-to-create surface the groups can't be: selecting a
-    /// project or environment here and pressing `n` is how the first agent
-    /// gets somewhere new. A project appears whenever it has an environment
-    /// that is not a group above — usually because it has no agents at all,
-    /// but also when its staging sits empty next to an occupied production;
-    /// every environment stays reachable for `n`, `t`, and `r`. Workspaces
-    /// appear as a level only when there is more than one to tell apart.
+    /// Every project and environment stays reachable for `n`, `t`, and `r`,
+    /// including those already hosting agents in the thread list above.
+    /// Workspaces appear as a level only when there is more than one.
     fn push_project_tail(&self, rows: &mut Vec<Row>, groups: &[(usize, usize, usize)]) {
         let default_project = self.default_project.as_deref();
         let tails: Vec<(usize, Vec<usize>)> = self
             .tree
             .iter()
             .enumerate()
-            .map(|(w, ws)| {
-                let order = sorted_projects(ws, default_project)
-                    .into_iter()
-                    .filter(|&p| {
-                        ws.projects[p]
-                            .envs
-                            .iter()
-                            .any(|env| env.agents_vec().is_empty())
-                    })
-                    .collect();
-                (w, order)
-            })
+            .map(|(w, ws)| (w, sorted_projects(ws, default_project)))
             .collect();
         let total: usize = tails.iter().map(|(_, order)| order.len()).sum();
         if total == 0 {
@@ -2014,17 +1986,11 @@ impl App {
         if !groups.is_empty() {
             rows.push(separator_row());
         }
-        let open = self.others_expanded.unwrap_or(groups.is_empty());
+        let open = self.others_expanded.unwrap_or(true);
         rows.push(Row {
             depth: 0,
             kind: RowKind::OtherProjects,
-            // "Other" is relative to the groups; without any there is nothing
-            // for these to be other than.
-            label: if groups.is_empty() {
-                "projects".into()
-            } else {
-                "other projects".into()
-            },
+            label: "projects".into(),
             note: format!("({total})"),
             status: None,
             expanded: Some(open),
@@ -2070,25 +2036,15 @@ impl App {
                     },
                     status: None,
                     expanded: Some(proj.expanded),
-                    // Everything here is empty, so everything recedes — except
-                    // the default, which is where agents go and has to be
-                    // findable even while empty.
-                    dimmed: !is_default,
+                    dimmed: !is_default && proj.envs.iter().all(|env| env.agents_vec().is_empty()),
                 });
                 if !proj.expanded {
                     continue;
                 }
                 for (e, env) in proj.envs.iter().enumerate() {
-                    // An environment with agents is a group above; repeating
-                    // it down here would be the same thing twice.
-                    if !env.agents_vec().is_empty() {
-                        continue;
-                    }
                     let note = match &env.agents {
                         Load::Loading => "…".into(),
                         Load::Failed(_) => "!".into(),
-                        // Everything left here is empty, and a marker against
-                        // every empty environment would be noise.
                         _ => String::new(),
                     };
                     rows.push(Row {
@@ -2349,8 +2305,7 @@ impl App {
     /// environment that already had a list gets the snapshot instead — that is
     /// what makes this a refresh rather than a first fill, and it is the only
     /// thing that can tell the tree an agent was created or deleted somewhere
-    /// else. (Skipping environments that already had a list is why `shift+r`
-    /// used to report "already loaded" and change nothing.)
+    /// else.
     ///
     /// A snapshot may not overwrite a newer request's answer or settle a
     /// mutation accepted after the request began. Both fetch paths compare
@@ -2424,9 +2379,8 @@ impl App {
 
     /// Put the cursor back on the row it was on, wherever that row now sits.
     ///
-    /// A row can be gone entirely — a load can fold the projects tail the
-    /// cursor was in — and then the nearest selectable row is the best that
-    /// can be done.
+    /// A row can be gone entirely after a deletion or collapse; then use the
+    /// nearest selectable row.
     fn restore_cursor(&mut self, anchor: Option<RowKind>) {
         if let Some(kind) = anchor {
             let rows = self.rows();
@@ -5741,9 +5695,6 @@ impl App {
             KeyCode::Char('s') => self.agent_op(AgentOp::Sleep),
             KeyCode::Char('w') => self.agent_op(AgentOp::Wake),
             KeyCode::Char('d') => self.agent_op(AgentOp::Delete),
-            // Startup loads only what a keypress needs, so this is how an agent
-            // in a project you haven't opened gets found.
-            KeyCode::Char('R') => Some(Effect::ScanEverywhere),
             KeyCode::Char('r') => {
                 let (w, p, e) = self.env_of(row?.kind)?;
                 let env = self.tree.get_mut(w)?.projects.get_mut(p)?.envs.get_mut(e)?;
@@ -6155,47 +6106,22 @@ impl App {
         }
     }
 
-    /// Every environment that has not been fetched, as load requests.
-    ///
-    /// The whole-account scan, which is what `shift+r` asks for. Startup no
-    /// longer does this: it is one request per environment, so it costs a large
-    /// account hundreds of them. As a deliberate action the cost is the user's
-    /// to spend, and a rate limit stops it partway rather than pressing on.
-    pub fn scan_environments(&mut self) -> Vec<Effect> {
-        let mut out = Vec::new();
-        for w in 0..self.tree.len() {
-            for p in 0..self.tree[w].projects.len() {
-                for e in 0..self.tree[w].projects[p].envs.len() {
-                    let env = &mut self.tree[w].projects[p].envs[e];
-                    if env.agents != Load::NotLoaded {
-                        continue;
-                    }
-                    env.agents = Load::Loading;
-                    out.push(Effect::LoadAgents {
-                        environment_id: env.id.clone(),
-                        path: (w, p, e),
-                    });
-                }
-            }
-        }
-        out
-    }
-
     /// The environments a refresh should ask about again, one request each.
     ///
     /// Only for callers that cannot use the account-wide query — see
-    /// [`Self::account_query_unavailable`]. Scoped to environments that already
-    /// have an answer: those are the ones with rows on screen that could now be
-    /// wrong. Environments that have never loaded are left to `shift+r`, since
-    /// asking about all of them is the request-per-environment cost this TUI is
-    /// careful about. One still `Loading` is already on its way.
-    pub fn environments_to_refresh(&self) -> Vec<Effect> {
+    /// [`Self::account_query_unavailable`]. An explicit ⌥r also discovers
+    /// unopened environments; incidental refreshes only revisit answered ones,
+    /// avoiding an account-wide sweep just because the sidebar was revealed.
+    /// One still `Loading` is already on its way. Keep loaded rows visible.
+    pub fn environments_to_refresh(&mut self, discover_unloaded: bool) -> Vec<Effect> {
         let mut out = Vec::new();
-        for (w, ws) in self.tree.iter().enumerate() {
-            for (p, project) in ws.projects.iter().enumerate() {
-                for (e, env) in project.envs.iter().enumerate() {
-                    if !matches!(env.agents, Load::Loaded(_) | Load::Failed(_)) {
-                        continue;
+        for (w, ws) in self.tree.iter_mut().enumerate() {
+            for (p, project) in ws.projects.iter_mut().enumerate() {
+                for (e, env) in project.envs.iter_mut().enumerate() {
+                    match env.agents {
+                        Load::NotLoaded if discover_unloaded => env.agents = Load::Loading,
+                        Load::Loaded(_) | Load::Failed(_) => {}
+                        _ => continue,
                     }
                     out.push(Effect::LoadAgents {
                         environment_id: env.id.clone(),
@@ -12127,8 +12053,7 @@ mod tests {
         assert_eq!(project_order(&a), ["Alpha", "beta", "mono", "zebra"]);
     }
 
-    /// A project that gains agents leaves the tail and leads the tree as a
-    /// group — groups with something running first.
+    /// Agent groups lead with running agents, while every project stays visible.
     #[test]
     fn projects_with_agents_lead_the_thread_list() {
         let mut a = ordering_app();
@@ -12143,15 +12068,15 @@ mod tests {
             .collect();
         assert_eq!(threads, ["two", "one"], "running leads");
 
-        // Threads exist now, so the untouched tail folded itself away…
-        assert_eq!(project_order(&a), Vec::<String>::new());
-        // …and holds the rest once opened.
-        a.others_expanded = Some(true);
-        assert_eq!(project_order(&a), ["Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
 
         // An environment that answers with nothing does not promote anyone.
         a.agents_loaded((0, 1, 0), Ok(Vec::new()));
-        assert_eq!(project_order(&a), ["Alpha", "beta"]);
+        assert_eq!(project_order(&a), ["mono", "zebra", "Alpha", "beta"]);
+
+        // Users can still fold the project list explicitly.
+        a.others_expanded = Some(false);
+        assert!(project_order(&a).is_empty());
     }
 
     /// Empty projects are de-emphasised, and stop being so the moment they
@@ -12167,11 +12092,9 @@ mod tests {
         );
 
         a.agents_loaded((0, 2, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        // With an agent, mono's thread is on the list and its project row is
-        // gone from the tail.
         let rows = a.rows();
         assert!(rows.iter().any(|r| r.label == "one"), "{rows:#?}");
-        assert!(!rows.iter().any(|r| r.label == "mono"));
+        assert!(!rows.iter().find(|r| r.label == "mono").unwrap().dimmed);
     }
 
     /// Re-ordering must not move the selection to a different row: the cursor
@@ -12188,8 +12111,7 @@ mod tests {
         assert_eq!(a.selected_row().unwrap().label, "one");
     }
 
-    /// The tail header counts the projects folded under it, and says what
-    /// they are other than once there are groups to be other than.
+    /// The project count is independent of agent discovery.
     #[test]
     fn the_tail_header_counts_its_projects() {
         let mut a = ordering_app();
@@ -12203,8 +12125,9 @@ mod tests {
         assert_eq!(header(&a).note, "(4)");
 
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        assert_eq!(header(&a).label, "other projects");
-        assert_eq!(header(&a).note, "(3)");
+        assert_eq!(header(&a).label, "projects");
+        assert_eq!(header(&a).note, "(4)");
+        assert_eq!(header(&a).expanded, Some(true));
     }
 
     /// Expanding an agent asks the platform what is running on it, every time:
@@ -12701,15 +12624,14 @@ mod tests {
         assert!(a.toast.is_none());
     }
 
-    /// Without `myCloudAgents` a refresh asks per environment — but only about
-    /// the ones with rows on screen. Sweeping the account is `shift+r`, which is
-    /// a deliberate act because it costs a request each.
+    /// Without `myCloudAgents` an incidental refresh only asks about answered
+    /// environments. Discovering unopened ones needs an explicit ⌥r.
     #[test]
     fn the_fallback_refresh_asks_only_about_answered_environments() {
         let mut a = loaded_app();
         // env_prod is loaded (loaded_app), env_stg has never been asked about.
         assert_eq!(
-            a.environments_to_refresh(),
+            a.environments_to_refresh(false),
             vec![Effect::LoadAgents {
                 environment_id: "env_prod".into(),
                 path: (0, 0, 0)
@@ -12718,7 +12640,7 @@ mod tests {
 
         // One still in flight is already on its way.
         a.tree[0].projects[0].envs[0].agents = Load::Loading;
-        assert!(a.environments_to_refresh().is_empty());
+        assert!(a.environments_to_refresh(false).is_empty());
     }
 
     /// ⌥enter hands the whole terminal over; `f` does the same, because
@@ -13203,25 +13125,47 @@ mod tests {
         }
     }
 
-    /// `shift+r` is how an agent in a project nobody has opened gets found: the
-    /// scan startup used to do, when the user asks for it.
     #[test]
-    fn shift_r_scans_every_environment() {
+    fn shift_r_no_longer_triggers_discovery() {
         let mut a = loaded_app();
-        // Off the launcher, where `R` is a letter for the prompt.
+        // Off the launcher, where R must not trigger another refresh action.
         a.on_key(key(KeyCode::Down));
+        assert_eq!(a.on_key(key(KeyCode::Char('R'))), None);
         assert_eq!(
-            a.on_key(key(KeyCode::Char('R'))),
-            Some(Effect::ScanEverywhere)
+            a.on_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            None
         );
+        assert!(!a.refresh_announce);
 
         let mut a = app();
-        let effects = a.scan_environments();
-        assert_eq!(effects.len(), 2, "every environment in the fixture");
+        assert_eq!(a.on_key(key(KeyCode::Char('R'))), None);
+        assert_eq!(a.prompt, "R", "uppercase R remains prompt text");
+    }
+
+    #[test]
+    fn explicit_fallback_refresh_also_discovers_unopened_environments() {
+        let mut a = loaded_app();
+        a.account_query_unavailable = true;
+        assert_eq!(a.on_key(alt('r')), Some(Effect::RefreshAll));
+        let discover_unloaded = std::mem::take(&mut a.refresh_announce);
+        let effects = a.environments_to_refresh(discover_unloaded);
+        assert_eq!(effects.len(), 2, "both loaded and unopened environments");
+        assert!(matches!(
+            a.tree[0].projects[0].envs[0].agents,
+            Load::Loaded(_)
+        ));
+        assert_eq!(a.tree[0].projects[0].envs[1].agents, Load::Loading);
+        // An incidental refresh cannot turn into another discovery scan, and
+        // a second explicit refresh must not duplicate an in-flight load.
+        assert!(!a.refresh_announce);
+        assert_eq!(a.environments_to_refresh(true).len(), 1);
+        a.tree[0].projects[0].envs[0].agents = Load::Loading;
         assert!(
-            a.scan_environments().is_empty(),
-            "a second scan must not refetch what is already in flight"
+            a.environments_to_refresh(true).is_empty(),
+            "do not refetch environments already in flight"
         );
+        a.tree[0].projects[0].envs[0].agents = Load::Failed("temporary error".into());
+        assert_eq!(a.environments_to_refresh(true).len(), 1, "retry failures");
     }
 
     /// A rate limit puts what was in flight back, so opening the row retries
@@ -13312,10 +13256,9 @@ mod tests {
         assert!(toast.text.contains("502 from backboard"), "{}", toast.text);
     }
 
-    /// A project with agents in one environment still shows its empty ones in
-    /// the tail — they have to stay reachable for `n`, `t`, and `r`.
+    /// All environments stay selectable, including when every one has agents.
     #[test]
-    fn empty_environments_of_a_grouped_project_stay_reachable() {
+    fn all_environments_of_a_grouped_project_stay_reachable() {
         let mut a = loaded_app();
         a.others_expanded = Some(true);
         let rows = a.rows();
@@ -13324,13 +13267,11 @@ mod tests {
                 .any(|r| r.kind == RowKind::Environment(0, 0, 1) && r.label == "staging"),
             "{rows:#?}"
         );
-        // The occupied environment is a group above, not a tail row too.
-        assert!(!rows.iter().any(|r| r.kind == RowKind::Environment(0, 0, 0)));
+        assert!(rows.iter().any(|r| r.kind == RowKind::Environment(0, 0, 0)));
 
-        // Once every environment has agents the project leaves the tail.
         a.agents_loaded((0, 0, 1), Ok(vec![agent("ca_9", "niner", "running")]));
         assert!(
-            !a.rows()
+            a.rows()
                 .iter()
                 .any(|r| matches!(r.kind, RowKind::Project(..)))
         );
@@ -13347,10 +13288,9 @@ mod tests {
         assert_eq!(a.screen, Screen::TargetPick, "no target: ask for one");
     }
 
-    /// Loading an environment from the tail can promote it into a group; the
-    /// cursor follows it up rather than being stranded in the folded tail.
+    /// Agent discovery preserves the selected environment as a create target.
     #[test]
-    fn the_cursor_follows_an_environment_promoted_to_a_group() {
+    fn the_cursor_stays_on_an_environment_after_agent_discovery() {
         let mut a = app();
         a.screen = Screen::Manage;
         a.cursor = a.rows().iter().position(|r| r.label == "devtools").unwrap();
@@ -13362,9 +13302,54 @@ mod tests {
             .unwrap();
         a.on_key(key(KeyCode::Right));
         a.agents_loaded((0, 0, 0), Ok(vec![agent("ca_1", "one", "running")]));
-        // The environment left the tail for the thread list; the cursor lands
-        // on a row that still exists rather than the one that vanished.
-        assert!(a.selected_row().unwrap().selectable(), "{:#?}", a.rows());
+        assert_eq!(
+            a.selected_row().unwrap().kind,
+            RowKind::Environment(0, 0, 0)
+        );
+        a.on_key(key(KeyCode::Char('n')));
+        assert_eq!(a.screen, Screen::HarnessPick);
+        let target = a.harness_pick_target.as_ref().unwrap();
+        assert_eq!(target.project_id, "proj_1");
+        assert_eq!(target.environment_id, "env_prod");
+    }
+
+    #[test]
+    fn projects_in_every_workspace_can_create_agents_even_when_occupied() {
+        let mut workspaces = tree();
+        let mut second = workspaces[0].clone();
+        second.id = "ws_other".into();
+        second.name = "Other workspace".into();
+        second.projects[0].id = "proj_other".into();
+        second.projects[0].envs[0].id = "env_other".into();
+        workspaces.push(second);
+        let mut a = App::new(workspaces, None, Some("grok"), None, None, true);
+        a.screen = Screen::Manage;
+        for w in 0..2 {
+            for e in 0..2 {
+                a.agents_loaded(
+                    (w, 0, e),
+                    Ok(vec![agent(&format!("ca_{w}_{e}"), "occupied", "running")]),
+                );
+            }
+        }
+        for w in 0..2 {
+            a.cursor = a
+                .rows()
+                .iter()
+                .position(|r| r.kind == RowKind::Project(w, 0))
+                .unwrap();
+            a.on_key(key(KeyCode::Char('n')));
+            assert_eq!(a.screen, Screen::HarnessPick);
+            let target = a.harness_pick_target.as_ref().unwrap();
+            assert_eq!(target.project_id, a.tree[w].projects[0].id);
+            assert_eq!(target.environment_id, a.tree[w].projects[0].envs[0].id);
+            let Some(Effect::Launch(req)) = a.on_key(key(KeyCode::Enter)) else {
+                panic!("expected launch in selected project");
+            };
+            assert_eq!(req.project_id, a.tree[w].projects[0].id);
+            assert!(req.force_new);
+            assert!(req.agent_id.is_none());
+        }
     }
 
     /// "None yet" is a definitive claim: the hint searches while anything is

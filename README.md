@@ -274,19 +274,18 @@ details; rerun the command to retry.
 The CLI also prints the server URL, username, password, and project directory
 for manual setup, plus a Railway reconnect command:
 `railway code --opencode connect <agent>` (or `--opencode2` for Beta).
-After successful setup in an interactive terminal, it clears the setup messages
-and shows the connection details, with the Desktop update confirmation inside
-the result panel. Failed setup keeps its diagnostic output visible.
 The matching local terminal client launches automatically inside the Railway CA
-frame. If that client is missing, Railway offers to install it first. Declining,
-Esc, or Ctrl+C at the installation prompt leaves the server running and prints
-the connection details. Installations initiated inside the frame run quietly.
+frame. Interactive starts show provisioning and client setup in its loading
+pane, installing a missing client quietly. Reconnecting with `connect` offers
+to install a missing client first; declining leaves the server running and
+prints the connection details. Use `railway code get-config` to view saved
+connection and Desktop settings. Failed setup keeps its diagnostic output visible.
 Standard and Beta clients are detected and installed separately.
 
 New OpenCode agents are named `oc-railg-3ed` (standard) or `oc2-railg-3ed`
-(Beta); Codex uses `codex-railg-3ed`, Claude Code uses `cc-railg-3ed`, and
-Railway uses `rlwy-railg-3ed`: the first five letters/digits of the project name,
-lowercase, plus a random three-character suffix. When using your default cloud
+(Beta); Codex uses `codex-railg-3ed`, Claude Code uses `cc-railg-3ed`, Grok uses
+`grok-railg-3ed`, and Railway uses `rlwy-railg-3ed`: the first five letters/digits
+of the project name, lowercase, plus a random three-character suffix. When using your default cloud
 agents project, the label comes from the local repository or directory instead.
 Existing names are checked before creation; `--name` overrides the generated
 name. The same naming applies to `remote` and `railway ca desktop`.
@@ -549,6 +548,11 @@ when Option+F / Alt+F reveals the sidebar, and on explicit refresh. Loaded rows,
 their order, expansion choices, and the selected conversation stay in place.
 The machine's status icon always represents its machine state.
 
+Use **Option+R / Alt+R** to refresh agents and visible conversations from anywhere,
+including inside a session. It also finds agents in unopened projects; there is
+no separate discovery shortcut. Plain **r** refreshes the selected environment
+when the sidebar is focused.
+
 Press **x / X** on a saved conversation to delete it from its harness. The row
 disappears immediately while native deletion runs in the background; failures
 restore the row and show an error. This deletes the saved conversation, rather
@@ -574,6 +578,9 @@ Selecting a Claude or Grok thread reconnects to its verified live terminal when
 available, or resumes its native UI from the recorded project and configuration
 directory. Claude background jobs use `claude attach`. Live metadata and hooks
 update thread status and associate native panes with their conversation IDs.
+Grok launches and resumed conversations use `--trust --always-approve` on the
+cloud VM, skipping folder-trust and tool-approval prompts. SSH autostart uses
+the same flags after the next `railway code` provision; local settings are unchanged.
 Native Codex and OpenCode client actions update the pane's exact conversation
 identity through a per-pane authenticated bridge.
 History belongs to the VM where it was saved; wake a sleeping agent before

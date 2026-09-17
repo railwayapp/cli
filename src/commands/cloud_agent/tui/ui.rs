@@ -1219,12 +1219,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
                 ),
                 ("⌥r", "refresh"),
             ],
-            _ => vec![
-                ("enter", "open"),
-                ("n", "new VM"),
-                ("⌥r", "refresh"),
-                ("shift+r", "find agents"),
-            ],
+            _ => vec![("enter", "open"), ("n", "new VM"), ("⌥r", "refresh")],
         }
     };
     // Only worth advertising once there is somewhere to cycle to; on a single
@@ -4151,6 +4146,8 @@ mod tests {
         let out = draw(&app, 100, 34);
         assert!(out.contains("keys"));
         assert!(out.contains("refresh"), "{out}");
+        assert!(out.contains("⌥r"), "{out}");
+        assert!(!out.contains("shift+r"), "{out}");
         assert!(out.contains("⌥esc"), "{out}");
         assert!(out.contains("any key closes"));
     }

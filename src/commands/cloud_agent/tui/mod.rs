@@ -969,8 +969,7 @@ fn spawn_my_agents_fetch(
 /// One request for the whole account (see [`fetch_my_agents`]), and the sessions
 /// of the agents someone is looking at once it lands — not a sweep. Every
 /// refresh in the TUI comes through here: ⌥r, revealing the sidebar, the re-entry
-/// after the terminal was handed back, and `shift+r` on an account that is
-/// already fully loaded.
+/// after the terminal was handed back.
 ///
 /// Coalesced on [`App::refreshing`], so holding the chord or having three
 /// actions finish at once cannot stack account-wide queries.
@@ -985,12 +984,11 @@ fn start_refresh(
     }
     app.refresh_started();
     // Without `myCloudAgents` there is no account-wide question to ask, so the
-    // refresh asks per environment — but only about the ones that already have
-    // an answer or are open, never the whole account. Finding agents in
-    // environments that have never loaded stays `shift+r`, a deliberate act,
-    // because that is the one that costs a request each.
+    // refresh asks per environment. An explicit ⌥r includes unopened ones;
+    // incidental refreshes remain scoped to environments already loaded.
     if app.account_query_unavailable {
-        let effects = app.environments_to_refresh();
+        let discover_unloaded = std::mem::take(&mut app.refresh_announce);
+        let effects = app.environments_to_refresh(discover_unloaded);
         // Each environment answers with its own `AgentsLoaded`, so there is no
         // one reply to close the refresh out on: it is done being started, and
         // the sweep's own limiter bounds what is in flight from here.
@@ -1754,30 +1752,11 @@ pub async fn run(
             Some(Effect::SaveSettings(outcome)) => {
                 apply_settings(app, &outcome);
             }
-            Some(Effect::ScanEverywhere) => {
-                // A deliberate scan clears a previous rate-limit stop: the user
-                // is asking again, and by now the window may have passed.
-                stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
-                let effects = app.scan_environments();
-                match effects.len() {
-                    // Nothing left to discover — the account-wide query answers
-                    // for every environment at once, so this is the normal case
-                    // rather than an edge one. "Every project is already loaded"
-                    // was a true sentence that did nothing, and it was the reply
-                    // anyone reaching for shift+r to see a new agent got.
-                    0 => {
-                        app.status = "Refreshing…".into();
-                        app.refresh_announce = true;
-                        start_refresh(app, &tx, &client, &backboard);
-                    }
-                    n => {
-                        app.status =
-                            format!("Looking for agents in {n} more environment{}…", plural(n));
-                        spawn_sweep(effects, &tx, &client, &backboard, stop_fetching.clone());
-                    }
-                }
-            }
             Some(Effect::RefreshAll) => {
+                if app.refresh_announce {
+                    // A deliberate refresh retries a previous rate-limit stop.
+                    stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
                 app.bootstrap_defaults.clear();
                 start_refresh(app, &tx, &client, &backboard);
             }
@@ -2415,7 +2394,7 @@ fn handle_message(
                 // The per-environment fallback below is the answer to whatever
                 // asked, and the rows are its report; a pending "up to date"
                 // line must not be claimed by the next refresh to succeed.
-                app.refresh_announce = false;
+                let discover_unloaded = std::mem::take(&mut app.refresh_announce);
                 // Asking again every tick would fail again every tick: a caller
                 // this field refuses — a workspace-scoped token, or a backboard
                 // without it — is refused permanently, so refreshes switch to
@@ -2425,14 +2404,18 @@ fn handle_message(
                 // These are fresh requests; a stop left over from an earlier
                 // 429 would strand them as spinners that never resolve.
                 stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
-                let mut sweep = app.initial_environments();
+                let mut sweep = if discover_unloaded {
+                    app.environments_to_refresh(true)
+                } else {
+                    app.initial_environments()
+                };
                 if sweep.is_empty() {
                     // Nothing left to load for the first time, so this was a
                     // refresh rather than startup — and it still has to refresh
                     // something. Without this, the ⌥r that discovered the field
                     // was unavailable would change nothing and only the next one
                     // would work.
-                    sweep = app.environments_to_refresh();
+                    sweep = app.environments_to_refresh(false);
                 }
                 if !sweep.is_empty() {
                     spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
@@ -2876,11 +2859,6 @@ fn open_session(
 
 /// How many count queries are allowed in flight at once.
 const SWEEP_CONCURRENCY: usize = 5;
-
-/// `s` when there is more than one of something.
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
 
 /// A 429 seen by any background fetch. Shared so the rest of a batch stops
 /// rather than spending the caller's remaining budget on requests that will be
