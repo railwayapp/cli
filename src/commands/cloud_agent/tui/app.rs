@@ -799,20 +799,47 @@ pub struct PendingConfirm {
     pub agent_id: String,
     pub agent_name: String,
     pub environment_id: String,
+    /// `Some(harness)` when this wake was offered because the agent was slept
+    /// under an open local client pane for that harness; a yes also brings
+    /// the harness server back so the client's own reconnect can land. See
+    /// [`App::detect_slept_under_panes`].
+    pub resume: Option<String>,
 }
 
 impl PendingConfirm {
     pub fn question(&self) -> String {
-        match self.op {
-            AgentOp::Delete => format!(
+        match (self.op, &self.resume) {
+            (AgentOp::Delete, _) => format!(
                 "Delete {} and its disk? This cannot be undone.  y / n",
                 self.agent_name
             ),
-            AgentOp::Sleep => format!("Sleep {}?  y / n", self.agent_name),
-            AgentOp::Wake => format!("Wake {}?  y / n", self.agent_name),
+            (AgentOp::Sleep, _) => format!("Sleep {}?  y / n", self.agent_name),
+            (AgentOp::Wake, Some(harness)) => format!(
+                "{} was put to sleep under your {harness} client. Wake it and resume?  y / n",
+                self.agent_name
+            ),
+            (AgentOp::Wake, None) => format!("Wake {}?  y / n", self.agent_name),
         }
     }
 }
+
+/// A local client pane whose agent was put to sleep underneath it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SleptResume {
+    pub agent_name: String,
+    pub environment_id: String,
+    pub harness: String,
+    /// Offers made so far. Capped so something that keeps sleeping the agent
+    /// cannot turn the offer into a wake loop.
+    pub offers: u8,
+    /// A yes was given: respawn the harness server once the wake settles.
+    pub respawn_after_wake: bool,
+}
+
+/// How many times one TUI run offers to wake the same agent after it was
+/// slept under a client. Past this the status line says so and leaves the
+/// agent alone until the user wakes it by hand.
+pub const SLEPT_RESUME_MAX_OFFERS: u8 = 2;
 
 /// What the startup check learned about the user's SSH key. Connecting to an
 /// agent rides SSH and the relay only answers registered keys, so a connect
@@ -966,6 +993,15 @@ pub enum Effect {
     },
     /// Reconnect to an existing session on a running agent — no provisioning,
     /// no credential work, just ssh with the session's name.
+    /// Start the harness server again on an agent that was slept under a
+    /// local client pane and has since woken. The saved port and credentials
+    /// are reused, so the client that has been retrying the old address needs
+    /// no restart of its own.
+    RespawnServer {
+        agent_id: String,
+        environment_id: String,
+        harness: String,
+    },
     Reattach {
         agent_id: String,
         agent_name: String,
@@ -1213,6 +1249,12 @@ pub struct App {
     pub ops: std::collections::HashMap<String, &'static str>,
     /// Agents whose state is still on its way. See [`AgentWatch`].
     pub watching: std::collections::HashMap<String, AgentWatch>,
+    /// Agents slept under an open local client pane, and what this TUI has
+    /// offered about it. See [`App::detect_slept_under_panes`].
+    pub slept_resume: std::collections::HashMap<String, SleptResume>,
+    /// Harness servers owed a restart now that their agent's wake has settled.
+    /// Drained by the event loop after each agent refresh.
+    pending_respawns: Vec<Effect>,
     /// Round-robin cursor so a slow operation cannot monopolize watch polling.
     last_watched_environment: Option<String>,
     /// A refresh is in flight. Coalescing: a held ⌥r, or several actions
@@ -1372,6 +1414,8 @@ impl App {
             ssh_gate: None,
             ops: std::collections::HashMap::new(),
             watching: std::collections::HashMap::new(),
+            slept_resume: std::collections::HashMap::new(),
+            pending_respawns: Vec::new(),
             last_watched_environment: None,
             refreshing: false,
             thread_cache: None,
@@ -2232,6 +2276,7 @@ impl App {
         // moves up — so the cursor is put back by row identity rather than
         // left on whatever index it was.
         let anchor = self.selected_row().map(|row| row.kind);
+        let before = self.status_snapshot();
         let mut refresh_failed = None;
         let mut answered = None;
         if let Some(env) = self
@@ -2271,6 +2316,10 @@ impl App {
             self.toast_error(format!("Couldn't refresh: {err}"));
         }
         self.collapse_if_empty(w, p);
+        // Before the watches settle: a sleep this TUI asked for is still
+        // recorded there, which is how it is told apart from one imposed
+        // from outside.
+        self.detect_slept_under_panes(&before);
         if let Some(id) = answered {
             self.settle_watched_agents(&[id]);
         }
@@ -2313,6 +2362,7 @@ impl App {
     /// still `Loading` await their dedicated reply.
     pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>, asked_at: std::time::Instant) {
         let anchor = self.selected_row().map(|row| row.kind);
+        let before = self.status_snapshot();
         let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
         for (environment_id, agent) in agents {
             by_env.entry(environment_id).or_default().push(agent);
@@ -2344,10 +2394,141 @@ impl App {
         for id in &answered {
             self.agent_snapshot_floor.insert(id.clone(), asked_at);
         }
+        self.detect_slept_under_panes(&before);
         self.settle_watched_agents(&answered);
         self.restore_cursor(anchor);
         self.select_pending();
         self.adopt_pane_sessions();
+    }
+
+    /// Agent id → status for every loaded agent, taken before a refresh is
+    /// merged so the refresh can be read as transitions.
+    fn status_snapshot(&self) -> HashMap<String, String> {
+        let mut statuses = HashMap::new();
+        for ws in &self.tree {
+            for project in &ws.projects {
+                for env in &project.envs {
+                    for agent in env.agents_vec() {
+                        statuses.insert(agent.id.clone(), agent.status.clone());
+                    }
+                }
+            }
+        }
+        statuses
+    }
+
+    /// The environment an agent row lives under.
+    fn environment_of_agent(&self, agent_id: &str) -> Option<String> {
+        self.tree.iter().find_map(|ws| {
+            ws.projects.iter().find_map(|project| {
+                project
+                    .envs
+                    .iter()
+                    .find(|env| env.agents_vec().iter().any(|a| a.id == agent_id))
+                    .map(|env| env.id.clone())
+            })
+        })
+    }
+
+    /// An agent that just went from awake to `sleeping` while this TUI holds a
+    /// live local client pane on it was slept by something else: an idle
+    /// timer, or a `railway ca sleep` in another terminal. Sleep kills the
+    /// harness server, and the local Codex or OpenCode client keeps retrying
+    /// an address nothing answers on, so offer to wake the agent and bring
+    /// the server back. The client's own reconnect does the rest.
+    ///
+    /// Sleeps this TUI asked for carry an `ops` or `watching` entry and are
+    /// not offered back. One offer at a time, and at most
+    /// [`SLEPT_RESUME_MAX_OFFERS`] per agent per run: an agent that keeps
+    /// being slept has a problem waking it will not fix.
+    fn detect_slept_under_panes(&mut self, before: &HashMap<String, String>) {
+        if self.confirm.is_some() {
+            return;
+        }
+        let mut candidates: Vec<(String, String, String, String)> = Vec::new();
+        for session in self.sessions.iter().filter(|s| !s.ended()) {
+            if session.client_id.is_none()
+                || !matches!(session.harness.as_str(), "codex" | "opencode" | "opencode2")
+            {
+                continue;
+            }
+            let Some(agent) = self.agent_by_id(&session.agent_id) else {
+                continue;
+            };
+            let slept_now = agent.status == "sleeping"
+                && before
+                    .get(&agent.id)
+                    .is_some_and(|previous| previous != "sleeping");
+            if !slept_now
+                || self.ops.contains_key(&agent.id)
+                || self.watching.contains_key(&agent.id)
+                || candidates.iter().any(|(id, ..)| *id == agent.id)
+            {
+                continue;
+            }
+            let Some(environment_id) = self.environment_of_agent(&agent.id) else {
+                continue;
+            };
+            candidates.push((
+                agent.id.clone(),
+                agent.name.clone(),
+                environment_id,
+                session.harness.clone(),
+            ));
+        }
+        for (agent_id, agent_name, environment_id, harness) in candidates {
+            let entry = self
+                .slept_resume
+                .entry(agent_id.clone())
+                .or_insert_with(|| SleptResume {
+                    agent_name: agent_name.clone(),
+                    environment_id: environment_id.clone(),
+                    harness: harness.clone(),
+                    offers: 0,
+                    respawn_after_wake: false,
+                });
+            entry.harness = harness.clone();
+            if entry.offers >= SLEPT_RESUME_MAX_OFFERS {
+                self.status = format!(
+                    "{agent_name} was put to sleep again — select it and press w when you want it back"
+                );
+                continue;
+            }
+            entry.offers += 1;
+            // The offer needs the keyboard; the pane it floats over has
+            // nothing live to type into anyway.
+            self.focus = ManageFocus::Tree;
+            self.confirm = Some(PendingConfirm {
+                op: AgentOp::Wake,
+                agent_id,
+                agent_name,
+                environment_id,
+                resume: Some(harness),
+            });
+            break;
+        }
+    }
+
+    /// Server respawns owed since the last drain. See [`Effect::RespawnServer`].
+    pub fn take_pending_respawns(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.pending_respawns)
+    }
+
+    /// The harness server on a woken agent was asked to start again.
+    pub fn server_respawned(&mut self, agent_id: &str, error: Option<String>) {
+        let (name, harness) = self
+            .slept_resume
+            .get(agent_id)
+            .map(|entry| (entry.agent_name.clone(), entry.harness.clone()))
+            .unwrap_or_else(|| (agent_id.to_string(), "client".to_string()));
+        match error {
+            None => self.toast(format!(
+                "{name} is awake; your {harness} client will reconnect on its own"
+            )),
+            Some(err) => self.toast_error(format!(
+                "Woke {name}, but its {harness} server did not restart: {err}. Reopen it from the tree."
+            )),
+        }
     }
 
     /// Fold up a project whose last agent has gone.
@@ -5511,10 +5692,20 @@ impl App {
         // than yes cancels: a mistyped key must never be taken as consent.
         if let Some(pending) = self.confirm.clone() {
             self.confirm = None;
+            // An offer raised over a client pane took the keyboard from it;
+            // give it back either way.
+            if pending.resume.is_some() && self.active.is_some() {
+                self.focus = ManageFocus::Session;
+            }
             return match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.ops
                         .insert(pending.agent_id.clone(), pending.op.pending_label());
+                    if pending.resume.is_some()
+                        && let Some(entry) = self.slept_resume.get_mut(&pending.agent_id)
+                    {
+                        entry.respawn_after_wake = true;
+                    }
                     Some(Effect::Agent {
                         op: pending.op,
                         agent_id: pending.agent_id,
@@ -5522,7 +5713,14 @@ impl App {
                     })
                 }
                 _ => {
-                    self.status = "Cancelled".into();
+                    self.status = if pending.resume.is_some() {
+                        format!(
+                            "{} left asleep — select it and press w to wake it later",
+                            pending.agent_name
+                        )
+                    } else {
+                        "Cancelled".into()
+                    };
                     None
                 }
             };
@@ -6078,6 +6276,7 @@ impl App {
             agent_id: agent.id.clone(),
             agent_name: agent.name.clone(),
             environment_id: env.id.clone(),
+            resume: None,
         };
         if op == AgentOp::Delete {
             self.confirm = Some(pending);
@@ -6358,6 +6557,7 @@ impl App {
             return;
         }
         let mut arrived: Vec<String> = Vec::new();
+        let mut woke: Vec<(String, String)> = Vec::new();
         let mut failures = Vec::new();
         for (id, watch) in &self.watching {
             // A failed refresh or another environment's response supplies no
@@ -6369,7 +6569,12 @@ impl App {
                 // Gone from the list entirely: deleted elsewhere, or never
                 // there. Either way nothing is coming.
                 None => arrived.push(id.clone()),
-                Some(agent) if agent.status == watch.want => arrived.push(id.clone()),
+                Some(agent) if agent.status == watch.want => {
+                    arrived.push(id.clone());
+                    if watch.want == "running" {
+                        woke.push((id.clone(), watch.environment_id.clone()));
+                    }
+                }
                 Some(agent)
                     if !crate::controllers::cloud_agent::Status::from_label(&agent.status)
                         .is_live() =>
@@ -6391,6 +6596,23 @@ impl App {
         for id in arrived {
             self.watching.remove(&id);
             self.ops.remove(&id);
+            // A wake that did not land leaves nothing to respawn a server on.
+            if let Some(entry) = self.slept_resume.get_mut(&id)
+                && !woke.iter().any(|(woken, _)| *woken == id)
+            {
+                entry.respawn_after_wake = false;
+            }
+        }
+        for (id, environment_id) in woke {
+            if let Some(entry) = self.slept_resume.get_mut(&id)
+                && std::mem::take(&mut entry.respawn_after_wake)
+            {
+                self.pending_respawns.push(Effect::RespawnServer {
+                    agent_id: id,
+                    environment_id,
+                    harness: entry.harness.clone(),
+                });
+            }
         }
         if !failures.is_empty() {
             failures.sort();
@@ -8764,6 +8986,7 @@ mod tests {
             agent_id: "ca_1".into(),
             environment_id: "env_prod".into(),
             agent_name: "nimble-otter".into(),
+            resume: None,
         });
         a.sessions[0].end_dropped_for_test();
         assert_eq!(a.reap_ended_sessions(), None);
@@ -10224,6 +10447,156 @@ mod tests {
             STARTING_GRACE >= std::time::Duration::from_secs(30),
             "too tight for a slow-but-healthy boot"
         );
+    }
+
+    /// A local client pane whose agent is slept by something else — an idle
+    /// timer, `railway ca sleep` in another terminal — is offered a wake. The
+    /// client keeps retrying on its own; a yes wakes the agent and, once the
+    /// wake lands, asks for its server back so those retries succeed.
+    #[test]
+    fn slept_under_a_client_pane_offers_wake_then_respawns_the_server() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.harness = "opencode2".into();
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        assert_eq!(a.focus, ManageFocus::Session);
+
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        let confirm = a.confirm.clone().expect("offered a wake");
+        assert_eq!(confirm.op, AgentOp::Wake);
+        assert_eq!(confirm.resume.as_deref(), Some("opencode2"));
+        assert!(confirm.question().contains("put to sleep"));
+        assert_eq!(a.focus, ManageFocus::Tree, "the offer takes the keyboard");
+
+        let effect = a.on_key(key(KeyCode::Char('y')));
+        assert!(matches!(
+            effect,
+            Some(Effect::Agent {
+                op: AgentOp::Wake,
+                ..
+            })
+        ));
+        assert_eq!(a.focus, ManageFocus::Session, "and gives it back");
+        assert!(
+            a.take_pending_respawns().is_empty(),
+            "nothing to respawn on until the wake lands"
+        );
+
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
+        assert_eq!(
+            a.take_pending_respawns(),
+            vec![Effect::RespawnServer {
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
+                harness: "opencode2".into(),
+            }]
+        );
+        assert!(a.take_pending_respawns().is_empty(), "drained once");
+        assert!(a.confirm.is_none());
+    }
+
+    #[test]
+    fn a_sleep_this_tui_asked_for_is_not_offered_back() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.harness = "codex".into();
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('s'))),
+            Some(Effect::Agent {
+                op: AgentOp::Sleep,
+                ..
+            })
+        ));
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Sleep, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        assert!(a.confirm.is_none());
+        assert!(a.take_pending_respawns().is_empty());
+    }
+
+    #[test]
+    fn declining_leaves_it_asleep_and_offers_are_capped() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.harness = "codex".into();
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        for _ in 0..SLEPT_RESUME_MAX_OFFERS {
+            a.agents_loaded(
+                (0, 0, 0),
+                Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+            );
+            assert!(a.confirm.is_some());
+            assert_eq!(a.on_key(key(KeyCode::Char('n'))), None);
+            assert!(a.status.contains("left asleep"));
+            // The same snapshot again is not a new transition.
+            a.agents_loaded(
+                (0, 0, 0),
+                Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+            );
+            assert!(a.confirm.is_none(), "no re-ask without a new transition");
+            a.agents_loaded(
+                (0, 0, 0),
+                Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+            );
+        }
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        assert!(a.confirm.is_none(), "capped");
+        assert!(a.status.contains("press w"));
+    }
+
+    #[test]
+    fn panes_without_a_local_client_are_not_offered() {
+        let mut a = loaded_app();
+        // An ssh pane: the relay reattaches those by name, and RouteSSH wakes.
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        assert!(a.confirm.is_none());
+    }
+
+    #[test]
+    fn a_wake_that_fails_drops_the_owed_respawn() {
+        let mut a = loaded_app();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.harness = "opencode".into();
+        pane.client_id = Some("local-client".into());
+        a.attach_session(pane, "ca_1".into());
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        assert!(a.on_key(key(KeyCode::Char('y'))).is_some());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "crashed")]),
+        );
+        assert!(a.take_pending_respawns().is_empty());
+        assert!(a.status.contains("Couldn't wake"));
     }
 
     fn agent(id: &str, name: &str, status: &str) -> Agent {

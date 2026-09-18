@@ -365,6 +365,12 @@ enum Message {
         session_name: String,
         info: Box<code::ConnectInfo>,
     },
+    /// The harness server on an agent woken after being slept under a local
+    /// client pane was asked to start again. See [`Effect::RespawnServer`].
+    ServerRespawned {
+        agent_id: String,
+        error: Option<String>,
+    },
     /// A background auto-connect failed. Quiet too: the spinner comes off and
     /// the reason rides the status line, not a toast.
     AutoConnectFailed {
@@ -1882,6 +1888,9 @@ pub async fn run(
             Some(Effect::CloseSession { index }) => {
                 close_session(app, index, &client, &backboard).await
             }
+            Some(effect @ Effect::RespawnServer { .. }) => {
+                spawn_server_respawns(vec![effect], &tx);
+            }
             Some(Effect::Agent {
                 op,
                 agent_id,
@@ -2343,6 +2352,10 @@ fn handle_message(
             app.rate_limited(retry_after_secs);
             None
         }
+        Message::ServerRespawned { agent_id, error } => {
+            app.server_respawned(&agent_id, error);
+            None
+        }
         Message::AgentsLoaded {
             path,
             environment_id,
@@ -2350,6 +2363,7 @@ fn handle_message(
             asked_at,
         } => {
             app.agents_loaded_at(path, &environment_id, result, asked_at);
+            spawn_server_respawns(app.take_pending_respawns(), tx);
             app.restore_cached_threads();
             // Fill in each running agent's session count without waiting for
             // someone to expand it. Bounded: one environment usually holds a
@@ -2367,6 +2381,7 @@ fn handle_message(
                 let count = agents.len();
                 app.refresh_finished();
                 app.my_agents_loaded(agents, asked_at);
+                spawn_server_respawns(app.take_pending_respawns(), tx);
                 app.restore_cached_threads();
                 let prefetch = app.sessions_to_prefetch();
                 if !prefetch.is_empty() {
@@ -2984,6 +2999,44 @@ fn spawn_session_fetch(
 /// Same discipline as [`spawn_sweep`]: the account-wide settle can name every
 /// running agent at once, and firing one request per agent simultaneously is
 /// the burst this TUI exists to avoid. The first 429 abandons the rest.
+/// Bring a harness server back on an agent that was slept under a local
+/// client pane and has since woken. `reconnect` reuses the saved port and
+/// credentials, so the client that has been retrying the old address needs no
+/// restart of its own; it lands on the next try.
+fn spawn_server_respawns(effects: Vec<Effect>, tx: &mpsc::UnboundedSender<Message>) {
+    for effect in effects {
+        let Effect::RespawnServer {
+            agent_id,
+            environment_id,
+            harness,
+        } = effect
+        else {
+            continue;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let result: Result<()> = async {
+                let info = code::connect_info(&environment_id, &agent_id).await?;
+                match harness.as_str() {
+                    "codex" => {
+                        super::codex::reconnect(&info).await?;
+                    }
+                    "opencode" | "opencode2" => {
+                        super::opencode::reconnect(&info, harness == "opencode2").await?;
+                    }
+                    other => anyhow::bail!("no managed server to restart for {other}"),
+                }
+                Ok(())
+            }
+            .await;
+            let _ = tx.send(Message::ServerRespawned {
+                agent_id,
+                error: result.err().map(|e| format!("{e:#}")),
+            });
+        });
+    }
+}
+
 fn spawn_session_prefetch(
     effects: Vec<Effect>,
     tx: &mpsc::UnboundedSender<Message>,
