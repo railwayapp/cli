@@ -312,7 +312,7 @@ pub async fn command(args: Args) -> Result<()> {
     let deployment_id = body.deployment_id;
 
     if !args.json {
-        println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+        println!("  {}: {}", "Deployment".green().bold(), body.logs_url);
     }
 
     if args.detach {
@@ -894,7 +894,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         println!("  {} Build queued", "✓".green());
         println!(
             "  {} {}",
-            "Build Logs:".green().bold(),
+            "Deployment:".green().bold(),
             up_response.logs_url
         );
     }
@@ -1019,7 +1019,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
                     deployment_errors.print_failure();
                     println!(
                         "     {} {}",
-                        "Logs:".dimmed(),
+                        "Deployment:".dimmed(),
                         up_response.logs_url.bold().underline(),
                     );
                     println!();
@@ -1034,7 +1034,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
                     println!("  {} {}", "✗".red(), "Deploy crashed".bold());
                     println!(
                         "     {} {}",
-                        "Logs:".dimmed(),
+                        "Deployment:".dimmed(),
                         up_response.logs_url.bold().underline(),
                     );
                     println!();
