@@ -39,16 +39,14 @@ impl Drop for Bridge {
 impl Bridge {
     pub(crate) fn start(
         connection: super::Connection,
-        beta: bool,
         notify: impl Fn(Thread) + Send + Sync + 'static,
     ) -> Result<Self> {
         super::validate_url(&connection.url)?;
-        Self::bind(connection, beta, notify)
+        Self::bind(connection, notify)
     }
 
     fn bind(
         connection: super::Connection,
-        beta: bool,
         notify: impl Fn(Thread) + Send + Sync + 'static,
     ) -> Result<Self> {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
@@ -63,7 +61,6 @@ impl Bridge {
                 .connect_timeout(Duration::from_secs(10))
                 .build()?,
             connection,
-            beta,
             notify: Box::new(notify),
             sequence: AtomicU64::new(0),
             selected: Mutex::new(None),
@@ -100,7 +97,6 @@ struct State {
     closed: tokio::sync::watch::Receiver<bool>,
     client: reqwest::Client,
     connection: super::Connection,
-    beta: bool,
     notify: Box<dyn Fn(Thread) + Send + Sync>,
     sequence: AtomicU64,
     selected: Mutex<Option<Thread>>,
@@ -116,16 +112,24 @@ impl State {
     fn event(&self, value: &serde_json::Value) {
         let mut selected = self.selected.lock().unwrap();
         if let Some(thread) = selected.as_mut()
-            && update_thread(thread, value, self.beta)
+            && update_thread(thread, value, self.connection.protocol)
         {
             (self.notify)(thread.clone());
         }
     }
 }
 
-fn update_thread(thread: &mut Thread, value: &serde_json::Value, beta: bool) -> bool {
+fn update_thread(
+    thread: &mut Thread,
+    value: &serde_json::Value,
+    protocol: super::Protocol,
+) -> bool {
     let value = value.get("payload").unwrap_or(value);
-    let data = &value[if beta { "data" } else { "properties" }];
+    let data = &value[if protocol.is_v2() {
+        "data"
+    } else {
+        "properties"
+    }];
     let id = data["sessionID"]
         .as_str()
         .or_else(|| data["info"]["id"].as_str());
@@ -133,13 +137,13 @@ fn update_thread(thread: &mut Thread, value: &serde_json::Value, beta: bool) -> 
         return false;
     }
     match value["type"].as_str() {
-        Some("session.renamed") if beta => {
+        Some("session.renamed") if protocol.is_v2() => {
             let Some(title) = data["title"].as_str() else {
                 return false;
             };
             thread.title = client_sessions::title(Some(title), &thread.title);
         }
-        Some("session.updated") if !beta => {
+        Some("session.updated") if !protocol.is_v2() => {
             let Ok(info) = client_sessions::parse_opencode(&data["info"], &thread.directory) else {
                 return false;
             };
@@ -154,14 +158,16 @@ fn update_thread(thread: &mut Thread, value: &serde_json::Value, beta: bool) -> 
             }
             .into();
         }
-        Some("session.execution.started") if beta => thread.state = "working".into(),
-        Some("session.execution.succeeded" | "session.execution.interrupted") if beta => {
+        Some("session.execution.started") if protocol.is_v2() => thread.state = "working".into(),
+        Some("session.execution.succeeded" | "session.execution.interrupted")
+            if protocol.is_v2() =>
+        {
             thread.state = "idle".into()
         }
-        Some("session.execution.failed") if beta => thread.state = "failed".into(),
+        Some("session.execution.failed") if protocol.is_v2() => thread.state = "failed".into(),
         _ => return false,
     }
-    if beta {
+    if protocol.is_v2() {
         thread.updated_at = value["created"]
             .as_i64()
             .and_then(chrono::DateTime::from_timestamp_millis)
@@ -222,8 +228,12 @@ fn response(status: StatusCode, text: &'static str) -> Response<Body> {
 }
 
 /// An empty ID means the create/fork response supplies the newly selected ID.
-fn selection(method: &str, path: &str, beta: bool) -> Option<String> {
-    let path = path.strip_prefix(if beta { "/api/session" } else { "/session" })?;
+fn selection(method: &str, path: &str, protocol: super::Protocol) -> Option<String> {
+    let path = path.strip_prefix(if protocol.is_v2() {
+        "/api/session"
+    } else {
+        "/session"
+    })?;
     if path.is_empty() && method == "POST" {
         return Some(String::new());
     }
@@ -237,7 +247,7 @@ fn selection(method: &str, path: &str, beta: bool) -> Option<String> {
             action,
             "view" | "prompt" | "prompt_async" | "command" | "shell"
         ))
-        || (!beta && method == "GET" && action == "message"))
+        || (!protocol.is_v2() && method == "GET" && action == "message"))
         .then(|| id.into())
 }
 
@@ -263,7 +273,11 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
     if !authorized && !upgrade {
         return Ok(response(StatusCode::UNAUTHORIZED, "Unauthorized"));
     }
-    let selected = selection(request.method().as_str(), request.uri().path(), state.beta);
+    let selected = selection(
+        request.method().as_str(),
+        request.uri().path(),
+        state.connection.protocol,
+    );
     let sequence = selected
         .as_ref()
         .map(|_| state.sequence.fetch_add(1, Ordering::SeqCst) + 1);
@@ -321,7 +335,11 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
             let bytes = remote.bytes().await?;
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
                 && let Ok(thread) = client_sessions::parse_opencode(
-                    if state.beta { &value["data"] } else { &value },
+                    if state.connection.protocol.is_v2() {
+                        &value["data"]
+                    } else {
+                        &value
+                    },
                     &state.connection.directory,
                 )
                 && sequence == Some(state.sequence.load(Ordering::SeqCst))
@@ -345,20 +363,28 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
                     let url = format!(
                         "{}{}/session/{id}",
                         state.connection.url.trim_end_matches('/'),
-                        if state.beta { "/api" } else { "" }
+                        if state.connection.protocol.is_v2() {
+                            "/api"
+                        } else {
+                            ""
+                        }
                     );
                     let mut request = state
                         .client
                         .get(url)
                         .basic_auth(&state.connection.username, Some(&state.connection.password))
                         .timeout(Duration::from_secs(10));
-                    if !state.beta {
+                    if !state.connection.protocol.is_v2() {
                         request = request.query(&[("directory", &state.connection.directory)]);
                     }
                     let value: serde_json::Value =
                         request.send().await?.error_for_status()?.json().await?;
                     client_sessions::parse_opencode(
-                        if state.beta { &value["data"] } else { &value },
+                        if state.connection.protocol.is_v2() {
+                            &value["data"]
+                        } else {
+                            &value
+                        },
                         &state.connection.directory,
                     )
                 };
@@ -391,7 +417,8 @@ mod tests {
     use super::*;
     #[test]
     fn streamed_titles_and_status_only_update_the_selected_conversation() {
-        for beta in [false, true] {
+        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
+            let beta = protocol.is_v2();
             let mut thread = client_sessions::parse_opencode(
                 &serde_json::json!({"id":"ses_exact","title":"New Thread"}),
                 "/app",
@@ -407,7 +434,7 @@ mod tests {
             let mut seen = 0;
             for byte in wire.as_bytes() {
                 events.feed(&[*byte], |event| {
-                    assert!(update_thread(&mut thread, &event, beta));
+                    assert!(update_thread(&mut thread, &event, protocol));
                     seen += 1;
                 });
             }
@@ -417,12 +444,12 @@ mod tests {
             assert!(!update_thread(
                 &mut thread,
                 &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_other","status":{"type":"busy"}}}),
-                beta
+                protocol
             ));
             assert!(update_thread(
                 &mut thread,
                 &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_exact","status":{"type":"busy"}}}),
-                beta
+                protocol
             ));
             assert_eq!(thread.state, "working");
             assert_eq!(thread.id, "ses_exact");
@@ -431,21 +458,25 @@ mod tests {
 
     #[test]
     fn browsing_and_background_events_do_not_select_a_thread() {
-        for beta in [false, true] {
+        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
+            let beta = protocol.is_v2();
             let root = if beta { "/api/session" } else { "/session" };
-            assert_eq!(selection("GET", root, beta), None);
-            assert_eq!(selection("POST", root, beta), Some(String::new()));
+            assert_eq!(selection("GET", root, protocol), None);
+            assert_eq!(selection("POST", root, protocol), Some(String::new()));
             assert_eq!(
-                selection("POST", &format!("{root}/ses_selected/prompt"), beta),
+                selection("POST", &format!("{root}/ses_selected/prompt"), protocol),
                 Some("ses_selected".into())
             );
             assert_eq!(
-                selection("POST", &format!("{root}/ses_other/rename"), beta),
+                selection("POST", &format!("{root}/ses_other/rename"), protocol),
                 None
             );
-            assert_eq!(selection("GET", &format!("{root}/ses_other"), beta), None);
             assert_eq!(
-                selection("POST", &format!("{root}/ses_selected/fork"), beta),
+                selection("GET", &format!("{root}/ses_other"), protocol),
+                None
+            );
+            assert_eq!(
+                selection("POST", &format!("{root}/ses_selected/fork"), protocol),
                 Some(String::new())
             );
         }
@@ -453,7 +484,8 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_preserves_auth_streaming_and_exact_created_thread_identity() {
-        for beta in [false, true] {
+        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
+            let beta = protocol.is_v2();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -491,8 +523,9 @@ mod tests {
                     password: "pass".into(),
                     directory: "/app".into(),
                     reused: true,
+                    protocol,
+                    version: None,
                 },
-                beta,
                 move |thread| {
                     let _ = tx.send(thread);
                 },

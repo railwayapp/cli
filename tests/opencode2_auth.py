@@ -45,6 +45,18 @@ class CredentialTests(unittest.TestCase):
     def apply(self):
         shim.import_credentials(Path('unused-runtime'), self.pending, self.database)
 
+    def test_v1_storage_is_not_migrated_during_credential_import_or_remote_launch(self):
+        with sqlite3.connect(self.database) as db:
+            db.execute('DROP TABLE credential')
+        self.stage(credential())
+        with self.assertRaisesRegex(shim.InstallError, 'OpenCode 1 data'):
+            self.apply()
+        with self.assertRaisesRegex(shim.InstallError, 'OpenCode 1 data'):
+            shim.require_v2_storage(self.database)
+        self.assertTrue(self.pending.exists())
+        with sqlite3.connect(self.database) as db:
+            self.assertEqual(db.execute('SELECT value FROM session').fetchone()[0], 'private remote session')
+
     def test_imports_oauth_metadata_and_keys_then_removes_transfer_file(self):
         oauth = credential()
         key = credential('opencode-go', identifier='cred_go')

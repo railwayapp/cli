@@ -466,12 +466,11 @@ fn open_client(
     } else {
         None
     };
-    let opencode_bridge = if let ClientConnection::OpenCode(connection, beta) = &pane.connection {
+    let opencode_bridge = if let ClientConnection::OpenCode(connection) = &pane.connection {
         let id = client_id.clone();
         let updates = tx.clone();
         Some(super::opencode::bridge::Bridge::start(
             connection.clone(),
-            *beta,
             move |thread| {
                 let _ = updates.send(Message::ClientThreadSelected {
                     client_id: id.clone(),
@@ -553,18 +552,15 @@ fn reconnect_client(
                 if harness == "codex" {
                     ClientConnection::Codex(super::codex::reconnect(&info).await?)
                 } else {
-                    ClientConnection::OpenCode(
-                        super::opencode::reconnect(&info, harness == "opencode2").await?,
-                        harness == "opencode2",
-                    )
+                    ClientConnection::OpenCode(super::opencode::reconnect(&info).await?)
                 }
             };
             let binary = match &connection {
                 ClientConnection::Codex(c) => {
                     super::codex::local::ensure_client(&c.version).await?
                 }
-                ClientConnection::OpenCode(_, beta) => {
-                    super::opencode::local::ensure_client_quiet(*beta).await?
+                ClientConnection::OpenCode(c) => {
+                    super::opencode::local::ensure_client_quiet(c).await?
                 }
                 ClientConnection::Railway(_) => {
                     code::railway_client::installer::ensure_client(&ChannelProgress(tx.clone()))

@@ -18,6 +18,8 @@ use crate::util::shell::shell_join;
 
 pub(crate) mod bridge;
 pub(crate) mod local;
+mod protocol;
+pub(crate) use protocol::Protocol;
 
 const BOOTSTRAP: &str = include_str!("opencode.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
@@ -30,23 +32,26 @@ pub(crate) struct Connection {
     pub password: String,
     pub directory: String,
     pub reused: bool,
+    #[serde(default)]
+    pub protocol: Protocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Shared connection details for Desktop setup and local-client commands.
 /// Keep commands free of border prefixes so they can be copied directly.
 pub(crate) fn show_connection(
     connection: &Connection,
-    beta: bool,
     name: &str,
     desktop_configured: bool,
 ) -> Result<()> {
-    let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
+    let edition = connection.protocol.label();
     let divider = "─".repeat(64).cyan();
     println!("\n{divider}");
     println!("{}", format!("{edition} server on {name}").cyan().bold());
-    show_server_config(connection, beta, name);
+    show_server_config(connection, name);
     println!("\n{}", "Connect with the Railway CLI:".bold());
-    println!("  {}", railway_connect_command(beta, name));
+    println!("  {}", railway_connect_command(name));
     if desktop_configured {
         println!("\nOpenCode Desktop configuration updated (you may need to restart)");
     }
@@ -55,8 +60,8 @@ pub(crate) fn show_connection(
 }
 
 /// The server fields, without a surrounding panel or connection commands.
-pub(crate) fn show_server_config(connection: &Connection, beta: bool, name: &str) {
-    let edition = if beta { "OpenCode2 [Beta]" } else { "OpenCode" };
+pub(crate) fn show_server_config(connection: &Connection, name: &str) {
+    let edition = connection.protocol.label();
     println!(
         "\n{}",
         format!("Railway {edition} Server Configuration:").bold()
@@ -68,11 +73,11 @@ pub(crate) fn show_server_config(connection: &Connection, beta: bool, name: &str
     println!("  {} {}", "Directory:".bold(), connection.directory);
 }
 
-pub(crate) fn railway_connect_command(beta: bool, name: &str) -> String {
+pub(crate) fn railway_connect_command(name: &str) -> String {
     shell_join(&[
         "railway".into(),
         "code".into(),
-        if beta { "--opencode2" } else { "--opencode" }.into(),
+        "--opencode".into(),
         "connect".into(),
         name.into(),
     ])
@@ -116,7 +121,9 @@ async fn bootstrap(
     let output = tokio::time::timeout(
         Duration::from_secs(if request["action"] == "inspect" {
             15
-        } else if request["harness"] == "opencode2" {
+        } else if request["protocol"] == "v2"
+            || matches!(request["action"].as_str(), Some("connect" | "upgrade"))
+        {
             660
         } else {
             90
@@ -147,7 +154,6 @@ pub(crate) async fn start(
     directory: &str,
     ssh_config: &Path,
     password: &str,
-    beta: bool,
 ) -> Result<Connection> {
     start_with(
         ssh_command(
@@ -156,7 +162,6 @@ pub(crate) async fn start(
         ),
         directory,
         password,
-        beta,
     )
     .await
 }
@@ -167,21 +172,20 @@ pub(crate) async fn start_prepared(
     prepared: &crate::commands::code::Prepared,
     directory: &str,
     password: &str,
-    beta: bool,
 ) -> Result<Connection> {
     let info = crate::commands::code::ConnectInfo {
         ssh_target: prepared.ssh_target.clone(),
         identity: prepared.identity.clone(),
         relay_opts: prepared.relay_opts.clone(),
     };
-    let connection = start_with(relay_command(&info), directory, password, beta).await?;
-    verify_client_directory(&connection, beta).await?;
+    let connection = start_with(relay_command(&info), directory, password).await?;
+    verify_client_directory(&connection).await?;
     Ok(connection)
 }
 
-async fn verify_client_directory(connection: &Connection, beta: bool) -> Result<()> {
-    if beta {
-        // Beta's positional directory performs a local chdir, even with
+async fn verify_client_directory(connection: &Connection) -> Result<()> {
+    if connection.protocol.is_v2() {
+        // V2's positional directory performs a local chdir, even with
         // --server. Its remote client uses the server's default location.
         let location: serde_json::Value = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -212,38 +216,34 @@ async fn start_with(
     command: tokio::process::Command,
     directory: &str,
     password: &str,
-    beta: bool,
 ) -> Result<Connection> {
-    let mut request = json!({ "directory": directory, "password": password, "harness": if beta { "opencode2" } else { "opencode" } });
-    if beta {
-        request["runtime_shim"] = super::opencode2::SHIM.into();
-        request["version"] = local::server_version().await?.into();
-    }
+    let request = json!({ "directory": directory, "password": password, "protocol": Protocol::V2,
+        "runtime_shim": super::opencode2::SHIM });
     let response = bootstrap(command, request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
     // A fresh client carries no Railway API credentials. Never follow a
     // redirect with OpenCode's password or accept a plaintext public URL.
     validate_url(&connection.url)?;
-    verify_connection(&connection, beta).await?;
+    verify_connection(&connection).await?;
     Ok(connection)
 }
 
-pub(crate) async fn stop(alias: &str, ssh_config: &Path, beta: bool) -> Result<()> {
+pub(crate) async fn stop(alias: &str, ssh_config: &Path) -> Result<()> {
     bootstrap(
         ssh_command(
             alias,
             &["-F".into(), ssh_config.to_string_lossy().into_owned()],
         ),
-        json!({ "action": "stop", "harness": if beta { "opencode2" } else { "opencode" } }),
+        json!({ "action": "stop" }),
     )
     .await?;
     Ok(())
 }
 
 /// Arguments passed to the local client when Railway launches it.
-pub(crate) fn attach_args(connection: &Connection, beta: bool) -> Vec<String> {
-    if beta {
+pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
+    if connection.protocol.is_v2() {
         vec!["--server".into(), connection.url.clone(), "--auto".into()]
     } else {
         vec![
@@ -258,6 +258,7 @@ pub(crate) fn attach_args(connection: &Connection, beta: bool) -> Vec<String> {
 #[derive(Deserialize)]
 pub(crate) struct ServerInfo {
     pub directory: String,
+    pub protocol: Protocol,
 }
 
 fn relay_command(info: &crate::commands::code::ConnectInfo) -> tokio::process::Command {
@@ -274,32 +275,32 @@ fn relay_command(info: &crate::commands::code::ConnectInfo) -> tokio::process::C
 
 pub(crate) async fn inspect(
     info: &crate::commands::code::ConnectInfo,
-    beta: bool,
 ) -> Result<Option<ServerInfo>> {
-    let response = bootstrap(
-        relay_command(info),
-        json!({"action": "inspect", "harness": if beta {"opencode2"} else {"opencode"}}),
-    )
-    .await?;
+    let response = bootstrap(relay_command(info), json!({"action": "inspect"})).await?;
     serde_json::from_str(&response).context("Invalid OpenCode discovery result")
 }
 
-pub(crate) async fn reconnect(
+pub(crate) async fn reconnect(info: &crate::commands::code::ConnectInfo) -> Result<Connection> {
+    reconnect_with(info, "connect").await
+}
+
+pub(crate) async fn upgrade(info: &crate::commands::code::ConnectInfo) -> Result<Connection> {
+    reconnect_with(info, "upgrade").await
+}
+
+async fn reconnect_with(
     info: &crate::commands::code::ConnectInfo,
-    beta: bool,
+    action: &str,
 ) -> Result<Connection> {
-    let mut request =
-        json!({"action": "connect", "harness": if beta {"opencode2"} else {"opencode"}});
-    if beta {
-        request["runtime_shim"] = super::opencode2::SHIM.into();
-        request["version"] = local::server_version().await?.into();
-    }
+    // The VM owns the protocol and release. Reconnect must not upgrade it to
+    // whichever client happens to be installed on this machine.
+    let request = json!({"action": action, "runtime_shim": super::opencode2::SHIM});
     let response = bootstrap(relay_command(info), request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
     validate_url(&connection.url)?;
-    verify_connection(&connection, beta).await?;
-    verify_client_directory(&connection, beta).await?;
+    verify_connection(&connection).await?;
+    verify_client_directory(&connection).await?;
     Ok(connection)
 }
 
@@ -318,13 +319,13 @@ pub(super) fn validate_url(value: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
+async fn verify_connection(connection: &Connection) -> Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()?;
     let origin = validate_url(&connection.url)?;
-    let paths: &[&str] = if beta {
+    let paths: &[&str] = if connection.protocol.is_v2() {
         &["api/info", "api/status", "api/health"]
     } else {
         &["global/health"]
@@ -355,7 +356,7 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
                     .await
                     .ok()
                     .is_some_and(|body| {
-                        if beta {
+                        if connection.protocol.is_v2() {
                             body["version"].is_string()
                                 && ((body["pid"].is_u64() && body["urls"].is_array())
                                     || body["healthy"] == true)
@@ -396,18 +397,21 @@ mod tests {
             password: "test-password".into(),
             directory: "/app".into(),
             reused: false,
+            protocol: Protocol::V1,
+            version: None,
         }
     }
 
     #[test]
     fn attach_arguments_use_the_matching_client_protocol() {
-        let connection = connection();
+        let mut connection = connection();
         assert_eq!(
-            attach_args(&connection, false),
+            attach_args(&connection),
             ["attach", "https://app-box.up.railway.app", "--dir", "/app"]
         );
+        connection.protocol = Protocol::V2;
         assert_eq!(
-            attach_args(&connection, true),
+            attach_args(&connection),
             ["--server", "https://app-box.up.railway.app", "--auto"]
         );
     }

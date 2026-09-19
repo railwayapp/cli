@@ -574,7 +574,7 @@ impl Session {
         if let Some(url) = client_url {
             match &mut local_connection {
                 client_sessions::Connection::Codex(c) => c.url = url.into(),
-                client_sessions::Connection::OpenCode(c, _) => c.url = url.into(),
+                client_sessions::Connection::OpenCode(c) => c.url = url.into(),
                 client_sessions::Connection::Railway(c) => c.connection.url = url.into(),
             }
         }
@@ -587,7 +587,7 @@ impl Session {
                 client_sessions::Connection::Railway(_) => {
                     cmd.args(["--", prompt]);
                 }
-                client_sessions::Connection::OpenCode(_, true) => {
+                client_sessions::Connection::OpenCode(c) if c.protocol.is_v2() => {
                     cmd.args(["--prompt", prompt]);
                 }
                 _ => {}
@@ -598,7 +598,7 @@ impl Session {
                 cmd.env(codex::TOKEN_ENV, &c.token);
                 cmd.env("CODEX_HOME", codex::local::client_home(c)?);
             }
-            client_sessions::Connection::OpenCode(c, _) => {
+            client_sessions::Connection::OpenCode(c) => {
                 cmd.env("OPENCODE_SERVER_USERNAME", &c.username);
                 cmd.env("OPENCODE_SERVER_PASSWORD", &c.password);
             }
@@ -1827,19 +1827,24 @@ assert (size.lines, size.columns) == (30, 100)
         )
         .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for beta in [false, true] {
+        for protocol in [
+            crate::commands::cloud_agent::opencode::Protocol::V1,
+            crate::commands::cloud_agent::opencode::Protocol::V2,
+        ] {
             let c = crate::commands::cloud_agent::opencode::Connection {
                 url: "https://agent.example.com".into(),
                 username: "opencode".into(),
                 password: "secret ' $(echo injected)".into(),
                 directory: "/app/a project".into(),
                 reused: true,
+                protocol,
+                version: None,
             };
             let mut pane = Session::spawn_client(
                 "vm".into(),
                 "box".into(),
                 &binary,
-                &client_sessions::Connection::OpenCode(c, beta),
+                &client_sessions::Connection::OpenCode(c),
                 None,
                 Some("ses_thread1"),
                 None,
@@ -1872,11 +1877,7 @@ assert (size.lines, size.columns) == (30, 100)
             }
             assert_eq!(
                 pane.durable_name,
-                client_sessions::name(
-                    if beta { "opencode2" } else { "opencode" },
-                    "vm",
-                    Some("ses_thread1")
-                )
+                client_sessions::name(protocol.legacy_harness(), "vm", Some("ses_thread1"))
             );
         }
     }

@@ -37,14 +37,22 @@ except Exception as error:
     sys.exit(1)
 '''
 FAKE = '''
-import base64,json,os,socket,sys
+import base64,json,os,socket,sys,sqlite3
 from pathlib import Path
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 # HTTPServer.server_bind does reverse DNS, which can stall on macOS CI.
 # The fake server must use loopback only, including hostname resolution.
 socket.getfqdn = lambda host: 'localhost'
-VERSION = '0.0.0-beta-19425'
+VERSION = '1.18.29'
+if sys.argv[1:] == ['--version']:
+    print('opencode v' + VERSION)
+    sys.exit(0)
+if VERSION.startswith('2.'):
+    database = Path(os.environ['HOME']) / '.local/share/opencode/opencode.db'
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS credential (id TEXT)')
 class Handler(BaseHTTPRequestHandler):
     def authenticated(self):
         expected = 'Basic ' + base64.b64encode((os.environ['OPENCODE_SERVER_USERNAME'] + ':' + os.environ['OPENCODE_SERVER_PASSWORD']).encode()).decode()
@@ -58,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.authenticated(): return
         path = urlparse(self.path).path
-        health = ('/api/health' if VERSION.startswith('0.0.0-beta-') else '/api/info') if 'opencode2' in sys.argv[0] else '/global/health'
+        health = '/api/info' if VERSION.startswith('2.') else '/global/health'
         if path not in (health, '/config', '/global/config'):
             self.send_response(404)
             self.end_headers()
@@ -71,7 +79,7 @@ class Handler(BaseHTTPRequestHandler):
             path = self.config_path()
             self.wfile.write(path.read_bytes() if path.exists() else b'{}')
         else:
-            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), **({'version': VERSION} if 'opencode2' in sys.argv[0] else {})}).encode())
+            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), 'version': VERSION}).encode())
     def do_PATCH(self):
         if not self.authenticated(): return
         path = self.config_path()
@@ -108,7 +116,7 @@ class BootstrapTests(unittest.TestCase):
         binary.chmod(0o700)
         beta = self.home / '.local/bin/opencode2'
         beta.parent.mkdir(parents=True)
-        beta.write_text(binary.read_text())
+        beta.write_text(binary.read_text().replace("VERSION = '1.18.29'", "VERSION = '2.0.8'"))
         beta.chmod(0o700)
         self.harness = 'opencode'
         with socket.socket() as sock, socket.socket() as code, socket.socket() as custom:
@@ -118,7 +126,7 @@ class BootstrapTests(unittest.TestCase):
             self.port = sock.getsockname()[1]
             self.code_port = code.getsockname()[1]
             self.custom_port = custom.getsockname()[1]
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('OPENCODE_SERVER_', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_CODE_PORT'))}
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('OPENCODE_', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_CODE_PORT', 'XDG_DATA_HOME'))}
         self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
         self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.port}'] = 'app-test.up.railway.app'
         self.state = self.home / '.railway/desktop/opencode/server.json'
@@ -162,16 +170,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(restarted['reused'])
         self.assertEqual(restarted['password'], first['password'])
 
-    def v2_request(self, fail=False):
+    def v2_request(self, fail=False, version='2.0.8', action='upgrade'):
         binary = self.home / 'opencode2-v2'
-        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '0.0.0-beta-19425'", "VERSION = '2.0.8'"))
+        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '1.18.29'", "VERSION = " + repr(version)))
         binary.chmod(0o700)
         runtime = ("raise RuntimeError('download failed')" if fail else 'return Path(' + repr(str(binary)) + ')')
         shim = 'from pathlib import Path\ndef ensure_runtime(version):\n    ' + runtime + '\n'
-        return {'action': 'connect', 'harness': 'opencode2', 'version': '2.0.8', 'runtime_shim': shim}
+        return {'action': action, 'version': version, 'runtime_shim': shim}
 
-    def test_beta_upgrade_keeps_credentials_directory_and_database_and_reuses_matching_server(self):
-        self.harness = 'opencode2'
+    def test_explicit_v1_upgrade_backs_up_and_reconnect_keeps_remote_release(self):
         first = self.run_bootstrap()
         old_pid = json.loads(self.state.read_text())['pid']
         database = self.home / '.local/share/opencode/opencode.db'
@@ -188,16 +195,15 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         with sqlite3.connect(backups[0]) as db:
             self.assertEqual(db.execute('SELECT id FROM session').fetchone()[0], 'keep')
-        self.assertTrue(self.run_bootstrap(self.v2_request(fail=True))['reused'])
+        self.assertTrue(self.run_bootstrap(self.v2_request(fail=True, action='connect'))['reused'])
         self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
-        request = self.v2_request()
-        request['version'] = '2.0.4'
+        request = self.v2_request(version='2.0.4')
         rejected = self.run_bootstrap(request, check=False)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('server is newer', rejected.stderr)
         self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
         self.run_bootstrap({'action': 'stop'})
-        self.assertFalse(self.run_bootstrap(self.v2_request())['reused'])
+        self.assertFalse(self.run_bootstrap(self.v2_request(action='connect'))['reused'])
         self.assertEqual(len(list(self.state.parent.glob('opencode-before-upgrade-*.db'))), 1)
 
     def test_failed_beta_download_preserves_live_server(self):
@@ -210,30 +216,58 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.state.read_bytes(), old_state)
         self.assertTrue(self.run_bootstrap({'action': 'inspect'}))
 
-    def test_beta_starts_its_own_binary_and_rejects_cross_edition_reuse_or_stop(self):
+    def test_legacy_record_reconnect_does_not_change_protocol_when_flags_change(self):
+        first = self.run_bootstrap()
+        state = json.loads(self.state.read_text())
+        state.pop('protocol')
+        self.state.write_text(json.dumps(state))
+        result = self.run_bootstrap({'action': 'connect', 'harness': 'opencode2'})
+        self.assertEqual(result['protocol'], 'v1')
+        self.assertEqual(result['password'], first['password'])
+        self.assertEqual(json.loads(self.state.read_text())['pid'], state['pid'])
+
+    def test_v1_restart_rejects_a_replaced_v2_executable(self):
+        self.run_bootstrap()
+        self.run_bootstrap({'action': 'stop'})
+        binary = self.home / '.opencode/bin/opencode'
+        binary.write_text(binary.read_text().replace("VERSION = '1.18.29'", "VERSION = '2.0.8'"))
+        result = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no V1 executable', result.stderr)
+        self.assertFalse((self.home / '.local/share/opencode/opencode.db').exists())
+
+    def test_fresh_v2_request_requires_explicit_migration_for_v1_data(self):
+        database = self.home / '.local/share/opencode/opencode.db'
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as db:
+            db.execute('CREATE TABLE session (id TEXT)')
+        request = self.v2_request(action='start')
+        request.update(protocol='v2', directory=str(self.directory), password='test')
+        result = self.run_bootstrap(request, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('contains OpenCode 1 data', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def test_v2_starts_its_own_binary_and_aliases_reconnect_to_recorded_protocol(self):
         self.harness = 'opencode2'
         first = self.run_bootstrap()
         self.assertFalse(first['reused'])
         self.assertTrue(self.run_bootstrap()['reused'])
         self.assertEqual(json.loads(self.state.read_text())['harness'], 'opencode2')
-        for request in [
-            {'harness': 'opencode', 'action': 'stop'},
-            {'harness': 'opencode', 'directory': str(self.directory), 'password': 'other'},
-        ]:
-            result = self.run_bootstrap(request, check=False)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('another OpenCode edition', result.stderr)
-        self.assertTrue(self.run_bootstrap()['reused'])
+        result = self.run_bootstrap({'harness': 'opencode', 'action': 'connect'})
+        self.assertTrue(result['reused'])
+        self.assertEqual(result['protocol'], 'v2')
+        self.run_bootstrap({'harness': 'opencode', 'action': 'stop'})
 
-    def test_discovery_is_read_only_filters_editions_and_returns_no_password(self):
+    def test_discovery_is_read_only_reports_protocol_and_returns_no_password(self):
         self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
         self.assertFalse(self.state.parent.exists())
         self.run_bootstrap()
         before = self.state.read_bytes()
         result = self.run_bootstrap({'action': 'inspect'})
-        self.assertEqual(result, {'directory': str(self.directory.resolve())})
+        self.assertEqual(result, {'directory': str(self.directory.resolve()), 'protocol': 'v1'})
         self.assertEqual(before, self.state.read_bytes())
-        self.assertIsNone(self.run_bootstrap({'action': 'inspect', 'harness': 'opencode2'}))
+        self.assertEqual(self.run_bootstrap({'action': 'inspect', 'harness': 'opencode2'}), result)
         self.run_bootstrap({'action': 'stop'})
         self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
 
@@ -247,7 +281,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(again['password'], first['password'])
         self.assertEqual(again['directory'], first['directory'])
         self.run_bootstrap({'action': 'stop'})
-        wrong = self.run_bootstrap({'action': 'connect', 'harness': 'opencode2'}, check=False)
+        wrong = self.run_bootstrap({'action': 'connect', 'protocol': 'v2'}, check=False)
         self.assertNotEqual(wrong.returncode, 0)
         restarted = self.run_bootstrap({'action': 'connect'})
         self.assertFalse(restarted['reused'])
@@ -260,6 +294,15 @@ class BootstrapTests(unittest.TestCase):
         result = self.run_bootstrap()
         self.assertEqual(result['username'], 'boot-user')
         self.assertEqual(result['password'], 'boot-password')
+
+    def test_v2_uses_its_fixed_username_and_preserves_the_password_on_upgrade(self):
+        self.env['OPENCODE_SERVER_USERNAME'] = 'legacy-user'
+        self.env['OPENCODE_SERVER_PASSWORD'] = 'boot-password'
+        first = self.run_bootstrap()
+        self.assertEqual(first['username'], 'legacy-user')
+        upgraded = self.run_bootstrap(self.v2_request())
+        self.assertEqual(upgraded['username'], 'opencode')
+        self.assertEqual(upgraded['password'], 'boot-password')
 
     def test_setup_and_reconnect_enable_permissions_without_restarting_or_losing_config(self):
         path = self.home / '.config/opencode/opencode.json'

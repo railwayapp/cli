@@ -46,7 +46,7 @@ pub(crate) use opencode_config::configure_installed as configure_installed_openc
   railway ca desktop --claude
   railway ca desktop --codex
   railway ca desktop --opencode --agent my-box
-  railway ca desktop --opencode2 --new
+  railway ca desktop --opencode --new
 
 Sets up the selected app's connection and credentials without opening the app.
 Uses an existing VM when available; --new creates one, --agent selects one.
@@ -70,8 +70,8 @@ pub struct Args {
     #[clap(long)]
     opencode: bool,
 
-    /// Download the latest OpenCode2 Beta on the agent and configure Beta Desktop
-    #[clap(long, conflicts_with = "opencode")]
+    /// Deprecated alias for --opencode (stable V2)
+    #[clap(long, conflicts_with = "opencode", hide = true)]
     opencode2: bool,
 
     /// Agent to point the app at, by name or id (defaults to this
@@ -122,12 +122,11 @@ enum App {
     Claude,
     Codex,
     OpenCode,
-    OpenCode2,
 }
 
 impl App {
     fn is_opencode(self) -> bool {
-        matches!(self, Self::OpenCode | Self::OpenCode2)
+        matches!(self, Self::OpenCode)
     }
 
     /// The harness slug `railway code` uses, so provisioning seeds the
@@ -137,7 +136,6 @@ impl App {
             App::Claude => "claude",
             App::Codex => "codex",
             App::OpenCode => "opencode",
-            App::OpenCode2 => "opencode2",
         }
     }
 
@@ -146,7 +144,6 @@ impl App {
             App::Claude => "Claude Code Desktop",
             App::Codex => "Codex",
             App::OpenCode => "OpenCode Desktop",
-            App::OpenCode2 => "OpenCode2 [Beta] Desktop",
         }
     }
 
@@ -155,8 +152,7 @@ impl App {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
-            App::OpenCode => "opencode",
-            App::OpenCode2 => "opencode2",
+            App::OpenCode => "opencode2",
         }
     }
 
@@ -165,7 +161,7 @@ impl App {
         match self {
             App::Claude => "the environment dropdown, under the name below",
             App::Codex => "Connections and the project sidebar",
-            App::OpenCode | App::OpenCode2 => "the server picker",
+            App::OpenCode => "the server picker",
         }
     }
 }
@@ -190,7 +186,7 @@ pub async fn command(args: Args) -> Result<()> {
         return code::codex_desktop_only(args.codex_launch_args(), args.codex_options()).await;
     }
     if apps.iter().any(|app| app.is_opencode()) {
-        opencode_config::preflight(args.opencode2)?;
+        opencode_config::preflight(opencode::Protocol::V2).await?;
     }
     if apps.contains(&App::Codex) {
         preflight_codex_desktop()?;
@@ -318,23 +314,8 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     let connection = if let Some(password) = &opencode_password {
-        if args.opencode2 {
-            println!(
-                "\nStarting OpenCode2 [Beta] and checking its HTTPS connection. The first startup downloads the latest Beta and may take several minutes..."
-            );
-        } else {
-            println!("\nStarting OpenCode and checking its HTTPS connection...");
-        }
-        Some(
-            opencode::start(
-                &alias,
-                &args.dir,
-                &ssh_config_path,
-                password,
-                args.opencode2,
-            )
-            .await?,
-        )
+        println!("\nStarting OpenCode and checking its HTTPS connection...");
+        Some(opencode::start(&alias, &args.dir, &ssh_config_path, password).await?)
     } else {
         None
     };
@@ -366,27 +347,18 @@ pub async fn command(args: Args) -> Result<()> {
             }
             .bold()
         );
-        let desktop = opencode_config::configure(
-            args.opencode2,
-            &connection,
-            &prepared.agent_id,
-            &prepared.agent_name,
-        )
-        .await
-        .map(|()| true);
-        code::save_desktop_configuration(&prepared, Some(&connection), args.opencode2, &desktop);
-        opencode::show_connection(
-            &connection,
-            args.opencode2,
-            &prepared.agent_name,
-            desktop.is_ok(),
-        )?;
+        let desktop =
+            opencode_config::configure(&connection, &prepared.agent_id, &prepared.agent_name)
+                .await
+                .map(|()| true);
+        code::save_desktop_configuration(&prepared, Some(&connection), &desktop);
+        opencode::show_connection(&connection, &prepared.agent_name, desktop.is_ok())?;
         desktop.context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
             "You can close this terminal. Rerun this command after sleeping or restarting the agent."
         );
     } else {
-        code::save_desktop_configuration(&prepared, None, false, &Ok(true));
+        code::save_desktop_configuration(&prepared, None, &Ok(true));
     }
 
     Ok(())
@@ -693,7 +665,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         println!(
             "Would verify the agent's existing HTTPS address and print its connection details."
         );
-        for target in opencode_config::targets(args.opencode2)? {
+        for target in opencode_config::targets(opencode::Protocol::V2, None).await? {
             println!(
                 "Would save the authenticated server, default server, and project in {} ({}).",
                 target.name(),
@@ -744,16 +716,11 @@ fn selected_apps(args: &Args) -> Result<Vec<App>> {
     if args.codex {
         apps.push(App::Codex);
     }
-    if args.opencode {
+    if args.opencode || args.opencode2 {
         apps.push(App::OpenCode);
     }
-    if args.opencode2 {
-        apps.push(App::OpenCode2);
-    }
     if apps.is_empty() {
-        bail!(
-            "Name an app: --claude, --codex, --opencode, or --opencode2. OpenCode editions must be configured separately."
-        );
+        bail!("Name an app: --claude, --codex, or --opencode.");
     }
     Ok(apps)
 }
@@ -783,7 +750,7 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
         false
     };
     let removed_opencode = if apps.iter().any(|app| app.is_opencode()) {
-        opencode_config::remove(&agent.id, args.opencode2).await?
+        opencode_config::remove(&agent.id).await?
     } else {
         false
     };
@@ -797,7 +764,7 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
             args.alias.as_deref(),
             false,
         )?;
-        opencode::stop(&alias, ssh_config_path, args.opencode2).await?;
+        opencode::stop(&alias, ssh_config_path).await?;
     }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
     let removed_block = ssh_config::remove_marked_block(ssh_config_path, &marker)?;
@@ -1301,7 +1268,7 @@ mod tests {
     fn opencode_editions_are_explicit_and_mutually_exclusive() {
         assert_eq!(
             selected_apps(&args_for(&["--opencode2"])).unwrap(),
-            vec![App::OpenCode2]
+            vec![App::OpenCode]
         );
         assert!(Args::try_parse_from(["desktop", "--opencode", "--opencode2"]).is_err());
         assert!(Args::try_parse_from(["desktop", "--opencode2", "--new"]).is_ok());

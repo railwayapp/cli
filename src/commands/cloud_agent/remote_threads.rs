@@ -78,7 +78,12 @@ impl RemoteThread {
             ],
         };
         let config = format!(
-            "{}{}",
+            "{}{}{}",
+            if self.harness.starts_with("opencode") {
+                code::opencode_resume_guard(self.harness == "opencode2")
+            } else {
+                String::new()
+            },
             variable
                 .map(|variable| format!("export {variable}={}; ", quote(&self.config_dir)))
                 .unwrap_or_default(),
