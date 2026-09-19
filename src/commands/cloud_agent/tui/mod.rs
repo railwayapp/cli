@@ -3036,7 +3036,7 @@ fn spawn_server_respawns(effects: Vec<Effect>, tx: &mpsc::UnboundedSender<Messag
                         super::codex::reconnect(&info).await?;
                     }
                     "opencode" | "opencode2" => {
-                        super::opencode::reconnect(&info, harness == "opencode2").await?;
+                        super::opencode::reconnect(&info).await?;
                     }
                     other => anyhow::bail!("no managed server to restart for {other}"),
                 }
