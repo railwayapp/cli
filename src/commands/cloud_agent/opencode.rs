@@ -195,16 +195,16 @@ async fn verify_client_directory(connection: &Connection) -> Result<()> {
             .basic_auth(&connection.username, Some(&connection.password))
             .send()
             .await
-            .context("Checking OpenCode2's remote project directory")?
+            .context("Checking OpenCode's remote project directory")?
             .error_for_status()?
             .json()
             .await?;
         let actual = location["directory"]
             .as_str()
-            .context("OpenCode2 returned no remote project directory")?;
+            .context("OpenCode returned no remote project directory")?;
         if actual != connection.directory {
             bail!(
-                "OpenCode2 is already serving {actual}. Reconnect with --dir {actual}, or use --new to serve {} on a fresh agent.",
+                "OpenCode is already serving {actual}. Reconnect with --dir {actual}, or use --new to serve {} on a fresh agent.",
                 connection.directory
             );
         }

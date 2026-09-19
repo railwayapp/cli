@@ -159,7 +159,10 @@ pub(crate) async fn prepare_pane(
         })
         .unwrap_or_else(|| "/app".into());
     let result: Result<_> = async {
-        progress.step(&format!("Starting {harness} server"));
+        progress.step(&format!(
+            "Starting {} server",
+            crate::commands::cloud_agent::harness_label(harness)
+        ));
         let connection = if harness == "codex" {
             Connection::Codex(codex::start_prepared(&prepared, &directory, &password).await?)
         } else {
@@ -176,7 +179,10 @@ pub(crate) async fn prepare_pane(
             )
             .await;
         saved.save()?;
-        progress.step(&format!("Preparing local {harness} client"));
+        progress.step(&format!(
+            "Preparing local {} client",
+            crate::commands::cloud_agent::harness_label(harness)
+        ));
         let binary = match &connection {
             Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
             Connection::OpenCode(c) => local::ensure_client_quiet(c).await?,
@@ -201,8 +207,10 @@ pub(crate) async fn prepare_pane(
     .await;
     result.with_context(|| {
         format!(
-            "Opening {harness} on {} ({})",
-            prepared.agent_name, prepared.agent_id
+            "Opening {} on {} ({})",
+            crate::commands::cloud_agent::harness_label(harness),
+            prepared.agent_name,
+            prepared.agent_id
         )
     })
 }
@@ -489,7 +497,7 @@ fn choose(
     }
     match candidates.len() {
         0 => bail!(
-            "No running servers for this client. Run railway code with the matching --codex, --opencode, or --opencode2 flag to set one up."
+            "No running servers for this client. Run railway code with the matching --codex or --opencode flag to set one up."
         ),
         1 if complete => Ok(candidates.pop()),
         _ if !interactive => bail!(

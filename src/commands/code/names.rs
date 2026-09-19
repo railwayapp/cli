@@ -33,8 +33,7 @@ impl Target {
 fn prefix(agent: Agent) -> Option<&'static str> {
     match agent {
         Agent::Codex => Some("codex"),
-        Agent::OpenCode => Some("oc"),
-        Agent::OpenCode2 => Some("oc2"),
+        Agent::OpenCode | Agent::OpenCode2 => Some("oc"),
         Agent::Claude => Some("cc"),
         Agent::Grok => Some("grok"),
         Agent::Railway => Some("rlwy"),
@@ -147,7 +146,7 @@ mod tests {
     #[test]
     fn editions_and_fragments_follow_the_lowercase_format() {
         assert_eq!(prefix(Agent::OpenCode), Some("oc"));
-        assert_eq!(prefix(Agent::OpenCode2), Some("oc2"));
+        assert_eq!(prefix(Agent::OpenCode2), Some("oc"));
         assert_eq!(prefix(Agent::Claude), Some("cc"));
         assert_eq!(prefix(Agent::Grok), Some("grok"));
         assert_eq!(prefix(Agent::Shell), None);
@@ -180,7 +179,7 @@ mod tests {
 
     #[test]
     fn collisions_wrap_without_changing_the_project_or_edition() {
-        for prefix in ["codex", "oc", "oc2", "cc", "grok", "rlwy"] {
+        for prefix in ["codex", "oc", "cc", "grok", "rlwy"] {
             let existing =
                 HashSet::from([format!("{prefix}-railg-zzz"), format!("{prefix}-railg-000")]);
             assert_eq!(

@@ -71,7 +71,7 @@ pub(crate) fn read(
     let path = data.join(database.unwrap_or("opencode.db"));
     if path.try_exists()? {
         let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("Reading OpenCode2 credentials from {}", path.display()))?;
+            .with_context(|| format!("Reading OpenCode credentials from {}", path.display()))?;
         db.busy_timeout(Duration::from_secs(5))?;
         let transaction = db.unchecked_transaction()?;
         let exists: bool = transaction.query_row(
@@ -89,7 +89,7 @@ pub(crate) fn read(
                 .all(|key| columns.contains(*key))
             {
                 bail!(
-                    "Unsupported OpenCode2 credential database; provider credentials were not copied"
+                    "Unsupported OpenCode credential database; provider credentials were not copied"
                 );
             }
             // Match Beta's account preference: active first, then newest account.
@@ -118,9 +118,9 @@ pub(crate) fn read(
                     continue;
                 }
                 let value: Value = serde_json::from_str(&value)
-                    .map_err(|_| anyhow::anyhow!("Invalid OpenCode2 provider credential JSON"))?;
+                    .map_err(|_| anyhow::anyhow!("Invalid OpenCode provider credential JSON"))?;
                 if provider.is_empty() || !id.starts_with("cred_") || !valid_value(&value) {
-                    bail!("Unsupported OpenCode2 provider credential; credentials were not copied");
+                    bail!("Unsupported OpenCode provider credential; credentials were not copied");
                 }
                 credentials
                     .push(json!({"id":id,"integrationID":provider,"label":label,"value":value}));

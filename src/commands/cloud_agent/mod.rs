@@ -39,6 +39,14 @@ use crate::util::progress::create_spinner;
 use prefs::AgentPrefs;
 use tui::{App, Outcome};
 
+/// Display names are independent of historical harness identities.
+pub(crate) fn harness_label(slug: &str) -> &str {
+    match slug {
+        "opencode" | "opencode2" => "OpenCode",
+        _ => slug,
+    }
+}
+
 /// Manage Railway cloud agents
 #[derive(Parser)]
 #[clap(
@@ -302,7 +310,7 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
         new_session: false,
         harness: resolved.harness.to_string(),
         prompt: args.initial_prompt.clone(),
-        label: resolved.harness.to_string(),
+        label: harness_label(resolved.harness).to_string(),
         base: Box::new(args),
     };
     browse_with(BrowseOpts {

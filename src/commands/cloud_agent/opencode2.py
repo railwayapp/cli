@@ -162,7 +162,7 @@ def credential_database():
     data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode"
     database = os.environ.get("OPENCODE_DB", "opencode.db")
     if database == ":memory:":
-        raise InstallError("OpenCode2 provider credentials require a persistent database.")
+        raise InstallError("OpenCode provider credentials require a persistent database.")
     return data / database
 
 
@@ -192,9 +192,9 @@ def initialize_credentials(binary, database):
     try:
         process.communicate(timeout=30)
         if process.returncode:
-            raise InstallError("Could not initialize OpenCode2 provider storage; credentials were not imported.")
+            raise InstallError("Could not initialize OpenCode provider storage; credentials were not imported.")
     except subprocess.TimeoutExpired:
-        raise InstallError("Initializing OpenCode2 provider storage timed out; retry setup.") from None
+        raise InstallError("Initializing OpenCode provider storage timed out; retry setup.") from None
     finally:
         # Also clean up a private child server if its client failed or timed out.
         try:
@@ -210,17 +210,17 @@ def initialize_credentials(binary, database):
 
 def validate_credentials(payload):
     if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("credentials"), list):
-        raise InstallError("Unsupported OpenCode2 provider credential payload.")
+        raise InstallError("Unsupported OpenCode provider credential payload.")
     seen = set()
     for item in payload["credentials"]:
         if not isinstance(item, dict):
-            raise InstallError("Invalid OpenCode2 provider credential.")
+            raise InstallError("Invalid OpenCode provider credential.")
         provider, value = item.get("integrationID"), item.get("value")
         if (not isinstance(provider, str) or not provider or provider.startswith("mcp_")
                 or provider in seen or not isinstance(item.get("id"), str)
                 or not item["id"].startswith("cred_") or not isinstance(item.get("label"), str)
                 or not isinstance(value, dict)):
-            raise InstallError("Invalid OpenCode2 provider credential.")
+            raise InstallError("Invalid OpenCode provider credential.")
         seen.add(provider)
         metadata = value.get("metadata", {})
         valid = isinstance(metadata, dict) and all(isinstance(v, str) for v in metadata.values())
@@ -232,7 +232,7 @@ def validate_credentials(payload):
         else:
             valid = False
         if not valid:
-            raise InstallError("Unsupported OpenCode2 provider credential format.")
+            raise InstallError("Unsupported OpenCode provider credential format.")
     return payload["credentials"]
 
 
@@ -247,7 +247,7 @@ def import_credentials(binary, pending, database=None):
         try:
             credentials = validate_credentials(json.loads(pending.read_text()))
         except (ValueError, TypeError):
-            raise InstallError("Invalid OpenCode2 provider credential payload.") from None
+            raise InstallError("Invalid OpenCode provider credential payload.") from None
         initialize_credentials(binary, database)
         for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
             if path.exists():
@@ -257,7 +257,7 @@ def import_credentials(binary, pending, database=None):
                 columns = {row[1] for row in db.execute("PRAGMA table_info(credential)")}
                 required = {"id", "integration_id", "label", "value", "time_created", "time_updated"}
                 if not required <= columns:
-                    raise InstallError("Unsupported OpenCode2 provider database; credentials were not imported.")
+                    raise InstallError("Unsupported OpenCode provider database; credentials were not imported.")
                 db.execute("BEGIN IMMEDIATE")
                 for item in credentials:
                     # Preserve provider accounts already configured remotely,
@@ -273,7 +273,7 @@ def import_credentials(binary, pending, database=None):
                     db.execute(f"INSERT INTO credential ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})", values)
                 db.commit()
         except sqlite3.Error:
-            raise InstallError("Could not save OpenCode2 provider credentials; retry setup.") from None
+            raise InstallError("Could not save OpenCode provider credentials; retry setup.") from None
         # Remove the transferred copy only after the transaction commits.
         pending.unlink()
 

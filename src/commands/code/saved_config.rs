@@ -360,10 +360,14 @@ impl SavedConfig {
     fn render(&self) -> Result<String> {
         let divider = "─".repeat(64).cyan();
         let mut out = format!("\n{divider}\n");
+        let harness = self.opencode.as_ref().map_or_else(
+            || crate::commands::cloud_agent::harness_label(&self.harness),
+            |config| config.connection.protocol.label(),
+        );
         writeln!(
             out,
             "{} connection details for {}",
-            self.harness, self.agent_name
+            harness, self.agent_name
         )?;
         if let Some(codex) = &self.codex {
             let c = &codex.connection;
@@ -441,7 +445,7 @@ impl SavedConfig {
                 self.agent_name,
                 self.agent_id,
                 self.environment_id,
-                self.harness
+                harness
             )?;
             writeln!(
                 out,

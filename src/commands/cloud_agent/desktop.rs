@@ -956,7 +956,7 @@ async fn verify(alias: &str, apps: &[App], ssh_config_path: &Path) -> Vec<Check>
         )
         .await;
         checks.push(Check {
-            label: format!("{bin} on PATH (login shell)"),
+            label: format!("{} on PATH (login shell)", app.harness()),
             ok: probe.is_ok(),
             detail: probe.err().map(|e| format!("{e:#}")),
         });

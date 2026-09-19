@@ -31,13 +31,7 @@ pub fn harness_picker_indices(_cursor: usize) -> Vec<usize> {
     (0..HARNESSES.len()).collect()
 }
 
-pub fn harness_label(slug: &str) -> &str {
-    match slug {
-        "opencode" => "OpenCode",
-        "opencode2" => "OpenCode",
-        _ => slug,
-    }
-}
+pub(crate) use super::super::harness_label;
 
 /// The slice of [`HARNESSES`] that can be saved as the default agent —
 /// everything but `shell`, which starts no harness and so makes no sense as
@@ -257,13 +251,21 @@ impl ConsoleSession {
                 .unwrap_or_else(|| super::super::client_sessions::NEW_THREAD.into());
         }
         match self.harness_slug() {
+            Some("opencode2") if self.name.starts_with("opencode2-") => {
+                self.name.replacen("opencode2-", "opencode-", 1)
+            }
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
                 let segments: Vec<&str> = self.name.split('-').collect();
                 let short = match segments.as_slice() {
                     [.., suffix] if segments.len() >= 3 => suffix,
                     _ => self.name.as_str(),
                 };
-                format!("{slug}-{short}")
+                let label = if slug == "opencode2" {
+                    "opencode"
+                } else {
+                    slug
+                };
+                format!("{label}-{short}")
             }
             _ => self.name.clone(),
         }
@@ -788,8 +790,9 @@ impl PendingConfirm {
             ),
             (AgentOp::Sleep, _) => format!("Sleep {}?  y / n", self.agent_name),
             (AgentOp::Wake, Some(harness)) => format!(
-                "{} was put to sleep under your {harness} client. Wake it and resume?  y / n",
-                self.agent_name
+                "{} was put to sleep under your {} client. Wake it and resume?  y / n",
+                self.agent_name,
+                harness_label(harness)
             ),
             (AgentOp::Wake, None) => format!("Wake {}?  y / n", self.agent_name),
         }
@@ -2496,6 +2499,7 @@ impl App {
             .get(agent_id)
             .map(|entry| (entry.agent_name.clone(), entry.harness.clone()))
             .unwrap_or_else(|| (agent_id.to_string(), "client".to_string()));
+        let harness = harness_label(&harness);
         match error {
             None => self.toast(format!(
                 "{name} is awake; your {harness} client will reconnect on its own"

@@ -556,7 +556,10 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     let block = terminal_block(app, f.area().width)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
-            format!(" {} · starting ", loading.harness),
+            format!(
+                " {} · starting ",
+                super::app::harness_label(&loading.harness)
+            ),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),

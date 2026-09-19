@@ -183,7 +183,7 @@ latest snapshot; use an ID when names are ambiguous. Snapshots contain credentia
 and are removed by `railway logout`.
 
 `--connection-json` returns verified connection details including credentials for
-Codex or OpenCode2, without opening a local client. Progress goes to stderr.
+Codex or OpenCode, without opening a local client. Progress goes to stderr.
 It works with setup, `connect`, and Codex `desktop-only`.
 
 ## Reusable VMs and variables

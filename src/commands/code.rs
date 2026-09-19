@@ -33,7 +33,7 @@ use crate::util::shell::shell_join;
 // `express-agent serve --agents` entrypoint reconciles their config on every
 // boot: MCP servers (including Railway's own platform tools), hooks, the
 // onboarding/trust flags, and the autonomy posture. This command leaves that
-// config to the reconciler, prepares launch-time runtimes (OpenCode2 and Grok),
+// config to the reconciler, prepares launch-time runtimes (OpenCode and Grok),
 // and carries the one thing only the user's laptop has: their credential.
 //
 // Auth shape: Codex copies the user's existing local sign-in
@@ -220,7 +220,7 @@ pub(crate) async fn codex_desktop_only(
 pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
     if args.connection_json {
         bail!(
-            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
         );
     }
     // `railway code` passes its trailing arguments to the agent, so
@@ -503,7 +503,7 @@ impl LaunchArgs {
             || self.grok
             || self.shell
         {
-            bail!("Pick exactly one client: --codex, --opencode, --opencode2, or --railway.");
+            bail!("Pick exactly one client: --codex, --opencode, or --railway.");
         }
         if self.rm || self.initial_prompt.is_some() {
             bail!("Local-client commands cannot be combined with --rm or an initial prompt.");
@@ -528,7 +528,7 @@ impl LaunchArgs {
             Some("remote") => {
                 if self.agent_args.len() != 1 || self.remote_dir.is_some() {
                     bail!(
-                        "Use railway code --codex remote (or --opencode/--opencode2/--railway) to open the UI inside the cloud agent; --dir is for local clients."
+                        "Use railway code --codex remote (or --opencode/--railway) to open the UI inside the cloud agent; --dir is for local clients."
                     );
                 }
                 Ok(Some(ClientAction::Remote))
@@ -545,7 +545,7 @@ impl LaunchArgs {
                     || self.remote_dir.is_some()
                 {
                     bail!(
-                        "connect uses an existing server. Use railway code --codex, --opencode, --opencode2, or --railway to set one up on a fresh VM."
+                        "connect uses an existing server. Use railway code --codex, --opencode, or --railway to set one up on a fresh VM."
                     );
                 }
                 let positional = self.agent_args.get(1).cloned();
@@ -765,7 +765,7 @@ enum Agent {
 impl Agent {
     /// The remote binary name — what's actually exec'd, and what's
     /// autostarted on reconnect. Only ever used for that: anywhere this agent
-    /// needs a name a person reads, use [`Self::slug`] instead. The one
+    /// needs a name a person reads, use [`Self::display`] instead. The one
     /// exception to "identical to the slug": the interactive frontend binary
     /// is `railway-agent-tui`, not `railway-agent` (that name is the headless
     /// `run`/`serve` CLI it drives).
@@ -783,13 +783,9 @@ impl Agent {
         }
     }
 
-    /// The slug persisted in `agent-prefs.json`, accepted by
-    /// `RAILWAY_CA_AGENT`, and used anywhere this agent needs a short,
-    /// user-facing identifier — session name prefixes, the "get back in"
-    /// hint, launch messages. Identical to [`Self::name`] for every agent
-    /// except Railway's own: "railway" reads better than "railway-agent-tui"
-    /// in a flag, a config file, or a session name, and there is only the one
-    /// harness it could mean.
+    /// Historical harness identity for sessions, snapshots, and telemetry.
+    /// Also accepted by launch preferences and `RAILWAY_CA_AGENT`. Keep V1 and
+    /// V2 distinct here; use [`Self::display`] for user-facing labels.
     fn slug(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
@@ -895,9 +891,7 @@ impl Agent {
             Agent::OpenCode => {
                 "connect a provider in OpenCode Desktop or run `opencode auth login` on the agent"
             }
-            Agent::OpenCode2 => {
-                "connect a provider in OpenCode Desktop or run `opencode2 auth login` on the agent"
-            }
+            Agent::OpenCode2 => "connect a provider in OpenCode Desktop",
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
             Agent::Railway => "no sign-in needed — the agent carries its own",
@@ -1523,7 +1517,7 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
                 },
                 None => PendingAuth::SignInOnAgent {
                     note: format!(
-                        "No OpenCode2 provider sign-in to copy from this machine; {}.",
+                        "No OpenCode provider sign-in to copy from this machine; {}.",
                         agent.sign_in_on_agent_hint()
                     ),
                 },
@@ -2928,9 +2922,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
     match flagged.as_slice() {
         [agent] => return Ok(*agent),
         [] => {}
-        _ => bail!(
-            "Pick one agent: --codex, --claude, --opencode, --opencode2, --grok, or --railway."
-        ),
+        _ => bail!("Pick one agent: --codex, --claude, --opencode, --grok, or --railway."),
     }
 
     if let Ok(slug) = std::env::var(AGENT_ENV_VAR) {
@@ -2938,7 +2930,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
                 anyhow!(
-                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, opencode2, grok, railway, or shell)."
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, grok, railway, or shell)."
                 )
             })?;
             return Ok(agent);
@@ -3089,7 +3081,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
 
     if args.connection_json {
         bail!(
-            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
         );
     }
 
@@ -3135,7 +3127,8 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     };
     progress.finish();
 
-    println!("Launching {}…", prepared.harness);
+    let harness = crate::commands::cloud_agent::harness_label(prepared.harness);
+    println!("Launching {harness}…");
     let exit_code = run_session(&prepared)?;
 
     // The user's work is done; give detached telemetry a bounded window so a
@@ -3178,7 +3171,12 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     } else {
         println!(
             "  railway code --{}   # wakes it and drops back into {}",
-            prepared.harness, prepared.harness
+            if prepared.harness == "opencode2" {
+                "opencode"
+            } else {
+                prepared.harness
+            },
+            harness
         );
     }
     println!(

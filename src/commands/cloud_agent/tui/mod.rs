@@ -1168,9 +1168,10 @@ fn merge_native_threads(
             if !inventory.failed.iter().any(|failed| failed == harness) {
                 inventory.failed.push(harness.into());
             }
-            inventory
-                .warnings
-                .push(format!("Couldn't read {harness} history: {error:#}"));
+            inventory.warnings.push(format!(
+                "Couldn't read {} history: {error:#}",
+                app::harness_label(harness)
+            ));
         }
     }
 }
