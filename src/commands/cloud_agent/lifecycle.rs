@@ -1029,7 +1029,11 @@ async fn start_session(agent: &ca::Agent, resume_session_id: Option<String>) -> 
         if launch.resume_session_id.is_some() {
             format!("Resuming your Claude conversation on {}.", agent.name)
         } else {
-            format!("No session on {} yet — starting {harness}.", agent.name)
+            format!(
+                "No session on {} yet — starting {}.",
+                agent.name,
+                super::harness_label(harness)
+            )
         }
         .dimmed()
     );

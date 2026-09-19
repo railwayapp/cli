@@ -352,7 +352,8 @@ def discover():
             rows.extend(read())
         except Exception as error:
             failed.extend(harnesses)
-            warnings.append(f"{'/'.join(harnesses)} history unavailable ({type(error).__name__})")
+            label = "OpenCode" if "opencode" in harnesses else "/".join(harnesses)
+            warnings.append(f"{label} history unavailable ({type(error).__name__})")
     # Relocations and restored histories can leave duplicate IDs in the tree.
     newest = {}
     for row in sorted(rows, key=lambda r: r["thread"]["updated_at"], reverse=True):

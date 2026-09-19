@@ -1,4 +1,4 @@
-//! OpenCode Desktop stores (stable v1.18.29 and beta 0.0.0-beta-19289).
+//! OpenCode Desktop stores, selected by app identity and runtime compatibility.
 //! `server` is a JSON string inside opencode.global.dat, while the default
 //! URL lives in opencode.settings. Newer Desktop builds move renderer state
 //! into drafts.sqlite. Keep unknown keys and existing connections in either.
@@ -6,6 +6,8 @@
 //! https://github.com/anomalyco/opencode/blob/v1.18.29/packages/desktop/src/main/store.ts
 //! Beta's state schema and channel IDs were verified in the packaged release:
 //! https://github.com/anomalyco/opencode-beta/releases/tag/v0.0.0-beta-19289
+//! Stable 2.0.8's packaged registry/store modules retain the same server record
+//! and SQLite state schema, under ai.opencode.desktop (verified 2026-09-18).
 
 use std::fs;
 use std::io::Write;
@@ -15,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection as Database, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
-use super::opencode::Connection;
+use super::opencode::{Connection, Protocol, local};
 
 const SETTINGS: &str = "opencode.settings";
 const GLOBAL: &str = "opencode.global.dat";
@@ -74,10 +76,70 @@ fn target_at(base: &Path, beta: bool) -> Target {
     }
 }
 
-pub(super) fn targets(beta: bool) -> Result<Vec<Target>> {
+pub(super) async fn targets(protocol: Protocol, version: Option<&str>) -> Result<Vec<Target>> {
     let base = dirs::config_dir()
         .context("Unable to locate OpenCode Desktop's configuration directory")?;
-    Ok(vec![target_at(&base, beta)])
+    #[cfg(not(windows))]
+    let home = dirs::home_dir().context("Unable to locate the home directory")?;
+    let mut result = Vec::new();
+    // A channel name is not a protocol: stable Desktop can be V1 or V2.
+    // Verify its bundled client before writing credentials to that app's store.
+    for channel in [Channel::Standard, Channel::Beta] {
+        let mut candidates = Vec::<PathBuf>::new();
+        #[cfg(target_os = "macos")]
+        for root in [PathBuf::from("/Applications"), home.join("Applications")] {
+            candidates.push(root.join(format!(
+                "{}.app/Contents/Resources/opencode-cli",
+                channel.name()
+            )));
+        }
+        #[cfg(windows)]
+        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(root).join(format!(
+                "Programs/{}/resources/opencode-cli.exe",
+                channel.name()
+            )));
+        }
+        #[cfg(target_os = "linux")]
+        for root in [
+            PathBuf::from("/opt"),
+            home.join(".local/share"),
+            PathBuf::from("/usr/lib"),
+        ] {
+            candidates.push(root.join(channel.name()).join("resources/opencode-cli"));
+            candidates.push(
+                root.join(channel.name().to_lowercase().replace(' ', "-"))
+                    .join("resources/opencode-cli"),
+            );
+        }
+        for binary in candidates {
+            #[cfg(target_os = "macos")]
+            {
+                let Some(contents) = binary.parent().and_then(Path::parent) else {
+                    continue;
+                };
+                let identity = tokio::process::Command::new("/usr/bin/plutil")
+                    .args(["-extract", "CFBundleIdentifier", "raw"])
+                    .arg(contents.join("Info.plist"))
+                    .output()
+                    .await?;
+                if !identity.status.success()
+                    || String::from_utf8_lossy(&identity.stdout).trim() != channel.id()
+                {
+                    continue;
+                }
+            }
+            if local::compatible(&binary, protocol, version).await {
+                result.push(target_at(&base, channel == Channel::Beta));
+                break;
+            }
+        }
+        // Prefer the stable application when both channels support this protocol.
+        if !result.is_empty() {
+            break;
+        }
+    }
+    Ok(result)
 }
 
 fn read_object(path: &Path) -> Result<Map<String, Value>> {
@@ -312,8 +374,14 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 /// Catch unsupported stores before provisioning.
-pub(super) fn preflight(beta: bool) -> Result<()> {
-    for target in targets(beta)? {
+pub(super) async fn preflight(protocol: Protocol) -> Result<()> {
+    let targets = targets(protocol, None).await?;
+    if targets.is_empty() {
+        bail!(
+            "No compatible OpenCode Desktop installation was found. Install the matching Desktop release, then retry."
+        );
+    }
+    for target in targets {
         Stores::read(&target.root)
             .with_context(|| format!("Reading {} settings", target.name()))?;
     }
@@ -323,13 +391,12 @@ pub(super) fn preflight(beta: bool) -> Result<()> {
 /// Opportunistic setup for `railway code`: only write to an existing Desktop
 /// installation of the selected edition. Callers keep failures non-fatal.
 pub(crate) async fn configure_installed(
-    beta: bool,
     connection: &Connection,
     agent_id: &str,
     agent_name: &str,
 ) -> Result<bool> {
     let mut configured = false;
-    for target in targets(beta)? {
+    for target in targets(connection.protocol, connection.version.as_deref()).await? {
         configured |= configure_installed_target(&target, connection, agent_id, agent_name).await?;
     }
     Ok(configured)
@@ -351,12 +418,18 @@ async fn configure_installed_target(
 }
 
 pub(super) async fn configure(
-    beta: bool,
     connection: &Connection,
     agent_id: &str,
     agent_name: &str,
 ) -> Result<()> {
-    for target in targets(beta)? {
+    let targets = targets(connection.protocol, connection.version.as_deref()).await?;
+    if targets.is_empty() {
+        bail!(
+            "No Desktop app compatible with {} was found",
+            connection.protocol.label()
+        );
+    }
+    for target in targets {
         configure_target(&target, connection, agent_id, agent_name)
             .await
             .with_context(|| format!("Configuring {}", target.name()))?;
@@ -376,9 +449,10 @@ async fn configure_target(
     stores.save(root)
 }
 
-pub(super) async fn remove(agent_id: &str, beta: bool) -> Result<bool> {
+pub(super) async fn remove(agent_id: &str) -> Result<bool> {
     let mut removed = false;
-    for target in targets(beta)? {
+    let base = dirs::config_dir().context("Unable to locate OpenCode Desktop settings")?;
+    for target in [target_at(&base, false), target_at(&base, true)] {
         removed |= remove_target(&target, agent_id).await?;
     }
     Ok(removed)
@@ -405,6 +479,8 @@ mod tests {
             password: "secret".into(),
             directory: "/app".into(),
             reused: false,
+            protocol: Protocol::V2,
+            version: Some("2.0.8".into()),
         }
     }
 

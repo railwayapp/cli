@@ -33,11 +33,7 @@ pub(crate) fn client_connection(
     saved
         .codex
         .map(|c| Connection::Codex(c.connection))
-        .or_else(|| {
-            saved
-                .opencode
-                .map(|c| Connection::OpenCode(c.connection, c.beta))
-        })
+        .or_else(|| saved.opencode.map(|c| Connection::OpenCode(c.connection)))
         .or_else(|| {
             saved.railway.map(|c| {
                 Connection::Railway(super::railway_client::ClientConnection::new(
@@ -94,12 +90,62 @@ pub(super) struct SavedConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(try_from = "OpenCodeRecord", into = "OpenCodeRecord")]
 struct OpenCodeConfig {
     connection: opencode::Connection,
+    desktop_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desktop_error: Option<String>,
+}
+
+// Keep writing beta for old CLI readers, but consume it only when explicit
+// protocol metadata is absent. An old `opencode` record always means V1.
+#[derive(Serialize, Deserialize)]
+struct OpenCodeRecord {
+    // Inspect presence before Connection's historical V1 default is applied.
+    connection: serde_json::Value,
+    #[serde(default)]
+    protocol: Option<opencode::Protocol>,
+    #[serde(default)]
     beta: bool,
     desktop_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     desktop_error: Option<String>,
+}
+
+impl TryFrom<OpenCodeRecord> for OpenCodeConfig {
+    type Error = serde_json::Error;
+
+    fn try_from(record: OpenCodeRecord) -> Result<Self, Self::Error> {
+        let explicit = record.connection.get("protocol").is_some();
+        let mut connection: opencode::Connection = serde_json::from_value(record.connection)?;
+        connection.protocol = record
+            .protocol
+            .or(explicit.then_some(connection.protocol))
+            .unwrap_or(if record.beta {
+                opencode::Protocol::V2
+            } else {
+                opencode::Protocol::V1
+            });
+        Ok(Self {
+            connection,
+            desktop_configured: record.desktop_configured,
+            desktop_error: record.desktop_error,
+        })
+    }
+}
+
+impl From<OpenCodeConfig> for OpenCodeRecord {
+    fn from(config: OpenCodeConfig) -> Self {
+        Self {
+            protocol: Some(config.connection.protocol),
+            beta: config.connection.protocol.is_v2(),
+            connection: serde_json::to_value(config.connection)
+                .expect("OpenCode connection contains only serializable fields"),
+            desktop_configured: config.desktop_configured,
+            desktop_error: config.desktop_error,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -199,12 +245,11 @@ impl SavedConfig {
     pub(super) fn with_opencode(
         mut self,
         connection: &opencode::Connection,
-        beta: bool,
         desktop: &Result<bool>,
     ) -> Self {
+        self.harness = connection.protocol.legacy_harness().into();
         self.opencode = Some(OpenCodeConfig {
             connection: connection.clone(),
-            beta,
             desktop_configured: matches!(desktop, Ok(true)),
             desktop_error: desktop.as_ref().err().map(|e| format!("{e:#}")),
         });
@@ -315,10 +360,14 @@ impl SavedConfig {
     fn render(&self) -> Result<String> {
         let divider = "─".repeat(64).cyan();
         let mut out = format!("\n{divider}\n");
+        let harness = self.opencode.as_ref().map_or_else(
+            || crate::commands::cloud_agent::harness_label(&self.harness),
+            |config| config.connection.protocol.label(),
+        );
         writeln!(
             out,
             "{} connection details for {}",
-            self.harness, self.agent_name
+            harness, self.agent_name
         )?;
         if let Some(codex) = &self.codex {
             let c = &codex.connection;
@@ -354,11 +403,7 @@ impl SavedConfig {
         }
         if let Some(o) = &self.opencode {
             let c = &o.connection;
-            let edition = if o.beta {
-                "OpenCode2 [Beta]"
-            } else {
-                "OpenCode"
-            };
+            let edition = c.protocol.label();
             writeln!(
                 out,
                 "\n{}\n  Name:      {}\n  Server:    {}\n  Username:  {}\n  Password:  {}\n  Directory: {}",
@@ -400,7 +445,7 @@ impl SavedConfig {
                 self.agent_name,
                 self.agent_id,
                 self.environment_id,
-                self.harness
+                harness
             )?;
             writeln!(
                 out,
@@ -419,7 +464,14 @@ impl SavedConfig {
                 shell_join(&[
                     "railway".into(),
                     "code".into(),
-                    format!("--{}", self.harness),
+                    format!(
+                        "--{}",
+                        if self.opencode.is_some() {
+                            "opencode"
+                        } else {
+                            &self.harness
+                        }
+                    ),
                     "connect".into(),
                     self.agent_name.clone()
                 ])
@@ -554,6 +606,37 @@ pub(super) fn clear_in(home: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_opencode_records_keep_protocol_and_remain_readable_by_old_clients() {
+        for (beta, protocol) in [
+            (false, opencode::Protocol::V1),
+            (true, opencode::Protocol::V2),
+        ] {
+            let old = serde_json::json!({
+                "connection": {"url":"https://box.example", "username":"opencode", "password":"secret",
+                    "directory":"/app", "reused":true},
+                "beta":beta, "desktop_configured":false
+            });
+            let config: OpenCodeConfig = serde_json::from_value(old).unwrap();
+            assert_eq!(config.connection.protocol, protocol);
+            let written = serde_json::to_value(config).unwrap();
+            assert_eq!(written["beta"], beta);
+            assert_eq!(written["protocol"], serde_json::to_value(protocol).unwrap());
+            // Explicit metadata wins even if a stale legacy field disagrees.
+            let mut mixed = written;
+            mixed["beta"] = serde_json::json!(!beta);
+            let read: OpenCodeConfig = serde_json::from_value(mixed).unwrap();
+            assert_eq!(read.connection.protocol, protocol);
+        }
+        let explicit: OpenCodeConfig = serde_json::from_value(serde_json::json!({
+            "connection": {"url":"https://box.example", "username":"opencode", "password":"secret",
+                "directory":"/app", "reused":true, "protocol":"v2"},
+            "beta":false, "desktop_configured":false
+        }))
+        .unwrap();
+        assert_eq!(explicit.connection.protocol, opencode::Protocol::V2);
+    }
 
     #[test]
     fn railway_snapshot_preserves_public_endpoint_without_expiring_credentials() {

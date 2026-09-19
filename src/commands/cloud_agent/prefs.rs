@@ -149,7 +149,11 @@ impl AgentPrefs {
     /// worst it can do is send the user back through setup.
     pub fn load_in(home: &Path) -> Option<Self> {
         let raw = std::fs::read_to_string(Self::path_in(home)).ok()?;
-        serde_json::from_str(&raw).ok()
+        let mut prefs: Self = serde_json::from_str(&raw).ok()?;
+        if prefs.agent.as_deref() == Some("opencode2") {
+            prefs.agent = Some("opencode".into());
+        }
+        Some(prefs)
     }
 
     /// Reload before changing one layout preference so settings saved by

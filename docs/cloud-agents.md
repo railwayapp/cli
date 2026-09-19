@@ -14,8 +14,35 @@ railway code --claude
 railway code --codex connect my-box
 ```
 
+### OpenCode versions
+
+New `railway code --opencode` launches use stable OpenCode V2. The older
+`--opencode2` flag remains a deprecated alias. The launcher and setup wizard
+offer one **OpenCode** option.
+
+`railway code --opencode connect <agent>` retains the VM's saved protocol and
+release, including **OpenCode 1 — legacy** connections. Railway verifies local
+client versions and, when needed, installs a matching client privately under
+`~/.railway/runtimes/opencode-client/<version>`.
+
+To explicitly upgrade an existing managed OpenCode server:
+
+```sh
+railway code --opencode upgrade <agent>
+```
+
+The upgrade verifies the new executable, stops the managed server, and backs up
+its database, configuration, auth file, and server state under
+`~/.railway/desktop/opencode/` before migration. Reconnecting
+does not upgrade the VM. V1 cannot reopen a store marked or detected as migrated
+to V2. Restore the pre-upgrade state before returning to V1.
+
+Desktop setup detects the installed app's bundled client version independently
+of its release channel, preferring stable **OpenCode** when compatible. V2 no
+longer implies **OpenCode Beta**.
+
 Bare `railway code` opens `railway-agent-tui` on a new VM. An explicit agent
-flag also creates a new VM unless `connect` or
+flag also creates a new VM unless `connect`, `upgrade`, or
 `--agent` selects an existing one. `connect [agent]` connects to an existing
 Codex/OpenCode server; `--agent <name-or-id>` selects a VM for server setup.
 
@@ -24,12 +51,12 @@ rate-limits the check, the CLI retries with available GitHub authentication.
 If the update check still fails, including when offline, it uses the newest
 working client already installed on your machine.
 
-Codex, OpenCode, and OpenCode2 normally run a local client connected to the VM.
+Codex and OpenCode normally run a local client connected to the VM.
 Their clients run inside the Railway CA interface with command approvals disabled.
 Codex matches the local client to its server version and trusts the remote project.
-Missing OpenCode clients can be installed after confirmation. OpenCode2 downloads
-its official V2 runtime onto the VM at startup. A local V2 client selects the
-remote version; reconnect upgrades older servers without downgrading the client.
+Missing OpenCode clients can be installed after confirmation. OpenCode uses the
+image's official V2 runtime when available and an integrity-verified standalone
+package on older images. Both clients follow the server's recorded release.
 
 Use `remote` to run the client on the VM. Use `--` to pass arguments to the agent:
 
@@ -156,7 +183,7 @@ latest snapshot; use an ID when names are ambiguous. Snapshots contain credentia
 and are removed by `railway logout`.
 
 `--connection-json` returns verified connection details including credentials for
-Codex or OpenCode2, without opening a local client. Progress goes to stderr.
+Codex or OpenCode, without opening a local client. Progress goes to stderr.
 It works with setup, `connect`, and Codex `desktop-only`.
 
 ## Reusable VMs and variables

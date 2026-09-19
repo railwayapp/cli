@@ -20,7 +20,6 @@ use crate::controllers::cloud_agent as ca;
 pub(super) enum Harness {
     Codex,
     OpenCode,
-    OpenCode2,
 }
 
 impl Harness {
@@ -28,26 +27,23 @@ impl Harness {
         match self {
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
-            Self::OpenCode2 => "OpenCode2 [Beta]",
         }
     }
 
-    async fn inspect(self, info: &ConnectInfo) -> Result<bool> {
+    async fn inspect(self, info: &ConnectInfo) -> Result<Option<&'static str>> {
         match self {
-            Self::Codex => codex::inspect(info).await,
-            _ => Ok(opencode::inspect(info, self == Self::OpenCode2)
+            Self::Codex => Ok(codex::inspect(info).await?.then_some("Codex")),
+            _ => Ok(opencode::inspect(info)
                 .await?
-                .is_some_and(|info| !info.directory.is_empty())),
+                .filter(|info| !info.directory.is_empty())
+                .map(|info| info.protocol.label())),
         }
     }
 
     async fn reconnect(self, info: &ConnectInfo) -> Result<Connection> {
         match self {
             Self::Codex => Ok(Connection::Codex(codex::reconnect(info).await?)),
-            _ => Ok(Connection::OpenCode(
-                opencode::reconnect(info, self == Self::OpenCode2).await?,
-                self == Self::OpenCode2,
-            )),
+            _ => Ok(Connection::OpenCode(opencode::reconnect(info).await?)),
         }
     }
 }
@@ -74,15 +70,14 @@ impl Connection {
                 .await;
                 saved.with_codex(connection, desktop_only, &desktop)
             }
-            Self::OpenCode(connection, beta) => {
+            Self::OpenCode(connection) => {
                 let desktop = desktop::configure_installed_opencode(
-                    *beta,
                     connection,
                     &saved.agent_id,
                     &saved.agent_name,
                 )
                 .await;
-                saved.with_opencode(connection, *beta, &desktop)
+                saved.with_opencode(connection, &desktop)
             }
             Self::Railway(c) => saved.with_railway(&c.connection),
         }
@@ -102,9 +97,10 @@ impl Connection {
                 "url": c.url, "token": c.token, "directory": c.directory,
                 "version": c.version, "reused": c.reused,
             }),
-            Self::OpenCode(c, _) => serde_json::json!({
+            Self::OpenCode(c) => serde_json::json!({
                 "url": c.url, "username": c.username, "password": c.password,
                 "directory": c.directory, "reused": c.reused,
+                "protocol": c.protocol, "version": c.version,
             }),
             Self::Railway(c) => serde_json::json!({
                 "transport": "wss", "url": c.connection.url,
@@ -142,7 +138,6 @@ pub(crate) async fn prepare_pane(
     if harness == "railway" {
         return super::railway_client::prepare_pane(args, progress).await;
     }
-    let beta = harness == "opencode2";
     let directory = args.remote_dir.take();
     let password = opencode::generate_password();
     args.app_mode = true;
@@ -157,19 +152,21 @@ pub(crate) async fn prepare_pane(
     let directory = directory
         .or_else(|| {
             super::saved_config::client_connection(&prepared.agent_id, &prepared.environment_id)
-                .filter(|c| c.harness() == harness)
+                .filter(|c| {
+                    c.harness() == harness || (harness == "opencode" && c.harness() == "opencode2")
+                })
                 .map(|c| c.directory().to_string())
         })
         .unwrap_or_else(|| "/app".into());
     let result: Result<_> = async {
-        progress.step(&format!("Starting {harness} server"));
+        progress.step(&format!(
+            "Starting {} server",
+            crate::commands::cloud_agent::harness_label(harness)
+        ));
         let connection = if harness == "codex" {
             Connection::Codex(codex::start_prepared(&prepared, &directory, &password).await?)
         } else {
-            Connection::OpenCode(
-                opencode::start_prepared(&prepared, &directory, &password, beta).await?,
-                beta,
-            )
+            Connection::OpenCode(opencode::start_prepared(&prepared, &directory, &password).await?)
         };
         progress.step("Saving connection settings");
         let saved = connection
@@ -182,10 +179,13 @@ pub(crate) async fn prepare_pane(
             )
             .await;
         saved.save()?;
-        progress.step(&format!("Preparing local {harness} client"));
+        progress.step(&format!(
+            "Preparing local {} client",
+            crate::commands::cloud_agent::harness_label(harness)
+        ));
         let binary = match &connection {
             Connection::Codex(c) => codex::local::ensure_client(&c.version).await?,
-            Connection::OpenCode(_, beta) => local::ensure_client_quiet(*beta).await?,
+            Connection::OpenCode(c) => local::ensure_client_quiet(c).await?,
             Connection::Railway(_) => unreachable!("Railway prepares its public endpoint above"),
         };
         let thread = connection
@@ -207,8 +207,10 @@ pub(crate) async fn prepare_pane(
     .await;
     result.with_context(|| {
         format!(
-            "Opening {harness} on {} ({})",
-            prepared.agent_name, prepared.agent_id
+            "Opening {} on {} ({})",
+            crate::commands::cloud_agent::harness_label(harness),
+            prepared.agent_name,
+            prepared.agent_id
         )
     })
 }
@@ -252,7 +254,7 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
             "\nStarting {} in the background and opening its authenticated endpoint...",
             harness.edition()
         );
-        if harness == Harness::OpenCode2 {
+        if harness == Harness::OpenCode {
             println!(
                 "The first start downloads the matching OpenCode V2 server and can take several minutes."
             );
@@ -262,16 +264,9 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
         Harness::Codex => {
             Connection::Codex(codex::start_prepared(&prepared, &directory, &password).await?)
         }
-        _ => Connection::OpenCode(
-            opencode::start_prepared(
-                &prepared,
-                &directory,
-                &password,
-                harness == Harness::OpenCode2,
-            )
-            .await?,
-            harness == Harness::OpenCode2,
-        ),
+        _ => {
+            Connection::OpenCode(opencode::start_prepared(&prepared, &directory, &password).await?)
+        }
     };
     let saved = connection
         .configure_snapshot(
@@ -406,7 +401,7 @@ async fn launch(
     // Codex is version-matched automatically; OpenCode still offers installation.
     let binary = match connection {
         Connection::Codex(c) => Some(codex::local::ensure_client(&c.version).await?),
-        Connection::OpenCode(_, beta) => local::ensure_client(*beta).await?,
+        Connection::OpenCode(c) => local::ensure_client(c).await?,
         Connection::Railway(_) => unreachable!("Railway checks its client before provisioning"),
     };
     let Some(binary) = binary else {
@@ -502,7 +497,7 @@ fn choose(
     }
     match candidates.len() {
         0 => bail!(
-            "No running servers for this client. Run railway code with the matching --codex, --opencode, or --opencode2 flag to set one up."
+            "No running servers for this client. Run railway code with the matching --codex or --opencode flag to set one up."
         ),
         1 if complete => Ok(candidates.pop()),
         _ if !interactive => bail!(
@@ -533,6 +528,7 @@ pub(super) async fn connect(
     mut args: LaunchArgs,
     harness: Harness,
     selector: Option<String>,
+    upgrade: bool,
 ) -> Result<()> {
     if harness == Harness::Codex {
         desktop::preflight_codex_desktop()?;
@@ -598,8 +594,8 @@ pub(super) async fn connect(
         let mut complete = true;
         for (agent, result) in probes {
             match result {
-                Ok(true) => candidates.push(Candidate {
-                    label: label(&agent, &names),
+                Ok(Some(edition)) => candidates.push(Candidate {
+                    label: format!("{} — {edition}", label(&agent, &names)),
                     agent,
                 }),
                 Ok(_) => {}
@@ -643,14 +639,18 @@ pub(super) async fn connect(
         )
         .await?;
     }
-    let connection = harness
-        .reconnect(&relay_info(&selected, &relay))
-        .await
-        .with_context(|| format!("Connecting to {} ({})", selected.name, harness.edition()))?;
+    let info = relay_info(&selected, &relay);
+    let connection = if upgrade {
+        Connection::OpenCode(opencode::upgrade(&info).await?)
+    } else {
+        harness
+            .reconnect(&info)
+            .await
+            .with_context(|| format!("Connecting to {} ({})", selected.name, harness.edition()))?
+    };
     let slug = match harness {
         Harness::Codex => "codex",
         Harness::OpenCode => "opencode",
-        Harness::OpenCode2 => "opencode2",
     };
     let saved = connection
         .configure_snapshot(
@@ -699,18 +699,19 @@ mod tests {
             password: "secret with \"quotes\"\nand a newline".into(),
             directory: "/app/a project".into(),
             reused: true,
+            protocol: opencode::Protocol::V2,
+            version: Some("2.0.8".into()),
         };
         let encoded = serde_json::to_string(&connection_json(
-            &Connection::OpenCode(
-                opencode::Connection {
-                    url: connection.url.clone(),
-                    username: connection.username.clone(),
-                    password: connection.password.clone(),
-                    directory: connection.directory.clone(),
-                    reused: true,
-                },
-                true,
-            ),
+            &Connection::OpenCode(opencode::Connection {
+                url: connection.url.clone(),
+                username: connection.username.clone(),
+                password: connection.password.clone(),
+                directory: connection.directory.clone(),
+                reused: true,
+                protocol: connection.protocol,
+                version: connection.version.clone(),
+            }),
             "agent-id",
             "box",
             "env-id",

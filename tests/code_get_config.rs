@@ -58,6 +58,24 @@ fn run(home: &Path, args: &[&str]) -> Output {
     output
 }
 
+fn assert_saved(mut actual: Value, historical: &Value) {
+    if let Some(opencode) = actual.get_mut("opencode") {
+        let protocol = if historical["opencode"]["beta"] == true {
+            "v2"
+        } else {
+            "v1"
+        };
+        assert_eq!(opencode["protocol"], protocol);
+        assert_eq!(opencode["connection"]["protocol"], protocol);
+        opencode.as_object_mut().unwrap().remove("protocol");
+        opencode["connection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol");
+    }
+    assert_eq!(&actual, historical);
+}
+
 #[test]
 fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
     for (harness, name) in [
@@ -93,7 +111,12 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
             ] {
                 assert!(!text.contains(removed), "unexpected SSH detail: {removed}");
             }
-            assert!(text.contains(&format!("railway code --{harness} connect {name}")));
+            let flag = if harness.starts_with("opencode") {
+                "opencode"
+            } else {
+                harness
+            };
+            assert!(text.contains(&format!("railway code --{flag} connect {name}")));
         }
         assert!(text.contains(&format!("railway code get-config {name}")));
         assert!(text.contains(&format!("railway ca sleep {name}")));
@@ -123,6 +146,8 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
                 assert!(text.contains(expected), "missing {expected}");
             }
         } else if harness.starts_with("opencode") {
+            assert_eq!(text.contains("OpenCode 1 — legacy"), harness == "opencode");
+            assert!(!text.contains("Beta"));
             assert!(
                 text.contains("fixture-password") && text.contains("Desktop configuration updated")
             );
@@ -158,9 +183,9 @@ fn json_uses_legacy_snapshots_without_login_or_writes() {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(output.stderr.is_empty());
-            assert_eq!(
+            assert_saved(
                 serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                expected
+                &expected,
             );
         }
         assert_eq!(fs::read(path).unwrap(), before);
@@ -189,9 +214,9 @@ fn named_lookup_selects_an_older_agent_and_reports_duplicates_and_missing_agents
     ] {
         let output = run(home.path(), &args);
         assert!(output.status.success());
-        assert_eq!(
+        assert_saved(
             serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            *expected
+            expected,
         );
     }
     first["agent_name"] = json!("shared-name");
