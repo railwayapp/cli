@@ -2,10 +2,13 @@
 """Provider credential import regression checks; no real credentials or network."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SHIM = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode2.py'
 spec = importlib.util.spec_from_file_location('opencode2_auth', SHIM)
@@ -67,6 +70,24 @@ class CredentialTests(unittest.TestCase):
         with sqlite3.connect(self.database) as db:
             rows = db.execute('SELECT value FROM credential').fetchall()
             self.assertEqual([json.loads(row[0]) for row in rows], [remote])
+
+    def test_fresh_provider_storage_uses_the_current_standalone_info_endpoint(self):
+        database = self.root / 'fresh.db'
+        binary = self.root / 'opencode2'
+        binary.write_text('#!' + sys.executable + '\n' + '''
+import os, sqlite3, sys
+if sys.argv[1:] != ['api', '--standalone', 'GET', '/api/info']:
+    sys.exit(1)
+with sqlite3.connect(os.environ['OPENCODE_DB']) as db:
+    db.execute('CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, value TEXT, time_created INTEGER, time_updated INTEGER)')
+''')
+        binary.chmod(0o700)
+        self.stage(credential())
+        with patch.dict(os.environ, {'OPENCODE_DB': str(database)}):
+            shim.import_credentials(binary, self.pending, database)
+        with sqlite3.connect(database) as db:
+            self.assertEqual(db.execute('SELECT integration_id FROM credential').fetchall(), [('openai',)])
+        self.assertFalse(self.pending.exists())
 
     def test_transaction_rolls_back_on_id_conflict_and_retains_transfer(self):
         self.stage(credential('existing'))

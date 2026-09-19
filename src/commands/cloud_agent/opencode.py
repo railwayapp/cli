@@ -81,9 +81,13 @@ def probe(port, credentials, path):
 def server_status(port, credentials=None, harness="opencode"):
     if harness != "opencode2":
         return probe(port, credentials, "global/health")
-    status, body = probe(port, credentials, "api/status")
-    # Read legacy health only to discover/upgrade existing pre-V2 servers.
-    return probe(port, credentials, "api/health") if status == 404 else (status, body)
+    # Current V2 exposes server identity at /api/info. Older V2/Beta
+    # endpoints are only fallbacks for discovering an existing server.
+    for path in ("api/info", "api/status", "api/health"):
+        status, body = probe(port, credentials, path)
+        if status != 404:
+            return status, body
+    return status, body
 
 
 def health(port, credentials=None, harness="opencode"):

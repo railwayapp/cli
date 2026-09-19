@@ -1118,24 +1118,7 @@ async fn fetch_sessions(
     });
     let mut inventory = merge_remote_threads(cloud_agent_id, sessions, discovery);
     if let Some(harness) = native_harness {
-        match native {
-            Ok(threads) => {
-                for thread in &threads {
-                    let row = ConsoleSession::client_thread(cloud_agent_id, harness, Some(thread));
-                    if let Some(previous) = inventory.rows.iter_mut().find(|r| r.name == row.name) {
-                        *previous = row;
-                    } else {
-                        inventory.rows.push(row);
-                    }
-                }
-            }
-            Err(error) => {
-                inventory.failed.push(harness.into());
-                inventory
-                    .warnings
-                    .push(format!("Couldn't read {harness} history: {error:#}"));
-            }
-        }
+        merge_native_threads(&mut inventory, cloud_agent_id, harness, native);
         if inventory.primary_harness.is_none()
             && inventory
                 .rows
@@ -1153,6 +1136,41 @@ async fn fetch_sessions(
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(inventory)
+}
+
+fn merge_native_threads(
+    inventory: &mut SessionInventory,
+    agent_id: &str,
+    harness: &str,
+    native: Result<Vec<ClientThread>>,
+) {
+    match native {
+        Ok(threads) => {
+            for thread in &threads {
+                let row = ConsoleSession::client_thread(agent_id, harness, Some(thread));
+                if let Some(previous) = inventory.rows.iter_mut().find(|r| r.name == row.name) {
+                    *previous = row;
+                } else {
+                    inventory.rows.push(row);
+                }
+            }
+        }
+        // A saved public endpoint can outlive its server (for example after
+        // sleep/wake). VM metadata is authoritative even when it is empty;
+        // live status is only enrichment. Marking this as failed would also
+        // resurrect deleted conversations from the sidebar's stale cache.
+        Err(_)
+            if matches!(harness, "codex" | "opencode" | "opencode2")
+                && !inventory.failed.iter().any(|failed| failed == harness) => {}
+        Err(error) => {
+            if !inventory.failed.iter().any(|failed| failed == harness) {
+                inventory.failed.push(harness.into());
+            }
+            inventory
+                .warnings
+                .push(format!("Couldn't read {harness} history: {error:#}"));
+        }
+    }
 }
 
 fn merge_remote_threads(
@@ -3408,6 +3426,85 @@ mod tests {
         progress.step("Saving checkpoint");
         assert!(matches!(rx.try_recv(), Ok(Message::BootstrapStep(s)) if s == "Saving checkpoint"));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn saved_vm_history_survives_an_unavailable_native_server() {
+        for harness in ["codex", "opencode", "opencode2"] {
+            for populated in [false, true] {
+                let threads = if populated {
+                    vec![remote_threads::tests::thread(harness, "saved")]
+                } else {
+                    vec![]
+                };
+                let mut inventory = merge_remote_threads(
+                    "vm",
+                    vec![],
+                    remote_threads::Discovery {
+                        threads,
+                        ..Default::default()
+                    },
+                );
+                merge_native_threads(
+                    &mut inventory,
+                    "vm",
+                    harness,
+                    Err(anyhow::anyhow!("502 Bad Gateway")),
+                );
+                assert_eq!(inventory.rows.len(), usize::from(populated));
+                assert!(inventory.warnings.is_empty());
+                assert!(inventory.failed.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn history_errors_remain_visible_without_a_successful_vm_fallback() {
+        for harness in ["codex", "opencode", "opencode2", "railway"] {
+            let failed = if harness == "railway" {
+                vec![] // Railway has no disk-history reader.
+            } else {
+                vec![harness.into()]
+            };
+            let mut inventory = merge_remote_threads(
+                "vm",
+                vec![],
+                remote_threads::Discovery {
+                    failed,
+                    ..Default::default()
+                },
+            );
+            merge_native_threads(
+                &mut inventory,
+                "vm",
+                harness,
+                Err(anyhow::anyhow!("502 Bad Gateway")),
+            );
+            assert_eq!(inventory.failed, [harness]);
+            assert!(inventory.warnings[0].contains("502 Bad Gateway"));
+        }
+    }
+
+    #[test]
+    fn native_history_enriches_saved_vm_threads_without_duplicates() {
+        let saved = remote_threads::tests::thread("codex", "saved");
+        let mut live = saved.thread.clone();
+        live.state = "working".into();
+        let mut inventory = merge_remote_threads(
+            "vm",
+            vec![],
+            remote_threads::Discovery {
+                threads: vec![saved],
+                ..Default::default()
+            },
+        );
+        merge_native_threads(&mut inventory, "vm", "codex", Ok(vec![live]));
+        assert_eq!(inventory.rows.len(), 1);
+        assert_eq!(
+            inventory.rows[0].snapshot.as_ref().unwrap().state,
+            "working"
+        );
+        assert_eq!(inventory.remote.len(), 1);
     }
 
     #[test]

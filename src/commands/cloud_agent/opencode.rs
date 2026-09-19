@@ -323,8 +323,14 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()?;
-    let health =
-        validate_url(&connection.url)?.join(if beta { "api/status" } else { "global/health" })?;
+    let origin = validate_url(&connection.url)?;
+    let paths: &[&str] = if beta {
+        &["api/info", "api/status", "api/health"]
+    } else {
+        &["global/health"]
+    };
+    let mut endpoint = 0;
+    let mut health = origin.join(paths[endpoint])?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let response = client
@@ -333,6 +339,11 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
             .send()
             .await;
         if let Ok(response) = response {
+            if response.status() == reqwest::StatusCode::NOT_FOUND && endpoint + 1 < paths.len() {
+                endpoint += 1;
+                health = origin.join(paths[endpoint])?;
+                continue;
+            }
             if response.status().is_redirection() {
                 bail!(
                     "OpenCode's HTTPS address redirected unexpectedly; credentials were not forwarded"
@@ -346,8 +357,8 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
                     .is_some_and(|body| {
                         if beta {
                             body["version"].is_string()
-                                && body["pid"].is_u64()
-                                && body["urls"].is_array()
+                                && ((body["pid"].is_u64() && body["urls"].is_array())
+                                    || body["healthy"] == true)
                         } else {
                             body["healthy"] == true
                         }
@@ -365,6 +376,11 @@ async fn verify_connection(connection: &Connection, beta: bool) -> Result<()> {
                 "OpenCode started on the agent, but its HTTPS health check failed. Rerun setup to retry; check ~/.railway/desktop/opencode/server.log on the agent."
             );
         }
+        // A not-yet-published route can transiently return 404 too. Start
+        // the next probe at the current endpoint instead of pinning retries
+        // to a legacy path that this server may never expose.
+        endpoint = 0;
+        health = origin.join(paths[endpoint])?;
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

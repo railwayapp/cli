@@ -167,7 +167,7 @@ def initialize_credentials(binary, database):
     # with the API client; it never joins an existing background service.
     environment = dict(os.environ, OPENCODE_DISABLE_MODELS_FETCH="1")
     process = subprocess.Popen(
-        [str(binary), "api", "--standalone", "GET", "/api/status"],
+        [str(binary), "api", "--standalone", "GET", "/api/info"],
         env=environment, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, start_new_session=True,
     )
