@@ -4,7 +4,7 @@ use crate::commands::Configs;
 use anyhow::{Result, bail};
 use futures::{SinkExt, StreamExt};
 use graphql_client::GraphQLQuery;
-use graphql_ws_client::{Client, Subscription, graphql::StreamingOperation};
+use graphql_ws_client::{Client, ConnectionActor, Subscription, graphql::StreamingOperation};
 use reqwest_websocket::{RequestBuilderExt, WebSocket};
 
 pub async fn subscribe_graphql<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
@@ -14,6 +14,18 @@ where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
+    Ok(Client::build(connect_websocket().await?)
+        .subscribe(StreamingOperation::<T>::new(variables))
+        .await?)
+}
+
+/// Open one connection for multiple operations. The caller must drive the
+/// actor for as long as it needs the subscriptions.
+pub async fn connect_graphql() -> Result<(Client, ConnectionActor)> {
+    Ok(Client::build(connect_websocket().await?).await?)
+}
+
+async fn connect_websocket() -> Result<GraphQLWebSocket> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = reqwest::Client::default();
@@ -41,9 +53,7 @@ where
     resp.error_for_status_ref()?;
     let web_socket = resp.into_websocket().await?;
 
-    Ok(Client::build(GraphQLWebSocket(web_socket))
-        .subscribe(StreamingOperation::<T>::new(variables))
-        .await?)
+    Ok(GraphQLWebSocket(web_socket))
 }
 
 struct GraphQLWebSocket(WebSocket);

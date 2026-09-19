@@ -47,3 +47,11 @@ pub struct DnsQueryLogs;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct Deployment;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/subscriptions/strings/DeploymentEvents.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DeploymentEvents;
