@@ -58,13 +58,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.authenticated(): return
         path = urlparse(self.path).path
-        if path == '/api/status' and VERSION.startswith('0.0.0-beta-'):
+        health = ('/api/health' if VERSION.startswith('0.0.0-beta-') else '/api/info') if 'opencode2' in sys.argv[0] else '/global/health'
+        if path not in (health, '/config', '/global/config'):
             self.send_response(404)
             self.end_headers()
             return
         self.send_response(200)
         self.end_headers()
-        if path == '/api/status':
+        if path == '/api/info':
             self.wfile.write(json.dumps({'version': VERSION, 'pid': os.getpid(), 'urls': []}).encode())
         elif path in ('/config', '/global/config'):
             path = self.config_path()
@@ -163,11 +164,11 @@ class BootstrapTests(unittest.TestCase):
 
     def v2_request(self, fail=False):
         binary = self.home / 'opencode2-v2'
-        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '0.0.0-beta-19425'", "VERSION = '2.0.5'"))
+        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '0.0.0-beta-19425'", "VERSION = '2.0.8'"))
         binary.chmod(0o700)
         runtime = ("raise RuntimeError('download failed')" if fail else 'return Path(' + repr(str(binary)) + ')')
         shim = 'from pathlib import Path\ndef ensure_runtime(version):\n    ' + runtime + '\n'
-        return {'action': 'connect', 'harness': 'opencode2', 'version': '2.0.5', 'runtime_shim': shim}
+        return {'action': 'connect', 'harness': 'opencode2', 'version': '2.0.8', 'runtime_shim': shim}
 
     def test_beta_upgrade_keeps_credentials_directory_and_database_and_reuses_matching_server(self):
         self.harness = 'opencode2'
