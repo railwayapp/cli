@@ -1,0 +1,9 @@
+subscription DeploymentEvents($id: String!) {
+  deploymentEvents(id: $id) {
+    id
+    payload {
+      error
+      skipped
+    }
+  }
+}

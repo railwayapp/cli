@@ -145,6 +145,10 @@ pub async fn upload_deploy_tarball(
         .into());
     }
 
-    let response = res.json::<UpResponse>().await?;
+    let mut response = res.json::<UpResponse>().await?;
+    // Backboard can leave an empty query parameter at the end of these URLs.
+    for url in [&mut response.url, &mut response.logs_url] {
+        *url = url.trim_end_matches('&').to_owned();
+    }
     Ok(response)
 }
