@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Install the current OpenCode V2 server from its official @opencode package.
+"""Resolve an image-provided or pinned official OpenCode V2 server.
 
-A requested client version selects the same server release without touching
-local clients. Only the regular CLI binary is extracted, after SHA-512 verification.
+A saved remote version selects the same server release on restart. Only the
+regular CLI binary is extracted, after SHA-512 verification.
 """
 import base64
 import fcntl
@@ -23,6 +23,7 @@ import tempfile
 import urllib.request
 
 REGISTRY = "https://registry.npmjs.org/"
+TESTED_VERSION = "2.0.8"
 
 
 class InstallError(Exception):
@@ -37,15 +38,9 @@ def request(url):
 
 def validate_version(version):
     if (not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
-            or int(version.split(".")[0]) < 2):
+            or int(version.split(".")[0]) != 2):
         raise InstallError("Unsupported OpenCode 2 release version.")
     return version
-
-
-def latest_release():
-    # V2 graduated from the frozen opencode-beta GitHub releases to @opencode.
-    with request(REGISTRY + "@opencode%2fcli/latest") as response:
-        return validate_version(json.loads(response.read(2 * 1024 * 1024))["version"])
 
 
 def release_asset(version, machine):
@@ -144,7 +139,20 @@ def ensure_runtime(version=None):
     os.umask(0o077)
     root = Path.home() / ".railway/runtimes/opencode2"
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    version = version or os.environ.get("RAILWAY_OPENCODE_VERSION") or latest_release()
+    version = version or os.environ.get("RAILWAY_OPENCODE_VERSION")
+    # Images provide the official CLI. Inspect the actual executable, never the
+    # opencode2 alias (old Railway aliases may invoke this installer recursively).
+    candidates = [Path.home() / ".opencode/bin/opencode", shutil.which("opencode")]
+    for candidate in filter(None, candidates):
+        try:
+            output = subprocess.run([str(candidate), "--version"], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10)
+            installed = validate_version(output.stdout.strip().removeprefix("opencode v"))
+            if output.returncode == 0 and (version is None or installed == version):
+                return Path(candidate)
+        except (OSError, subprocess.SubprocessError, InstallError):
+            continue
+    version = version or TESTED_VERSION
     with (root / "install.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         return install(root, version, platform.machine())
@@ -154,8 +162,16 @@ def credential_database():
     data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode"
     database = os.environ.get("OPENCODE_DB", "opencode.db")
     if database == ":memory:":
-        raise InstallError("OpenCode2 provider credentials require a persistent database.")
+        raise InstallError("OpenCode provider credentials require a persistent database.")
     return data / database
+
+
+def require_v2_storage(database):
+    if database.is_file():
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "session" in tables and "credential" not in tables:
+            raise InstallError("This VM contains OpenCode 1 data. Use railway code --opencode upgrade <agent> before starting V2.")
 
 
 def initialize_credentials(binary, database):
@@ -163,7 +179,9 @@ def initialize_credentials(binary, database):
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'").fetchone():
                 return
-    # Let the installed Beta perform its own migrations. A private server exits
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='session'").fetchone():
+                raise InstallError("This VM contains OpenCode 1 data. Use railway code --opencode upgrade <agent> before importing V2 credentials.")
+    # Let the installed V2 perform its own migrations. A private server exits
     # with the API client; it never joins an existing background service.
     environment = dict(os.environ, OPENCODE_DISABLE_MODELS_FETCH="1")
     process = subprocess.Popen(
@@ -174,9 +192,9 @@ def initialize_credentials(binary, database):
     try:
         process.communicate(timeout=30)
         if process.returncode:
-            raise InstallError("Could not initialize OpenCode2 provider storage; credentials were not imported.")
+            raise InstallError("Could not initialize OpenCode provider storage; credentials were not imported.")
     except subprocess.TimeoutExpired:
-        raise InstallError("Initializing OpenCode2 provider storage timed out; retry setup.") from None
+        raise InstallError("Initializing OpenCode provider storage timed out; retry setup.") from None
     finally:
         # Also clean up a private child server if its client failed or timed out.
         try:
@@ -192,17 +210,17 @@ def initialize_credentials(binary, database):
 
 def validate_credentials(payload):
     if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("credentials"), list):
-        raise InstallError("Unsupported OpenCode2 provider credential payload.")
+        raise InstallError("Unsupported OpenCode provider credential payload.")
     seen = set()
     for item in payload["credentials"]:
         if not isinstance(item, dict):
-            raise InstallError("Invalid OpenCode2 provider credential.")
+            raise InstallError("Invalid OpenCode provider credential.")
         provider, value = item.get("integrationID"), item.get("value")
         if (not isinstance(provider, str) or not provider or provider.startswith("mcp_")
                 or provider in seen or not isinstance(item.get("id"), str)
                 or not item["id"].startswith("cred_") or not isinstance(item.get("label"), str)
                 or not isinstance(value, dict)):
-            raise InstallError("Invalid OpenCode2 provider credential.")
+            raise InstallError("Invalid OpenCode provider credential.")
         seen.add(provider)
         metadata = value.get("metadata", {})
         valid = isinstance(metadata, dict) and all(isinstance(v, str) for v in metadata.values())
@@ -214,7 +232,7 @@ def validate_credentials(payload):
         else:
             valid = False
         if not valid:
-            raise InstallError("Unsupported OpenCode2 provider credential format.")
+            raise InstallError("Unsupported OpenCode provider credential format.")
     return payload["credentials"]
 
 
@@ -229,7 +247,7 @@ def import_credentials(binary, pending, database=None):
         try:
             credentials = validate_credentials(json.loads(pending.read_text()))
         except (ValueError, TypeError):
-            raise InstallError("Invalid OpenCode2 provider credential payload.") from None
+            raise InstallError("Invalid OpenCode provider credential payload.") from None
         initialize_credentials(binary, database)
         for path in (database, Path(str(database) + "-wal"), Path(str(database) + "-shm")):
             if path.exists():
@@ -239,7 +257,7 @@ def import_credentials(binary, pending, database=None):
                 columns = {row[1] for row in db.execute("PRAGMA table_info(credential)")}
                 required = {"id", "integration_id", "label", "value", "time_created", "time_updated"}
                 if not required <= columns:
-                    raise InstallError("Unsupported OpenCode2 provider database; credentials were not imported.")
+                    raise InstallError("Unsupported OpenCode provider database; credentials were not imported.")
                 db.execute("BEGIN IMMEDIATE")
                 for item in credentials:
                     # Preserve provider accounts already configured remotely,
@@ -255,7 +273,7 @@ def import_credentials(binary, pending, database=None):
                     db.execute(f"INSERT INTO credential ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})", values)
                 db.commit()
         except sqlite3.Error:
-            raise InstallError("Could not save OpenCode2 provider credentials; retry setup.") from None
+            raise InstallError("Could not save OpenCode provider credentials; retry setup.") from None
         # Remove the transferred copy only after the transaction commits.
         pending.unlink()
 
@@ -266,6 +284,8 @@ if __name__ == "__main__":
         pending = Path.home() / ".railway/runtimes/opencode2/credentials.json"
         if import_only and not pending.exists():
             sys.exit(0)
+        if sys.argv[1:] != ["--version"]:
+            require_v2_storage(credential_database())
         binary = ensure_runtime()
         if import_only:
             import_credentials(binary, pending)
@@ -273,5 +293,5 @@ if __name__ == "__main__":
         # Do not read stdin: terminal input and piped prompts belong to OpenCode.
         os.execv(str(binary), [str(binary), *sys.argv[1:]])
     except (InstallError, OSError, ValueError, KeyError, sqlite3.Error, tarfile.TarError) as error:
-        print(f"OpenCode2 [Beta] could not start: {error}", file=sys.stderr)
+        print(f"OpenCode could not start: {error}", file=sys.stderr)
         sys.exit(1)

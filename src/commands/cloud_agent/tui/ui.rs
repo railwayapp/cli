@@ -556,7 +556,10 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     let block = terminal_block(app, f.area().width)
         .border_style(Style::default().fg(theme.accent))
         .title(Span::styled(
-            format!(" {} · starting ", loading.harness),
+            format!(
+                " {} · starting ",
+                super::app::harness_label(&loading.harness)
+            ),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -690,14 +693,7 @@ fn render_prompt(app: &App, f: &mut Frame, area: Rect, focused: bool) {
                     .fg(if focused { theme.accent } else { theme.fg })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                if super::app::opencode_alternate(app.harness).is_some() {
-                    "shift+tab · tab version "
-                } else {
-                    "shift+tab "
-                },
-                Style::default().fg(theme.dim),
-            ),
+            Span::styled("shift+tab ", Style::default().fg(theme.dim)),
         ]))
         .title_bottom(
             Line::from(Span::styled(count, Style::default().fg(theme.dim))).right_aligned(),
@@ -1018,7 +1014,7 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
         return;
     }
     if app.screen == Screen::HarnessPick {
-        let mut hints = vec![
+        let hints = vec![
             ("↑↓", "navigate"),
             (
                 "enter",
@@ -1037,12 +1033,6 @@ fn render_manage_footer(app: &App, f: &mut Frame, area: Rect, rects: &PaneRects)
             ),
             ("esc", "back"),
         ];
-        if app
-            .harness_pick
-            .is_some_and(|h| super::app::opencode_alternate(h).is_some())
-        {
-            hints.push(("tab", "version"));
-        }
         f.render_widget(Paragraph::new(Line::from(chord_spans(theme, &hints))), area);
         return;
     }
@@ -1619,8 +1609,8 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                 "grok" => "Grok Build",
                 "codex" => "ChatGPT Codex",
                 "claude" => "Claude Code",
-                "opencode" => "OpenCode",
-                "opencode2" => "OpenCode2 [Beta]",
+                "opencode2" => "OpenCode",
+                "opencode" => "OpenCode 1 — legacy",
                 "shell" => "Shell",
                 other => other,
             };
@@ -1743,14 +1733,7 @@ fn render_manage_prompt(app: &App, f: &mut Frame) {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                if super::app::opencode_alternate(app.harness).is_some() {
-                    "shift+tab · tab version "
-                } else {
-                    "shift+tab "
-                },
-                Style::default().fg(theme.dim),
-            ),
+            Span::styled("shift+tab ", Style::default().fg(theme.dim)),
         ]))
         .title_bottom(
             Line::from(Span::styled(

@@ -33,7 +33,7 @@ use crate::util::shell::shell_join;
 // `express-agent serve --agents` entrypoint reconciles their config on every
 // boot: MCP servers (including Railway's own platform tools), hooks, the
 // onboarding/trust flags, and the autonomy posture. This command leaves that
-// config to the reconciler, prepares launch-time runtimes (OpenCode2 and Grok),
+// config to the reconciler, prepares launch-time runtimes (OpenCode and Grok),
 // and carries the one thing only the user's laptop has: their credential.
 //
 // Auth shape: Codex copies the user's existing local sign-in
@@ -101,12 +101,11 @@ pub(crate) fn clear_saved_config() {
 pub(crate) fn save_desktop_configuration(
     prepared: &Prepared,
     connection: Option<&crate::commands::cloud_agent::opencode::Connection>,
-    beta: bool,
     desktop: &Result<bool>,
 ) {
     let result = saved_config::SavedConfig::from_prepared(prepared)
         .map(|saved| match connection {
-            Some(connection) => saved.with_opencode(connection, beta, desktop),
+            Some(connection) => saved.with_opencode(connection, desktop),
             None => saved,
         })
         .and_then(|saved| saved.save());
@@ -124,10 +123,11 @@ pub(crate) fn save_desktop_configuration(
   railway code --codex                    # start Codex on a new VM
   railway code --claude                   # start Claude Code on a new VM
   railway code --codex connect my-box     # connect to an existing server
+  railway code --opencode upgrade my-box  # explicitly migrate a saved server to V2
   railway code --codex desktop-only       # configure Codex Desktop
   railway code get-config my-box          # show saved connection details
 
-An explicit agent flag creates a new VM unless you use connect or --agent.
+An explicit agent flag creates a new VM unless you use connect, upgrade, or --agent.
 Without an agent flag, opens railway-agent-tui on a new VM.
 Flags override preferences; the linked project overrides the saved project.
 
@@ -173,8 +173,6 @@ pub async fn command(args: Args) -> Result<()> {
         }
         let harness = if args.codex {
             client::Harness::Codex
-        } else if args.opencode2 {
-            client::Harness::OpenCode2
         } else {
             client::Harness::OpenCode
         };
@@ -186,7 +184,10 @@ pub async fn command(args: Args) -> Result<()> {
                 return codex_desktop_only(args, Default::default()).await;
             }
             ClientAction::Connect(selector) => {
-                return client::connect(args, harness, selector).await;
+                return client::connect(args, harness, selector, false).await;
+            }
+            ClientAction::Upgrade(selector) => {
+                return client::connect(args, harness, Some(selector), true).await;
             }
             ClientAction::Remote => {
                 args.agent_args.clear();
@@ -219,7 +220,7 @@ pub(crate) async fn codex_desktop_only(
 pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
     if args.connection_json {
         bail!(
-            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
         );
     }
     // `railway code` passes its trailing arguments to the agent, so
@@ -248,22 +249,22 @@ pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode2", "railway"]).multiple(true))
+    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode", "opencode2", "railway"]).multiple(true))
 )]
 pub struct LaunchArgs {
     /// Select Codex
     #[clap(long, help_heading = "Agent")]
     codex: bool,
 
-    /// Select OpenCode
+    /// Select OpenCode (stable V2 for new launches)
     #[clap(long, help_heading = "Agent")]
     opencode: bool,
 
-    /// Select OpenCode2 Beta
-    #[clap(long, help_heading = "Agent")]
+    /// Deprecated alias for --opencode
+    #[clap(long, help_heading = "Agent", hide = true)]
     opencode2: bool,
 
-    /// Return Codex/OpenCode2 credentials or Railway endpoint details as JSON
+    /// Return Codex/OpenCode credentials or Railway endpoint details as JSON
     #[clap(
         long,
         requires = "client_json_harness",
@@ -349,7 +350,7 @@ pub struct LaunchArgs {
     #[clap(long, short, help_heading = "Target")]
     pub project: Option<String>,
 
-    /// Client action: remote, connect [AGENT], desktop-only (Codex); or agent arguments after --
+    /// Client action: remote, connect [AGENT], upgrade AGENT (OpenCode), desktop-only (Codex); or agent arguments after --
     agent_args: Vec<String>,
 
     /// Remote project directory for Codex/OpenCode server mode (default: /app)
@@ -414,6 +415,7 @@ enum ClientAction {
     DesktopOnly,
     Remote,
     Connect(Option<String>),
+    Upgrade(String),
 }
 
 impl LaunchArgs {
@@ -439,8 +441,10 @@ impl LaunchArgs {
             self.railway = true;
         }
         let action = self.client_action()?;
-        if matches!(action, Some(ClientAction::Connect(_)))
-            && (self.bootstrap.is_some() || self.no_bootstrap)
+        if matches!(
+            action,
+            Some(ClientAction::Connect(_) | ClientAction::Upgrade(_))
+        ) && (self.bootstrap.is_some() || self.no_bootstrap)
         {
             bail!("Bootstrap options create a new VM and cannot be used with connect.");
         }
@@ -454,7 +458,10 @@ impl LaunchArgs {
             && !self.rm
             && self.remote_agent.is_none()
             && self.agent_id.is_none()
-            && !matches!(action, Some(ClientAction::Connect(_)))
+            && !matches!(
+                action,
+                Some(ClientAction::Connect(_) | ClientAction::Upgrade(_))
+            )
         {
             self.new = true;
         }
@@ -466,17 +473,20 @@ impl LaunchArgs {
     fn client_action(&self) -> Result<Option<ClientAction>> {
         let verb = self.agent_args.first().map(String::as_str);
         if self.connection_json
-            && ((!self.codex && !self.opencode2 && !self.railway)
+            && ((!self.codex && !self.opencode && !self.opencode2 && !self.railway)
                 || self.rm
                 || self.app_mode
-                || !(matches!(verb, None | Some("connect"))
+                || !(matches!(verb, None | Some("connect" | "upgrade"))
                     || (self.codex && verb == Some("desktop-only"))))
         {
             bail!(
-                "--connection-json requires railway code --codex, --opencode2, or --railway [connect], or --codex desktop-only."
+                "--connection-json requires railway code --codex, --opencode, or --railway [connect], --opencode upgrade, or --codex desktop-only."
             );
         }
-        let reserved = matches!(verb, Some("remote" | "connect" | "desktop-only"));
+        let reserved = matches!(
+            verb,
+            Some("remote" | "connect" | "upgrade" | "desktop-only")
+        );
         let selected = self.codex || self.opencode || self.opencode2 || self.railway;
         if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
             if self.remote_dir.is_some() || self.remote_agent.is_some() {
@@ -493,7 +503,7 @@ impl LaunchArgs {
             || self.grok
             || self.shell
         {
-            bail!("Pick exactly one client: --codex, --opencode, --opencode2, or --railway.");
+            bail!("Pick exactly one client: --codex, --opencode, or --railway.");
         }
         if self.rm || self.initial_prompt.is_some() {
             bail!("Local-client commands cannot be combined with --rm or an initial prompt.");
@@ -518,12 +528,12 @@ impl LaunchArgs {
             Some("remote") => {
                 if self.agent_args.len() != 1 || self.remote_dir.is_some() {
                     bail!(
-                        "Use railway code --codex remote (or --opencode/--opencode2/--railway) to open the UI inside the cloud agent; --dir is for local clients."
+                        "Use railway code --codex remote (or --opencode/--railway) to open the UI inside the cloud agent; --dir is for local clients."
                     );
                 }
                 Ok(Some(ClientAction::Remote))
             }
-            Some("connect") => {
+            Some("connect" | "upgrade") => {
                 if self.agent_args.len() > 2
                     || self.new
                     || self.name.is_some()
@@ -535,7 +545,7 @@ impl LaunchArgs {
                     || self.remote_dir.is_some()
                 {
                     bail!(
-                        "connect uses an existing server. Use railway code --codex, --opencode, --opencode2, or --railway to set one up on a fresh VM."
+                        "connect uses an existing server. Use railway code --codex, --opencode, or --railway to set one up on a fresh VM."
                     );
                 }
                 let positional = self.agent_args.get(1).cloned();
@@ -549,7 +559,14 @@ impl LaunchArgs {
                 {
                     bail!("The cloud agent name cannot be empty.");
                 }
-                Ok(Some(ClientAction::Connect(selector)))
+                if verb == Some("upgrade") {
+                    if !self.opencode && !self.opencode2 {
+                        bail!("upgrade requires --opencode and an explicit cloud agent");
+                    }
+                    Ok(Some(ClientAction::Upgrade(selector.context("Use railway code --opencode upgrade <agent> to explicitly migrate an existing server")?)))
+                } else {
+                    Ok(Some(ClientAction::Connect(selector)))
+                }
             }
             _ => unreachable!("other harness arguments returned above"),
         }
@@ -748,7 +765,7 @@ enum Agent {
 impl Agent {
     /// The remote binary name — what's actually exec'd, and what's
     /// autostarted on reconnect. Only ever used for that: anywhere this agent
-    /// needs a name a person reads, use [`Self::slug`] instead. The one
+    /// needs a name a person reads, use [`Self::display`] instead. The one
     /// exception to "identical to the slug": the interactive frontend binary
     /// is `railway-agent-tui`, not `railway-agent` (that name is the headless
     /// `run`/`serve` CLI it drives).
@@ -766,13 +783,9 @@ impl Agent {
         }
     }
 
-    /// The slug persisted in `agent-prefs.json`, accepted by
-    /// `RAILWAY_CA_AGENT`, and used anywhere this agent needs a short,
-    /// user-facing identifier — session name prefixes, the "get back in"
-    /// hint, launch messages. Identical to [`Self::name`] for every agent
-    /// except Railway's own: "railway" reads better than "railway-agent-tui"
-    /// in a flag, a config file, or a session name, and there is only the one
-    /// harness it could mean.
+    /// Historical harness identity for sessions, snapshots, and telemetry.
+    /// Also accepted by launch preferences and `RAILWAY_CA_AGENT`. Keep V1 and
+    /// V2 distinct here; use [`Self::display`] for user-facing labels.
     fn slug(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
@@ -789,8 +802,7 @@ impl Agent {
         match slug {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
-            "opencode" => Some(Agent::OpenCode),
-            "opencode2" => Some(Agent::OpenCode2),
+            "opencode" | "opencode2" => Some(Agent::OpenCode2),
             "grok" => Some(Agent::Grok),
             "railway" => Some(Agent::Railway),
             "shell" => Some(Agent::Shell),
@@ -802,8 +814,8 @@ impl Agent {
     fn display(self) -> &'static str {
         match self {
             Agent::Codex => "Codex",
-            Agent::OpenCode => "OpenCode",
-            Agent::OpenCode2 => "OpenCode2 [Beta]",
+            Agent::OpenCode => "OpenCode 1 — legacy",
+            Agent::OpenCode2 => "OpenCode",
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
             Agent::Railway => "Railway",
@@ -879,9 +891,7 @@ impl Agent {
             Agent::OpenCode => {
                 "connect a provider in OpenCode Desktop or run `opencode auth login` on the agent"
             }
-            Agent::OpenCode2 => {
-                "connect a provider in OpenCode Beta or run `opencode2 auth login` on the agent"
-            }
+            Agent::OpenCode2 => "connect a provider in OpenCode Desktop",
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
             Agent::Railway => "no sign-in needed — the agent carries its own",
@@ -954,6 +964,21 @@ chmod 600 "$opencode_data/auth.json""#;
 /// zoxide init writes to stdout and would corrupt the AGENT-READY marker this
 /// command parses. Mirrors the image's own export line instead.
 const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+
+/// History slugs retain their original protocol even after `opencode` on PATH
+/// is replaced by V2. Inspect before a remote resume can touch shared storage.
+pub(crate) fn opencode_resume_guard(v2: bool) -> String {
+    let agent = if v2 {
+        Agent::OpenCode2
+    } else {
+        Agent::OpenCode
+    };
+    let major = if v2 { "2" } else { "1" };
+    format!(
+        "case \"$({} --version 2>/dev/null)\" in {major}.*|'opencode v{major}.'*) ;; *) echo 'The installed OpenCode runtime does not match this saved conversation. Use railway code --opencode connect <agent>, or explicitly upgrade it.' >&2; exit 1;; esac; ",
+        agent.name()
+    )
+}
 
 /// Agent-independent seeds, all idempotent:
 /// - COLORTERM: the relay forwards TERM but not COLORTERM; without it TUIs
@@ -1492,7 +1517,7 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
                 },
                 None => PendingAuth::SignInOnAgent {
                     note: format!(
-                        "No OpenCode2 provider sign-in to copy from this machine; {}.",
+                        "No OpenCode provider sign-in to copy from this machine; {}.",
                         agent.sign_in_on_agent_hint()
                     ),
                 },
@@ -2884,7 +2909,7 @@ const AGENT_ENV_VAR: &str = "RAILWAY_CA_AGENT";
 fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) -> Result<Agent> {
     let flagged: Vec<Agent> = [
         (args.codex, Agent::Codex),
-        (args.opencode, Agent::OpenCode),
+        (args.opencode, Agent::OpenCode2),
         (args.opencode2, Agent::OpenCode2),
         (args.claude, Agent::Claude),
         (args.grok, Agent::Grok),
@@ -2897,9 +2922,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
     match flagged.as_slice() {
         [agent] => return Ok(*agent),
         [] => {}
-        _ => bail!(
-            "Pick one agent: --codex, --claude, --opencode, --opencode2, --grok, or --railway."
-        ),
+        _ => bail!("Pick one agent: --codex, --claude, --opencode, --grok, or --railway."),
     }
 
     if let Ok(slug) = std::env::var(AGENT_ENV_VAR) {
@@ -2907,7 +2930,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
                 anyhow!(
-                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, opencode2, grok, railway, or shell)."
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, grok, railway, or shell)."
                 )
             })?;
             return Ok(agent);
@@ -3058,7 +3081,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
 
     if args.connection_json {
         bail!(
-            "--connection-json requires railway code --codex, --opencode2, or --railway [connect]."
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
         );
     }
 
@@ -3104,7 +3127,8 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     };
     progress.finish();
 
-    println!("Launching {}…", prepared.harness);
+    let harness = crate::commands::cloud_agent::harness_label(prepared.harness);
+    println!("Launching {harness}…");
     let exit_code = run_session(&prepared)?;
 
     // The user's work is done; give detached telemetry a bounded window so a
@@ -3147,7 +3171,12 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     } else {
         println!(
             "  railway code --{}   # wakes it and drops back into {}",
-            prepared.harness, prepared.harness
+            if prepared.harness == "opencode2" {
+                "opencode"
+            } else {
+                prepared.harness
+            },
+            harness
         );
     }
     println!(
@@ -4666,6 +4695,31 @@ mod tests {
     }
 
     #[test]
+    fn opencode_aliases_use_v2_and_only_explicit_upgrade_migrates_existing_servers() {
+        for flag in ["--opencode", "--opencode2"] {
+            let home = tempfile::tempdir().unwrap();
+            let mut prefs = AgentPrefs::default();
+            let args = LaunchArgs::try_parse_from(["code", flag, "--connection-json"]).unwrap();
+            assert_eq!(
+                resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
+                Agent::OpenCode2
+            );
+            assert_eq!(args.client_action().unwrap(), Some(ClientAction::Local));
+            let mut upgrade =
+                LaunchArgs::try_parse_from(["code", flag, "upgrade", "old-box"]).unwrap();
+            assert_eq!(
+                upgrade.prepare_code_launch().unwrap(),
+                Some(ClientAction::Upgrade("old-box".into()))
+            );
+            assert!(!upgrade.new);
+            let missing = LaunchArgs::try_parse_from(["code", flag, "upgrade"]).unwrap();
+            assert!(missing.client_action().is_err());
+        }
+        let codex = LaunchArgs::try_parse_from(["code", "--codex", "upgrade", "box"]).unwrap();
+        assert!(codex.client_action().is_err());
+    }
+
+    #[test]
     fn code_endpoint_creation_is_typed_and_ports_are_validated() {
         let mut args = LaunchArgs::try_parse_from(["code", "--opencode2", "--new"]).unwrap();
         // Merely selecting a harness (e.g. for an SSH session) does not expose it.
@@ -4822,15 +4876,15 @@ cat
         };
         assert_eq!(
             resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
-            Agent::OpenCode
+            Agent::OpenCode2
         );
         assert!(!args.is_bare());
-        let script = provision_script(Agent::OpenCode, false, args.app_mode);
+        let script = provision_script(Agent::OpenCode2, false, args.app_mode);
         assert!(script.contains("touch ~/.railway-app-mode"));
         assert!(script.contains("command -v opencode"));
         assert!(!script.contains("$opencode_data/auth.json"));
         let command = remote_command(
-            Agent::OpenCode,
+            Agent::OpenCode2,
             "",
             Some("explain this project"),
             None,
@@ -4838,7 +4892,7 @@ cat
             SessionStyle::Pane,
         );
         assert!(
-            command.contains("opencode --prompt 'explain this project'"),
+            command.contains("opencode2 --standalone --prompt 'explain this project'"),
             "{command}"
         );
     }

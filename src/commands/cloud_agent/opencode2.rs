@@ -7,7 +7,7 @@ pub(super) const SHIM: &str = include_str!("opencode2.py");
 
 pub(crate) fn seed_script() -> String {
     format!(
-        "mkdir -p ~/.local/bin\nprintf '%s' {} > ~/.local/bin/opencode2\nchmod 700 ~/.local/bin/opencode2\n~/.local/bin/opencode2 --railway-import-auth || exit 1",
+        "mkdir -p ~/.local/bin ~/.railway/runtimes/opencode2\nprintf '%s' {} > ~/.railway/runtimes/opencode2/launcher.py\nchmod 700 ~/.railway/runtimes/opencode2/launcher.py\nif [ -e ~/.local/bin/opencode2 ] && ! grep -Eq 'railway/runtimes/opencode2|Install the current OpenCode|OpenCode.*Beta' ~/.local/bin/opencode2; then\n  echo 'A custom ~/.local/bin/opencode2 exists; move it before configuring OpenCode.' >&2; exit 1\nfi\nprintf '%s\\n' '#!/bin/sh' 'exec python3 \"$HOME/.railway/runtimes/opencode2/launcher.py\" \"$@\"' > ~/.local/bin/opencode2\nchmod 700 ~/.local/bin/opencode2\n~/.local/bin/opencode2 --railway-import-auth || exit 1",
         shell_join(&[SHIM.to_string()])
     )
 }
