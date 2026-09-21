@@ -40,6 +40,74 @@ Apply the planned changes:
 railway config apply
 ```
 
+## Manage named partial ownership
+
+These commands use the linked project and environment, including environment-scoped
+`RAILWAY_TOKEN` credentials. Release and transfer require environment ADMIN access.
+They work even when the original authoring file no longer exists.
+
+List partial names and every owned address:
+
+```bash
+railway config partials list
+railway config partials list --json
+```
+
+Preview moving two services from an orphaned partial to a new or existing partial:
+
+```bash
+railway config partials transfer legacy-ops operations \
+  --resource service.api --resource service.admin --dry-run
+```
+
+Run the same command without `--dry-run` to review the addresses and confirm the
+transfer. Omit every `--resource` option to transfer the entire source partial.
+Every selected address must currently belong to that source.
+
+Release all ownership held by a partial:
+
+```bash
+railway config partials release operations --dry-run
+railway config partials release operations
+```
+
+Use repeated `--resource ADDRESS` options to release only selected addresses.
+Release and transfer change ownership metadata only: they do not delete resources,
+change resource configuration, or redeploy anything. They do not edit local files.
+All named ownership must be cleared before whole-project planning is available;
+releasing one partial is insufficient if another still owns resources.
+
+After release, remove the named partial export (`partial`, `PARTIAL`, or `Partial`)
+from your authoring configuration if moving to whole-project management, and run a
+fresh `railway config plan`. Ensure that configuration includes the resources you
+want to retain, since ordinary whole-project applies can delete omitted resources.
+After a transfer, update both partials' configurations to match the new ownership
+and re-plan. Applying an old named-partial configuration can reclaim released
+ownership. To restore ownership later, use an ordinary named-partial plan/apply.
+
+For automation, `--yes` confirms without prompting. As with `config apply`,
+`--json` also proceeds without prompting; add `--dry-run` for a read-only JSON
+preview. JSON includes `affectedResources`, the complete resulting `iacPartials`
+map (predicted for dry runs), and `wholeProjectAvailable`.
+
+Every mutation sends the preview's existing `Environment.configEtag` and exact
+affected addresses. Configuration or ownership changes during review reject the
+operation; refresh the preview and review it again. For a separate CI review step:
+
+```bash
+railway config partials release operations --dry-run --json > ownership-preview.json
+# After reviewing that preview, pass its baseConfigEtag with the same command:
+railway config partials release operations \
+  --base-config-etag "$(jq -r .baseConfigEtag ownership-preview.json)" --yes --json
+```
+
+Ownership operations do not produce a resource ChangeSet, so they do not use
+`config plan --out` / `config apply --plan` artifacts or require a `.railway` source
+tree. They reuse the same config etag, and ownership changes make previously saved
+configuration plans stale. Create a fresh configuration plan after changing
+ownership. If a backend has not yet rolled out the ownership mutations, the
+command reports the API error without falling back to a configuration apply.
+
 ## Notes
 
 - `railway config plan` is safe and does not change Railway.

@@ -1,5 +1,6 @@
 mod authoring;
 mod migrate;
+mod partials;
 mod runner;
 
 use self::authoring::AuthoringLang;
@@ -20,7 +21,7 @@ use super::*;
 const LEGACY_CONFIG_SKILL_SHA256: &str =
     "08dff6674cd2df2d8a37fd2c0f3ef8aa506b353e88005331910387514430e00e";
 
-/// Define, import, preview, and apply your Railway project from .railway/railway.ts (or .py / .go)
+/// Manage Railway configuration and IaC ownership
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
@@ -47,6 +48,9 @@ enum Command {
 
     /// Translate railway.json / railway.toml into an authoring file
     Migrate(migrate::MigrateArgs),
+
+    /// List, release, or transfer named IaC partial ownership without changing resources
+    Partials(partials::Args),
 }
 
 #[derive(Parser, Clone)]
@@ -158,6 +162,11 @@ struct PullArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    // Ownership management must also work without an authoring file and must
+    // not perform the legacy authoring-skill cleanup below.
+    if let Command::Partials(args) = args.command {
+        return partials::command(args).await;
+    }
     if let Ok(cwd) = std::env::current_dir() {
         match remove_generated_legacy_skill(&cwd, LEGACY_CONFIG_SKILL_SHA256) {
             Ok(true) => eprintln!(
@@ -204,6 +213,7 @@ pub async fn command(args: Args) -> Result<()> {
         Command::Init(args) => init_config(args).await,
         Command::Pull(args) => pull_config(args).await,
         Command::Migrate(args) => migrate::migrate_config(args).await,
+        Command::Partials(_) => unreachable!(),
     }
 }
 
