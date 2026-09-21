@@ -1,12 +1,14 @@
 use graphql_client::GraphQLQuery;
 
+type DateTime = chrono::DateTime<chrono::Utc>;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/subscriptions/strings/BuildLogs.graphql",
+    query_path = "src/gql/subscriptions/strings/EnvironmentLogs.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-pub struct BuildLogs;
+pub struct EnvironmentLogs;
 
 #[derive(GraphQLQuery)]
 #[graphql(

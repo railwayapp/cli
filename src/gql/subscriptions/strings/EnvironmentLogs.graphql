@@ -1,0 +1,14 @@
+subscription EnvironmentLogs($environmentId: String!, $filter: String, $beforeLimit: Int, $beforeDate: String, $anchorDate: String, $afterDate: String, $afterLimit: Int) {
+  environmentLogs(environmentId: $environmentId, filter: $filter, beforeLimit: $beforeLimit, beforeDate: $beforeDate, anchorDate: $anchorDate, afterDate: $afterDate, afterLimit: $afterLimit) {
+    ...LogFields
+  }
+}
+
+fragment LogFields on Log {
+  timestamp
+  message
+  attributes {
+    key
+    value
+  }
+}

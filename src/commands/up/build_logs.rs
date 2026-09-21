@@ -12,15 +12,18 @@ use futures::StreamExt;
 use graphql_ws_client::graphql::StreamingOperation;
 use serde::Serialize;
 use tokio::sync::{Notify, OnceCell};
+use tokio::time::Instant;
 
 use crate::{
+    controllers::deployment::BuildLogContext,
     gql::subscriptions,
     subscription::connect_graphql,
     util::logs::{LogFormat, LogLike, format_log_string, strip_terminal_controls},
 };
 
-const FINAL_LOG_GRACE: Duration = Duration::from_secs(5);
-const FINAL_LOG_TIMEOUT: Duration = Duration::from_secs(5);
+const FINAL_LOG_GRACE: Duration = Duration::from_secs(1);
+const FINAL_LOG_QUIET: Duration = Duration::from_secs(2);
+const FINAL_LOG_TIMEOUT: Duration = Duration::from_secs(15);
 const RECENT_LOG_LIMIT: usize = 1_000;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -45,12 +48,26 @@ fn attribute<'a>(attributes: &'a [(String, String)], name: &str) -> Option<Cow<'
     })
 }
 
+fn is_error(attributes: &[(String, String)]) -> bool {
+    attribute(attributes, "error").is_some_and(|error| !error.is_empty() && error != "null")
+        || ["level", "severity", "lvl"].iter().any(|name| {
+            attribute(attributes, name).is_some_and(|level| {
+                matches!(
+                    level.to_ascii_lowercase().as_str(),
+                    "error" | "err" | "fatal" | "critical"
+                )
+            })
+        })
+}
+
 struct Output<W> {
     writer: W,
     seen: HashSet<LogKey>,
     recent: VecDeque<LogKey>,
     seen_steps: HashSet<BuildStepKey>,
     recent_steps: VecDeque<BuildStepKey>,
+    last_message: Option<String>,
+    error_seen: bool,
     closed: bool,
 }
 
@@ -109,11 +126,14 @@ impl<W> Output<W> {
 }
 
 /// Keep live output open after FAILED, then replay the subscription's tail on
-/// the same socket. This catches late entries behind the server's timestamp
-/// cursor without an HTTP build-log query.
+/// the same socket until error logs settle or finalization times out. Repeated
+/// replays catch late entries behind the server's timestamp cursor without an
+/// HTTP build-log query.
 pub(super) struct BuildLogs<W = Stdout> {
     json: bool,
     output: Mutex<Output<W>>,
+    context: OnceCell<BuildLogContext>,
+    context_ready: Notify,
     finished: OnceCell<()>,
     replay_requested: Notify,
     replay_finished: Notify,
@@ -138,16 +158,34 @@ impl BuildLogs {
             .await;
     }
 
-    pub(super) async fn stream(&self, deployment_id: &str, ci: bool) -> Result<()> {
+    pub(super) fn set_context(&self, context: Option<BuildLogContext>) {
+        if let Some(context) = context
+            && self.context.set(context).is_ok()
+        {
+            self.context_ready.notify_one();
+        }
+    }
+
+    pub(super) async fn stream(&self, ci: bool) -> Result<()> {
         // Wake finish even if the socket closes or initial subscription fails.
         let _finished = scopeguard::guard((), |_| self.replay_finished.notify_one());
+        // The existing status subscription supplies the first available snapshot.
+        // A deployment can fail before it has one, so finalization must also
+        // release this wait without making a metadata query.
+        let context = loop {
+            if let Some(context) = self.context.get() {
+                break context;
+            }
+            tokio::select! {
+                _ = self.context_ready.notified() => {}
+                _ = self.replay_requested.notified() => return Ok(()),
+            }
+        };
         let mut delay_ms = 1_000;
         for attempt in 1..=12 {
             let mut received_logs = false;
-            match self
-                .stream_once(deployment_id, ci, &mut received_logs)
-                .await
-            {
+            let result = self.stream_once(context, ci, &mut received_logs).await;
+            match result {
                 Ok(()) => return Ok(()),
                 Err(error) if received_logs || attempt == 12 => return Err(error),
                 Err(_) => {
@@ -161,23 +199,20 @@ impl BuildLogs {
 
     async fn stream_once(
         &self,
-        deployment_id: &str,
+        context: &BuildLogContext,
         ci: bool,
         received_logs: &mut bool,
     ) -> Result<()> {
         let (client, actor) = connect_graphql().await?;
         let _actor = scopeguard::guard(tokio::spawn(actor.into_future()), |task| task.abort());
         let subscribe = || {
-            client.subscribe(StreamingOperation::<subscriptions::BuildLogs>::new(
-                subscriptions::build_logs::Variables {
-                    deployment_id: deployment_id.to_owned(),
-                    filter: Some(String::new()),
-                    limit: Some(500),
-                },
+            client.subscribe(StreamingOperation::<subscriptions::EnvironmentLogs>::new(
+                context.stream_variables(None),
             ))
         };
         let mut stream = subscribe().await?;
         let mut replaying = false;
+        let mut last_new_log = Instant::now();
         loop {
             let response = tokio::select! {
                 _ = self.replay_requested.notified(), if !replaying => {
@@ -195,18 +230,30 @@ impl BuildLogs {
                 .context("Build log stream error")?
                 .data
                 .context("Failed to retrieve build logs")?;
-            for log in data.build_logs {
+            for log in data.environment_logs {
                 *received_logs = true;
                 let skipped = ci && log.message.starts_with("No changed files matched patterns");
                 // Accept unseen older entries, including replayed final errors.
-                self.print(log);
+                if self.print(log) {
+                    last_new_log = Instant::now();
+                }
                 if skipped {
                     std::process::exit(0);
                 }
             }
             if replaying {
                 stream.stop().await?;
-                return Ok(());
+                // An empty or stale first replay is not a completion signal:
+                // logs can still be ingested behind its timestamp cursor.
+                // Require a fresh replay after the error output settles. If
+                // there is no error log, finish's timeout bounds the wait.
+                if self.output.lock().unwrap().error_seen
+                    && last_new_log.elapsed() >= FINAL_LOG_QUIET
+                {
+                    return Ok(());
+                }
+                tokio::time::sleep(FINAL_LOG_GRACE).await;
+                stream = subscribe().await?;
             }
         }
     }
@@ -222,15 +269,20 @@ impl<W: Write> BuildLogs<W> {
                 recent: VecDeque::new(),
                 seen_steps: HashSet::new(),
                 recent_steps: VecDeque::new(),
+                last_message: None,
+                error_seen: false,
                 closed: false,
             }),
+            context: OnceCell::new(),
+            context_ready: Notify::new(),
             finished: OnceCell::new(),
             replay_requested: Notify::new(),
             replay_finished: Notify::new(),
         }
     }
 
-    pub(super) fn print<T: LogLike + Serialize>(&self, log: T) {
+    /// Return whether the event is new, independently of display deduplication.
+    pub(super) fn print<T: LogLike + Serialize>(&self, log: T) -> bool {
         let mut attributes: Vec<_> = log
             .attributes()
             .into_iter()
@@ -247,8 +299,9 @@ impl<W: Write> BuildLogs<W> {
         // or interleave a multiline build error.
         let mut output = self.output.lock().unwrap();
         if output.closed || !output.seen.insert(key.clone()) {
-            return;
+            return false;
         }
+        output.error_seen |= is_error(&key.attributes);
         output.recent.push_back(key.clone());
         if output.recent.len() > RECENT_LOG_LIMIT {
             let expired = output.recent.pop_front().unwrap();
@@ -259,10 +312,19 @@ impl<W: Write> BuildLogs<W> {
             format_log_string(log, true, LogFormat::LevelOnly)
         } else {
             let Some(message) = output.build_step_message(log.message(), &key.attributes) else {
-                return;
+                return true;
             };
             strip_terminal_controls(&message)
         };
+        // Compare rendered text so differing timestamps or attributes cannot
+        // repeat the same adjacent message in human-readable output.
+        if !self.json && output.last_message.as_deref() == Some(line.as_str()) {
+            return true;
+        }
         writeln!(output.writer, "{line}").expect("failed to write build log");
+        if !self.json {
+            output.last_message = Some(line);
+        }
+        true
     }
 }

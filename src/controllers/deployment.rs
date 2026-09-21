@@ -2,7 +2,7 @@ use crate::{
     commands::{
         queries::{self},
         subscriptions::{
-            self, build_logs, deployment, deployment_logs, dns_query_logs, http_logs,
+            self, deployment, deployment_logs, dns_query_logs, environment_logs, http_logs,
             network_flow_logs,
         },
     },
@@ -32,6 +32,69 @@ const STREAM_STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
 const ANCHORED_LOG_DEFAULT_LIMIT: i64 = 500;
 const STREAM_LOOKBACK_SECONDS: i64 = 30;
 const STREAM_DEDUPE_CACHE_SIZE: usize = 10_000;
+
+/// Scope build logs the same way as the dashboard, including legacy replica tags.
+pub struct BuildLogContext {
+    environment_id: String,
+    snapshot_id: String,
+    start_date: DateTime<Utc>,
+}
+
+impl BuildLogContext {
+    pub fn new(
+        environment_id: String,
+        snapshot_id: Option<String>,
+        created_at: DateTime<Utc>,
+    ) -> Option<Self> {
+        Some(Self {
+            environment_id,
+            snapshot_id: snapshot_id?,
+            // Build events can be timestamped just before deployment creation.
+            start_date: created_at - ChronoDuration::minutes(5),
+        })
+    }
+
+    pub async fn load(client: &Client, backboard: &str, deployment_id: &str) -> Result<Self> {
+        let deployment = post_graphql::<queries::DeploymentStatus, _>(
+            client,
+            backboard,
+            queries::deployment_status::Variables {
+                id: deployment_id.to_owned(),
+            },
+        )
+        .await?
+        .deployment;
+        Self::new(
+            deployment.environment_id,
+            deployment.snapshot_id,
+            deployment.created_at,
+        )
+        .context("Deployment does not have an associated build")
+    }
+
+    fn filter(&self, filter: Option<&str>) -> String {
+        let scope = format!(
+            "(@snapshot:{} OR @replica:{})",
+            self.snapshot_id, self.snapshot_id
+        );
+        match filter.filter(|filter| !filter.trim().is_empty()) {
+            Some(filter) => format!("({filter}) {scope}"),
+            None => scope,
+        }
+    }
+
+    pub fn stream_variables(&self, filter: Option<&str>) -> environment_logs::Variables {
+        environment_logs::Variables {
+            environment_id: self.environment_id.clone(),
+            filter: Some(self.filter(filter)),
+            before_date: Some(format_anchored_log_timestamp(self.start_date)),
+            before_limit: Some(500),
+            anchor_date: None,
+            after_date: None,
+            after_limit: Some(0),
+        }
+    }
+}
 
 pub struct FetchLogsParams<'a> {
     pub client: &'a Client,
@@ -135,21 +198,31 @@ fn anchored_log_window(
 
 pub async fn fetch_build_logs(
     params: FetchLogsParams<'_>,
-    mut on_log: impl FnMut(queries::build_logs::BuildLogsBuildLogs),
+    mut on_log: impl FnMut(queries::environment_logs::LogFields),
 ) -> Result<()> {
-    let vars = queries::build_logs::Variables {
-        deployment_id: params.deployment_id,
-        limit: params.limit,
-        start_date: params.start_date,
-        end_date: params.end_date,
-        filter: params.filter,
+    let context =
+        BuildLogContext::load(params.client, params.backboard, &params.deployment_id).await?;
+    let window = anchored_log_window(
+        params.limit,
+        Some(params.start_date.unwrap_or(context.start_date)),
+        params.end_date,
+        Utc::now(),
+    );
+    let vars = queries::environment_logs::Variables {
+        filter: Some(context.filter(params.filter.as_deref())),
+        environment_id: context.environment_id,
+        before_limit: window.before_limit,
+        before_date: window.before_date,
+        anchor_date: window.anchor_date,
+        after_date: window.after_date,
+        after_limit: window.after_limit,
     };
 
     let response =
-        post_graphql::<queries::BuildLogs, _>(params.client, params.backboard, vars).await?;
+        post_graphql::<queries::EnvironmentLogs, _>(params.client, params.backboard, vars).await?;
 
     // Take only the requested number of logs from the end (the API has a bug and returns limit+1)
-    let logs = response.build_logs;
+    let logs = response.environment_logs;
     let logs_to_process = take_last_n_logs(logs, params.limit);
 
     for log in logs_to_process {
@@ -270,10 +343,13 @@ pub async fn fetch_dns_query_logs(
 }
 
 pub async fn stream_build_logs(
+    client: &Client,
+    backboard: &str,
     deployment_id: String,
     filter: Option<String>,
-    mut on_log: impl FnMut(build_logs::LogFields),
+    mut on_log: impl FnMut(environment_logs::LogFields),
 ) -> Result<()> {
+    let mut context = None;
     let mut last_timestamp: Option<String> = None;
     let mut attempt = 0;
     let mut delay_ms = LOGS_RETRY_CONFIG.initial_delay_ms;
@@ -282,14 +358,15 @@ pub async fn stream_build_logs(
     loop {
         attempt += 1;
 
-        let vars = subscriptions::build_logs::Variables {
-            deployment_id: deployment_id.clone(),
-            filter: filter.clone().or_else(|| Some(String::new())),
-            limit: Some(500),
-        };
-
         let result = async {
-            let mut stream = subscribe_graphql::<subscriptions::BuildLogs>(vars).await?;
+            let context = match &context {
+                Some(context) => context,
+                None => {
+                    context.insert(BuildLogContext::load(client, backboard, &deployment_id).await?)
+                }
+            };
+            let vars = context.stream_variables(filter.as_deref());
+            let mut stream = subscribe_graphql::<subscriptions::EnvironmentLogs>(vars).await?;
 
             while let Some(response) = stream.next().await {
                 let log = response
@@ -297,7 +374,7 @@ pub async fn stream_build_logs(
                     .data
                     .context("Failed to retrieve build log")?;
 
-                for line in log.build_logs {
+                for line in log.environment_logs {
                     if let Some(ref ts) = last_timestamp {
                         if line.timestamp <= *ts {
                             continue;

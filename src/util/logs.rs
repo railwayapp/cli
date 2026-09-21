@@ -479,7 +479,7 @@ impl LogLike for queries::deployment_logs::LogFields {
     }
 }
 
-impl LogLike for subscriptions::build_logs::LogFields {
+impl LogLike for subscriptions::environment_logs::LogFields {
     fn message(&self) -> &str {
         &self.message
     }
@@ -494,7 +494,7 @@ impl LogLike for subscriptions::build_logs::LogFields {
     }
 }
 
-impl LogLike for queries::build_logs::LogFields {
+impl LogLike for queries::environment_logs::LogFields {
     fn message(&self) -> &str {
         &self.message
     }

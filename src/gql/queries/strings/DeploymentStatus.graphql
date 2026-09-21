@@ -1,5 +1,8 @@
 query DeploymentStatus($id: String!) {
   deployment(id: $id) {
     status
+    environmentId
+    snapshotId
+    createdAt
   }
 }
