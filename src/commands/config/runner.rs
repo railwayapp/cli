@@ -364,10 +364,16 @@ fn guard_destructive_apply(args: &Args, destructive: bool) -> Result<()> {
 }
 
 async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'static str)> {
+    ensure_config_context_with_prompt(std::io::stdout().is_terminal()).await
+}
+
+pub(super) async fn ensure_config_context_with_prompt(
+    interactive: bool,
+) -> Result<(Configs, LinkedProject, String, &'static str)> {
     let configs = Configs::new()?;
     let (token, auth_type) = match get_runner_token(&configs) {
         Ok(token) => token,
-        Err(error) if std::io::stdout().is_terminal() => {
+        Err(error) if interactive => {
             println!("{}", "Log in to Railway to continue.".bold());
             crate::commands::login::prompt_login().await?;
             get_runner_token(&Configs::new()?).map_err(|_| error)?
@@ -377,10 +383,10 @@ async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'st
 
     let linked_project = match configs.get_linked_project().await {
         Ok(linked_project) => linked_project,
-        Err(_error) if std::io::stdout().is_terminal() => {
+        Err(_error) if interactive => {
             println!();
             println!("{}", "Connect Railway configuration".bold());
-            println!("Choose where .railway/railway.ts should plan and apply changes.");
+            println!("Choose the project and environment to manage.");
             crate::commands::link::link_project_without_service().await?
         }
         Err(error) => return Err(error),

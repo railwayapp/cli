@@ -26,6 +26,18 @@ bash <(curl -fsSL cli.new) -r
 
 Other installation methods are available in the CLI documentation: [Homebrew](https://docs.railway.com/cli#homebrew-macos), [npm](https://docs.railway.com/cli#npm-macos-linux-windows), [Scoop](https://docs.railway.com/cli#scoop-windows), [pre-built binaries](https://docs.railway.com/cli#pre-built-binaries), and [source builds](https://docs.railway.com/cli#from-source).
 
+## IaC partial ownership
+
+Use `railway config partials list` to discover named partials and their owned
+resource addresses. `railway config partials release NAME` clears a partial's
+ownership, and `railway config partials transfer FROM TO` moves it to another
+partial. Add repeated `--resource ADDRESS` options to select resources or omit
+them for the entire source partial. Use `--dry-run` to preview the exact addresses.
+
+These commands work without the original authoring file and only change ownership
+metadata. See the [IaC guide](assets/iac/README.md#manage-named-partial-ownership)
+for confirmation, JSON/CI usage, and moving back to whole-project management.
+
 ## Authentication
 
 Before using the CLI, authenticate with your Railway account:
