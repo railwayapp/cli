@@ -1,4 +1,8 @@
-//! Export provider sign-ins from Beta's credential store, without copying sessions.
+//! Export local OpenCode provider sign-ins for the VM, without copying sessions.
+//!
+//! OpenCode V2 keeps credentials in the `credential` table of
+//! `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`);
+//! a V1-only `auth.json` is converted when no V2 store exists.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,11 +12,11 @@ use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
-pub(crate) const SEED: &str = r#"mkdir -p ~/.railway/runtimes/opencode2 || exit 1
-opencode_credentials=$(mktemp ~/.railway/runtimes/opencode2/credentials.XXXXXX) || exit 1
+pub(crate) const SEED: &str = r#"mkdir -p ~/.railway/runtimes/opencode || exit 1
+opencode_credentials=$(mktemp ~/.railway/runtimes/opencode/credentials.XXXXXX) || exit 1
 cat > "$opencode_credentials" || { rm -f "$opencode_credentials"; exit 1; }
 chmod 600 "$opencode_credentials" || exit 1
-mv "$opencode_credentials" ~/.railway/runtimes/opencode2/credentials.json || exit 1"#;
+mv "$opencode_credentials" ~/.railway/runtimes/opencode/credentials.json || exit 1"#;
 
 pub(crate) fn seed_framed(len: usize) -> String {
     // Read only this frame: buffered readers can consume the following skills
@@ -92,7 +96,7 @@ pub(crate) fn read(
                     "Unsupported OpenCode credential database; provider credentials were not copied"
                 );
             }
-            // Match Beta's account preference: active first, then newest account.
+            // Match OpenCode's account preference: active first, then newest account.
             // NULL active is valid for credentials imported by older releases.
             let order = if columns.contains("active") {
                 "COALESCE(active,0) DESC,"
@@ -125,7 +129,7 @@ pub(crate) fn read(
                 credentials
                     .push(json!({"id":id,"integrationID":provider,"label":label,"value":value}));
             }
-            // An initialized, empty Beta store can mean the user signed out.
+            // An initialized, empty V2 store can mean the user signed out.
             // Never resurrect its accounts from a stale legacy auth.json.
             return payload(credentials, path);
         }
@@ -258,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_beta_store_does_not_restore_signed_out_legacy_accounts() {
+    fn empty_v2_store_does_not_restore_signed_out_legacy_accounts() {
         let home = tempfile::tempdir().unwrap();
         let (path, _db) = database(home.path());
         std::fs::write(
@@ -270,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fallback_converts_oauth_and_keys_only_without_beta_store() {
+    fn legacy_fallback_converts_oauth_and_keys_only_without_v2_store() {
         let home = tempfile::tempdir().unwrap();
         let data = home.path().join("custom/opencode");
         std::fs::create_dir_all(&data).unwrap();
@@ -373,7 +377,7 @@ mod tests {
             );
             let path = root
                 .path()
-                .join(".railway/runtimes/opencode2/credentials.json");
+                .join(".railway/runtimes/opencode/credentials.json");
             assert_eq!(std::fs::read(&path).unwrap(), auth);
             assert_eq!(
                 std::fs::metadata(path).unwrap().permissions().mode() & 0o777,

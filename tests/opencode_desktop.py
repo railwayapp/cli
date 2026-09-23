@@ -30,6 +30,9 @@ if sys.platform == 'darwin':
         # Process status changes between probes; only start time identifies it.
         return fields[1] if result.returncode == 0 and len(fields) == 2 and not fields[0].startswith('Z') else None
     m.process_start = process_start
+# Tests decide what the official V2 installer does; it must never reach the network here.
+if len(sys.argv) > 5 and sys.argv[5]:
+    exec(sys.argv[5])
 try:
     print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]))))
 except Exception as error:
@@ -110,14 +113,10 @@ class BootstrapTests(unittest.TestCase):
         self.home = Path(self.tmp.name)
         self.directory = self.home / "project ' with $(touch INJECTED)"
         self.directory.mkdir()
-        binary = self.home / '.opencode/bin/opencode'
-        binary.parent.mkdir(parents=True)
-        binary.write_text('#!' + sys.executable + '\n' + FAKE)
-        binary.chmod(0o700)
-        beta = self.home / '.local/bin/opencode2'
-        beta.parent.mkdir(parents=True)
-        beta.write_text(binary.read_text().replace("VERSION = '1.18.29'", "VERSION = '2.0.8'"))
-        beta.chmod(0o700)
+        # An older image: the official install location holds OpenCode 1.
+        (self.home / '.opencode/bin').mkdir(parents=True)
+        self.write_runtime('1.18.29')
+        self.hook = "def _install(home):\n    raise RuntimeError('unexpected installer run')\nm.install_v2 = _install"
         self.harness = 'opencode'
         with socket.socket() as sock, socket.socket() as code, socket.socket() as custom:
             sock.bind(('127.0.0.1', 0))
@@ -135,7 +134,7 @@ class BootstrapTests(unittest.TestCase):
         request = dict(request or {'directory': str(self.directory), 'password': 'test-password'})
         request.setdefault('harness', self.harness)
         result = subprocess.run(
-            [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port), str(self.code_port)],
+            [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port), str(self.code_port), self.hook],
             input=json.dumps(request),
             capture_output=True, text=True, timeout=15, env=self.env,
         )
@@ -170,13 +169,24 @@ class BootstrapTests(unittest.TestCase):
         self.assertFalse(restarted['reused'])
         self.assertEqual(restarted['password'], first['password'])
 
-    def v2_request(self, fail=False, version='2.0.8', action='upgrade'):
-        binary = self.home / 'opencode2-v2'
+    def write_runtime(self, version):
+        """The image's opencode, at the path the official installer also writes."""
+        binary = self.home / '.opencode/bin/opencode'
         binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '1.18.29'", "VERSION = " + repr(version)))
         binary.chmod(0o700)
-        runtime = ("raise RuntimeError('download failed')" if fail else 'return Path(' + repr(str(binary)) + ')')
-        shim = 'from pathlib import Path\ndef ensure_runtime(version):\n    ' + runtime + '\n'
-        return {'action': action, 'version': version, 'runtime_shim': shim}
+        return binary
+
+    def v2_request(self, fail=False, version='2.0.8', action='upgrade'):
+        """A request whose installer run either fails or upgrades opencode in place."""
+        if fail:
+            self.hook = "def _install(home):\n    raise RuntimeError('download failed')\nm.install_v2 = _install"
+        else:
+            content = '#!' + sys.executable + '\n' + FAKE.replace("VERSION = '1.18.29'", "VERSION = " + repr(version))
+            self.hook = ('from pathlib import Path\ndef _install(home):\n'
+                         '    binary = Path(home) / ".opencode/bin/opencode"\n'
+                         f'    binary.write_text({content!r})\n    binary.chmod(0o700)\n'
+                         'm.install_v2 = _install')
+        return {'action': action}
 
     def test_explicit_v1_upgrade_backs_up_and_reconnect_keeps_remote_release(self):
         first = self.run_bootstrap()
@@ -195,19 +205,24 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         with sqlite3.connect(backups[0]) as db:
             self.assertEqual(db.execute('SELECT id FROM session').fetchone()[0], 'keep')
+        # V2 is installed now: reconnecting never runs the installer again.
         self.assertTrue(self.run_bootstrap(self.v2_request(fail=True, action='connect'))['reused'])
         self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
-        request = self.v2_request(version='2.0.4')
-        rejected = self.run_bootstrap(request, check=False)
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn('server is newer', rejected.stderr)
-        self.assertEqual(json.loads(self.state.read_text())['pid'], new_pid)
+        self.assertEqual(json.loads(self.state.read_text())['version'], '2.0.8')
+        # An image behind the release the server last ran is upgraded on
+        # restart rather than reopening V2 storage with an older binary.
         self.run_bootstrap({'action': 'stop'})
-        self.assertFalse(self.run_bootstrap(self.v2_request(action='connect'))['reused'])
+        self.write_runtime('2.0.4')
+        rejected = self.run_bootstrap(self.v2_request(fail=True, action='connect'), check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('download failed', rejected.stderr)
+        self.assertNotIn('pid', json.loads(self.state.read_text()))
+        restarted = self.run_bootstrap(self.v2_request(version='2.0.9', action='connect'))
+        self.assertFalse(restarted['reused'])
+        self.assertEqual(restarted['version'], '2.0.9')
         self.assertEqual(len(list(self.state.parent.glob('opencode-before-upgrade-*.db'))), 1)
 
-    def test_failed_beta_download_preserves_live_server(self):
-        self.harness = 'opencode2'
+    def test_failed_v2_install_preserves_the_live_v1_server(self):
         self.run_bootstrap()
         old_state = self.state.read_bytes()
         rejected = self.run_bootstrap(self.v2_request(fail=True), check=False)
@@ -229,8 +244,7 @@ class BootstrapTests(unittest.TestCase):
     def test_v1_restart_rejects_a_replaced_v2_executable(self):
         self.run_bootstrap()
         self.run_bootstrap({'action': 'stop'})
-        binary = self.home / '.opencode/bin/opencode'
-        binary.write_text(binary.read_text().replace("VERSION = '1.18.29'", "VERSION = '2.0.8'"))
+        self.write_runtime('2.0.8')
         result = self.run_bootstrap({'action': 'connect'}, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('no V1 executable', result.stderr)
@@ -241,23 +255,37 @@ class BootstrapTests(unittest.TestCase):
         database.parent.mkdir(parents=True)
         with sqlite3.connect(database) as db:
             db.execute('CREATE TABLE session (id TEXT)')
-        request = self.v2_request(action='start')
-        request.update(protocol='v2', directory=str(self.directory), password='test')
+        self.write_runtime('2.0.8')
+        request = {'action': 'start', 'protocol': 'v2', 'directory': str(self.directory), 'password': 'test'}
         result = self.run_bootstrap(request, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('contains OpenCode 1 data', result.stderr)
         self.assertFalse(self.state.exists())
 
-    def test_v2_starts_its_own_binary_and_aliases_reconnect_to_recorded_protocol(self):
+    def test_v2_records_one_harness_and_aliases_reconnect_to_recorded_protocol(self):
         self.harness = 'opencode2'
+        self.write_runtime('2.0.8')
         first = self.run_bootstrap()
         self.assertFalse(first['reused'])
         self.assertTrue(self.run_bootstrap()['reused'])
-        self.assertEqual(json.loads(self.state.read_text())['harness'], 'opencode2')
+        state = json.loads(self.state.read_text())
+        self.assertEqual((state['harness'], state['protocol']), ('opencode', 'v2'))
         result = self.run_bootstrap({'harness': 'opencode', 'action': 'connect'})
         self.assertTrue(result['reused'])
         self.assertEqual(result['protocol'], 'v2')
         self.run_bootstrap({'harness': 'opencode', 'action': 'stop'})
+
+    def test_fresh_v2_start_on_an_old_image_installs_v2_in_place_once(self):
+        request = dict(self.v2_request(action='start'), protocol='v2', directory=str(self.directory), password='test')
+        first = self.run_bootstrap(request)
+        self.assertFalse(first['reused'])
+        self.assertEqual(first['protocol'], 'v2')
+        self.assertEqual(first['version'], '2.0.8')
+        self.assertIn("opencode v2.0.8", subprocess.run([str(self.home / '.opencode/bin/opencode'), '--version'],
+                                                        capture_output=True, text=True).stdout)
+        # Reconnecting finds V2 and never asks the installer again.
+        self.hook = "def _install(home):\n    raise RuntimeError('unexpected installer run')\nm.install_v2 = _install"
+        self.assertTrue(self.run_bootstrap({'action': 'connect'})['reused'])
 
     def test_discovery_is_read_only_reports_protocol_and_returns_no_password(self):
         self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
@@ -340,6 +368,8 @@ class BootstrapTests(unittest.TestCase):
             for harness in ('opencode', 'opencode2'):
                 with self.subTest(harness=harness):
                     self.harness = harness
+                    if harness == 'opencode2':
+                        self.write_runtime('2.0.8')
                     first = self.run_bootstrap()
                     self.assertEqual(first['url'], 'https://code-test.up.railway.app')
                     self.assertEqual(json.loads(self.state.read_text())['port'], self.custom_port)

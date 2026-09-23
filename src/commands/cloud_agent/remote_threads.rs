@@ -58,14 +58,15 @@ impl RemoteThread {
                 "resume".into(),
                 self.thread.id.clone(),
             ],
-            None if self.harness.starts_with("opencode") => {
-                let mut args = vec![self.harness.clone()];
-                if self.harness == "opencode2" {
-                    args.extend(["--standalone".into(), "--auto".into()]);
-                }
-                args.extend(["--session".into(), self.thread.id.clone()]);
-                args
-            }
+            // Both slugs name the one OpenCode harness; `opencode2` rows come
+            // from history written while V2 was a separate edition.
+            None if self.harness.starts_with("opencode") => vec![
+                "opencode".into(),
+                "--standalone".into(),
+                "--auto".into(),
+                "--session".into(),
+                self.thread.id.clone(),
+            ],
             None if self.harness == "railway" => vec![
                 "railway-agent-tui".into(),
                 "--session".into(),
@@ -80,7 +81,7 @@ impl RemoteThread {
         let config = format!(
             "{}{}{}",
             if self.harness.starts_with("opencode") {
-                code::opencode_resume_guard(self.harness == "opencode2")
+                code::opencode_resume_guard()
             } else {
                 String::new()
             },
@@ -89,7 +90,7 @@ impl RemoteThread {
                 .unwrap_or_default(),
             self.database
                 .as_ref()
-                .filter(|_| self.harness == "opencode2")
+                .filter(|_| self.harness.starts_with("opencode"))
                 .map(|path| format!("export OPENCODE_DB={}; ", quote(path)))
                 .unwrap_or_default()
         );
@@ -120,6 +121,15 @@ pub(crate) async fn discover(info: &code::ConnectInfo) -> Result<Discovery> {
     let output = run_helper(info, "").await?;
     let mut result: Discovery =
         serde_json::from_str(&output).context("Invalid conversation inventory")?;
+    // Older helpers and saved server records name V2 history `opencode2`.
+    for row in &mut result.threads {
+        if row.harness == "opencode2" {
+            row.harness = "opencode".into();
+        }
+    }
+    if result.primary_harness.as_deref() == Some("opencode2") {
+        result.primary_harness = Some("opencode".into());
+    }
     result.threads.retain(|row| {
         matches!(
             row.harness.as_str(),

@@ -22,13 +22,12 @@ impl Protocol {
         }
     }
 
-    /// Historical identity used by saved panes and older CLI snapshots. New
-    /// launch flags are aliases; they must not change these persisted meanings.
-    pub fn legacy_harness(self) -> &'static str {
-        match self {
-            Self::V1 => "opencode",
-            Self::V2 => "opencode2",
-        }
+    /// The harness slug saved connections and client panes carry. One
+    /// OpenCode harness now; the protocol travels beside it as its own field.
+    /// Records written while V2 was a separate edition say `opencode2`, and
+    /// every reader still accepts that spelling.
+    pub fn harness(self) -> &'static str {
+        "opencode"
     }
 
     pub fn from_version(version: &str) -> Option<Self> {

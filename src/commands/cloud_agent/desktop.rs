@@ -70,7 +70,7 @@ pub struct Args {
     #[clap(long)]
     opencode: bool,
 
-    /// Deprecated alias for --opencode (stable V2)
+    /// Deprecated alias for --opencode, from when V2 was a separate edition
     #[clap(long, conflicts_with = "opencode", hide = true)]
     opencode2: bool,
 
@@ -152,7 +152,7 @@ impl App {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
-            App::OpenCode => "opencode2",
+            App::OpenCode => "opencode",
         }
     }
 
@@ -1265,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_editions_are_explicit_and_mutually_exclusive() {
+    fn deprecated_opencode2_alias_selects_opencode_and_is_exclusive() {
         assert_eq!(
             selected_apps(&args_for(&["--opencode2"])).unwrap(),
             vec![App::OpenCode]

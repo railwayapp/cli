@@ -16,13 +16,59 @@ use tokio::io::AsyncWriteExt;
 
 use crate::util::shell::shell_join;
 
+pub(crate) mod auth;
 pub(crate) mod bridge;
 pub(crate) mod local;
 mod protocol;
 pub(crate) use protocol::Protocol;
 
 const BOOTSTRAP: &str = include_str!("opencode.py");
+const IMPORT_AUTH: &str = include_str!("opencode/import_auth.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
+
+/// The official V2 installer, which places `opencode` at `~/.opencode/bin`,
+/// the same location the cloud-agent image installs it to.
+pub(crate) const V2_INSTALLER: &str = "https://opencode.ai/v2/install";
+
+/// Runtime seed for terminal launches: the image's own `opencode` is the V2
+/// runtime, so nothing is downloaded on a current image. On an older image
+/// whose `opencode` is 1.x the official installer upgrades it in place (same
+/// path the image used), because a saved V1 session cannot be resumed by the
+/// CLI any more and a dead end helps nobody. Then the shim earlier releases
+/// seeded as `~/.local/bin/opencode2` is retired and staged provider
+/// credentials are imported into V2's store.
+///
+/// The installer script is fetched into a variable before it runs so a failed
+/// download is reported as such rather than executed half-way, and it never
+/// reads this script's stdin, which may still carry the skills payload.
+pub(crate) fn seed_script() -> String {
+    format!(
+        r#"mkdir -p ~/.railway/runtimes/opencode
+if [ -e ~/.local/bin/opencode2 ] && grep -q 'railway/runtimes/opencode2' ~/.local/bin/opencode2 2>/dev/null; then rm -f ~/.local/bin/opencode2; fi
+rm -rf ~/.railway/runtimes/opencode2
+railway_opencode_v2() {{ case "$(opencode --version 2>/dev/null </dev/null)" in 2.*|'opencode v2.'*) return 0;; *) return 1;; esac; }}
+if ! railway_opencode_v2; then
+  printf '%s\n' 'This agent image ships an older OpenCode; installing OpenCode V2 from opencode.ai...' >&2
+  if ! opencode_installer=$(curl -fsSL {V2_INSTALLER}) || [ -z "$opencode_installer" ]; then
+    printf '%s\n' 'Could not download the OpenCode V2 installer on this agent. Create a fresh agent with railway code --opencode --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash' >&2
+    exit 1
+  fi
+  if ! bash -c "$opencode_installer" install --no-modify-path </dev/null >&2; then
+    printf '%s\n' 'Could not install OpenCode V2 on this agent. Create a fresh agent with railway code --opencode --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash' >&2
+    exit 1
+  fi
+  hash -r 2>/dev/null || true
+  if ! railway_opencode_v2; then
+    printf '%s\n' 'OpenCode V2 was installed, but an older opencode is still first on PATH. Create a fresh agent with railway code --opencode --new.' >&2
+    exit 1
+  fi
+fi
+printf '%s' {importer} > ~/.railway/runtimes/opencode/import_auth.py
+chmod 700 ~/.railway/runtimes/opencode/import_auth.py
+python3 ~/.railway/runtimes/opencode/import_auth.py || exit 1"#,
+        importer = shell_join(&[IMPORT_AUTH.to_string()])
+    )
+}
 
 // Deliberately no Debug: this value contains the server password.
 #[derive(Clone, Deserialize, Serialize)]
@@ -217,8 +263,7 @@ async fn start_with(
     directory: &str,
     password: &str,
 ) -> Result<Connection> {
-    let request = json!({ "directory": directory, "password": password, "protocol": Protocol::V2,
-        "runtime_shim": super::opencode2::SHIM });
+    let request = json!({ "directory": directory, "password": password, "protocol": Protocol::V2 });
     let response = bootstrap(command, request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
@@ -292,9 +337,9 @@ async fn reconnect_with(
     info: &crate::commands::code::ConnectInfo,
     action: &str,
 ) -> Result<Connection> {
-    // The VM owns the protocol and release. Reconnect must not upgrade it to
-    // whichever client happens to be installed on this machine.
-    let request = json!({"action": action, "runtime_shim": super::opencode2::SHIM});
+    // The VM owns the protocol. Reconnect must not change it to suit whichever
+    // client happens to be installed on this machine; only `upgrade` migrates.
+    let request = json!({"action": action});
     let response = bootstrap(relay_command(info), request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
@@ -472,6 +517,90 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(&args[..3], ["-F", "/tmp/ssh config", "-T"]);
         assert!(!args.iter().any(|arg| arg == "-L" || arg == "-tt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_seed_upgrades_only_old_images_and_imports_staged_credentials() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let script = seed_script();
+        // The installer is fetched only behind the version check, never
+        // unconditionally, and the credential importer always runs.
+        assert!(script.find("opencode --version").unwrap() < script.find(V2_INSTALLER).unwrap());
+        assert!(
+            script.contains("bash -c \"$opencode_installer\" install --no-modify-path </dev/null")
+        );
+        assert!(script.contains("railway/runtimes/opencode2"));
+        assert!(script.ends_with("python3 ~/.railway/runtimes/opencode/import_auth.py || exit 1"));
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // The embedded importer is the shipped file, byte for byte.
+        let root = tempfile::tempdir().unwrap();
+        // The quoted importer spans many lines: take from its printf up to
+        // the chmod that follows it.
+        let start = script.find("printf '%s' ").unwrap();
+        let end = script
+            .find("\nchmod 700 ~/.railway/runtimes/opencode/import_auth.py")
+            .unwrap();
+        // Only the redirect target moves; the importer's own text mentions
+        // `~/` too and must arrive untouched.
+        let write = script[start..end].replace(
+            "> ~/.railway/runtimes/opencode/import_auth.py",
+            &format!(
+                "> {}/.railway/runtimes/opencode/import_auth.py",
+                root.path().display()
+            ),
+        );
+        std::fs::create_dir_all(root.path().join(".railway/runtimes/opencode")).unwrap();
+        assert!(
+            Command::new("sh")
+                .args(["-c", &write])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                root.path()
+                    .join(".railway/runtimes/opencode/import_auth.py")
+            )
+            .unwrap(),
+            IMPORT_AUTH
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_credentials_merge_without_overwriting_remote_signins() {
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/opencode_import_auth.py"
+            ))
+            .output()
+            .expect("python3 is required for OpenCode credential tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]

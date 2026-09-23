@@ -31,7 +31,7 @@ class DiscoveryTest(unittest.TestCase):
             self.assertIsNone(threads.primary_harness())
             marker = self.root / ".railway-code-agent"
             for value, expected in [("codex\n", "codex"), ("railway-agent-tui", "railway"),
-                                    ("opencode2", "opencode2"), ("unknown", None),
+                                    ("opencode2", "opencode"), ("opencode", "opencode"), ("unknown", None),
                                     ("codex; touch /tmp/never-run", None)]:
                 marker.write_text(value)
                 self.assertEqual(threads.primary_harness(), expected)
@@ -106,6 +106,19 @@ class DiscoveryTest(unittest.TestCase):
                 threads.delete_conversation({"harness": harness, "id": "../neighbor"})
             stop.assert_not_called()
 
+    def test_opencode_deletion_uses_the_v2_api_for_either_saved_slug(self):
+        row = {"harness": "opencode", "database": "/data/opencode.db", "thread": {"id": "target"}}
+        for slug in ("opencode", "opencode2"):
+            calls = []
+            def delete(args, environment, directory=None):
+                calls.append(args)
+                self.assertEqual(environment["OPENCODE_DB"], "/data/opencode.db")
+            with patch.object(threads, "opencode_threads", side_effect=[[row], []]), patch.object(
+                threads, "stop_consoles"
+            ), patch.object(threads, "run_delete_command", side_effect=delete):
+                self.assertEqual(threads.delete_conversation({"harness": slug, "id": "target"}), {"deleted": "target"})
+            self.assertEqual(calls, [["opencode", "api", "--standalone", "delete", "/api/session/target"]])
+
     def test_claude_deletion_uses_sdk_and_restores_config_on_failure(self):
         def delete(session_id):
             self.assertEqual(session_id, "target")
@@ -157,7 +170,7 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(rows[0]["thread"]["id"], "real-id")
         self.assertEqual(rows[0]["thread"]["title"], "Generated title")
 
-    def test_opencode_versions_are_read_only_and_keep_native_titles_and_directories(self):
+    def test_opencode_history_is_one_harness_read_only_with_native_titles_and_directories(self):
         data = self.root / "opencode"
         data.mkdir()
         database = data / "opencode.db"
@@ -174,8 +187,10 @@ class DiscoveryTest(unittest.TestCase):
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root), "OPENCODE_DB": ""}):
             rows = threads.opencode_threads()
         self.assertEqual(database.read_bytes(), before)
+        # The same ID in V1 and V2 tables is one conversation (V2 migrates V1
+        # history in place); discover() keeps the newest of duplicates.
         self.assertEqual(len(rows), 4)
-        self.assertEqual({row["harness"] for row in rows}, {"opencode", "opencode2"})
+        self.assertEqual({row["harness"] for row in rows}, {"opencode"})
         for row in rows:
             self.assertEqual(row["database"], str(database))
             if row["thread"]["id"] == "saved":

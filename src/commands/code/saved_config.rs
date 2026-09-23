@@ -247,7 +247,7 @@ impl SavedConfig {
         connection: &opencode::Connection,
         desktop: &Result<bool>,
     ) -> Self {
-        self.harness = connection.protocol.legacy_harness().into();
+        self.harness = connection.protocol.harness().into();
         self.opencode = Some(OpenCodeConfig {
             connection: connection.clone(),
             desktop_configured: matches!(desktop, Ok(true)),

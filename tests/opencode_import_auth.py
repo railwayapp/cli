@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SHIM = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode2.py'
-spec = importlib.util.spec_from_file_location('opencode2_auth', SHIM)
+SHIM = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode/import_auth.py'
+spec = importlib.util.spec_from_file_location('opencode_import_auth', SHIM)
 shim = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shim)
 
@@ -45,17 +45,42 @@ class CredentialTests(unittest.TestCase):
     def apply(self):
         shim.import_credentials(Path('unused-runtime'), self.pending, self.database)
 
-    def test_v1_storage_is_not_migrated_during_credential_import_or_remote_launch(self):
+    def test_v1_storage_is_backed_up_before_v2_migrates_it(self):
         with sqlite3.connect(self.database) as db:
             db.execute('DROP TABLE credential')
+        binary = self.root / 'opencode'
+        binary.write_text('#!' + sys.executable + '\n' + '''
+import os, sqlite3, sys
+if sys.argv[1:] != ['api', '--standalone', 'GET', '/api/info']:
+    sys.exit(1)
+with sqlite3.connect(os.environ['OPENCODE_DB']) as db:
+    db.execute('CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, value TEXT, time_created INTEGER, time_updated INTEGER)')
+    db.execute('DROP TABLE session')
+''')
+        binary.chmod(0o700)
         self.stage(credential())
-        with self.assertRaisesRegex(shim.InstallError, 'OpenCode 1 data'):
-            self.apply()
-        with self.assertRaisesRegex(shim.InstallError, 'OpenCode 1 data'):
-            shim.require_v2_storage(self.database)
-        self.assertTrue(self.pending.exists())
-        with sqlite3.connect(self.database) as db:
+        with patch.dict(os.environ, {'OPENCODE_DB': str(self.database)}), patch.object(shim, 'STATE', self.root / 'state'):
+            shim.import_credentials(binary, self.pending, self.database)
+        backups = list((self.root / 'state').glob('opencode-v1-before-upgrade-*.db'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        with sqlite3.connect(backups[0]) as db:
             self.assertEqual(db.execute('SELECT value FROM session').fetchone()[0], 'private remote session')
+        with sqlite3.connect(self.database) as db:
+            self.assertEqual(db.execute('SELECT integration_id FROM credential').fetchall(), [('openai',)])
+        self.assertFalse(self.pending.exists())
+
+    def test_binary_resolution_requires_the_image_v2_runtime(self):
+        home = self.root / 'home'
+        (home / '.opencode/bin').mkdir(parents=True)
+        binary = home / '.opencode/bin/opencode'
+        binary.write_text('#!/bin/sh\necho "opencode v1.18.29"\n')
+        binary.chmod(0o700)
+        with patch.object(shim.Path, 'home', return_value=home), patch.object(shim.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(shim.InstallError, 'opencode.ai/v2/install'):
+                shim.resolve_binary()
+            binary.write_text('#!/bin/sh\necho "opencode v2.0.15"\n')
+            self.assertEqual(shim.resolve_binary(), binary)
 
     def test_imports_oauth_metadata_and_keys_then_removes_transfer_file(self):
         oauth = credential()
@@ -85,7 +110,7 @@ class CredentialTests(unittest.TestCase):
 
     def test_fresh_provider_storage_uses_the_current_standalone_info_endpoint(self):
         database = self.root / 'fresh.db'
-        binary = self.root / 'opencode2'
+        binary = self.root / 'opencode'
         binary.write_text('#!' + sys.executable + '\n' + '''
 import os, sqlite3, sys
 if sys.argv[1:] != ['api', '--standalone', 'GET', '/api/info']:

@@ -266,7 +266,10 @@ def opencode_threads():
             continue
         with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
             db.row_factory = sqlite3.Row
-            for table, harness in (("session", "opencode"), ("session_v2", "opencode2")):
+            # One OpenCode harness. V2 keeps sessions in session_v2; a `session`
+            # table is OpenCode 1 history that V2 migrates when it next opens
+            # the store, so both are listed and the same ID is kept once.
+            for table in ("session_v2", "session"):
                 columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 if not columns:
                     continue
@@ -274,7 +277,7 @@ def opencode_threads():
                     raise ValueError("Unsupported OpenCode metadata schema")
                 for row in db.execute(f"SELECT id,title,directory,time_created,time_updated FROM {table} WHERE parent_id IS NULL AND time_archived IS NULL ORDER BY time_updated DESC"):
                     title = text(row["title"])
-                    rows.append({"harness": harness, "config_dir": str(Path.home() / ".config" / "opencode"),
+                    rows.append({"harness": "opencode", "config_dir": str(Path.home() / ".config" / "opencode"),
                         "database": str(path), "thread": {
                             "id": row["id"], "directory": row["directory"],
                             "title": "New Thread" if not title or title.startswith("New session - ") else title,
@@ -288,22 +291,23 @@ def opencode_server_threads():
     state = read_json(root / "server.json")
     if not isinstance(state, dict):
         return []
-    harness = state.get("harness", "opencode")
-    if harness not in ("opencode", "opencode2"):
+    if state.get("harness", "opencode") not in ("opencode", "opencode2"):
         return []
-    beta = harness == "opencode2"
+    # Records written before `protocol` existed named V2 servers opencode2.
+    v2 = state.get("protocol", "v2" if state.get("harness") == "opencode2" else "v1") == "v2"
+    harness = "opencode"
     credentials = base64.b64encode((state["username"] + ":" + state["password"]).encode()).decode()
     rows, cursor, seen = [], None, set()
     while True:
-        query = {"limit": 100, "order": "desc"} if beta else {"directory": state["directory"]}
+        query = {"limit": 100, "order": "desc"} if v2 else {"directory": state["directory"]}
         if cursor:
             query["cursor"] = cursor
-        request = urllib.request.Request(f"http://127.0.0.1:{state.get('port', 8080)}/" + ("api/" if beta else "") +
+        request = urllib.request.Request(f"http://127.0.0.1:{state.get('port', 8080)}/" + ("api/" if v2 else "") +
                                          "session?" + urllib.parse.urlencode(query),
                                          headers={"Authorization": "Basic " + credentials})
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
             page = json.load(response)
-        for row in page["data"] if beta else page:
+        for row in page["data"] if v2 else page:
             if row.get("parentID") or (row.get("time") or {}).get("archived"):
                 continue
             title = text(row.get("title"))
@@ -313,7 +317,7 @@ def opencode_server_threads():
                 "created_at": timestamp(row["time"]["created"]),
                 "updated_at": timestamp(row["time"]["updated"]) or "", "state": "idle",
             }})
-        cursor = (page.get("cursor") or {}).get("next") if beta else None
+        cursor = (page.get("cursor") or {}).get("next") if v2 else None
         if not cursor:
             return rows
         if cursor in seen:
@@ -326,7 +330,7 @@ def primary_harness():
     # metadata only: never source a shell file or infer from the user's prefs.
     names = {"railway-agent-tui": "railway", "railway-agent": "railway",
              "claude": "claude", "codex": "codex", "grok": "grok",
-             "opencode": "opencode", "opencode2": "opencode2", "bash": "shell"}
+             "opencode": "opencode", "opencode2": "opencode", "bash": "shell"}
     try:
         with (Path.home() / ".railway-code-agent").open() as file:
             return names.get(file.read(128).strip())
@@ -347,12 +351,12 @@ def discover():
         except Exception as error:
             failed.append(harness)
             warnings.append(f"{harness} history unavailable ({type(error).__name__})")
-    for harnesses, read in ((["codex"], codex_threads), (["opencode", "opencode2"], opencode_threads)):
+    for harness, read in (("codex", codex_threads), ("opencode", opencode_threads)):
         try:
             rows.extend(read())
         except Exception as error:
-            failed.extend(harnesses)
-            label = "OpenCode" if "opencode" in harnesses else "/".join(harnesses)
+            failed.append(harness)
+            label = "OpenCode" if harness == "opencode" else harness
             warnings.append(f"{label} history unavailable ({type(error).__name__})")
     # Relocations and restored histories can leave duplicate IDs in the tree.
     newest = {}
@@ -482,16 +486,15 @@ def delete_conversation(request):
                 if any(row["thread"]["id"] == session_id for row in grok_threads(root)):
                     raise RuntimeError("Grok still reports the conversation after deletion")
     elif harness in ("opencode", "opencode2"):
-        matches = [row for row in opencode_threads()
-                   if row["harness"] == harness and row["thread"]["id"] == session_id]
-        for row in matches:
+        # `opencode2` is accepted from older callers; the VM's opencode is V2.
+        # The same ID can appear in a store's V1 and V2 tables: delete it once.
+        matches = {row.get("database"): row for row in opencode_threads() if row["thread"]["id"] == session_id}
+        for row in matches.values():
             environment = dict(os.environ)
             if row.get("database"):
                 environment["OPENCODE_DB"] = row["database"]
-            args = (["opencode2", "api", "--standalone", "delete", "/api/session/" + session_id]
-                    if harness == "opencode2" else ["opencode", "session", "delete", session_id])
-            run_delete_command(args, environment)
-        if any(row["harness"] == harness and row["thread"]["id"] == session_id for row in opencode_threads()):
+            run_delete_command(["opencode", "api", "--standalone", "delete", "/api/session/" + session_id], environment)
+        if any(row["thread"]["id"] == session_id for row in opencode_threads()):
             raise RuntimeError("OpenCode still reports the conversation after deletion")
     else:
         raise ValueError(f"{harness} does not expose native conversation deletion")

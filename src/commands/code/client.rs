@@ -152,9 +152,7 @@ pub(crate) async fn prepare_pane(
     let directory = directory
         .or_else(|| {
             super::saved_config::client_connection(&prepared.agent_id, &prepared.environment_id)
-                .filter(|c| {
-                    c.harness() == harness || (harness == "opencode" && c.harness() == "opencode2")
-                })
+                .filter(|c| c.harness() == harness)
                 .map(|c| c.directory().to_string())
         })
         .unwrap_or_else(|| "/app".into());

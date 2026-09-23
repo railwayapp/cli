@@ -256,12 +256,14 @@ pub struct LaunchArgs {
     #[clap(long, help_heading = "Agent")]
     codex: bool,
 
-    /// Select OpenCode (stable V2 for new launches)
+    /// Select OpenCode
     #[clap(long, help_heading = "Agent")]
     opencode: bool,
 
-    /// Deprecated alias for --opencode
-    #[clap(long, help_heading = "Agent", hide = true)]
+    /// Deprecated alias for --opencode, from when V2 was a separate edition.
+    /// Folded into `opencode` by [`LaunchArgs::normalize_aliases`] before any
+    /// dispatch looks at the flags.
+    #[clap(long, help_heading = "Agent", hide = true, conflicts_with = "opencode")]
     opencode2: bool,
 
     /// Return Codex/OpenCode credentials or Railway endpoint details as JSON
@@ -429,9 +431,9 @@ impl LaunchArgs {
     /// here rather than in clap or provisioning, which CA, Desktop, and SSH also
     /// use when opening sessions on an existing VM.
     fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
+        self.normalize_aliases();
         if !self.codex
             && !self.opencode
-            && !self.opencode2
             && !self.claude
             && !self.grok
             && !self.railway
@@ -448,12 +450,8 @@ impl LaunchArgs {
         {
             bail!("Bootstrap options create a new VM and cannot be used with connect.");
         }
-        let harness_selected = self.codex
-            || self.opencode
-            || self.opencode2
-            || self.claude
-            || self.grok
-            || self.railway;
+        let harness_selected =
+            self.codex || self.opencode || self.claude || self.grok || self.railway;
         if harness_selected
             && !self.rm
             && self.remote_agent.is_none()
@@ -473,7 +471,7 @@ impl LaunchArgs {
     fn client_action(&self) -> Result<Option<ClientAction>> {
         let verb = self.agent_args.first().map(String::as_str);
         if self.connection_json
-            && ((!self.codex && !self.opencode && !self.opencode2 && !self.railway)
+            && ((!self.codex && !self.wants_opencode() && !self.railway)
                 || self.rm
                 || self.app_mode
                 || !(matches!(verb, None | Some("connect" | "upgrade"))
@@ -487,14 +485,14 @@ impl LaunchArgs {
             verb,
             Some("remote" | "connect" | "upgrade" | "desktop-only")
         );
-        let selected = self.codex || self.opencode || self.opencode2 || self.railway;
+        let selected = self.codex || self.wants_opencode() || self.railway;
         if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
             if self.remote_dir.is_some() || self.remote_agent.is_some() {
                 bail!("--dir and --agent require a Codex, OpenCode, or Railway client command.");
             }
             return Ok(None);
         }
-        if [self.codex, self.opencode, self.opencode2, self.railway]
+        if [self.codex, self.wants_opencode(), self.railway]
             .into_iter()
             .filter(|selected| *selected)
             .count()
@@ -560,7 +558,7 @@ impl LaunchArgs {
                     bail!("The cloud agent name cannot be empty.");
                 }
                 if verb == Some("upgrade") {
-                    if !self.opencode && !self.opencode2 {
+                    if !self.wants_opencode() {
                         bail!("upgrade requires --opencode and an explicit cloud agent");
                     }
                     Ok(Some(ClientAction::Upgrade(selector.context("Use railway code --opencode upgrade <agent> to explicitly migrate an existing server")?)))
@@ -572,12 +570,31 @@ impl LaunchArgs {
         }
     }
 
+    /// OpenCode selected by either spelling. Entry points call
+    /// [`Self::normalize_aliases`], but the parse-time checks (`client_action`
+    /// on a fresh `LaunchArgs`) run before that and must see both flags.
+    fn wants_opencode(&self) -> bool {
+        self.opencode || self.opencode2
+    }
+
+    /// Fold deprecated aliases into their current flag, once, with a note on
+    /// stderr so scripts still using them learn the spelling that will remain.
+    pub(crate) fn normalize_aliases(&mut self) {
+        if self.opencode2 {
+            eprintln!(
+                "{}",
+                "Note: --opencode2 is deprecated; OpenCode V2 is now `--opencode`.".yellow()
+            );
+            self.opencode = true;
+            self.opencode2 = false;
+        }
+    }
+
     /// No flags, no arguments — the invocation that means "just open the
     /// front door" rather than "launch this exact thing".
     pub fn is_bare(&self) -> bool {
         !self.codex
-            && !self.opencode
-            && !self.opencode2
+            && !self.wants_opencode()
             && !self.connection_json
             && !self.claude
             && !self.grok
@@ -632,8 +649,10 @@ impl LaunchArgs {
     pub fn set_harness(&mut self, slug: &str) {
         self.claude = slug == "claude";
         self.codex = slug == "codex";
-        self.opencode = slug == "opencode";
-        self.opencode2 = slug == "opencode2";
+        // `opencode2` is the slug older preferences, panes, and backboard
+        // records used for V2; it is the same harness now.
+        self.opencode = matches!(slug, "opencode" | "opencode2");
+        self.opencode2 = false;
         self.grok = slug == "grok";
         self.railway = slug == "railway";
         self.shell = slug == "shell";
@@ -754,8 +773,10 @@ impl LaunchArgs {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Agent {
     Codex,
+    /// OpenCode V2 — the image's `opencode`. The V1 edition is no longer a
+    /// launchable harness; a VM still carrying 1.x is upgraded by the runtime
+    /// seed (see `cloud_agent::opencode::seed_script`).
     OpenCode,
-    OpenCode2,
     Claude,
     Grok,
     Railway,
@@ -773,7 +794,6 @@ impl Agent {
         match self {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
-            Agent::OpenCode2 => "opencode2",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway-agent-tui",
@@ -783,14 +803,14 @@ impl Agent {
         }
     }
 
-    /// Historical harness identity for sessions, snapshots, and telemetry.
-    /// Also accepted by launch preferences and `RAILWAY_CA_AGENT`. Keep V1 and
-    /// V2 distinct here; use [`Self::display`] for user-facing labels.
+    /// Harness identity for sessions, snapshots, and telemetry. Also accepted
+    /// by launch preferences and `RAILWAY_CA_AGENT`. Records written while V2
+    /// was a separate edition say `opencode2`; [`Self::from_slug`] still reads
+    /// them, but nothing writes that slug any more.
     fn slug(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
             Agent::OpenCode => "opencode",
-            Agent::OpenCode2 => "opencode2",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway",
@@ -802,7 +822,7 @@ impl Agent {
         match slug {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
-            "opencode" | "opencode2" => Some(Agent::OpenCode2),
+            "opencode" | "opencode2" => Some(Agent::OpenCode),
             "grok" => Some(Agent::Grok),
             "railway" => Some(Agent::Railway),
             "shell" => Some(Agent::Shell),
@@ -814,8 +834,7 @@ impl Agent {
     fn display(self) -> &'static str {
         match self {
             Agent::Codex => "Codex",
-            Agent::OpenCode => "OpenCode 1 — legacy",
-            Agent::OpenCode2 => "OpenCode",
+            Agent::OpenCode => "OpenCode",
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
             Agent::Railway => "Railway",
@@ -829,8 +848,7 @@ impl Agent {
     fn credential_seed(self) -> &'static str {
         match self {
             Agent::Codex => CODEX_SEED,
-            Agent::OpenCode => OPENCODE_SEED,
-            Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::auth::SEED,
+            Agent::OpenCode => crate::commands::cloud_agent::opencode::auth::SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
             Agent::Railway | Agent::Shell => "",
@@ -845,36 +863,27 @@ impl Agent {
     fn credential_seed_framed(self, len: usize) -> String {
         match self {
             Agent::Codex => format!("mkdir -p ~/.codex\nhead -c {len} > ~/.codex/auth.json"),
-            Agent::OpenCode => format!(
-                "{OPENCODE_DATA_DIR}\nmkdir -p \"$opencode_data\"\nhead -c {len} > \"$opencode_data/auth.json\"\nchmod 600 \"$opencode_data/auth.json\""
-            ),
+            Agent::OpenCode => crate::commands::cloud_agent::opencode::auth::seed_framed(len),
             Agent::Claude => {
                 format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
             }
             Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
-            Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::auth::seed_framed(len),
             Agent::Railway | Agent::Shell => "true".to_string(),
         }
     }
 
-    /// The local sign-in file this command copies. OpenCode follows XDG data
-    /// paths; the others store auth directly under the home directory.
-    /// `None` for Claude, whose credential is minted rather than
-    /// copied — sharing the local sign-in's rotating refresh token across two
-    /// machines is the thing the setup-token exists to avoid — and for
-    /// Railway's own harness, whose credential the VM is given at create time.
-    fn local_signin_path(self, home: &Path, xdg_data_home: Option<&Path>) -> Option<PathBuf> {
+    /// The local sign-in file this command copies. `None` for OpenCode, whose
+    /// provider accounts are exported from its SQLite store by
+    /// `cloud_agent::opencode::auth` rather than copied as a file; for Claude,
+    /// whose credential is minted rather than copied — sharing the local
+    /// sign-in's rotating refresh token across two machines is the thing the
+    /// setup-token exists to avoid — and for Railway's own harness, whose
+    /// credential the VM is given at create time.
+    fn local_signin_path(self, home: &Path) -> Option<PathBuf> {
         match self {
             Agent::Codex => Some(home.join(".codex").join("auth.json")),
             Agent::Grok => Some(home.join(".grok").join("auth.json")),
-            Agent::OpenCode => Some(
-                xdg_data_home
-                    .filter(|p| p.is_absolute())
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| home.join(".local/share"))
-                    .join("opencode/auth.json"),
-            ),
-            Agent::OpenCode2 | Agent::Claude | Agent::Railway | Agent::Shell => None,
+            Agent::OpenCode | Agent::Claude | Agent::Railway | Agent::Shell => None,
         }
     }
 
@@ -891,7 +900,6 @@ impl Agent {
             Agent::OpenCode => {
                 "connect a provider in OpenCode Desktop or run `opencode auth login` on the agent"
             }
-            Agent::OpenCode2 => "connect a provider in OpenCode Desktop",
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
             Agent::Railway => "no sign-in needed — the agent carries its own",
@@ -941,14 +949,6 @@ const CLAUDE_ENV_GUARD: &str =
 const GROK_SEED: &str = r#"mkdir -p ~/.grok
 cat > ~/.grok/auth.json"#;
 
-// OpenCode uses XDG data paths on every platform, including macOS. Match
-// https://opencode.ai/docs/cli/#auth and the remote process's data directory.
-const OPENCODE_DATA_DIR: &str = r#"opencode_data="${XDG_DATA_HOME:-$HOME/.local/share}/opencode""#;
-const OPENCODE_SEED: &str = r#"opencode_data="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
-mkdir -p "$opencode_data"
-cat > "$opencode_data/auth.json"
-chmod 600 "$opencode_data/auth.json""#;
-
 /// PATH for the harness binaries, needed by every command session this command
 /// opens.
 ///
@@ -958,25 +958,23 @@ chmod 600 "$opencode_data/auth.json""#;
 /// `ssh <target> <cmd>` session is non-interactive and non-login, so it starts
 /// from the default PATH and cannot see `~/.local/bin` — where claude and codex
 /// actually live. Without this, `command -v claude` reports missing on an image
-/// that definitely has it.
+/// that definitely has it. `~/.opencode/bin` leads because it is where both the
+/// image and the official V2 installer put `opencode`, so an in-place upgrade
+/// on an older image is what every later `opencode` resolves to.
 ///
 /// Deliberately not `. ~/.profile`: that sources `.bashrc`, whose starship/mise/
 /// zoxide init writes to stdout and would corrupt the AGENT-READY marker this
 /// command parses. Mirrors the image's own export line instead.
-const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+const HARNESS_PATH: &str = r#"export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
 
-/// History slugs retain their original protocol even after `opencode` on PATH
-/// is replaced by V2. Inspect before a remote resume can touch shared storage.
-pub(crate) fn opencode_resume_guard(v2: bool) -> String {
-    let agent = if v2 {
-        Agent::OpenCode2
-    } else {
-        Agent::OpenCode
-    };
-    let major = if v2 { "2" } else { "1" };
+/// Saved OpenCode conversations are resumed by the VM's `opencode`, which must
+/// be V2. A launch runs the runtime seed first and upgrades an older image, but
+/// a resume goes straight to the binary, so it checks before touching storage
+/// and says what to do instead of failing inside the harness.
+pub(crate) fn opencode_resume_guard() -> String {
     format!(
-        "case \"$({} --version 2>/dev/null)\" in {major}.*|'opencode v{major}.'*) ;; *) echo 'The installed OpenCode runtime does not match this saved conversation. Use railway code --opencode connect <agent>, or explicitly upgrade it.' >&2; exit 1;; esac; ",
-        agent.name()
+        "case \"$({} --version 2>/dev/null)\" in 2.*|'opencode v2.'*) ;; *) echo 'This cloud agent is on an older image whose OpenCode is not V2. Start a new OpenCode session on it with railway code --opencode (which upgrades it), or create a fresh agent with --new.' >&2; exit 1;; esac; ",
+        Agent::OpenCode.name()
     )
 }
 
@@ -1047,9 +1045,10 @@ const CLAUDE_CREDENTIAL_PROBE: &str =
 /// stdout: without it a relay-level failure is indistinguishable from a VM
 /// that answered but couldn't run the script.
 ///
-/// Standard harnesses are baked into `cloud-agent-base`. OpenCode2 is a
-/// separate shim which downloads the latest official Beta when launched.
-/// Grok updates its baked-in install before each new launch.
+/// Standard harnesses are baked into `cloud-agent-base`. OpenCode's seed
+/// verifies the image's `opencode` is V2 (upgrading an older image in place)
+/// and imports staged provider credentials. Grok updates its baked-in install
+/// before each new launch.
 ///
 /// `write_credential` is false when the agent already holds a working credential
 /// and we are reusing it. The seed must then be omitted entirely rather than run
@@ -1123,7 +1122,7 @@ if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MIS
 
 fn runtime_seed(agent: Agent) -> String {
     match agent {
-        Agent::OpenCode2 => crate::commands::cloud_agent::opencode2::seed_script(),
+        Agent::OpenCode => crate::commands::cloud_agent::opencode::seed_script(),
         Agent::Grok => GROK_UPDATE.to_string(),
         _ => "true".to_string(),
     }
@@ -1267,9 +1266,9 @@ fn remote_command(
     // is left alone: its arguments are the caller's, flags included.
     let grok = shell_join(&grok_invocation(&[]));
     let name = match agent {
-        // Beta and standard share a background-service discovery file.
-        // Each Beta terminal session must use its freshly selected runtime.
-        Agent::OpenCode2 => "opencode2 --standalone",
+        // A private server per terminal session: sessions on one VM must not
+        // share (or outlive each other through) V2's background service.
+        Agent::OpenCode => "opencode --standalone",
         Agent::Grok => &grok,
         Agent::Railway => {
             "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\""
@@ -1296,7 +1295,7 @@ fn remote_command(
         );
     }
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(prompt) if matches!(agent, Agent::OpenCode | Agent::OpenCode2) => format!(
+        Some(prompt) if agent == Agent::OpenCode => format!(
             "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --prompt {}; {reset}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
         ),
@@ -1492,8 +1491,9 @@ fn terminal_reset_printf() -> String {
 }
 
 /// Read a harness's local sign-in file so the agent starts already signed in.
-/// OpenCode's provider map lives in `$XDG_DATA_HOME/opencode/auth.json`
-/// (default `~/.local/share/opencode/auth.json`).
+/// OpenCode's provider accounts live in `$XDG_DATA_HOME/opencode/opencode.db`
+/// (default `~/.local/share/opencode/opencode.db`), read by
+/// `cloud_agent::opencode::auth`, with V1's `auth.json` as the fallback.
 ///
 /// A missing or empty file is not a failure. It means this machine never had
 /// that harness signed in, so there is nothing to carry and the harness on the
@@ -1503,10 +1503,10 @@ fn terminal_reset_printf() -> String {
 /// worked.
 fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
     let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    if agent == Agent::OpenCode2 {
+    if agent == Agent::OpenCode {
         let database = std::env::var("OPENCODE_DB").ok();
         return Ok(
-            match crate::commands::cloud_agent::opencode2::auth::read(
+            match crate::commands::cloud_agent::opencode::auth::read(
                 home,
                 xdg_data_home.as_deref(),
                 database.as_deref(),
@@ -1524,7 +1524,7 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
             },
         );
     }
-    let auth_path = agent.local_signin_path(home, xdg_data_home.as_deref());
+    let auth_path = agent.local_signin_path(home);
     read_local_signin(agent, auth_path.as_deref())
 }
 
@@ -2909,8 +2909,7 @@ const AGENT_ENV_VAR: &str = "RAILWAY_CA_AGENT";
 fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) -> Result<Agent> {
     let flagged: Vec<Agent> = [
         (args.codex, Agent::Codex),
-        (args.opencode, Agent::OpenCode2),
-        (args.opencode2, Agent::OpenCode2),
+        (args.wants_opencode(), Agent::OpenCode),
         (args.claude, Agent::Claude),
         (args.grok, Agent::Grok),
         (args.railway, Agent::Railway),
@@ -3171,12 +3170,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     } else {
         println!(
             "  railway code --{}   # wakes it and drops back into {}",
-            if prepared.harness == "opencode2" {
-                "opencode"
-            } else {
-                prepared.harness
-            },
-            harness
+            prepared.harness, harness
         );
     }
     println!(
@@ -3306,7 +3300,7 @@ async fn prepare_inner(
     // know whether the agent already holds a credential from a previous run —
     // see `PendingAuth`.
     let pending = match agent {
-        Agent::Codex | Agent::Grok | Agent::OpenCode | Agent::OpenCode2 => {
+        Agent::Codex | Agent::Grok | Agent::OpenCode => {
             ssh_tel::timed_for("cloud_agent_launch", "credential", async {
                 local_signin(agent, home)
             })
@@ -3602,7 +3596,7 @@ async fn prepare_inner(
                     Ok(())
                 } else if out.contains("AGENT-MISSING") {
                     bail!(
-                        "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). The harness could not be prepared; report this with the agent id.",
+                        "`{}` was not found on the agent (PATH: ~/.opencode/bin, ~/.local/bin, ~/.grok/bin, mise shims). The harness could not be prepared; report this with the agent id.",
                         agent.name()
                     )
                 } else {
@@ -3955,7 +3949,6 @@ mod tests {
         for harness in [
             Agent::Codex,
             Agent::OpenCode,
-            Agent::OpenCode2,
             Agent::Claude,
             Agent::Grok,
             Agent::Railway,
@@ -4292,90 +4285,6 @@ mod tests {
     }
 
     #[test]
-    fn opencode_auth_uses_xdg_data_and_preserves_the_provider_map() {
-        let home = tempfile::tempdir().unwrap();
-        let xdg = home.path().join("custom data");
-        assert_eq!(
-            Agent::OpenCode
-                .local_signin_path(home.path(), None)
-                .unwrap(),
-            home.path().join(".local/share/opencode/auth.json")
-        );
-        let path = Agent::OpenCode
-            .local_signin_path(home.path(), Some(&xdg))
-            .unwrap();
-        assert_eq!(path, xdg.join("opencode/auth.json"));
-        assert!(matches!(
-            read_local_signin(Agent::OpenCode, Some(&path)).unwrap(),
-            PendingAuth::SignInOnAgent { .. }
-        ));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let auth = br#"{"openai":{"type":"api","key":"test-only"},"example":{"type":"oauth","access":"test-access","refresh":"test-refresh","expires":123}}"#;
-        std::fs::write(&path, auth).unwrap();
-        let PendingAuth::Ready { line, .. } =
-            read_local_signin(Agent::OpenCode, Some(&path)).unwrap()
-        else {
-            panic!("expected provider credentials")
-        };
-        assert_eq!(line, auth);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn opencode_credential_seed_frames_stdin_and_protects_existing_file() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::{Command, Stdio};
-
-        for framed in [false, true] {
-            let data = tempfile::tempdir().unwrap();
-            let auth_path = data.path().join("opencode/auth.json");
-            std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
-            std::fs::write(&auth_path, "old auth").unwrap();
-            std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            let auth = br#"{"provider":{"type":"api","key":"test"}}"#;
-            let script = if framed {
-                format!(
-                    "{}\ncat",
-                    Agent::OpenCode.credential_seed_framed(auth.len())
-                )
-            } else {
-                Agent::OpenCode.credential_seed().to_string()
-            };
-            let mut child = Command::new("sh")
-                .args(["-c", &script])
-                .env("XDG_DATA_HOME", data.path())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(auth).unwrap();
-            if framed {
-                stdin.write_all(b"skills payload").unwrap();
-            }
-            drop(stdin);
-            let output = child.wait_with_output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(std::fs::read(&auth_path).unwrap(), auth);
-            assert_eq!(
-                std::fs::metadata(&auth_path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-            // The VM runs GNU head. macOS's BSD head consumes extra pipe
-            // bytes, so exact stream framing is exercised by the Linux CI job.
-            if framed && cfg!(target_os = "linux") {
-                assert_eq!(output.stdout, b"skills payload");
-            }
-        }
-    }
-
-    #[test]
     fn interactive_client_starts_use_the_loading_pane() {
         for flag in ["--codex", "--opencode", "--opencode2", "--railway"] {
             for extra in [vec![], vec!["--agent", "my-box", "--dir", "/app/project"]] {
@@ -4665,7 +4574,6 @@ mod tests {
             vec!["code", "--codex", "connect", "--new"],
             vec!["code", "--codex", "remote", "--dir", "/app"],
             vec!["code", "remote"],
-            vec!["code", "--opencode", "--opencode2"],
             vec!["code", "--opencode", "remote", "extra"],
             vec!["code", "--opencode", "remote", "--rm"],
             vec!["code", "--opencode", "remote", "--dir", "/app"],
@@ -4685,6 +4593,8 @@ mod tests {
         assert!(
             LaunchArgs::try_parse_from(["code", "--opencode", "--new", "--agent", "box"]).is_err()
         );
+        // The deprecated alias is the same flag, so naming both is a conflict.
+        assert!(LaunchArgs::try_parse_from(["code", "--opencode", "--opencode2"]).is_err());
         assert_eq!(
             LaunchArgs::try_parse_from(["code", "--opencode", "--rm"])
                 .unwrap()
@@ -4702,7 +4612,7 @@ mod tests {
             let args = LaunchArgs::try_parse_from(["code", flag, "--connection-json"]).unwrap();
             assert_eq!(
                 resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
-                Agent::OpenCode2
+                Agent::OpenCode
             );
             assert_eq!(args.client_action().unwrap(), Some(ClientAction::Local));
             let mut upgrade =
@@ -4845,25 +4755,55 @@ cat
     }
 
     #[test]
-    fn opencode2_launch_seeds_the_shim_and_preserves_prompt_arguments() {
+    fn opencode_launch_uses_the_image_runtime_and_retires_the_shim() {
+        // The historical `opencode2` slug still selects the one OpenCode.
         let args = LaunchArgs::for_app_mode("opencode2", None, None);
+        assert!(args.opencode && !args.opencode2);
         assert_eq!(
             resolve_agent_choice(&args, &mut AgentPrefs::default(), Path::new("/tmp")).unwrap(),
-            Agent::OpenCode2
+            Agent::OpenCode
         );
-        let script = provision_script(Agent::OpenCode2, false, true);
-        assert!(script.contains("~/.local/bin/opencode2"));
-        assert!(script.contains("command -v opencode2"));
-        assert!(!provision_script(Agent::OpenCode, false, true).contains("opencode-beta/releases"));
+        let script = provision_script(Agent::OpenCode, false, true);
+        assert!(script.contains("command -v opencode >/dev/null"));
+        assert!(!script.contains("command -v opencode2"));
+        // No shim is written; the one earlier releases seeded is removed.
+        assert!(!script.contains("> ~/.local/bin/opencode2"));
+        assert!(script.contains("rm -f ~/.local/bin/opencode2"));
+        // The V2 installer only runs behind the version check.
+        assert!(
+            script.find("opencode --version").unwrap()
+                < script
+                    .find(crate::commands::cloud_agent::opencode::V2_INSTALLER)
+                    .unwrap()
+        );
         let command = remote_command(
-            Agent::OpenCode2,
+            Agent::OpenCode,
             "",
             Some("explain this project"),
             None,
             &[],
             SessionStyle::Pane,
         );
-        assert!(command.contains("opencode2 --standalone --prompt 'explain this project'"));
+        assert!(command.contains("opencode --standalone --prompt 'explain this project'"));
+        assert!(!command.contains("opencode2"));
+    }
+
+    #[test]
+    fn deprecated_opencode2_flag_normalizes_to_opencode_with_a_note() {
+        let mut args = LaunchArgs::try_parse_from(["code", "--opencode2"]).unwrap();
+        assert!(args.wants_opencode() && !args.opencode);
+        args.prepare_code_launch().unwrap();
+        assert!(args.opencode && !args.opencode2);
+        // Idempotent, and the plain flag is untouched.
+        args.normalize_aliases();
+        assert!(args.opencode && !args.opencode2);
+        let plain = LaunchArgs::try_parse_from(["code", "--opencode"]).unwrap();
+        assert!(plain.wants_opencode());
+        // The alias is hidden from help but still parses.
+        use clap::CommandFactory;
+        let help = LaunchArgs::command().render_long_help().to_string();
+        assert!(help.contains("--opencode"));
+        assert!(!help.contains("--opencode2"));
     }
 
     #[test]
@@ -4876,15 +4816,15 @@ cat
         };
         assert_eq!(
             resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
-            Agent::OpenCode2
+            Agent::OpenCode
         );
         assert!(!args.is_bare());
-        let script = provision_script(Agent::OpenCode2, false, args.app_mode);
+        let script = provision_script(Agent::OpenCode, false, args.app_mode);
         assert!(script.contains("touch ~/.railway-app-mode"));
         assert!(script.contains("command -v opencode"));
         assert!(!script.contains("$opencode_data/auth.json"));
         let command = remote_command(
-            Agent::OpenCode2,
+            Agent::OpenCode,
             "",
             Some("explain this project"),
             None,
@@ -4892,7 +4832,7 @@ cat
             SessionStyle::Pane,
         );
         assert!(
-            command.contains("opencode2 --standalone --prompt 'explain this project'"),
+            command.contains("opencode --standalone --prompt 'explain this project'"),
             "{command}"
         );
     }
@@ -5271,7 +5211,6 @@ cat
             Agent::Codex,
             Agent::Grok,
             Agent::OpenCode,
-            Agent::OpenCode2,
             Agent::Railway,
             Agent::Shell,
         ] {
@@ -5318,7 +5257,6 @@ cat
             Agent::Claude,
             Agent::Grok,
             Agent::OpenCode,
-            Agent::OpenCode2,
             Agent::Railway,
             Agent::Shell,
         ] {

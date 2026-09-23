@@ -65,7 +65,7 @@ impl Connection {
     pub(crate) fn harness(&self) -> &'static str {
         match self {
             Self::Codex(_) => "codex",
-            Self::OpenCode(c) => c.protocol.legacy_harness(),
+            Self::OpenCode(c) => c.protocol.harness(),
             Self::Railway(_) => "railway",
         }
     }

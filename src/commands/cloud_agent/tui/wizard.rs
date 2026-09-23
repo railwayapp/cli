@@ -146,8 +146,7 @@ pub fn harness_blurb(slug: &str) -> &'static str {
         "claude" => "Anthropic's Claude Code",
         "codex" => "OpenAI's Codex",
         "grok" => "xAI's Grok",
-        "opencode" => "OpenCode",
-        "opencode2" => "OpenCode — stable V2",
+        "opencode" | "opencode2" => "OpenCode",
         "railway" => "Railway's own agent — no sign-in needed",
         "shell" => "No agent — just a shell on the VM",
         // Named rather than folded into a catch-all: an unknown slug is a

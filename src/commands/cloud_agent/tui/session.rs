@@ -1877,7 +1877,7 @@ assert (size.lines, size.columns) == (30, 100)
             }
             assert_eq!(
                 pane.durable_name,
-                client_sessions::name(protocol.legacy_harness(), "vm", Some("ses_thread1"))
+                client_sessions::name(protocol.harness(), "vm", Some("ses_thread1"))
             );
         }
     }

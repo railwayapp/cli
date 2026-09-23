@@ -6,8 +6,6 @@ The child has its own session and closed SSH descriptors; no tunnel is needed.
 import base64
 import fcntl
 import http.client
-import importlib.machinery
-import importlib.util
 import json
 import os
 import re
@@ -25,6 +23,9 @@ import urllib.request
 
 CODE_PORT = 4096
 LEGACY_PORT = 8080
+# The official installer places opencode at ~/.opencode/bin, where the image
+# installs it too, so an upgrade replaces the image's copy in place.
+V2_INSTALLER = "https://opencode.ai/v2/install"
 
 
 class SetupError(Exception):
@@ -83,8 +84,8 @@ def probe(port, credentials, path):
 def server_status(port, credentials=None, protocol="v1"):
     if protocol not in ("v2", "opencode2"):
         return probe(port, credentials, "global/health")
-    # Current V2 exposes server identity at /api/info. Older V2/Beta
-    # endpoints are only fallbacks for discovering an existing server.
+    # Current V2 exposes server identity at /api/info. Older V2 endpoints
+    # are only fallbacks for discovering an existing server.
     for path in ("api/info", "api/status", "api/health"):
         status, body = probe(port, credentials, path)
         if status != 404:
@@ -121,25 +122,56 @@ def stop_owned(state):
             raise SetupError("The old OpenCode server did not stop; retry the upgrade.")
 
 
-def prepare_v2(request, home):
-    source = request.get("runtime_shim")
-    if not source:
-        return None
-    path = home / ".railway/runtimes/opencode2/launcher.py"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(source)
-    temporary.chmod(0o700)
-    temporary.replace(path)
-    spec = importlib.util.spec_from_file_location(
-        "railway_opencode2", path,
-        loader=importlib.machinery.SourceFileLoader("railway_opencode2", str(path)),
-    )
-    runtime = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runtime)
-    # Download and verify before stopping a working older server.
-    binary = runtime.ensure_runtime(request.get("version"))
-    return binary, executable_version(binary)
+def release_tuple(version):
+    return tuple(map(int, version.split("."))) if re.fullmatch(r"\d+\.\d+\.\d+", version or "") else None
+
+
+def installed_v2(home, minimum=None):
+    """The image's official OpenCode V2 executable, if it is at least `minimum`."""
+    search = f"{home}/.opencode/bin:{home}/.local/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    for binary in filter(None, [str(home / ".opencode/bin/opencode"), shutil.which("opencode", path=search)]):
+        try:
+            version = executable_version(binary)
+        except (OSError, subprocess.SubprocessError, SetupError):
+            continue
+        floor = release_tuple(minimum)
+        if version.startswith("2.") and (floor is None or release_tuple(version) >= floor):
+            return binary, version
+    return None
+
+
+def install_v2(home):
+    """Upgrade an older image's opencode with the official V2 installer.
+
+    The script is downloaded first so a failed fetch is reported rather than
+    partially executed, and it runs without this bootstrap's stdin.
+    """
+    print("This agent image ships an older OpenCode; installing OpenCode V2 from opencode.ai...", file=sys.stderr, flush=True)
+    installer = subprocess.run(["curl", "-fsSL", V2_INSTALLER], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=120)
+    if installer.returncode or not installer.stdout.strip():
+        raise SetupError(f"Could not download the OpenCode V2 installer. Create a fresh agent with --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash")
+    result = subprocess.run(["bash", "-c", installer.stdout, "install", "--no-modify-path"],
+                            stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=subprocess.STDOUT,
+                            env=dict(os.environ, HOME=str(home)), timeout=600)
+    if result.returncode:
+        raise SetupError(f"Could not install OpenCode V2 on this agent. Create a fresh agent with --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash")
+
+
+def v2_runtime(home, minimum=None):
+    """OpenCode V2 on the agent, upgrading an older image when necessary.
+
+    `minimum` is the release a saved server last ran: V2 storage is not
+    reopened by an older release, so an image behind the saved server is
+    upgraded rather than refused.
+    """
+    runtime = installed_v2(home, minimum)
+    if runtime is None:
+        install_v2(home)
+        runtime = installed_v2(home, minimum)
+    if runtime is None:
+        raise SetupError("OpenCode V2 is not available on this agent after installation. Create a fresh agent with --new.")
+    return runtime
 
 
 def executable_version(binary):
@@ -154,6 +186,7 @@ def executable_version(binary):
 def state_protocol(state):
     protocol = state.get("protocol")
     if protocol is None:
+        # Records written before `protocol` existed named V2 servers opencode2.
         protocol = "v2" if state.get("harness") == "opencode2" else "v1"
     if protocol not in ("v1", "v2"):
         raise SetupError("The saved OpenCode protocol is unsupported; update the Railway CLI.")
@@ -393,16 +426,10 @@ def setup(request, home):
             if not upgrading and legacy_database(home):
                 raise SetupError("This VM contains OpenCode 1 data. Reconnect to its V1 server or explicitly upgrade with railway code --opencode upgrade <agent>.")
             if not current or upgrading:
-                runtime_request = dict(request)
-                if not upgrading and previous:
-                    runtime_request["version"] = previous
-                runtime = prepare_v2(runtime_request, home)
-                if runtime is None:
-                    binary = shutil.which("opencode2", path=f"{home}/.local/bin:{home}/.opencode/bin")
-                    runtime = (binary, executable_version(binary))
+                # The image's opencode is the runtime; a saved release only
+                # sets the floor so V2 storage is never reopened by an older one.
+                runtime = v2_runtime(home, None if upgrading else previous)
                 reject_downgrade(previous, runtime[1])
-                if not runtime[1].startswith("2."):
-                    raise SetupError("The selected runtime does not support OpenCode V2.")
                 if upgrading:
                     stop_owned(state)
                     backup_database(home, root)
@@ -432,9 +459,9 @@ def setup(request, home):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            if runtime:
-                environment["RAILWAY_OPENCODE_VERSION"] = runtime[1]
-            state = dict(credentials, harness="opencode2" if protocol == "v2" else "opencode", protocol=protocol, directory=directory, port=port,
+            # One OpenCode harness; `protocol` carries the wire/storage version.
+            # Older records still say opencode2 for V2 (see state_protocol).
+            state = dict(credentials, harness="opencode", protocol=protocol, directory=directory, port=port,
                          vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"))
             if runtime:
                 state["version"] = runtime[1]

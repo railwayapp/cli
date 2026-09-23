@@ -16,14 +16,25 @@ railway code --codex connect my-box
 
 ### OpenCode versions
 
-New `railway code --opencode` launches use stable OpenCode V2. The older
-`--opencode2` flag remains a deprecated alias. The launcher and setup wizard
-offer one **OpenCode** option.
+OpenCode is OpenCode V2. The cloud-agent image ships the official V2 `opencode`
+and `railway code --opencode` runs it directly; nothing is downloaded on a
+current image. `--opencode2` is a hidden, deprecated alias for `--opencode`
+(it prints a note). The launcher and setup wizard offer one **OpenCode** option,
+and history or preferences saved as `opencode2` by earlier releases are read as
+OpenCode.
 
-`railway code --opencode connect <agent>` retains the VM's saved protocol and
-release, including **OpenCode 1 — legacy** connections. Railway verifies local
-client versions and, when needed, installs a matching client privately under
-`~/.railway/runtimes/opencode-client/<version>`.
+An agent created from an older image still has OpenCode 1.x. Launching an
+OpenCode session on it upgrades `opencode` in place with the official installer
+(`curl -fsSL https://opencode.ai/v2/install | bash`), the same way the image
+installs it, and V1 storage is backed up under `~/.railway/runtimes/opencode/`
+before V2 migrates it. Resuming a saved conversation on such an agent does not
+upgrade; it explains how to (start a new OpenCode session, or create a fresh
+agent with `--new`).
+
+`railway code --opencode connect <agent>` retains the VM's saved protocol,
+including **OpenCode 1 — legacy** servers started before the cutover. Railway
+verifies local client versions and, when needed, installs a matching client
+privately under `~/.railway/runtimes/opencode-client/<version>`.
 
 To explicitly upgrade an existing managed OpenCode server:
 
@@ -31,15 +42,15 @@ To explicitly upgrade an existing managed OpenCode server:
 railway code --opencode upgrade <agent>
 ```
 
-The upgrade verifies the new executable, stops the managed server, and backs up
-its database, configuration, auth file, and server state under
-`~/.railway/desktop/opencode/` before migration. Reconnecting
-does not upgrade the VM. V1 cannot reopen a store marked or detected as migrated
-to V2. Restore the pre-upgrade state before returning to V1.
+The upgrade uses the image's `opencode` (installing V2 first on an older
+image), stops the managed server, and backs up its database, configuration,
+auth file, and server state under `~/.railway/desktop/opencode/` before
+migration. Reconnecting does not migrate a V1 server. V1 cannot reopen a store
+marked or detected as migrated to V2. Restore the pre-upgrade state before
+returning to V1.
 
 Desktop setup detects the installed app's bundled client version independently
-of its release channel, preferring stable **OpenCode** when compatible. V2 no
-longer implies **OpenCode Beta**.
+of its release channel, preferring stable **OpenCode** when compatible.
 
 Bare `railway code` opens `railway-agent-tui` on a new VM. An explicit agent
 flag also creates a new VM unless `connect`, `upgrade`, or
@@ -54,9 +65,9 @@ working client already installed on your machine.
 Codex and OpenCode normally run a local client connected to the VM.
 Their clients run inside the Railway CA interface with command approvals disabled.
 Codex matches the local client to its server version and trusts the remote project.
-Missing OpenCode clients can be installed after confirmation. OpenCode uses the
-image's official V2 runtime when available and an integrity-verified standalone
-package on older images. Both clients follow the server's recorded release.
+Missing OpenCode clients can be installed after confirmation. On the VM,
+OpenCode is the image's official V2 runtime, upgraded in place on older images.
+Both local clients follow the server's recorded release.
 
 Use `remote` to run the client on the VM. Use `--` to pass arguments to the agent:
 
@@ -120,7 +131,9 @@ sessions must be restarted to pick up the launch flags.
 
 Local sign-ins are optional: without one, sign in using the agent's login flow
 on the VM. When available, Codex copies `~/.codex/auth.json`, Grok copies
-`~/.grok/auth.json`, and OpenCode carries local provider sign-ins to the VM.
+`~/.grok/auth.json`, and OpenCode carries the active account per provider from
+its local credential store (`~/.local/share/opencode/opencode.db`) into the
+VM's store, converting a V1 `auth.json` when no V2 store exists.
 
 Claude uses a setup token from `claude setup-token`, or the supplied
 `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. The CLI can mint the setup token
