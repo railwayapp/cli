@@ -1,18 +1,22 @@
-//! Export provider sign-ins from Beta's credential store, without copying sessions.
+//! Export local OpenCode provider sign-ins for the VM, without copying sessions.
+//!
+//! OpenCode V2 keeps credentials in the `credential` table of
+//! `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode/`).
+//! A machine whose local OpenCode is still V1 has no store to export; the
+//! agent asks for a provider sign-in instead.
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use rand::Rng;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
-pub(crate) const SEED: &str = r#"mkdir -p ~/.railway/runtimes/opencode2 || exit 1
-opencode_credentials=$(mktemp ~/.railway/runtimes/opencode2/credentials.XXXXXX) || exit 1
+pub(crate) const SEED: &str = r#"mkdir -p ~/.railway/runtimes/opencode || exit 1
+opencode_credentials=$(mktemp ~/.railway/runtimes/opencode/credentials.XXXXXX) || exit 1
 cat > "$opencode_credentials" || { rm -f "$opencode_credentials"; exit 1; }
 chmod 600 "$opencode_credentials" || exit 1
-mv "$opencode_credentials" ~/.railway/runtimes/opencode2/credentials.json || exit 1"#;
+mv "$opencode_credentials" ~/.railway/runtimes/opencode/credentials.json || exit 1"#;
 
 pub(crate) fn seed_framed(len: usize) -> String {
     // Read only this frame: buffered readers can consume the following skills
@@ -92,7 +96,7 @@ pub(crate) fn read(
                     "Unsupported OpenCode credential database; provider credentials were not copied"
                 );
             }
-            // Match Beta's account preference: active first, then newest account.
+            // Match OpenCode's account preference: active first, then newest account.
             // NULL active is valid for credentials imported by older releases.
             let order = if columns.contains("active") {
                 "COALESCE(active,0) DESC,"
@@ -125,76 +129,10 @@ pub(crate) fn read(
                 credentials
                     .push(json!({"id":id,"integrationID":provider,"label":label,"value":value}));
             }
-            // An initialized, empty Beta store can mean the user signed out.
-            // Never resurrect its accounts from a stale legacy auth.json.
             return payload(credentials, path);
         }
     }
-    read_legacy(&data.join("auth.json"))
-}
-
-fn read_legacy(path: &Path) -> Result<Option<(Vec<u8>, PathBuf)>> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("Reading legacy OpenCode provider credentials"),
-    };
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    let auth: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| anyhow::anyhow!("Invalid legacy OpenCode provider credential JSON"))?;
-    let auth = auth
-        .as_object()
-        .context("Unsupported legacy OpenCode provider credentials")?;
-    let mut credentials = Vec::new();
-    for (provider, legacy) in auth {
-        if provider.starts_with("mcp_") {
-            continue;
-        }
-        let value = match legacy["type"].as_str() {
-            Some("api") => {
-                let mut value = json!({"type":"key","key":legacy["key"]});
-                if let Some(metadata) = legacy.get("metadata") {
-                    value["metadata"] = metadata.clone();
-                }
-                value
-            }
-            Some("oauth") => {
-                let method = match provider.as_str() {
-                    "openai" => "chatgpt-browser",
-                    "github-copilot" | "opencode" | "xai" => "device",
-                    _ => "oauth",
-                };
-                let mut value = json!({"type":"oauth","methodID":method,"access":legacy["access"],"refresh":legacy["refresh"],"expires":legacy["expires"]});
-                let mut metadata = serde_json::Map::new();
-                for (old, new) in [
-                    ("accountId", "accountID"),
-                    ("enterpriseUrl", "enterpriseUrl"),
-                ] {
-                    if let Some(value) = legacy.get(old) {
-                        metadata.insert(new.into(), value.clone());
-                    }
-                }
-                if !metadata.is_empty() {
-                    value["metadata"] = Value::Object(metadata);
-                }
-                value
-            }
-            _ => continue,
-        };
-        if provider.is_empty() || !valid_value(&value) {
-            bail!("Unsupported legacy OpenCode provider credential; credentials were not copied");
-        }
-        let suffix: String = rand::rngs::OsRng
-            .sample_iter(&rand::distributions::Alphanumeric)
-            .take(26)
-            .map(char::from)
-            .collect();
-        let id = format!("cred_{suffix}");
-        credentials.push(json!({"id":id,"integrationID":provider.trim_end_matches('/'),"label":"Imported from OpenCode","value":value}));
-    }
-    payload(credentials, path.to_owned())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -258,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_beta_store_does_not_restore_signed_out_legacy_accounts() {
+    fn empty_v2_store_and_v1_only_auth_json_export_nothing() {
         let home = tempfile::tempdir().unwrap();
         let (path, _db) = database(home.path());
         std::fs::write(
@@ -267,27 +205,16 @@ mod tests {
         )
         .unwrap();
         assert!(read(home.path(), None, None).unwrap().is_none());
-    }
-
-    #[test]
-    fn legacy_fallback_converts_oauth_and_keys_only_without_beta_store() {
-        let home = tempfile::tempdir().unwrap();
-        let data = home.path().join("custom/opencode");
+        // Without a V2 store at all, a V1 auth.json is not converted either.
+        let v1 = tempfile::tempdir().unwrap();
+        let data = v1.path().join(".local/share/opencode");
         std::fs::create_dir_all(&data).unwrap();
-        std::fs::write(data.join("auth.json"),json!({"openai":{"type":"oauth","access":"access","refresh":"refresh","expires":10,"accountId":"account"},"opencode-go":{"type":"api","key":"api-key"}}).to_string()).unwrap();
-        let (bytes, _) = read(home.path(), Some(&home.path().join("custom")), None)
-            .unwrap()
-            .unwrap();
-        let payload: Value = serde_json::from_slice(&bytes).unwrap();
-        let values = payload["credentials"].as_array().unwrap();
-        assert_eq!(values.len(), 2);
-        let oauth = values
-            .iter()
-            .find(|v| v["integrationID"] == "openai")
-            .unwrap();
-        assert_eq!(oauth["value"]["methodID"], "chatgpt-browser");
-        assert_eq!(oauth["value"]["metadata"]["accountID"], "account");
-        assert_eq!(oauth["id"].as_str().unwrap().len(), 31);
+        std::fs::write(
+            data.join("auth.json"),
+            r#"{"openai":{"type":"api","key":"v1"}}"#,
+        )
+        .unwrap();
+        assert!(read(v1.path(), None, None).unwrap().is_none());
     }
 
     #[test]
@@ -313,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_native_credentials_fail_without_exposing_values_or_using_stale_auth() {
+    fn malformed_native_credentials_fail_without_exposing_values() {
         let home = tempfile::tempdir().unwrap();
         let (path, db) = database(home.path());
         insert(
@@ -373,7 +300,7 @@ mod tests {
             );
             let path = root
                 .path()
-                .join(".railway/runtimes/opencode2/credentials.json");
+                .join(".railway/runtimes/opencode/credentials.json");
             assert_eq!(std::fs::read(&path).unwrap(), auth);
             assert_eq!(
                 std::fs::metadata(path).unwrap().permissions().mode() & 0o777,

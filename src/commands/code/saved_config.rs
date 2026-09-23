@@ -81,7 +81,11 @@ pub(super) struct SavedConfig {
     harness: String,
     ssh_command: String,
     ssh_config: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "v2_opencode",
+        skip_serializing_if = "Option::is_none"
+    )]
     opencode: Option<OpenCodeConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     codex: Option<CodexConfig>,
@@ -89,8 +93,8 @@ pub(super) struct SavedConfig {
     railway: Option<super::railway_client::Connection>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(try_from = "OpenCodeRecord", into = "OpenCodeRecord")]
+#[derive(Clone, Serialize)]
+#[serde(into = "OpenCodeRecord")]
 struct OpenCodeConfig {
     connection: opencode::Connection,
     desktop_configured: bool,
@@ -98,14 +102,16 @@ struct OpenCodeConfig {
     desktop_error: Option<String>,
 }
 
-// Keep writing beta for old CLI readers, but consume it only when explicit
-// protocol metadata is absent. An old `opencode` record always means V1.
+// Snapshots written while OpenCode 1 servers were still managed classified the
+// record with `beta` (true = V2) and later an explicit `protocol`. Both are
+// still written so older CLI readers classify this record as V2, and a saved
+// OpenCode 1 server is dropped on read: this CLI no longer manages it, and a
+// V2 client pointed at it would fail.
 #[derive(Serialize, Deserialize)]
 struct OpenCodeRecord {
-    // Inspect presence before Connection's historical V1 default is applied.
     connection: serde_json::Value,
     #[serde(default)]
-    protocol: Option<opencode::Protocol>,
+    protocol: Option<String>,
     #[serde(default)]
     beta: bool,
     desktop_configured: bool,
@@ -113,33 +119,48 @@ struct OpenCodeRecord {
     desktop_error: Option<String>,
 }
 
-impl TryFrom<OpenCodeRecord> for OpenCodeConfig {
-    type Error = serde_json::Error;
-
-    fn try_from(record: OpenCodeRecord) -> Result<Self, Self::Error> {
-        let explicit = record.connection.get("protocol").is_some();
-        let mut connection: opencode::Connection = serde_json::from_value(record.connection)?;
-        connection.protocol = record
+impl OpenCodeRecord {
+    fn is_v2(&self) -> bool {
+        match self
             .protocol
-            .or(explicit.then_some(connection.protocol))
-            .unwrap_or(if record.beta {
-                opencode::Protocol::V2
-            } else {
-                opencode::Protocol::V1
-            });
-        Ok(Self {
-            connection,
+            .as_deref()
+            .or_else(|| self.connection.get("protocol").and_then(|p| p.as_str()))
+        {
+            Some(protocol) => protocol == "v2",
+            None => self.beta,
+        }
+    }
+}
+
+impl OpenCodeConfig {
+    /// `None` for an OpenCode 1 server record.
+    fn from_record(record: OpenCodeRecord) -> Result<Option<Self>, serde_json::Error> {
+        if !record.is_v2() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            connection: serde_json::from_value(record.connection)?,
             desktop_configured: record.desktop_configured,
             desktop_error: record.desktop_error,
-        })
+        }))
+    }
+}
+
+fn v2_opencode<'de, D>(deserializer: D) -> Result<Option<OpenCodeConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<OpenCodeRecord>::deserialize(deserializer)? {
+        Some(record) => OpenCodeConfig::from_record(record).map_err(serde::de::Error::custom),
+        None => Ok(None),
     }
 }
 
 impl From<OpenCodeConfig> for OpenCodeRecord {
     fn from(config: OpenCodeConfig) -> Self {
         Self {
-            protocol: Some(config.connection.protocol),
-            beta: config.connection.protocol.is_v2(),
+            protocol: Some("v2".into()),
+            beta: true,
             connection: serde_json::to_value(config.connection)
                 .expect("OpenCode connection contains only serializable fields"),
             desktop_configured: config.desktop_configured,
@@ -247,7 +268,7 @@ impl SavedConfig {
         connection: &opencode::Connection,
         desktop: &Result<bool>,
     ) -> Self {
-        self.harness = connection.protocol.legacy_harness().into();
+        self.harness = "opencode".into();
         self.opencode = Some(OpenCodeConfig {
             connection: connection.clone(),
             desktop_configured: matches!(desktop, Ok(true)),
@@ -360,10 +381,7 @@ impl SavedConfig {
     fn render(&self) -> Result<String> {
         let divider = "─".repeat(64).cyan();
         let mut out = format!("\n{divider}\n");
-        let harness = self.opencode.as_ref().map_or_else(
-            || crate::commands::cloud_agent::harness_label(&self.harness),
-            |config| config.connection.protocol.label(),
-        );
+        let harness = crate::commands::cloud_agent::harness_label(&self.harness);
         writeln!(
             out,
             "{} connection details for {}",
@@ -403,11 +421,10 @@ impl SavedConfig {
         }
         if let Some(o) = &self.opencode {
             let c = &o.connection;
-            let edition = c.protocol.label();
             writeln!(
                 out,
                 "\n{}\n  Name:      {}\n  Server:    {}\n  Username:  {}\n  Password:  {}\n  Directory: {}",
-                format!("Railway {edition} Server Configuration:").bold(),
+                "Railway OpenCode Server Configuration:".bold(),
                 self.agent_name,
                 c.url,
                 c.username,
@@ -417,14 +434,14 @@ impl SavedConfig {
             if o.desktop_configured {
                 writeln!(
                     out,
-                    "\n{edition} Desktop configuration updated (you may need to restart)."
+                    "\nOpenCode Desktop configuration updated (you may need to restart)."
                 )?;
             } else if let Some(error) = &o.desktop_error {
                 writeln!(out, "\nDesktop configuration was not saved: {error}")?;
             } else {
                 writeln!(
                     out,
-                    "\n{edition} Desktop was not detected; desktop configuration was skipped."
+                    "\nOpenCode Desktop was not detected; desktop configuration was skipped."
                 )?;
             }
         }
@@ -608,34 +625,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_opencode_records_keep_protocol_and_remain_readable_by_old_clients() {
-        for (beta, protocol) in [
-            (false, opencode::Protocol::V1),
-            (true, opencode::Protocol::V2),
+    fn v2_records_stay_readable_by_old_clients_and_v1_records_are_dropped() {
+        let connection = serde_json::json!({"url":"https://box.example", "username":"opencode",
+            "password":"secret", "directory":"/app", "reused":true});
+        let record = |extra: serde_json::Value| {
+            let mut value =
+                serde_json::json!({"connection": connection, "desktop_configured": false});
+            for (key, item) in extra.as_object().unwrap() {
+                value[key] = item.clone();
+            }
+            serde_json::from_value::<OpenCodeRecord>(value).unwrap()
+        };
+        // V2 by any of the classifications older snapshots used.
+        for extra in [
+            serde_json::json!({"beta": true}),
+            serde_json::json!({"protocol": "v2", "beta": false}),
+            serde_json::json!({"connection": {"url":"https://box.example", "username":"opencode",
+                "password":"secret", "directory":"/app", "reused":true, "protocol":"v2"}}),
         ] {
-            let old = serde_json::json!({
-                "connection": {"url":"https://box.example", "username":"opencode", "password":"secret",
-                    "directory":"/app", "reused":true},
-                "beta":beta, "desktop_configured":false
-            });
-            let config: OpenCodeConfig = serde_json::from_value(old).unwrap();
-            assert_eq!(config.connection.protocol, protocol);
+            let config = OpenCodeConfig::from_record(record(extra)).unwrap().unwrap();
+            assert_eq!(config.connection.url, "https://box.example");
             let written = serde_json::to_value(config).unwrap();
-            assert_eq!(written["beta"], beta);
-            assert_eq!(written["protocol"], serde_json::to_value(protocol).unwrap());
-            // Explicit metadata wins even if a stale legacy field disagrees.
-            let mut mixed = written;
-            mixed["beta"] = serde_json::json!(!beta);
-            let read: OpenCodeConfig = serde_json::from_value(mixed).unwrap();
-            assert_eq!(read.connection.protocol, protocol);
+            assert_eq!(written["beta"], true);
+            assert_eq!(written["protocol"], "v2");
         }
-        let explicit: OpenCodeConfig = serde_json::from_value(serde_json::json!({
-            "connection": {"url":"https://box.example", "username":"opencode", "password":"secret",
-                "directory":"/app", "reused":true, "protocol":"v2"},
-            "beta":false, "desktop_configured":false
+        // OpenCode 1 servers: an old `opencode` record without metadata, or
+        // an explicit v1, even when a stale `beta` disagrees.
+        for extra in [
+            serde_json::json!({}),
+            serde_json::json!({"beta": false}),
+            serde_json::json!({"protocol": "v1", "beta": true}),
+        ] {
+            assert!(
+                OpenCodeConfig::from_record(record(extra))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // Inside a snapshot the dropped record leaves the rest intact.
+        let saved: SavedConfig = serde_json::from_value(serde_json::json!({
+            "version":1, "saved_at":"2026-09-09T12:00:00Z", "agent_id":"id", "agent_name":"box",
+            "environment_id":"env", "harness":"opencode", "ssh_command":"ssh", "ssh_config":"",
+            "opencode": {"connection": connection, "beta": false, "desktop_configured": true}
         }))
         .unwrap();
-        assert_eq!(explicit.connection.protocol, opencode::Protocol::V2);
+        assert!(saved.opencode.is_none());
+        assert_eq!(saved.agent_name, "box");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use base64::Engine;
 use serde_json::Value;
 use sha2::{Digest, Sha512};
 
-use super::{Connection, Protocol};
+use super::Connection;
 use crate::config::Configs;
 #[cfg(test)]
 use std::process::Command;
@@ -40,10 +40,6 @@ fn client_paths(home: &Path) -> Vec<PathBuf> {
     let mut paths = vec![
         home.join(".opencode/bin")
             .join(format!("opencode{}", std::env::consts::EXE_SUFFIX)),
-        home.join(".opencode/bin")
-            .join(format!("opencode2{}", std::env::consts::EXE_SUFFIX)),
-        home.join(".railway/runtimes/opencode2-client")
-            .join(format!("opencode2{}", std::env::consts::EXE_SUFFIX)),
     ];
     #[cfg(target_os = "macos")]
     for root in [PathBuf::from("/Applications"), home.join("Applications")] {
@@ -65,9 +61,12 @@ fn client_paths(home: &Path) -> Vec<PathBuf> {
     paths
 }
 
-#[cfg(test)]
+/// The release a `--version` line reports, when it is a stable V2 release.
 fn v2_version(output: &str) -> Option<&str> {
-    let version = output.trim().strip_prefix("opencode v")?;
+    let version = output
+        .trim()
+        .strip_prefix("opencode v")
+        .unwrap_or(output.trim());
     valid_v2_version(version).then_some(version)
 }
 
@@ -80,24 +79,8 @@ fn valid_v2_version(version: &str) -> bool {
         && parts[0] == "2"
 }
 
-fn client_version(output: &str) -> Option<&str> {
-    let version = output
-        .trim()
-        .strip_prefix("opencode v")
-        .unwrap_or(output.trim());
-    if let Some(build) = version.strip_prefix("0.0.0-beta-") {
-        return (!build.is_empty() && build.bytes().all(|b| b.is_ascii_digit())).then_some(version);
-    }
-    let parts = version.split('.').collect::<Vec<_>>();
-    (parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-        && Protocol::from_version(version).is_some())
-    .then_some(version)
-}
-
-pub(crate) async fn compatible(binary: &Path, protocol: Protocol, version: Option<&str>) -> bool {
+/// Whether `binary` is an OpenCode V2 client, at exactly `version` when given.
+pub(crate) async fn compatible(binary: &Path, version: Option<&str>) -> bool {
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new(binary)
@@ -108,17 +91,16 @@ pub(crate) async fn compatible(binary: &Path, protocol: Protocol, version: Optio
     )
     .await;
     matches!(result, Ok(Ok(output)) if output.status.success()
-        && client_version(&String::from_utf8_lossy(&output.stdout)).is_some_and(|actual|
-            Protocol::from_version(actual) == Some(protocol) && version.is_none_or(|v| v == actual)))
+        && v2_version(&String::from_utf8_lossy(&output.stdout))
+            .is_some_and(|actual| version.is_none_or(|v| v == actual)))
 }
 
 async fn find_client(connection: &Connection) -> Result<Option<PathBuf>> {
     if let Some(version) = &connection.version
-        && (client_version(version) != Some(version.as_str())
-            || Protocol::from_version(version) != Some(connection.protocol))
+        && v2_version(version) != Some(version.as_str())
     {
         bail!(
-            "Unsupported remote OpenCode release; use railway code --opencode upgrade <agent> before installing a matching client"
+            "The agent's OpenCode server reports an unsupported release ({version}). Create a new agent with railway code --opencode --new."
         );
     }
     let home = dirs::home_dir().context("Unable to get home directory")?;
@@ -129,10 +111,9 @@ async fn find_client(connection: &Connection) -> Result<Option<PathBuf>> {
         );
     }
     candidates.extend(which::which("opencode").ok());
-    candidates.extend(which::which("opencode2").ok());
     candidates.extend(client_paths(&home));
     for binary in candidates {
-        if compatible(&binary, connection.protocol, connection.version.as_deref()).await {
+        if compatible(&binary, connection.version.as_deref()).await {
             return Ok(Some(binary));
         }
     }
@@ -141,17 +122,16 @@ async fn find_client(connection: &Connection) -> Result<Option<PathBuf>> {
 
 pub(crate) async fn ensure_client(connection: &Connection) -> Result<Option<PathBuf>> {
     let found = find_client(connection).await?;
-    let name = connection.protocol.label();
     ensure_client_with(
         found,
         || {
-            confirm(&format!(
-                "A matching {name} client is not installed locally. Install a Railway-managed copy?"
-            ))
+            confirm(
+                "A matching OpenCode client is not installed locally. Install a Railway-managed copy?",
+            )
         },
         || async {
             let installed = install_client(connection).await?;
-            println!("Installed {name}: {}", installed.display());
+            println!("Installed OpenCode: {}", installed.display());
             Ok(installed)
         },
     )
@@ -201,19 +181,16 @@ fn client_command(binary: &Path, connection: &Connection) -> Command {
 
 async fn install_client(connection: &Connection) -> Result<PathBuf> {
     let version = connection.version.as_deref().context("The remote server did not report its version; reconnect before installing a matching client")?;
-    if client_version(version) != Some(version)
-        || Protocol::from_version(version) != Some(connection.protocol)
-        || version.starts_with("0.0.0-beta-")
-    {
+    if v2_version(version) != Some(version) {
         bail!(
-            "The remote OpenCode release is unsupported; explicitly upgrade the VM before installing a client"
+            "The agent's OpenCode server reports an unsupported release ({version}). Create a new agent with railway code --opencode --new."
         );
     }
     let home = dirs::home_dir().context("Unable to get home directory")?;
-    install_release(&runtime_root(&home, version), connection.protocol, version).await
+    install_release(&runtime_root(&home, version), version).await
 }
 
-fn beta_asset_name(os: &str, arch: &str) -> Result<String> {
+fn asset_name(os: &str, arch: &str) -> Result<String> {
     let os = match os {
         "macos" => "darwin",
         "linux" => "linux",
@@ -233,7 +210,7 @@ struct Asset {
     digest: Vec<u8>,
 }
 
-fn beta_asset(package: &Value, name: &str, version: &str) -> Result<Asset> {
+fn asset(package: &Value, name: &str, version: &str) -> Result<Asset> {
     if !valid_v2_version(version)
         || package["name"] != format!("@opencode/{name}")
         || package["version"] != version
@@ -268,7 +245,7 @@ async fn download(client: &reqwest::Client, asset: &Asset, package: &Path) -> Re
     Ok(())
 }
 
-fn extract_beta(package: &Path, output: &Path) -> Result<()> {
+fn extract(package: &Path, output: &Path) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(fs::File::open(package)?);
     for entry in tar::Archive::new(decoder).entries()? {
         let mut entry = entry?;
@@ -289,7 +266,7 @@ fn extract_beta(package: &Path, output: &Path) -> Result<()> {
     bail!("The OpenCode V2 package contains no standalone CLI executable")
 }
 
-async fn install_release(root: &Path, protocol: Protocol, version: &str) -> Result<PathBuf> {
+async fn install_release(root: &Path, version: &str) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
     #[cfg(unix)]
     {
@@ -300,47 +277,24 @@ async fn install_release(root: &Path, protocol: Protocol, version: &str) -> Resu
         .user_agent("railway-opencode-client")
         .timeout(Duration::from_secs(600))
         .build()?;
-    let name = beta_asset_name(std::env::consts::OS, std::env::consts::ARCH)?;
-    let package_name = if protocol.is_v2() {
-        format!("@opencode/{name}")
-    } else {
-        name.replacen("cli-", "opencode-", 1)
-    };
+    let name = asset_name(std::env::consts::OS, std::env::consts::ARCH)?;
     let package: Value = client
         .get(format!(
-            "https://registry.npmjs.org/{package_name}/{version}"
+            "https://registry.npmjs.org/@opencode/{name}/{version}"
         ))
         .send()
         .await?
         .error_for_status()?
         .json()
         .await?;
-    let asset = if protocol.is_v2() {
-        beta_asset(&package, &name, version)?
-    } else {
-        let url =
-            format!("https://registry.npmjs.org/{package_name}/-/{package_name}-{version}.tgz");
-        if package["name"] != package_name
-            || package["version"] != version
-            || package["dist"]["tarball"] != url
-        {
-            bail!("OpenCode V1 returned an unexpected package identity");
-        }
-        let digest = package["dist"]["integrity"]
-            .as_str()
-            .and_then(|v| v.strip_prefix("sha512-"))
-            .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v).ok())
-            .filter(|v| v.len() == 64)
-            .context("OpenCode V1 package has no SHA-512 integrity digest")?;
-        Asset { url, digest }
-    };
+    let asset = asset(&package, &name, version)?;
     let temporary = tempfile::tempdir_in(root)?;
     let package = temporary.path().join("package.tgz");
     download(&client, &asset, &package).await?;
     let staged = temporary
         .path()
-        .join(format!("opencode2{}", std::env::consts::EXE_SUFFIX));
-    extract_beta(&package, &staged)?;
+        .join(format!("opencode-staged{}", std::env::consts::EXE_SUFFIX));
+    extract(&package, &staged)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -357,7 +311,7 @@ async fn install_release(root: &Path, protocol: Protocol, version: &str) -> Resu
     .await
     .context("Checking OpenCode V2 timed out")??;
     if !checked.status.success()
-        || client_version(&String::from_utf8_lossy(&checked.stdout)) != Some(version)
+        || v2_version(&String::from_utf8_lossy(&checked.stdout)) != Some(version)
     {
         bail!("The downloaded OpenCode V2 client could not run or returned an unexpected version");
     }
@@ -373,16 +327,12 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    #[ignore = "downloads official V1 and V2 packages and runs each CLI in a temporary directory"]
+    #[ignore = "downloads the official V2 package and runs the CLI in a temporary directory"]
     async fn official_release_install_smoke() {
-        for (protocol, version) in [(Protocol::V1, "1.18.29"), (Protocol::V2, "2.0.8")] {
-            let root = tempfile::tempdir().unwrap();
-            let binary = install_release(root.path(), protocol, version)
-                .await
-                .unwrap();
-            assert!(binary.starts_with(root.path()));
-            assert!(compatible(&binary, protocol, Some(version)).await);
-        }
+        let root = tempfile::tempdir().unwrap();
+        let binary = install_release(root.path(), "2.0.8").await.unwrap();
+        assert!(binary.starts_with(root.path()));
+        assert!(compatible(&binary, Some("2.0.8")).await);
     }
 
     #[tokio::test]
@@ -426,19 +376,16 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with(format!("bin/opencode{}", std::env::consts::EXE_SUFFIX)))
         );
+        assert_eq!(asset_name("macos", "aarch64").unwrap(), "cli-darwin-arm64");
         assert_eq!(
-            beta_asset_name("macos", "aarch64").unwrap(),
-            "cli-darwin-arm64"
-        );
-        assert_eq!(
-            beta_asset_name("linux", "x86_64").unwrap(),
+            asset_name("linux", "x86_64").unwrap(),
             "cli-linux-x64-baseline"
         );
         assert_eq!(
-            beta_asset_name("windows", "aarch64").unwrap(),
+            asset_name("windows", "aarch64").unwrap(),
             "cli-windows-arm64"
         );
-        assert!(beta_asset_name("linux", "riscv64").is_err());
+        assert!(asset_name("linux", "riscv64").is_err());
     }
 
     #[test]
@@ -447,40 +394,35 @@ mod tests {
         let package = json!({"name":format!("@opencode/{name}"),"version":"2.0.5","dist":{
             "tarball":format!("https://registry.npmjs.org/@opencode/{name}/-/{name}-2.0.5.tgz"),
             "integrity":format!("sha512-{}", base64::engine::general_purpose::STANDARD.encode([1u8;64]))}});
-        assert!(beta_asset(&package, name, "2.0.5").is_ok());
-        assert!(beta_asset(&package, name, "2.0.4").is_err());
+        assert!(asset(&package, name, "2.0.5").is_ok());
+        assert!(asset(&package, name, "2.0.4").is_err());
         let mut hostile = package.clone();
         hostile["dist"]["tarball"] = json!("https://example.com/client");
-        assert!(beta_asset(&hostile, name, "2.0.5").is_err());
+        assert!(asset(&hostile, name, "2.0.5").is_err());
         let mut missing = package;
         missing["dist"]["integrity"] = Value::Null;
-        assert!(beta_asset(&missing, name, "2.0.5").is_err());
+        assert!(asset(&missing, name, "2.0.5").is_err());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn executable_name_never_substitutes_for_protocol_and_release() {
+    async fn executable_name_never_substitutes_for_a_v2_release() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let binary = root.path().join("opencode");
-        for (output, protocol) in [("1.18.29", Protocol::V1), ("opencode v2.0.8", Protocol::V2)] {
-            fs::write(&binary, format!("#!/bin/sh\necho '{output}'\n")).unwrap();
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-            assert!(compatible(&binary, protocol, None).await);
-            let other = if protocol.is_v2() {
-                Protocol::V1
-            } else {
-                Protocol::V2
-            };
-            assert!(!compatible(&binary, other, None).await);
-            assert!(!compatible(&binary, protocol, Some("2.0.7")).await);
-        }
-        assert!(compatible(&binary, Protocol::V2, Some("2.0.8")).await);
+        fs::write(&binary, "#!/bin/sh\necho '1.18.29'\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!compatible(&binary, None).await);
+        fs::write(&binary, "#!/bin/sh\necho 'opencode v2.0.8'\n").unwrap();
+        assert!(compatible(&binary, None).await);
+        assert!(!compatible(&binary, Some("2.0.7")).await);
+        assert!(compatible(&binary, Some("2.0.8")).await);
     }
 
     #[test]
-    fn v2_client_version_drives_the_server_without_accepting_legacy_beta() {
+    fn v2_client_version_drives_the_server_without_accepting_legacy_or_beta() {
         assert_eq!(v2_version("opencode v2.0.5\n"), Some("2.0.5"));
+        assert_eq!(v2_version("2.0.5"), Some("2.0.5"));
         for output in [
             "opencode2 v0.0.0-beta-19425",
             "1.18.31",
@@ -492,9 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn beta_extraction_copies_only_the_regular_cli_file() {
+    fn extraction_copies_only_the_regular_cli_file() {
         let root = tempfile::tempdir().unwrap();
-        let package = root.path().join("beta.tar.gz");
+        let package = root.path().join("cli.tar.gz");
         let encoder = flate2::write::GzEncoder::new(
             fs::File::create(&package).unwrap(),
             flate2::Compression::fast(),
@@ -514,8 +456,8 @@ mod tests {
                 .unwrap();
         }
         archive.into_inner().unwrap().finish().unwrap();
-        let output = root.path().join("opencode2");
-        extract_beta(&package, &output).unwrap();
+        let output = root.path().join("opencode");
+        extract(&package, &output).unwrap();
         assert_eq!(fs::read_to_string(output).unwrap(), "binary");
         assert!(!root.path().join("OpenCode Beta.app").exists());
     }
@@ -528,30 +470,26 @@ mod tests {
         let binary = root.path().join("local client");
         fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\" \"$@\"\n").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut c = Connection {
+        let c = Connection {
             url: "https://agent.up.railway.app".into(),
             username: "opencode".into(),
             password: "' $(touch INJECTED)".into(),
             directory: "/remote/path with spaces".into(),
             reused: true,
-            protocol: Protocol::V1,
             version: None,
         };
-        for protocol in [Protocol::V1, Protocol::V2] {
-            c.protocol = protocol;
-            let mut command = client_command(&binary, &c);
-            assert!(!command.get_args().any(|arg| arg == c.password.as_str()));
-            let output = command
-                .current_dir(root.path())
-                .stdout(Stdio::piped())
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            let text = String::from_utf8(output.stdout).unwrap();
-            let lines: Vec<_> = text.lines().collect();
-            assert_eq!(&lines[..2], ["opencode", c.password.as_str()]);
-            assert_eq!(lines[2..], super::super::attach_args(&c));
-            assert!(!root.path().join("INJECTED").exists());
-        }
+        let mut command = client_command(&binary, &c);
+        assert!(!command.get_args().any(|arg| arg == c.password.as_str()));
+        let output = command
+            .current_dir(root.path())
+            .stdout(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(&lines[..2], ["opencode", c.password.as_str()]);
+        assert_eq!(lines[2..], super::super::attach_args(&c));
+        assert!(!root.path().join("INJECTED").exists());
     }
 }

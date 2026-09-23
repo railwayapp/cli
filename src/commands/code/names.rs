@@ -33,7 +33,7 @@ impl Target {
 fn prefix(agent: Agent) -> Option<&'static str> {
     match agent {
         Agent::Codex => Some("codex"),
-        Agent::OpenCode | Agent::OpenCode2 => Some("oc"),
+        Agent::OpenCode => Some("oc"),
         Agent::Claude => Some("cc"),
         Agent::Grok => Some("grok"),
         Agent::Railway => Some("rlwy"),
@@ -146,7 +146,6 @@ mod tests {
     #[test]
     fn editions_and_fragments_follow_the_lowercase_format() {
         assert_eq!(prefix(Agent::OpenCode), Some("oc"));
-        assert_eq!(prefix(Agent::OpenCode2), Some("oc"));
         assert_eq!(prefix(Agent::Claude), Some("cc"));
         assert_eq!(prefix(Agent::Grok), Some("grok"));
         assert_eq!(prefix(Agent::Shell), None);
@@ -155,7 +154,6 @@ mod tests {
         for agent in [
             Agent::Codex,
             Agent::OpenCode,
-            Agent::OpenCode2,
             Agent::Claude,
             Agent::Grok,
             Agent::Railway,
@@ -259,7 +257,6 @@ mod tests {
         for agent in [
             Agent::Codex,
             Agent::OpenCode,
-            Agent::OpenCode2,
             Agent::Claude,
             Agent::Grok,
             Agent::Railway,
