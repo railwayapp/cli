@@ -1,11 +1,12 @@
 """CLI-owned OpenCode launcher, executed over SSH with a JSON request on stdin.
 
-Credentials stay in the VM's private state directory and in the SSH response.
-The child has its own session and closed SSH descriptors; no tunnel is needed.
+Runs the image's official OpenCode V2 `opencode` as a password-protected
+server. Credentials stay in the VM's private state directory and in the SSH
+response. The child has its own session and closed SSH descriptors; no tunnel
+is needed.
 """
 import base64
 import fcntl
-import http.client
 import json
 import os
 import re
@@ -18,14 +19,15 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 
 CODE_PORT = 4096
+# Agents created before the code endpoint existed serve on the app port.
 LEGACY_PORT = 8080
-# The official installer places opencode at ~/.opencode/bin, where the image
-# installs it too, so an upgrade replaces the image's copy in place.
-V2_INSTALLER = "https://opencode.ai/v2/install"
+OLD_IMAGE = ("This cloud agent is on an older image whose OpenCode is not V2. "
+             "Create a new agent with railway code --opencode --new.")
+V1_SERVER = ("This agent's saved OpenCode server was started as OpenCode 1, which this CLI no longer supports. "
+             "Create a new agent with railway code --opencode --new.")
 
 
 class SetupError(Exception):
@@ -81,9 +83,7 @@ def probe(port, credentials, path):
         return None, {}
 
 
-def server_status(port, credentials=None, protocol="v1"):
-    if protocol not in ("v2", "opencode2"):
-        return probe(port, credentials, "global/health")
+def server_status(port, credentials=None):
     # Current V2 exposes server identity at /api/info. Older V2 endpoints
     # are only fallbacks for discovering an existing server.
     for path in ("api/info", "api/status", "api/health"):
@@ -93,13 +93,11 @@ def server_status(port, credentials=None, protocol="v1"):
     return status, body
 
 
-def health(port, credentials=None, harness="v1"):
-    status, body = server_status(port, credentials, harness)
-    ready = body.get("healthy") is True
-    if harness in ("v2", "opencode2"):
-        ready = isinstance(body.get("version"), str) and (
-            ready or (type(body.get("pid")) is int and isinstance(body.get("urls"), list))
-        )
+def health(port, credentials=None):
+    status, body = server_status(port, credentials)
+    ready = isinstance(body.get("version"), str) and (
+        body.get("healthy") is True or (type(body.get("pid")) is int and isinstance(body.get("urls"), list))
+    )
     return status, ready
 
 
@@ -119,15 +117,20 @@ def stop_owned(state):
         while owned_process(state) and time.monotonic() < deadline:
             time.sleep(0.1)
         if owned_process(state):
-            raise SetupError("The old OpenCode server did not stop; retry the upgrade.")
+            raise SetupError("The OpenCode server did not stop; retry.")
 
 
 def release_tuple(version):
     return tuple(map(int, version.split("."))) if re.fullmatch(r"\d+\.\d+\.\d+", version or "") else None
 
 
-def installed_v2(home, minimum=None):
-    """The image's official OpenCode V2 executable, if it is at least `minimum`."""
+def v2_runtime(home, minimum=None):
+    """The image's official OpenCode V2 executable.
+
+    `minimum` is the release a saved server last ran: V2 storage is not
+    reopened by an older release. The CLI never installs or upgrades OpenCode
+    on a VM; an image without V2 is recreated.
+    """
     search = f"{home}/.opencode/bin:{home}/.local/bin:" + os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     for binary in filter(None, [str(home / ".opencode/bin/opencode"), shutil.which("opencode", path=search)]):
         try:
@@ -137,115 +140,38 @@ def installed_v2(home, minimum=None):
         floor = release_tuple(minimum)
         if version.startswith("2.") and (floor is None or release_tuple(version) >= floor):
             return binary, version
-    return None
-
-
-def install_v2(home):
-    """Upgrade an older image's opencode with the official V2 installer.
-
-    The script is downloaded first so a failed fetch is reported rather than
-    partially executed, and it runs without this bootstrap's stdin.
-    """
-    print("This agent image ships an older OpenCode; installing OpenCode V2 from opencode.ai...", file=sys.stderr, flush=True)
-    installer = subprocess.run(["curl", "-fsSL", V2_INSTALLER], stdin=subprocess.DEVNULL,
-                               capture_output=True, text=True, timeout=120)
-    if installer.returncode or not installer.stdout.strip():
-        raise SetupError(f"Could not download the OpenCode V2 installer. Create a fresh agent with --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash")
-    result = subprocess.run(["bash", "-c", installer.stdout, "install", "--no-modify-path"],
-                            stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=subprocess.STDOUT,
-                            env=dict(os.environ, HOME=str(home)), timeout=600)
-    if result.returncode:
-        raise SetupError(f"Could not install OpenCode V2 on this agent. Create a fresh agent with --new, or run on the agent: curl -fsSL {V2_INSTALLER} | bash")
-
-
-def v2_runtime(home, minimum=None):
-    """OpenCode V2 on the agent, upgrading an older image when necessary.
-
-    `minimum` is the release a saved server last ran: V2 storage is not
-    reopened by an older release, so an image behind the saved server is
-    upgraded rather than refused.
-    """
-    runtime = installed_v2(home, minimum)
-    if runtime is None:
-        install_v2(home)
-        runtime = installed_v2(home, minimum)
-    if runtime is None:
-        raise SetupError("OpenCode V2 is not available on this agent after installation. Create a fresh agent with --new.")
-    return runtime
+    raise SetupError(OLD_IMAGE)
 
 
 def executable_version(binary):
     result = subprocess.run([str(binary), "--version"], stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=10)
     version = result.stdout.strip().removeprefix("opencode v")
-    if result.returncode or not re.fullmatch(r"[12]\.\d+\.\d+", version):
+    if result.returncode or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise SetupError("The OpenCode executable has an unsupported version.")
     return version
 
 
-def state_protocol(state):
+def saved_v2(state):
+    """Whether a saved server record is a V2 server this CLI can manage.
+
+    Records written before `protocol` existed named V2 servers opencode2;
+    an `opencode` record without a protocol was OpenCode 1.
+    """
+    if not state:
+        return True
     protocol = state.get("protocol")
     if protocol is None:
-        # Records written before `protocol` existed named V2 servers opencode2.
-        protocol = "v2" if state.get("harness") == "opencode2" else "v1"
+        return state.get("harness") == "opencode2"
     if protocol not in ("v1", "v2"):
         raise SetupError("The saved OpenCode protocol is unsupported; update the Railway CLI.")
-    return protocol
-
-
-def legacy_database(home):
-    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "opencode"
-    database = data / os.environ.get("OPENCODE_DB", "opencode.db")
-    if not database.is_file():
-        return False
-    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    return "session" in tables and "credential" not in tables
-
-
-def migrated_database(home):
-    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "opencode"
-    database = data / os.environ.get("OPENCODE_DB", "opencode.db")
-    if not database.is_file():
-        return False
-    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
-        return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'").fetchone())
-
-
-def legacy_runtime(home, state):
-    # Never run an upgraded `opencode` against a V1 store based on its name.
-    candidates = [state.get("binary"), str(home / ".opencode/bin/opencode"), shutil.which("opencode")]
-    for binary in filter(None, candidates):
-        try:
-            version = executable_version(binary)
-            if version.startswith("1.") and (not state.get("version") or version == state["version"]):
-                return binary, version
-        except (OSError, subprocess.SubprocessError, SetupError):
-            continue
-    raise SetupError("This connection uses OpenCode 1 — legacy, but no V1 executable matching its saved release is installed. Restore its V1 runtime or explicitly upgrade with railway code --opencode upgrade <agent>.")
+    return protocol == "v2"
 
 
 def reject_downgrade(current, requested):
     if current and requested and current != requested and not current.startswith("0.0.0-beta-"):
         if tuple(map(int, current.split("."))) > tuple(map(int, requested.split("."))):
-            raise SetupError(f"The cloud server is newer ({current}) than the requested release ({requested}); refusing to downgrade its storage.")
-
-
-def backup_database(home, root):
-    data = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / "opencode"
-    database = data / os.environ.get("OPENCODE_DB", "opencode.db")
-    prefix = root / f"opencode-before-upgrade-{time.time_ns()}"
-    if database.is_file():
-        backup = prefix.with_suffix(".db")
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as source, sqlite3.connect(backup) as target:
-            source.backup(target)
-    if (root / "server.json").exists():
-        shutil.copy2(root / "server.json", prefix.with_suffix(".server.json"))
-    if (data / "auth.json").exists():
-        shutil.copy2(data / "auth.json", prefix.with_suffix(".auth.json"))
-    config = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config") / "opencode"
-    if config.is_dir():
-        shutil.copytree(config, prefix.with_suffix(".config"), symlinks=True)
+            raise SetupError(f"The saved server last ran OpenCode {current}, newer than this image's {requested}; its storage is not reopened by an older release. Create a new agent with railway code --opencode --new.")
 
 
 def port_available(port):
@@ -256,68 +182,6 @@ def port_available(port):
         return True
     except OSError:
         return False
-
-
-def automatic_permissions(config):
-    # Match auto mode: turn approval requests into allows, preserving explicit
-    # denials and agent restrictions (for example, the read-only plan agent).
-    def allow_asks(value):
-        if isinstance(value, dict):
-            return {key: allow_asks(item) for key, item in value.items()}
-        return "allow" if value == "ask" else value
-
-    current = config.get("permission", {})
-    policy = allow_asks(current)
-    if isinstance(policy, dict) and "*" not in policy:
-        # Global PATCH preserves key order. Appending a new wildcard after
-        # existing rules would override their explicit denials. Override only
-        # OpenCode's asking defaults; the other built-in defaults already allow.
-        policy = {"read": "allow", "external_directory": "allow", "doom_loop": "allow", **policy}
-    updates = {} if current == policy else {"permission": policy}
-    agents = {}
-    for name, agent in config.get("agent", {}).items():
-        if isinstance(agent, dict) and "permission" in agent:
-            policy = allow_asks(agent["permission"])
-            if policy != agent["permission"]:
-                agents[name] = {"permission": policy}
-    if agents:
-        updates["agent"] = agents
-    return updates
-
-
-def configure_permissions(port, credentials, directory):
-    # Standard OpenCode's attach client has no --auto flag. Apply the policy
-    # through the running server so reconnecting to an older server also works.
-    # The global API preserves JSONC and reloads active locations. The project
-    # PATCH endpoint writes config.json, which some versions do not load.
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
-    token = base64.b64encode(f"{credentials['username']}:{credentials['password']}".encode()).decode()
-    project_path = "/config?" + urllib.parse.urlencode({"directory": directory})
-
-    def request(method, path="/global/config", payload=None):
-        connection.request(method, path, body=json.dumps(payload) if payload is not None else None,
-                           headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
-        response = connection.getresponse()
-        body = response.read()
-        if response.status != 200:
-            raise SetupError(f"Could not configure OpenCode automatic permissions (HTTP {response.status}).")
-        config = json.loads(body)
-        if not isinstance(config, dict):
-            raise SetupError("OpenCode returned an invalid permissions configuration.")
-        return config
-
-    try:
-        updates = automatic_permissions(request("GET"))
-        if updates:
-            request("PATCH", payload=updates)
-            if automatic_permissions(request("GET")):
-                raise SetupError("OpenCode did not apply automatic permissions. Rerun setup to retry.")
-        if automatic_permissions(request("GET", project_path)):
-            raise SetupError("OpenCode's project configuration overrides automatic permissions. Update its permission rules and reconnect.")
-    except (OSError, ValueError, http.client.HTTPException) as error:
-        raise SetupError("Could not configure OpenCode automatic permissions. Rerun setup to retry.") from error
-    finally:
-        connection.close()
 
 
 def server_port(state):
@@ -348,8 +212,7 @@ def setup(request, home):
     home = Path(home)
     if request.get("harness", "opencode") not in ("opencode", "opencode2"):
         raise SetupError("Unsupported OpenCode harness.")
-    requested_protocol = request.get("protocol")
-    if requested_protocol is not None and requested_protocol not in ("v1", "v2"):
+    if request.get("protocol", "v2") != "v2":
         raise SetupError("Unsupported OpenCode protocol.")
     os.umask(0o077)
     root = Path(home) / ".railway" / "desktop" / "opencode"
@@ -358,14 +221,15 @@ def setup(request, home):
         # Discovery is read-only, returns no credentials, and must not seed
         # directories or start a server on an unrelated cloud agent.
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        protocol = state_protocol(state)
+        if not saved_v2(state):
+            return None
         port = server_port(state)
         if (owned_process(state)
-                and health(port, state, protocol) == (200, True)
-                and health(port, harness=protocol)[0] == 401):
-            return {"directory": state.get("directory") or str(Path(f"/proc/{state['pid']}/cwd").resolve()), "protocol": protocol}
+                and health(port, state) == (200, True)
+                and health(port)[0] == 401):
+            return {"directory": state.get("directory") or str(Path(f"/proc/{state['pid']}/cwd").resolve())}
         return None
-    if request.get("action") in ("connect", "upgrade") and not state_path.exists():
+    if request.get("action") == "connect" and not state_path.exists():
         raise SetupError("This agent has no managed OpenCode server. Set one up with railway code first.")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root, 0o700)
@@ -375,20 +239,19 @@ def setup(request, home):
         except BlockingIOError:
             raise SetupError("Another OpenCode setup is running on this agent. Retry when it finishes.")
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        protocol = state_protocol(state) if state else (requested_protocol or state_protocol(request))
-        upgrading = request.get("action") == "upgrade"
-        if state and requested_protocol and requested_protocol != protocol and not upgrading:
-            raise SetupError("This agent has an OpenCode 1 — legacy connection. Use railway code --opencode connect <agent> to retain V1, or railway code --opencode upgrade <agent> to migrate it.")
         if request.get("action") == "stop":
+            # A V1 server is still ours to stop; nothing else touches it.
             stop_owned(state)
             state.pop("pid", None)
             state.pop("start", None)
             if state:
                 save(state_path, state)
             return {"stopped": True}
+        if not saved_v2(state):
+            raise SetupError(V1_SERVER)
 
         port = server_port(state)
-        if request.get("action") in ("connect", "upgrade"):
+        if request.get("action") == "connect":
             if not state.get("password") or not state.get("username"):
                 raise SetupError("This agent has no server for the selected OpenCode edition.")
             directory = state.get("directory")
@@ -409,43 +272,26 @@ def setup(request, home):
             "username": state.get("username") or os.environ.get("OPENCODE_SERVER_USERNAME") or "opencode",
             "password": state.get("password") or os.environ.get("OPENCODE_SERVER_PASSWORD") or request["password"],
         }
-        # Stable V2's explicit server uses the fixed Basic-auth user opencode.
-        # Keep historical credentials on reuse; normalize only new starts or an
-        # explicit upgrade after probing the existing server with its old user.
-        if protocol == "v2" and not state:
+        # V2's explicit server uses the fixed Basic-auth user opencode. Keep
+        # historical credentials on reuse; normalize only new starts.
+        if not state:
             credentials["username"] = "opencode"
         if not all(isinstance(value, str) and value for value in credentials.values()):
             raise SetupError("OpenCode requires a nonempty username and password.")
 
         runtime = None
-        if protocol == "v2" or upgrading:
-            if not port_available(port) and not owned_process(state):
-                raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
-            current = server_status(port, credentials, protocol)[1].get("version") if owned_process(state) else None
-            previous = current or state.get("version")
-            if not upgrading and legacy_database(home):
-                raise SetupError("This VM contains OpenCode 1 data. Reconnect to its V1 server or explicitly upgrade with railway code --opencode upgrade <agent>.")
-            if not current or upgrading:
-                # The image's opencode is the runtime; a saved release only
-                # sets the floor so V2 storage is never reopened by an older one.
-                runtime = v2_runtime(home, None if upgrading else previous)
-                reject_downgrade(previous, runtime[1])
-                if upgrading:
-                    stop_owned(state)
-                    backup_database(home, root)
-                    protocol = "v2"
-                    credentials["username"] = "opencode"
-            # Record the storage protocol before a V2 process can migrate it.
-            # A failed upgrade must never cause a later V1 restart.
-            marker = root / "storage-protocol"
-            marker.write_text("v2\n")
-        elif not owned_process(state):
-            if (root / "storage-protocol").exists() or migrated_database(home):
-                raise SetupError("OpenCode storage has been migrated to V2; V1 cannot reopen it. Restore the pre-upgrade backup to use V1.")
-            runtime = legacy_runtime(home, state)
+        if not port_available(port) and not owned_process(state):
+            raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
+        current = server_status(port, credentials)[1].get("version") if owned_process(state) else None
+        if not current:
+            # The image's opencode is the runtime; a saved release only sets
+            # the floor so V2 storage is never reopened by an older one.
+            previous = state.get("version")
+            runtime = v2_runtime(home, previous)
+            reject_downgrade(previous, runtime[1])
         reused = False
         if not port_available(port):
-            if owned_process(state) and health(port, credentials, protocol) == (200, True) and health(port, harness=protocol)[0] == 401:
+            if owned_process(state) and health(port, credentials) == (200, True) and health(port)[0] == 401:
                 reused = True
             else:
                 raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
@@ -459,13 +305,10 @@ def setup(request, home):
                 "OPENCODE_SERVER_PASSWORD": credentials["password"],
             })
             environment["PATH"] = f"{home}/.opencode/bin:{home}/.local/bin:" + environment.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-            # One OpenCode harness; `protocol` carries the wire/storage version.
-            # Older records still say opencode2 for V2 (see state_protocol).
-            state = dict(credentials, harness="opencode", protocol=protocol, directory=directory, port=port,
-                         vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"))
-            if runtime:
-                state["version"] = runtime[1]
-                state["binary"] = str(runtime[0])
+            # `protocol` distinguishes this record from OpenCode 1 servers saved
+            # by older CLIs; those said harness=opencode without a protocol.
+            state = dict(credentials, harness="opencode", protocol="v2", directory=directory, port=port,
+                         vm_id=os.environ.get("RAILWAY_FACTORY_VM_ID"), version=runtime[1], binary=str(runtime[0]))
             save(state_path, state)
             with (root / "server.log").open("w") as log:
                 child = subprocess.Popen(
@@ -476,12 +319,12 @@ def setup(request, home):
                 )
             state.update({"pid": child.pid, "start": process_start(child.pid)})
             save(state_path, state)
-            deadline = time.monotonic() + (600 if protocol == "v2" else 60)
+            deadline = time.monotonic() + 600
             while time.monotonic() < deadline:
                 if child.poll() is not None:
                     raise SetupError(f"OpenCode exited during startup. Check {root / 'server.log'} on the agent.")
-                if health(port, credentials, protocol) == (200, True):
-                    if health(port, harness=protocol)[0] != 401:
+                if health(port, credentials) == (200, True):
+                    if health(port)[0] != 401:
                         os.killpg(child.pid, signal.SIGTERM)
                         raise SetupError("OpenCode is not enforcing password authentication; stopped it.")
                     break
@@ -494,15 +337,13 @@ def setup(request, home):
             if cwd.exists():
                 state["directory"] = str(cwd.resolve())
                 save(state_path, state)
-        if protocol == "v1":
-            configure_permissions(port, credentials, directory)
         if reused and not state.get("vm_id") and os.environ.get("RAILWAY_FACTORY_VM_ID"):
             state["vm_id"] = os.environ["RAILWAY_FACTORY_VM_ID"]
             save(state_path, state)
-        version = server_status(port, credentials, protocol)[1].get("version") or state.get("version")
-        state.update(protocol=protocol, version=version)
+        version = server_status(port, credentials)[1].get("version") or state.get("version")
+        state.update(protocol="v2", version=version)
         save(state_path, state)
-        return dict(credentials, url=f"https://{domain}", directory=directory, reused=reused, protocol=protocol, version=version)
+        return dict(credentials, url=f"https://{domain}", directory=directory, reused=reused, version=version)
 
 
 if __name__ == "__main__":

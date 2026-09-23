@@ -36,7 +36,7 @@ impl Harness {
             _ => Ok(opencode::inspect(info)
                 .await?
                 .filter(|info| !info.directory.is_empty())
-                .map(|info| info.protocol.label())),
+                .map(|_| "OpenCode")),
         }
     }
 
@@ -100,7 +100,8 @@ impl Connection {
             Self::OpenCode(c) => serde_json::json!({
                 "url": c.url, "username": c.username, "password": c.password,
                 "directory": c.directory, "reused": c.reused,
-                "protocol": c.protocol, "version": c.version,
+                // Kept for consumers of earlier schema versions; V2 is the only protocol.
+                "protocol": "v2", "version": c.version,
             }),
             Self::Railway(c) => serde_json::json!({
                 "transport": "wss", "url": c.connection.url,
@@ -189,9 +190,9 @@ pub(crate) async fn prepare_pane(
         let thread = connection
             .new_thread(args.initial_prompt.as_deref())
             .await?;
-        let prompt = connection
-            .initial_prompt(thread.as_ref(), args.initial_prompt)
-            .await?;
+        // The prompt reaches the client as an argument; a pre-created thread
+        // only fixes which conversation receives it.
+        let prompt = args.initial_prompt;
         Ok(crate::commands::cloud_agent::tui::ClientPane {
             agent_id: prepared.agent_id.clone(),
             agent_name: prepared.agent_name.clone(),
@@ -427,7 +428,6 @@ pub(super) async fn launch_binary(
 ) -> Result<()> {
     println!("Launching local {edition}…");
     let thread = connection.new_thread(prompt.as_deref()).await?;
-    let prompt = connection.initial_prompt(thread.as_ref(), prompt).await?;
     let result = crate::commands::cloud_agent::launch_client_in_pane(
         crate::commands::cloud_agent::tui::ClientPane {
             agent_id: saved.agent_id.clone(),
@@ -526,7 +526,6 @@ pub(super) async fn connect(
     mut args: LaunchArgs,
     harness: Harness,
     selector: Option<String>,
-    upgrade: bool,
 ) -> Result<()> {
     if harness == Harness::Codex {
         desktop::preflight_codex_desktop()?;
@@ -638,14 +637,10 @@ pub(super) async fn connect(
         .await?;
     }
     let info = relay_info(&selected, &relay);
-    let connection = if upgrade {
-        Connection::OpenCode(opencode::upgrade(&info).await?)
-    } else {
-        harness
-            .reconnect(&info)
-            .await
-            .with_context(|| format!("Connecting to {} ({})", selected.name, harness.edition()))?
-    };
+    let connection = harness
+        .reconnect(&info)
+        .await
+        .with_context(|| format!("Connecting to {} ({})", selected.name, harness.edition()))?;
     let slug = match harness {
         Harness::Codex => "codex",
         Harness::OpenCode => "opencode",
@@ -697,7 +692,6 @@ mod tests {
             password: "secret with \"quotes\"\nand a newline".into(),
             directory: "/app/a project".into(),
             reused: true,
-            protocol: opencode::Protocol::V2,
             version: Some("2.0.8".into()),
         };
         let encoded = serde_json::to_string(&connection_json(
@@ -707,7 +701,6 @@ mod tests {
                 password: connection.password.clone(),
                 directory: connection.directory.clone(),
                 reused: true,
-                protocol: connection.protocol,
                 version: connection.version.clone(),
             }),
             "agent-id",

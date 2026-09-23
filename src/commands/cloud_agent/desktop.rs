@@ -70,10 +70,6 @@ pub struct Args {
     #[clap(long)]
     opencode: bool,
 
-    /// Deprecated alias for --opencode, from when V2 was a separate edition
-    #[clap(long, conflicts_with = "opencode", hide = true)]
-    opencode2: bool,
-
     /// Agent to point the app at, by name or id (defaults to this
     /// environment's, creating one if there is none)
     #[clap(long, value_name = "NAME_OR_ID")]
@@ -186,7 +182,7 @@ pub async fn command(args: Args) -> Result<()> {
         return code::codex_desktop_only(args.codex_launch_args(), args.codex_options()).await;
     }
     if apps.iter().any(|app| app.is_opencode()) {
-        opencode_config::preflight(opencode::Protocol::V2).await?;
+        opencode_config::preflight().await?;
     }
     if apps.contains(&App::Codex) {
         preflight_codex_desktop()?;
@@ -403,7 +399,7 @@ impl Args {
         launch.agent_id = agent_id;
         // A preceding Claude/Codex SSH pass may create the VM before the
         // OpenCode pass, so request its endpoint on the first pass too.
-        launch.code_endpoint = self.opencode || self.opencode2;
+        launch.code_endpoint = self.opencode;
         launch
     }
 
@@ -665,7 +661,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
         println!(
             "Would verify the agent's existing HTTPS address and print its connection details."
         );
-        for target in opencode_config::targets(opencode::Protocol::V2, None).await? {
+        for target in opencode_config::targets(None).await? {
             println!(
                 "Would save the authenticated server, default server, and project in {} ({}).",
                 target.name(),
@@ -716,7 +712,7 @@ fn selected_apps(args: &Args) -> Result<Vec<App>> {
     if args.codex {
         apps.push(App::Codex);
     }
-    if args.opencode || args.opencode2 {
+    if args.opencode {
         apps.push(App::OpenCode);
     }
     if apps.is_empty() {
@@ -1265,13 +1261,8 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_opencode2_alias_selects_opencode_and_is_exclusive() {
-        assert_eq!(
-            selected_apps(&args_for(&["--opencode2"])).unwrap(),
-            vec![App::OpenCode]
-        );
-        assert!(Args::try_parse_from(["desktop", "--opencode", "--opencode2"]).is_err());
-        assert!(Args::try_parse_from(["desktop", "--opencode2", "--new"]).is_ok());
+    fn the_opencode2_flag_is_gone() {
+        assert!(Args::try_parse_from(["desktop", "--opencode2"]).is_err());
     }
 
     #[test]

@@ -266,10 +266,10 @@ def opencode_threads():
             continue
         with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
             db.row_factory = sqlite3.Row
-            # One OpenCode harness. V2 keeps sessions in session_v2; a `session`
-            # table is OpenCode 1 history that V2 migrates when it next opens
-            # the store, so both are listed and the same ID is kept once.
-            for table in ("session_v2", "session"):
+            # V2 keeps sessions in session_v2. A store with only OpenCode 1's
+            # `session` table is migrated by V2 when it next opens it; until
+            # then that history is not listed.
+            for table in ("session_v2",):
                 columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 if not columns:
                     continue
@@ -293,21 +293,22 @@ def opencode_server_threads():
         return []
     if state.get("harness", "opencode") not in ("opencode", "opencode2"):
         return []
-    # Records written before `protocol` existed named V2 servers opencode2.
-    v2 = state.get("protocol", "v2" if state.get("harness") == "opencode2" else "v1") == "v2"
+    # Records written before `protocol` existed named V2 servers opencode2;
+    # an OpenCode 1 server's history is not read.
+    if state.get("protocol", "v2" if state.get("harness") == "opencode2" else "v1") != "v2":
+        return []
     harness = "opencode"
     credentials = base64.b64encode((state["username"] + ":" + state["password"]).encode()).decode()
     rows, cursor, seen = [], None, set()
     while True:
-        query = {"limit": 100, "order": "desc"} if v2 else {"directory": state["directory"]}
+        query = {"limit": 100, "order": "desc"}
         if cursor:
             query["cursor"] = cursor
-        request = urllib.request.Request(f"http://127.0.0.1:{state.get('port', 8080)}/" + ("api/" if v2 else "") +
-                                         "session?" + urllib.parse.urlencode(query),
+        request = urllib.request.Request(f"http://127.0.0.1:{state.get('port', 8080)}/api/session?" + urllib.parse.urlencode(query),
                                          headers={"Authorization": "Basic " + credentials})
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
             page = json.load(response)
-        for row in page["data"] if v2 else page:
+        for row in page["data"]:
             if row.get("parentID") or (row.get("time") or {}).get("archived"):
                 continue
             title = text(row.get("title"))
@@ -317,7 +318,7 @@ def opencode_server_threads():
                 "created_at": timestamp(row["time"]["created"]),
                 "updated_at": timestamp(row["time"]["updated"]) or "", "state": "idle",
             }})
-        cursor = (page.get("cursor") or {}).get("next") if v2 else None
+        cursor = (page.get("cursor") or {}).get("next")
         if not cursor:
             return rows
         if cursor in seen:

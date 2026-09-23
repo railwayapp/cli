@@ -587,10 +587,9 @@ impl Session {
                 client_sessions::Connection::Railway(_) => {
                     cmd.args(["--", prompt]);
                 }
-                client_sessions::Connection::OpenCode(c) if c.protocol.is_v2() => {
+                client_sessions::Connection::OpenCode(_) => {
                     cmd.args(["--prompt", prompt]);
                 }
-                _ => {}
             }
         }
         match connection {
@@ -1827,17 +1826,13 @@ assert (size.lines, size.columns) == (30, 100)
         )
         .unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for protocol in [
-            crate::commands::cloud_agent::opencode::Protocol::V1,
-            crate::commands::cloud_agent::opencode::Protocol::V2,
-        ] {
+        {
             let c = crate::commands::cloud_agent::opencode::Connection {
                 url: "https://agent.example.com".into(),
                 username: "opencode".into(),
                 password: "secret ' $(echo injected)".into(),
                 directory: "/app/a project".into(),
                 reused: true,
-                protocol,
                 version: None,
             };
             let mut pane = Session::spawn_client(
@@ -1877,7 +1872,7 @@ assert (size.lines, size.columns) == (30, 100)
             }
             assert_eq!(
                 pane.durable_name,
-                client_sessions::name(protocol.harness(), "vm", Some("ses_thread1"))
+                client_sessions::name("opencode", "vm", Some("ses_thread1"))
             );
         }
     }

@@ -273,12 +273,17 @@ railway code --opencode --name my-box
 ```
 
 OpenCode means OpenCode V2: the cloud-agent image ships the official V2
-`opencode`, and the CLI launches it directly. `--opencode2`, from when V2 was a
-separate edition, is a hidden deprecated alias for `--opencode` and prints a
-note. An agent created from an older image whose `opencode` is still 1.x is
-upgraded in place with the official installer (`https://opencode.ai/v2/install`)
-the next time an OpenCode session is launched on it; resuming a saved
-conversation on such an agent instead explains how to upgrade or recreate it.
+`opencode`, and the CLI launches it directly. OpenCode 1 is no longer
+supported, and the earlier `--opencode2` edition flag is gone. An agent created
+from an older image whose `opencode` is still 1.x cannot run OpenCode sessions;
+launching or resuming one prints
+
+```
+This cloud agent is on an older image whose OpenCode is not V2. Create a new agent with railway code --opencode --new.
+```
+
+Preferences, saved connections, and VM history recorded as `opencode2` by
+earlier CLI releases are read as OpenCode.
 
 When a compatible OpenCode Desktop installation has an existing settings file or
 desktop database, Railway automatically saves the server URL, credentials,
@@ -315,9 +320,9 @@ railway code --opencode connect
 railway code --opencode connect my-box
 ```
 
-`connect` discovers running OpenCode servers on agents you own, retaining their
-recorded protocol. Servers started before the cutover as V1 display
-**OpenCode 1 — legacy** and can be migrated with `upgrade`.
+`connect` discovers running OpenCode servers on agents you own. A server that
+an earlier CLI started as OpenCode 1 is not discovered or reconnected; create a
+new agent with `railway code --opencode --new`.
 One match connects directly; multiple matches show a `workspace/project/agent`
 picker. A name or ID targets an agent directly and can wake a saved server.
 Connecting also refreshes a compatible Desktop installation's configuration.
@@ -541,9 +546,8 @@ to stop compute, then `railway code --codex connect my-box` to wake and reconnec
 Codex currently marks its remote App Server transport experimental.
 
 Local connections enable automatic command permissions. Codex starts, resumes,
-and forks conversations with full VM access and approvals disabled. OpenCode
-uses `--auto`; a legacy V1 server has its remote permissions configured while
-preserving explicit denies. These settings also apply on reconnect. Codex records
+and forks conversations with full VM access and approvals disabled, and
+OpenCode clients run with `--auto`. These settings also apply on reconnect. Codex records
 trust for the remote project directory, including a different repository
 selected when resuming a thread.
 
@@ -695,18 +699,12 @@ of the release channel, preferring stable OpenCode (`ai.opencode.desktop`) when
 compatible. JSON server settings and SQLite renderer state are
 supported; a drafts-only database does not change where settings are saved.
 
-New servers run the image's official OpenCode V2 `opencode`. On an older image
-whose `opencode` is 1.x, or one behind the release a saved server last ran, the
-CLI upgrades it in place with the official installer before starting the server.
-Local terminal clients follow the server's recorded release and install under
+Servers run the image's official OpenCode V2 `opencode`; the CLI never
+installs or upgrades OpenCode on an agent. An older image whose `opencode` is
+1.x, or one behind the release a saved server last ran, is refused with a
+message to create a new agent with `railway code --opencode --new`. Local
+terminal clients follow the server's recorded release and install under
 `~/.railway/runtimes/opencode-client/<version>/` when needed.
-
-Reconnect retains the remote protocol and release. Use
-`railway code --opencode upgrade <agent>` to explicitly migrate an existing
-managed server. The new executable is verified before stopping the old server;
-the database, configuration, auth file, and server state are backed up before
-migration. V1 cannot reopen migrated V2 storage. Refreshing the base image does
-not upgrade existing managed servers.
 
 Use `railway ca --opencode` for a terminal session. The new-session picker
 offers one **OpenCode** option; Shift+Tab cycles harnesses.
@@ -722,10 +720,9 @@ menu → New session. Setting a default server
 does not move existing chats. OpenCode imports the active account for each provider
 from your local V2 credential database (`~/.local/share/opencode/opencode.db`,
 or `$XDG_DATA_HOME/opencode/`), preserving accounts already configured on the
-cloud agent. A V1 `auth.json` is converted when no V2 credential store exists.
+cloud agent. A machine whose local OpenCode is still V1 has no store to copy.
 Credentials are sent over SSH and the temporary transfer file is removed after
-import; V1 storage found on the agent is backed up under
-`~/.railway/runtimes/opencode/` before V2 migrates it. If there is
+import. If there is
 no local sign-in to copy, connect the provider in the remote server's settings.
 
 OpenCode uses the agent's code endpoint when available. Setup refuses to take

@@ -44,8 +44,8 @@ def resolve_binary():
                 return Path(candidate)
         except (OSError, subprocess.SubprocessError, InstallError):
             continue
-    raise InstallError("OpenCode V2 is not installed on this agent. Create a new agent with "
-                       "railway code --opencode --new, or run: curl -fsSL https://opencode.ai/v2/install | bash")
+    raise InstallError("This cloud agent is on an older image whose OpenCode is not V2. "
+                       "Create a new agent with railway code --opencode --new.")
 
 
 def credential_database():
@@ -56,30 +56,12 @@ def credential_database():
     return data / database
 
 
-def backup_v1_storage(database):
-    """OpenCode 1 storage is migrated in place the first time V2 opens it.
-    Keep a copy so a legacy server's history can be restored if needed."""
-    if not database.is_file():
-        return None
-    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if "session" not in tables or "credential" in tables:
-        return None
-    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
-    backup = STATE / f"opencode-v1-before-upgrade-{time.time_ns()}.db"
-    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as source, sqlite3.connect(backup) as target:
-        source.backup(target)
-    backup.chmod(0o600)
-    return backup
-
-
 def initialize_credentials(binary, database):
     if database.is_file():
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'").fetchone():
                 return
-    backup_v1_storage(database)
-    # Let the installed V2 perform its own migrations. A private server exits
+    # Let the installed V2 create (or migrate) its own store. A private server exits
     # with the API client; it never joins an existing background service.
     environment = dict(os.environ, OPENCODE_DISABLE_MODELS_FETCH="1")
     process = subprocess.Popen(

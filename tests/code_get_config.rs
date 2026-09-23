@@ -20,9 +20,14 @@ fn fixture(home: &Path, harness: &str, id: &str, name: &str) -> Value {
                 "config_path":"/home/user/.codex/codex-app/config.json","project_label":"My Codex Project",
                 "remote_path":"/app/my project","apply_url":"codex://codex-app/apply-config","apply_sent":true}});
     } else if harness.starts_with("opencode") {
+        // Snapshots from the CLI that still distinguished editions: `opencode2`
+        // said beta, the current CLI writes an explicit protocol.
         value["opencode"] = json!({"connection":{"url":"https://example.up.railway.app","username":"opencode",
             "password":"fixture-password","directory":"/app/my project","reused":true},
-            "beta":harness=="opencode2","desktop_configured":true});
+            "beta":true,"desktop_configured":true});
+        if harness == "opencode" {
+            value["opencode"]["protocol"] = json!("v2");
+        }
     }
     fs::create_dir_all(home.join(".railway")).unwrap();
     fs::write(
@@ -60,24 +65,21 @@ fn run(home: &Path, args: &[&str]) -> Output {
 
 fn assert_saved(mut actual: Value, historical: &Value) {
     if let Some(opencode) = actual.get_mut("opencode") {
-        let protocol = if historical["opencode"]["beta"] == true {
-            "v2"
-        } else {
-            "v1"
-        };
-        assert_eq!(opencode["protocol"], protocol);
-        assert_eq!(opencode["connection"]["protocol"], protocol);
+        // The current CLI writes the V2 classification both ways.
+        assert_eq!(opencode["protocol"], "v2");
+        assert_eq!(opencode["beta"], true);
         opencode.as_object_mut().unwrap().remove("protocol");
-        opencode["connection"]
-            .as_object_mut()
-            .unwrap()
-            .remove("protocol");
     }
+    let mut historical = historical.clone();
+    if let Some(opencode) = historical.get_mut("opencode") {
+        opencode.as_object_mut().unwrap().remove("protocol");
+    }
+    let historical = &historical;
     assert_eq!(&actual, historical);
 }
 
 #[test]
-fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
+fn replay_supports_codex_opencode_snapshots_and_generic_ssh_in_one_panel() {
     for (harness, name) in [
         ("codex", "codex-railg-3ed"),
         ("opencode", "oc-railg-3ed"),
@@ -146,8 +148,8 @@ fn replay_supports_codex_both_opencode_editions_and_generic_ssh_in_one_panel() {
                 assert!(text.contains(expected), "missing {expected}");
             }
         } else if harness.starts_with("opencode") {
-            assert_eq!(text.contains("OpenCode 1 — legacy"), harness == "opencode");
-            assert!(!text.contains("Beta"));
+            assert!(text.contains("OpenCode connection details"));
+            assert!(!text.contains("legacy") && !text.contains("Beta"));
             assert!(
                 text.contains("fixture-password") && text.contains("Desktop configuration updated")
             );
@@ -255,4 +257,34 @@ fn empty_corrupt_and_future_snapshots_are_read_only_errors() {
         assert!(!output.status.success() && output.stdout.is_empty());
         assert_eq!(fs::read(&path).unwrap(), contents);
     }
+}
+
+#[test]
+fn saved_opencode_1_servers_are_shown_as_plain_ssh_connections() {
+    let home = tempfile::tempdir().unwrap();
+    let mut value = fixture(home.path(), "opencode", "agent-123", "oc-railg-3ed");
+    // What the CLI wrote for an OpenCode 1 server: no protocol, beta false.
+    value["opencode"]
+        .as_object_mut()
+        .unwrap()
+        .remove("protocol");
+    value["opencode"]["beta"] = json!(false);
+    fs::write(
+        home.path().join(".railway/last-code-config.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    let output = run(home.path(), &["oc-railg-3ed"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.contains("fixture-password"));
+    assert!(text.contains("Railway Cloud Agent SSH Configuration:"));
+    let json = run(home.path(), &["--json"]);
+    let saved: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(saved.get("opencode").is_none());
+    assert_eq!(saved["harness"], "opencode");
 }

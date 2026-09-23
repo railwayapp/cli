@@ -45,7 +45,7 @@ class CredentialTests(unittest.TestCase):
     def apply(self):
         shim.import_credentials(Path('unused-runtime'), self.pending, self.database)
 
-    def test_v1_storage_is_backed_up_before_v2_migrates_it(self):
+    def test_a_v1_only_store_is_left_for_v2_to_migrate_before_import(self):
         with sqlite3.connect(self.database) as db:
             db.execute('DROP TABLE credential')
         binary = self.root / 'opencode'
@@ -59,15 +59,11 @@ with sqlite3.connect(os.environ['OPENCODE_DB']) as db:
 ''')
         binary.chmod(0o700)
         self.stage(credential())
-        with patch.dict(os.environ, {'OPENCODE_DB': str(self.database)}), patch.object(shim, 'STATE', self.root / 'state'):
+        with patch.dict(os.environ, {'OPENCODE_DB': str(self.database)}):
             shim.import_credentials(binary, self.pending, self.database)
-        backups = list((self.root / 'state').glob('opencode-v1-before-upgrade-*.db'))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
-        with sqlite3.connect(backups[0]) as db:
-            self.assertEqual(db.execute('SELECT value FROM session').fetchone()[0], 'private remote session')
         with sqlite3.connect(self.database) as db:
             self.assertEqual(db.execute('SELECT integration_id FROM credential').fetchall(), [('openai',)])
+        self.assertFalse(list(self.root.glob('**/opencode-v1-before-upgrade-*.db')))
         self.assertFalse(self.pending.exists())
 
     def test_binary_resolution_requires_the_image_v2_runtime(self):
@@ -77,7 +73,7 @@ with sqlite3.connect(os.environ['OPENCODE_DB']) as db:
         binary.write_text('#!/bin/sh\necho "opencode v1.18.29"\n')
         binary.chmod(0o700)
         with patch.object(shim.Path, 'home', return_value=home), patch.object(shim.shutil, 'which', return_value=None):
-            with self.assertRaisesRegex(shim.InstallError, 'opencode.ai/v2/install'):
+            with self.assertRaisesRegex(shim.InstallError, 'older image'):
                 shim.resolve_binary()
             binary.write_text('#!/bin/sh\necho "opencode v2.0.15"\n')
             self.assertEqual(shim.resolve_binary(), binary)

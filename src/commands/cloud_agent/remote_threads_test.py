@@ -177,19 +177,19 @@ class DiscoveryTest(unittest.TestCase):
         with closing(sqlite3.connect(database)) as db, db:
             for table in ("session", "session_v2"):
                 db.execute(f"CREATE TABLE {table} (id TEXT, title TEXT, directory TEXT, parent_id TEXT, time_created INT, time_updated INT, time_archived INT)")
-                db.executemany(f"INSERT INTO {table} VALUES (?,?,?,?,?,?,?)", [
-                    ("saved", "Sacramento weather", "/app/weather", None, 1000, 2000, None),
-                    ("draft", "New session - 2026-09-10", "/app", None, 1000, 1000, None),
-                    ("child", "Subagent", "/app", "saved", 1000, 2000, None),
-                    ("archived", "Hidden", "/app", None, 1000, 2000, 3000),
-                ])
+            # OpenCode 1 rows in `session` are not listed; V2 migrates them.
+            db.execute("INSERT INTO session VALUES ('v1-only', 'Old', '/app', NULL, 1, 1, NULL)")
+            db.executemany("INSERT INTO session_v2 VALUES (?,?,?,?,?,?,?)", [
+                ("saved", "Sacramento weather", "/app/weather", None, 1000, 2000, None),
+                ("draft", "New session - 2026-09-10", "/app", None, 1000, 1000, None),
+                ("child", "Subagent", "/app", "saved", 1000, 2000, None),
+                ("archived", "Hidden", "/app", None, 1000, 2000, 3000),
+            ])
         before = database.read_bytes()
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root), "OPENCODE_DB": ""}):
             rows = threads.opencode_threads()
         self.assertEqual(database.read_bytes(), before)
-        # The same ID in V1 and V2 tables is one conversation (V2 migrates V1
-        # history in place); discover() keeps the newest of duplicates.
-        self.assertEqual(len(rows), 4)
+        self.assertEqual([row["thread"]["id"] for row in rows], ["saved", "draft"])
         self.assertEqual({row["harness"] for row in rows}, {"opencode"})
         for row in rows:
             self.assertEqual(row["database"], str(database))

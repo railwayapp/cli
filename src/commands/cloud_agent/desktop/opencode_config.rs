@@ -8,6 +8,8 @@
 //! https://github.com/anomalyco/opencode-beta/releases/tag/v0.0.0-beta-19289
 //! Stable 2.0.8's packaged registry/store modules retain the same server record
 //! and SQLite state schema, under ai.opencode.desktop (verified 2026-09-18).
+//! Only a Desktop whose bundled client is V2 is configured; the Beta channel
+//! is still detected for users who have that app installed.
 
 use std::fs;
 use std::io::Write;
@@ -17,7 +19,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection as Database, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value, json};
 
-use super::opencode::{Connection, Protocol, local};
+use super::opencode::{Connection, local};
 
 const SETTINGS: &str = "opencode.settings";
 const GLOBAL: &str = "opencode.global.dat";
@@ -76,14 +78,14 @@ fn target_at(base: &Path, beta: bool) -> Target {
     }
 }
 
-pub(super) async fn targets(protocol: Protocol, version: Option<&str>) -> Result<Vec<Target>> {
+pub(super) async fn targets(version: Option<&str>) -> Result<Vec<Target>> {
     let base = dirs::config_dir()
         .context("Unable to locate OpenCode Desktop's configuration directory")?;
     #[cfg(not(windows))]
     let home = dirs::home_dir().context("Unable to locate the home directory")?;
     let mut result = Vec::new();
-    // A channel name is not a protocol: stable Desktop can be V1 or V2.
-    // Verify its bundled client before writing credentials to that app's store.
+    // A channel name says nothing about the bundled client's release. Verify
+    // it is V2 before writing credentials to that app's store.
     for channel in [Channel::Standard, Channel::Beta] {
         let mut candidates = Vec::<PathBuf>::new();
         #[cfg(target_os = "macos")]
@@ -129,12 +131,12 @@ pub(super) async fn targets(protocol: Protocol, version: Option<&str>) -> Result
                     continue;
                 }
             }
-            if local::compatible(&binary, protocol, version).await {
+            if local::compatible(&binary, version).await {
                 result.push(target_at(&base, channel == Channel::Beta));
                 break;
             }
         }
-        // Prefer the stable application when both channels support this protocol.
+        // Prefer the stable application when both channels bundle a V2 client.
         if !result.is_empty() {
             break;
         }
@@ -374,8 +376,8 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
 }
 
 /// Catch unsupported stores before provisioning.
-pub(super) async fn preflight(protocol: Protocol) -> Result<()> {
-    let targets = targets(protocol, None).await?;
+pub(super) async fn preflight() -> Result<()> {
+    let targets = targets(None).await?;
     if targets.is_empty() {
         bail!(
             "No compatible OpenCode Desktop installation was found. Install the matching Desktop release, then retry."
@@ -396,7 +398,7 @@ pub(crate) async fn configure_installed(
     agent_name: &str,
 ) -> Result<bool> {
     let mut configured = false;
-    for target in targets(connection.protocol, connection.version.as_deref()).await? {
+    for target in targets(connection.version.as_deref()).await? {
         configured |= configure_installed_target(&target, connection, agent_id, agent_name).await?;
     }
     Ok(configured)
@@ -422,11 +424,15 @@ pub(super) async fn configure(
     agent_id: &str,
     agent_name: &str,
 ) -> Result<()> {
-    let targets = targets(connection.protocol, connection.version.as_deref()).await?;
+    let targets = targets(connection.version.as_deref()).await?;
     if targets.is_empty() {
         bail!(
-            "No Desktop app compatible with {} was found",
-            connection.protocol.label()
+            "No OpenCode Desktop app compatible with the agent's server{} was found",
+            connection
+                .version
+                .as_deref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default()
         );
     }
     for target in targets {
@@ -479,7 +485,6 @@ mod tests {
             password: "secret".into(),
             directory: "/app".into(),
             reused: false,
-            protocol: Protocol::V2,
             version: Some("2.0.8".into()),
         }
     }

@@ -65,7 +65,7 @@ impl Connection {
     pub(crate) fn harness(&self) -> &'static str {
         match self {
             Self::Codex(_) => "codex",
-            Self::OpenCode(c) => c.protocol.harness(),
+            Self::OpenCode(_) => "opencode",
             Self::Railway(_) => "railway",
         }
     }
@@ -140,21 +140,16 @@ impl Connection {
             Self::OpenCode(c) => {
                 let mut cursor = None::<String>;
                 loop {
-                    let mut query = Vec::new();
-                    if c.protocol.is_v2() {
-                        query.extend([("limit", "100".into()), ("order", "desc".into())]);
-                    }
+                    let mut query = vec![("limit", "100".into()), ("order", "desc".into())];
                     if let Some(cursor) = &cursor {
                         query.push(("cursor", cursor.clone()));
                     }
                     let page =
                         opencode_request(c, reqwest::Method::GET, "session", &query, None).await?;
-                    let data = if c.protocol.is_v2() {
-                        &page["data"]
-                    } else {
-                        &page
-                    };
-                    for row in data.as_array().context("Invalid OpenCode session list")? {
+                    for row in page["data"]
+                        .as_array()
+                        .context("Invalid OpenCode session list")?
+                    {
                         if row["parentID"].as_str().is_some_and(|id| !id.is_empty())
                             || row["time"]["archived"]
                                 .as_i64()
@@ -165,7 +160,7 @@ impl Connection {
                         rows.push(parse_opencode(row, &c.directory)?);
                     }
                     let next = page["cursor"]["next"].as_str().map(str::to_owned);
-                    if !c.protocol.is_v2() || next.is_none() {
+                    if next.is_none() {
                         break;
                     }
                     if next == cursor {
@@ -198,14 +193,7 @@ impl Connection {
                 let result =
                     opencode_request(c, reqwest::Method::GET, &format!("session/{id}"), &[], None)
                         .await?;
-                parse_opencode(
-                    if c.protocol.is_v2() {
-                        &result["data"]
-                    } else {
-                        &result
-                    },
-                    &c.directory,
-                )
+                parse_opencode(&result["data"], &c.directory)
             }
         }
     }
@@ -252,44 +240,12 @@ impl Connection {
         match self {
             Self::Codex(_) | Self::Railway(_) => Ok(None),
             Self::OpenCode(c) => {
-                let body = if c.protocol.is_v2() {
-                    json!({"location": {"directory": c.directory}})
-                } else {
-                    json!({})
-                };
+                let body = json!({"location": {"directory": c.directory}});
                 let result =
                     opencode_request(c, reqwest::Method::POST, "session", &[], Some(body)).await?;
-                Ok(Some(parse_opencode(
-                    if c.protocol.is_v2() {
-                        &result["data"]
-                    } else {
-                        &result
-                    },
-                    &c.directory,
-                )?))
+                Ok(Some(parse_opencode(&result["data"], &c.directory)?))
             }
         }
-    }
-
-    pub(crate) async fn initial_prompt(
-        &self,
-        thread: Option<&Thread>,
-        prompt: Option<String>,
-    ) -> Result<Option<String>> {
-        if let (Self::OpenCode(c), Some(thread), Some(prompt)) = (self, thread, &prompt)
-            && !c.protocol.is_v2()
-        {
-            opencode_request(
-                c,
-                reqwest::Method::POST,
-                &format!("session/{}/prompt_async", thread.id),
-                &[],
-                Some(json!({"parts": [{"type": "text", "text": prompt}]})),
-            )
-            .await?;
-            return Ok(None);
-        }
-        Ok(prompt)
     }
 }
 
@@ -383,10 +339,7 @@ async fn opencode_request(
     body: Option<Value>,
 ) -> Result<Value> {
     let deleting = method == reqwest::Method::DELETE;
-    let url = opencode::validate_url(&c.url)?.join(&format!(
-        "{}{path}",
-        if c.protocol.is_v2() { "api/" } else { "" }
-    ))?;
+    let url = opencode::validate_url(&c.url)?.join(&format!("api/{path}"))?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
@@ -395,9 +348,6 @@ async fn opencode_request(
         .request(method, url)
         .basic_auth(&c.username, Some(&c.password))
         .query(query);
-    if !c.protocol.is_v2() {
-        request = request.query(&[("directory", &c.directory)]);
-    }
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -434,14 +384,6 @@ mod tests {
         });
         let prompt = "Fix the startup error";
         assert!(connection.new_thread(Some(prompt)).await.unwrap().is_none());
-        assert_eq!(
-            connection
-                .initial_prompt(None, Some(prompt.into()))
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(prompt)
-        );
         for thread in [None, Some("thread-123")] {
             let args = connection.args(thread);
             for forbidden in [
@@ -465,35 +407,31 @@ mod tests {
 
     #[tokio::test]
     async fn deletion_rejects_non_native_ids_before_connecting() {
-        for protocol in [opencode::Protocol::V1, opencode::Protocol::V2] {
-            for id in ["", "../neighbor", "id?all=true", "~draft", "id/child"] {
-                let connection = Connection::OpenCode(opencode::Connection {
-                    url: "https://backend.invalid".into(),
-                    username: "opencode".into(),
-                    password: "secret".into(),
-                    directory: "/app/project".into(),
-                    reused: true,
-                    protocol,
-                    version: None,
-                });
-                assert_eq!(
-                    connection.delete_thread(id).await.unwrap_err().to_string(),
-                    "Invalid conversation ID"
-                );
-            }
+        for id in ["", "../neighbor", "id?all=true", "~draft", "id/child"] {
+            let connection = Connection::OpenCode(opencode::Connection {
+                url: "https://backend.invalid".into(),
+                username: "opencode".into(),
+                password: "secret".into(),
+                directory: "/app/project".into(),
+                reused: true,
+                version: None,
+            });
+            assert_eq!(
+                connection.delete_thread(id).await.unwrap_err().to_string(),
+                "Invalid conversation ID"
+            );
         }
     }
 
     #[tokio::test]
     async fn bare_opencode_launch_opens_home_without_creating_a_session() {
-        for protocol in [opencode::Protocol::V1, opencode::Protocol::V2] {
+        {
             let connection = super::Connection::OpenCode(super::opencode::Connection {
                 url: "http://127.0.0.1:1".into(),
                 username: "opencode".into(),
                 password: "secret".into(),
                 directory: "/app".into(),
                 reused: false,
-                protocol,
                 version: None,
             });
             for prompt in [None, Some(" \n ")] {
