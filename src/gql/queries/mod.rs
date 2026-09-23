@@ -576,3 +576,37 @@ pub struct VolumeInstanceBackupScheduleList;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct CloudAgentHarnessEndpoint;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/TracingSettings.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TracingSettings;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/TracingStatus.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TracingStatus;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Traces.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Traces;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Trace.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Trace;

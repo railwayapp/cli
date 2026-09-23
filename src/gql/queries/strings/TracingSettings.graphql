@@ -1,0 +1,18 @@
+query TracingSettings($projectId: String!) {
+  project(id: $projectId) {
+    id
+    name
+    tracingEnabled
+    tracingSampleRate
+    services {
+      edges {
+        node {
+          id
+          name
+          tracingEnabled
+          autoInstrumentationEnabled
+        }
+      }
+    }
+  }
+}
