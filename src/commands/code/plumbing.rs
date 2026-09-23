@@ -93,9 +93,9 @@ mod tests {
     }
 
     #[test]
-    fn beta_provisioning_keeps_the_ssh_command_small() {
+    fn opencode_provisioning_keeps_the_ssh_command_small() {
         let script = super::super::provision_script_with_skills(
-            super::super::Agent::OpenCode2,
+            super::super::Agent::OpenCode,
             Some(42),
             true,
             "deadbeef",

@@ -1609,7 +1609,7 @@ fn render_harness_pick(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                 "grok" => "Grok Build",
                 "codex" => "ChatGPT Codex",
                 "claude" => "Claude Code",
-                "opencode" => "OpenCode",
+                "opencode" | "opencode2" => "OpenCode",
                 "shell" => "Shell",
                 other => other,
             };

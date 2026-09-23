@@ -112,24 +112,16 @@ impl State {
     fn event(&self, value: &serde_json::Value) {
         let mut selected = self.selected.lock().unwrap();
         if let Some(thread) = selected.as_mut()
-            && update_thread(thread, value, self.connection.protocol)
+            && update_thread(thread, value)
         {
             (self.notify)(thread.clone());
         }
     }
 }
 
-fn update_thread(
-    thread: &mut Thread,
-    value: &serde_json::Value,
-    protocol: super::Protocol,
-) -> bool {
+fn update_thread(thread: &mut Thread, value: &serde_json::Value) -> bool {
     let value = value.get("payload").unwrap_or(value);
-    let data = &value[if protocol.is_v2() {
-        "data"
-    } else {
-        "properties"
-    }];
+    let data = &value["data"];
     let id = data["sessionID"]
         .as_str()
         .or_else(|| data["info"]["id"].as_str());
@@ -137,18 +129,11 @@ fn update_thread(
         return false;
     }
     match value["type"].as_str() {
-        Some("session.renamed") if protocol.is_v2() => {
+        Some("session.renamed") => {
             let Some(title) = data["title"].as_str() else {
                 return false;
             };
             thread.title = client_sessions::title(Some(title), &thread.title);
-        }
-        Some("session.updated") if !protocol.is_v2() => {
-            let Ok(info) = client_sessions::parse_opencode(&data["info"], &thread.directory) else {
-                return false;
-            };
-            thread.title = info.title;
-            thread.updated_at = info.updated_at;
         }
         Some("session.status") => {
             thread.state = match data["status"]["type"].as_str() {
@@ -158,22 +143,18 @@ fn update_thread(
             }
             .into();
         }
-        Some("session.execution.started") if protocol.is_v2() => thread.state = "working".into(),
-        Some("session.execution.succeeded" | "session.execution.interrupted")
-            if protocol.is_v2() =>
-        {
+        Some("session.execution.started") => thread.state = "working".into(),
+        Some("session.execution.succeeded" | "session.execution.interrupted") => {
             thread.state = "idle".into()
         }
-        Some("session.execution.failed") if protocol.is_v2() => thread.state = "failed".into(),
+        Some("session.execution.failed") => thread.state = "failed".into(),
         _ => return false,
     }
-    if protocol.is_v2() {
-        thread.updated_at = value["created"]
-            .as_i64()
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc3339();
-    }
+    thread.updated_at = value["created"]
+        .as_i64()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339();
     true
 }
 
@@ -228,12 +209,8 @@ fn response(status: StatusCode, text: &'static str) -> Response<Body> {
 }
 
 /// An empty ID means the create/fork response supplies the newly selected ID.
-fn selection(method: &str, path: &str, protocol: super::Protocol) -> Option<String> {
-    let path = path.strip_prefix(if protocol.is_v2() {
-        "/api/session"
-    } else {
-        "/session"
-    })?;
+fn selection(method: &str, path: &str) -> Option<String> {
+    let path = path.strip_prefix("/api/session")?;
     if path.is_empty() && method == "POST" {
         return Some(String::new());
     }
@@ -242,13 +219,12 @@ fn selection(method: &str, path: &str, protocol: super::Protocol) -> Option<Stri
     if method == "POST" && action == "fork" {
         return Some(String::new());
     }
-    ((method == "POST"
+    (method == "POST"
         && matches!(
             action,
             "view" | "prompt" | "prompt_async" | "command" | "shell"
         ))
-        || (!protocol.is_v2() && method == "GET" && action == "message"))
-        .then(|| id.into())
+    .then(|| id.into())
 }
 
 async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Response<Body>> {
@@ -273,11 +249,7 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
     if !authorized && !upgrade {
         return Ok(response(StatusCode::UNAUTHORIZED, "Unauthorized"));
     }
-    let selected = selection(
-        request.method().as_str(),
-        request.uri().path(),
-        state.connection.protocol,
-    );
+    let selected = selection(request.method().as_str(), request.uri().path());
     let sequence = selected
         .as_ref()
         .map(|_| state.sequence.fetch_add(1, Ordering::SeqCst) + 1);
@@ -334,14 +306,8 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
             // Create/fork replies are metadata only; no transcript is parsed.
             let bytes = remote.bytes().await?;
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                && let Ok(thread) = client_sessions::parse_opencode(
-                    if state.connection.protocol.is_v2() {
-                        &value["data"]
-                    } else {
-                        &value
-                    },
-                    &state.connection.directory,
-                )
+                && let Ok(thread) =
+                    client_sessions::parse_opencode(&value["data"], &state.connection.directory)
                 && sequence == Some(state.sequence.load(Ordering::SeqCst))
             {
                 state.select(thread);
@@ -361,32 +327,17 @@ async fn relay(mut request: Request<Incoming>, state: Arc<State>) -> Result<Resp
             tokio::spawn(async move {
                 let metadata = async {
                     let url = format!(
-                        "{}{}/session/{id}",
-                        state.connection.url.trim_end_matches('/'),
-                        if state.connection.protocol.is_v2() {
-                            "/api"
-                        } else {
-                            ""
-                        }
+                        "{}/api/session/{id}",
+                        state.connection.url.trim_end_matches('/')
                     );
-                    let mut request = state
+                    let request = state
                         .client
                         .get(url)
                         .basic_auth(&state.connection.username, Some(&state.connection.password))
                         .timeout(Duration::from_secs(10));
-                    if !state.connection.protocol.is_v2() {
-                        request = request.query(&[("directory", &state.connection.directory)]);
-                    }
                     let value: serde_json::Value =
                         request.send().await?.error_for_status()?.json().await?;
-                    client_sessions::parse_opencode(
-                        if state.connection.protocol.is_v2() {
-                            &value["data"]
-                        } else {
-                            &value
-                        },
-                        &state.connection.directory,
-                    )
+                    client_sessions::parse_opencode(&value["data"], &state.connection.directory)
                 };
                 if let Ok(thread) = metadata.await
                     && sequence == Some(state.sequence.load(Ordering::SeqCst))
@@ -417,75 +368,62 @@ mod tests {
     use super::*;
     #[test]
     fn streamed_titles_and_status_only_update_the_selected_conversation() {
-        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
-            let beta = protocol.is_v2();
-            let mut thread = client_sessions::parse_opencode(
-                &serde_json::json!({"id":"ses_exact","title":"New Thread"}),
-                "/app",
-            )
-            .unwrap();
-            let value = if beta {
-                serde_json::json!({"type":"session.renamed","data":{"sessionID":"ses_exact","title":"Weather 🌧"}})
-            } else {
-                serde_json::json!({"type":"session.updated","properties":{"info":{"id":"ses_exact","title":"Weather 🌧"}}})
-            };
-            let mut events = Events::default();
-            let wire = format!("data: {value}\r\n\r\n");
-            let mut seen = 0;
-            for byte in wire.as_bytes() {
-                events.feed(&[*byte], |event| {
-                    assert!(update_thread(&mut thread, &event, protocol));
-                    seen += 1;
-                });
-            }
-            assert_eq!(seen, 1);
-            assert_eq!(thread.title, "Weather 🌧");
-            let key = if beta { "data" } else { "properties" };
-            assert!(!update_thread(
-                &mut thread,
-                &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_other","status":{"type":"busy"}}}),
-                protocol
-            ));
-            assert!(update_thread(
-                &mut thread,
-                &serde_json::json!({"type":"session.status",key:{"sessionID":"ses_exact","status":{"type":"busy"}}}),
-                protocol
-            ));
-            assert_eq!(thread.state, "working");
-            assert_eq!(thread.id, "ses_exact");
+        let mut thread = client_sessions::parse_opencode(
+            &serde_json::json!({"id":"ses_exact","title":"New Thread"}),
+            "/app",
+        )
+        .unwrap();
+        let value = serde_json::json!({"type":"session.renamed","data":{"sessionID":"ses_exact","title":"Weather 🌧"}});
+        let mut events = Events::default();
+        let wire = format!("data: {value}\r\n\r\n");
+        let mut seen = 0;
+        for byte in wire.as_bytes() {
+            events.feed(&[*byte], |event| {
+                assert!(update_thread(&mut thread, &event));
+                seen += 1;
+            });
         }
+        assert_eq!(seen, 1);
+        assert_eq!(thread.title, "Weather 🌧");
+        assert!(!update_thread(
+            &mut thread,
+            &serde_json::json!({"type":"session.status","data":{"sessionID":"ses_other","status":{"type":"busy"}}}),
+        ));
+        assert!(update_thread(
+            &mut thread,
+            &serde_json::json!({"type":"session.status","data":{"sessionID":"ses_exact","status":{"type":"busy"}}}),
+        ));
+        assert_eq!(thread.state, "working");
+        assert_eq!(thread.id, "ses_exact");
+        // V1's event shape is not recognized.
+        assert!(!update_thread(
+            &mut thread,
+            &serde_json::json!({"type":"session.updated","properties":{"info":{"id":"ses_exact","title":"Old"}}}),
+        ));
     }
 
     #[test]
     fn browsing_and_background_events_do_not_select_a_thread() {
-        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
-            let beta = protocol.is_v2();
-            let root = if beta { "/api/session" } else { "/session" };
-            assert_eq!(selection("GET", root, protocol), None);
-            assert_eq!(selection("POST", root, protocol), Some(String::new()));
-            assert_eq!(
-                selection("POST", &format!("{root}/ses_selected/prompt"), protocol),
-                Some("ses_selected".into())
-            );
-            assert_eq!(
-                selection("POST", &format!("{root}/ses_other/rename"), protocol),
-                None
-            );
-            assert_eq!(
-                selection("GET", &format!("{root}/ses_other"), protocol),
-                None
-            );
-            assert_eq!(
-                selection("POST", &format!("{root}/ses_selected/fork"), protocol),
-                Some(String::new())
-            );
-        }
+        let root = "/api/session";
+        assert_eq!(selection("GET", root), None);
+        assert_eq!(selection("POST", root), Some(String::new()));
+        assert_eq!(
+            selection("POST", &format!("{root}/ses_selected/prompt")),
+            Some("ses_selected".into())
+        );
+        assert_eq!(selection("POST", &format!("{root}/ses_other/rename")), None);
+        assert_eq!(selection("GET", &format!("{root}/ses_other")), None);
+        assert_eq!(
+            selection("POST", &format!("{root}/ses_selected/fork")),
+            Some(String::new())
+        );
+        // V1 paths are not proxied selections.
+        assert_eq!(selection("POST", "/session"), None);
     }
 
     #[tokio::test]
     async fn bridge_preserves_auth_streaming_and_exact_created_thread_identity() {
-        for protocol in [super::super::Protocol::V1, super::super::Protocol::V2] {
-            let beta = protocol.is_v2();
+        {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -506,8 +444,7 @@ mod tests {
                             } else if parts.method == "POST" {
                                 assert_eq!(payload, "{\"title\":\"test\"}");
                                 let info = serde_json::json!({"id":"ses_exact", "title":"Generated title", "directory":"/app", "time":{"created":1000,"updated":2000}});
-                                let value = if beta { serde_json::json!({"data":info}) } else { info };
-                                Response::new(body(value.to_string()))
+                                Response::new(body(serde_json::json!({"data":info}).to_string()))
                             } else { Response::new(body("[]")) };
                             Ok::<_, Infallible>(reply)
                         });
@@ -523,7 +460,6 @@ mod tests {
                     password: "pass".into(),
                     directory: "/app".into(),
                     reused: true,
-                    protocol,
                     version: None,
                 },
                 move |thread| {
@@ -532,7 +468,7 @@ mod tests {
             )
             .unwrap();
             let client = reqwest::Client::new();
-            let endpoint = format!("{}{}session", bridge.url, if beta { "/api/" } else { "/" });
+            let endpoint = format!("{}/api/session", bridge.url);
             assert_eq!(
                 client.get(&endpoint).send().await.unwrap().status(),
                 StatusCode::UNAUTHORIZED

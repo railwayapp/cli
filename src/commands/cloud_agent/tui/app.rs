@@ -251,7 +251,7 @@ impl ConsoleSession {
                 .unwrap_or_else(|| super::super::client_sessions::NEW_THREAD.into());
         }
         match self.harness_slug() {
-            Some("opencode2") if self.name.starts_with("opencode2-") => {
+            Some("opencode") if self.name.starts_with("opencode2-") => {
                 self.name.replacen("opencode2-", "opencode-", 1)
             }
             Some(slug) if !self.name.starts_with(&format!("{slug}-")) => {
@@ -260,12 +260,7 @@ impl ConsoleSession {
                     [.., suffix] if segments.len() >= 3 => suffix,
                     _ => self.name.as_str(),
                 };
-                let label = if slug == "opencode2" {
-                    "opencode"
-                } else {
-                    slug
-                };
-                format!("{label}-{short}")
+                format!("{slug}-{short}")
             }
             _ => self.name.clone(),
         }
@@ -321,8 +316,8 @@ impl ConsoleSession {
             "railway-agent-tui" | "railway-agent" => Some("railway"),
             "claude" => Some("claude"),
             "codex" => Some("codex"),
-            "opencode" => Some("opencode"),
-            "opencode2" => Some("opencode2"),
+            // `opencode2` launch lines predate the single OpenCode harness.
+            "opencode" | "opencode2" => Some("opencode"),
             "grok" => Some("grok"),
             _ => None,
         }

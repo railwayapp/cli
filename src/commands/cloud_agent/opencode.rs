@@ -16,13 +16,35 @@ use tokio::io::AsyncWriteExt;
 
 use crate::util::shell::shell_join;
 
+pub(crate) mod auth;
 pub(crate) mod bridge;
 pub(crate) mod local;
-mod protocol;
-pub(crate) use protocol::Protocol;
 
 const BOOTSTRAP: &str = include_str!("opencode.py");
+const IMPORT_AUTH: &str = include_str!("opencode/import_auth.py");
 const RESULT_PREFIX: &str = "RAILWAY_OPENCODE_CONNECTION=";
+
+/// What a session on an agent whose `opencode` is not V2 prints before
+/// exiting. The CLI never installs or upgrades OpenCode on a VM: the image
+/// ships it, so an old image is recreated rather than patched.
+pub(crate) const OLD_IMAGE_MESSAGE: &str = "This cloud agent is on an older image whose OpenCode is not V2. Create a new agent with railway code --opencode --new.";
+
+/// Runtime seed for terminal launches: the image's `opencode` is the V2
+/// runtime. Verify that before anything touches OpenCode's storage, retire
+/// the shim earlier releases seeded as `~/.local/bin/opencode2`, then import
+/// staged provider credentials into V2's store.
+pub(crate) fn seed_script() -> String {
+    format!(
+        r#"mkdir -p ~/.railway/runtimes/opencode
+case "$(opencode --version 2>/dev/null </dev/null)" in 2.*|'opencode v2.'*) ;; *) printf '%s\n' '{OLD_IMAGE_MESSAGE}' >&2; exit 1;; esac
+if [ -e ~/.local/bin/opencode2 ] && grep -q 'railway/runtimes/opencode2' ~/.local/bin/opencode2 2>/dev/null; then rm -f ~/.local/bin/opencode2; fi
+rm -rf ~/.railway/runtimes/opencode2
+printf '%s' {importer} > ~/.railway/runtimes/opencode/import_auth.py
+chmod 700 ~/.railway/runtimes/opencode/import_auth.py
+python3 ~/.railway/runtimes/opencode/import_auth.py || exit 1"#,
+        importer = shell_join(&[IMPORT_AUTH.to_string()])
+    )
+}
 
 // Deliberately no Debug: this value contains the server password.
 #[derive(Clone, Deserialize, Serialize)]
@@ -32,8 +54,6 @@ pub(crate) struct Connection {
     pub password: String,
     pub directory: String,
     pub reused: bool,
-    #[serde(default)]
-    pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -45,10 +65,9 @@ pub(crate) fn show_connection(
     name: &str,
     desktop_configured: bool,
 ) -> Result<()> {
-    let edition = connection.protocol.label();
     let divider = "─".repeat(64).cyan();
     println!("\n{divider}");
-    println!("{}", format!("{edition} server on {name}").cyan().bold());
+    println!("{}", format!("OpenCode server on {name}").cyan().bold());
     show_server_config(connection, name);
     println!("\n{}", "Connect with the Railway CLI:".bold());
     println!("  {}", railway_connect_command(name));
@@ -61,11 +80,7 @@ pub(crate) fn show_connection(
 
 /// The server fields, without a surrounding panel or connection commands.
 pub(crate) fn show_server_config(connection: &Connection, name: &str) {
-    let edition = connection.protocol.label();
-    println!(
-        "\n{}",
-        format!("Railway {edition} Server Configuration:").bold()
-    );
+    println!("\n{}", "Railway OpenCode Server Configuration:".bold());
     println!("  {}      {name}", "Name:".bold());
     println!("  {}    {}", "Server:".bold(), connection.url);
     println!("  {}  {}", "Username:".bold(), connection.username);
@@ -119,14 +134,11 @@ async fn bootstrap(
     stdin.write_all(&payload).await?;
     drop(stdin);
     let output = tokio::time::timeout(
-        Duration::from_secs(if request["action"] == "inspect" {
-            15
-        } else if request["protocol"] == "v2"
-            || matches!(request["action"].as_str(), Some("connect" | "upgrade"))
-        {
-            660
-        } else {
-            90
+        Duration::from_secs(match request["action"].as_str() {
+            Some("inspect") => 15,
+            Some("stop") => 90,
+            // A first V2 start on a cold VM can take minutes.
+            _ => 660,
         }),
         child.wait_with_output(),
     )
@@ -184,30 +196,28 @@ pub(crate) async fn start_prepared(
 }
 
 async fn verify_client_directory(connection: &Connection) -> Result<()> {
-    if connection.protocol.is_v2() {
-        // V2's positional directory performs a local chdir, even with
-        // --server. Its remote client uses the server's default location.
-        let location: serde_json::Value = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5))
-            .build()?
-            .get(format!("{}/api/location", connection.url))
-            .basic_auth(&connection.username, Some(&connection.password))
-            .send()
-            .await
-            .context("Checking OpenCode's remote project directory")?
-            .error_for_status()?
-            .json()
-            .await?;
-        let actual = location["directory"]
-            .as_str()
-            .context("OpenCode returned no remote project directory")?;
-        if actual != connection.directory {
-            bail!(
-                "OpenCode is already serving {actual}. Reconnect with --dir {actual}, or use --new to serve {} on a fresh agent.",
-                connection.directory
-            );
-        }
+    // V2's positional directory performs a local chdir, even with --server.
+    // Its remote client uses the server's default location.
+    let location: serde_json::Value = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?
+        .get(format!("{}/api/location", connection.url))
+        .basic_auth(&connection.username, Some(&connection.password))
+        .send()
+        .await
+        .context("Checking OpenCode's remote project directory")?
+        .error_for_status()?
+        .json()
+        .await?;
+    let actual = location["directory"]
+        .as_str()
+        .context("OpenCode returned no remote project directory")?;
+    if actual != connection.directory {
+        bail!(
+            "OpenCode is already serving {actual}. Reconnect with --dir {actual}, or use --new to serve {} on a fresh agent.",
+            connection.directory
+        );
     }
     Ok(())
 }
@@ -217,8 +227,7 @@ async fn start_with(
     directory: &str,
     password: &str,
 ) -> Result<Connection> {
-    let request = json!({ "directory": directory, "password": password, "protocol": Protocol::V2,
-        "runtime_shim": super::opencode2::SHIM });
+    let request = json!({ "directory": directory, "password": password });
     let response = bootstrap(command, request).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
@@ -243,22 +252,12 @@ pub(crate) async fn stop(alias: &str, ssh_config: &Path) -> Result<()> {
 
 /// Arguments passed to the local client when Railway launches it.
 pub(crate) fn attach_args(connection: &Connection) -> Vec<String> {
-    if connection.protocol.is_v2() {
-        vec!["--server".into(), connection.url.clone(), "--auto".into()]
-    } else {
-        vec![
-            "attach".into(),
-            connection.url.clone(),
-            "--dir".into(),
-            connection.directory.clone(),
-        ]
-    }
+    vec!["--server".into(), connection.url.clone(), "--auto".into()]
 }
 
 #[derive(Deserialize)]
 pub(crate) struct ServerInfo {
     pub directory: String,
-    pub protocol: Protocol,
 }
 
 fn relay_command(info: &crate::commands::code::ConnectInfo) -> tokio::process::Command {
@@ -281,21 +280,7 @@ pub(crate) async fn inspect(
 }
 
 pub(crate) async fn reconnect(info: &crate::commands::code::ConnectInfo) -> Result<Connection> {
-    reconnect_with(info, "connect").await
-}
-
-pub(crate) async fn upgrade(info: &crate::commands::code::ConnectInfo) -> Result<Connection> {
-    reconnect_with(info, "upgrade").await
-}
-
-async fn reconnect_with(
-    info: &crate::commands::code::ConnectInfo,
-    action: &str,
-) -> Result<Connection> {
-    // The VM owns the protocol and release. Reconnect must not upgrade it to
-    // whichever client happens to be installed on this machine.
-    let request = json!({"action": action, "runtime_shim": super::opencode2::SHIM});
-    let response = bootstrap(relay_command(info), request).await?;
+    let response = bootstrap(relay_command(info), json!({"action": "connect"})).await?;
     let connection: Connection =
         serde_json::from_str(&response).context("Invalid OpenCode connection result")?;
     validate_url(&connection.url)?;
@@ -325,11 +310,8 @@ async fn verify_connection(connection: &Connection) -> Result<()> {
         .timeout(Duration::from_secs(5))
         .build()?;
     let origin = validate_url(&connection.url)?;
-    let paths: &[&str] = if connection.protocol.is_v2() {
-        &["api/info", "api/status", "api/health"]
-    } else {
-        &["global/health"]
-    };
+    // Current V2 answers /api/info; the others are older V2 endpoints.
+    let paths: &[&str] = &["api/info", "api/status", "api/health"];
     let mut endpoint = 0;
     let mut health = origin.join(paths[endpoint])?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -356,13 +338,9 @@ async fn verify_connection(connection: &Connection) -> Result<()> {
                     .await
                     .ok()
                     .is_some_and(|body| {
-                        if connection.protocol.is_v2() {
-                            body["version"].is_string()
-                                && ((body["pid"].is_u64() && body["urls"].is_array())
-                                    || body["healthy"] == true)
-                        } else {
-                            body["healthy"] == true
-                        }
+                        body["version"].is_string()
+                            && ((body["pid"].is_u64() && body["urls"].is_array())
+                                || body["healthy"] == true)
                     })
             {
                 let unauthenticated = client.get(health.clone()).send().await?;
@@ -378,8 +356,8 @@ async fn verify_connection(connection: &Connection) -> Result<()> {
             );
         }
         // A not-yet-published route can transiently return 404 too. Start
-        // the next probe at the current endpoint instead of pinning retries
-        // to a legacy path that this server may never expose.
+        // the next probe at the first endpoint instead of pinning retries
+        // to a fallback path that this server may never expose.
         endpoint = 0;
         health = origin.join(paths[endpoint])?;
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -397,21 +375,14 @@ mod tests {
             password: "test-password".into(),
             directory: "/app".into(),
             reused: false,
-            protocol: Protocol::V1,
             version: None,
         }
     }
 
     #[test]
-    fn attach_arguments_use_the_matching_client_protocol() {
-        let mut connection = connection();
+    fn attach_arguments_target_the_v2_server_with_automatic_permissions() {
         assert_eq!(
-            attach_args(&connection),
-            ["attach", "https://app-box.up.railway.app", "--dir", "/app"]
-        );
-        connection.protocol = Protocol::V2;
-        assert_eq!(
-            attach_args(&connection),
+            attach_args(&connection()),
             ["--server", "https://app-box.up.railway.app", "--auto"]
         );
     }
@@ -472,6 +443,113 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(&args[..3], ["-F", "/tmp/ssh config", "-T"]);
         assert!(!args.iter().any(|arg| arg == "-L" || arg == "-tt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_seed_requires_v2_then_imports_staged_credentials_without_installing() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let script = seed_script();
+        // The version check comes first and fails fast with the recreate
+        // message; nothing is ever downloaded or installed on the VM.
+        assert!(script.find("opencode --version").unwrap() < script.find("import_auth").unwrap());
+        assert!(script.contains(OLD_IMAGE_MESSAGE));
+        assert!(!script.contains("curl") && !script.contains("opencode.ai"));
+        assert!(script.contains("rm -f ~/.local/bin/opencode2"));
+        assert!(script.ends_with("python3 ~/.railway/runtimes/opencode/import_auth.py || exit 1"));
+        let mut child = Command::new("sh")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // On a 1.x image the script exits before the importer, with the message.
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("opencode"),
+            "#!/bin/sh\necho 'opencode v1.18.29'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("opencode"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .env("HOME", root.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(OLD_IMAGE_MESSAGE));
+        assert!(
+            !root
+                .path()
+                .join(".railway/runtimes/opencode/import_auth.py")
+                .exists()
+        );
+        // The embedded importer is the shipped file, byte for byte.
+        let start = script.find("printf '%s' ").unwrap();
+        let end = script
+            .find("\nchmod 700 ~/.railway/runtimes/opencode/import_auth.py")
+            .unwrap();
+        let write = script[start..end].replace(
+            "> ~/.railway/runtimes/opencode/import_auth.py",
+            &format!(
+                "> {}/.railway/runtimes/opencode/import_auth.py",
+                root.path().display()
+            ),
+        );
+        std::fs::create_dir_all(root.path().join(".railway/runtimes/opencode")).unwrap();
+        assert!(
+            Command::new("sh")
+                .args(["-c", &write])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                root.path()
+                    .join(".railway/runtimes/opencode/import_auth.py")
+            )
+            .unwrap(),
+            IMPORT_AUTH
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_credentials_merge_without_overwriting_remote_signins() {
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/opencode_import_auth.py"
+            ))
+            .output()
+            .expect("python3 is required for OpenCode credential tests");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(unix)]

@@ -1113,7 +1113,7 @@ async fn fetch_sessions(
         .unwrap_or_default();
     let discovery = discovery.unwrap_or_else(|error| remote_threads::Discovery {
         warnings: vec![format!("Couldn't read VM conversation history: {error:#}")],
-        failed: ["claude", "grok", "codex", "opencode", "opencode2"]
+        failed: ["claude", "grok", "codex", "opencode"]
             .map(str::to_owned)
             .to_vec(),
         ..Default::default()

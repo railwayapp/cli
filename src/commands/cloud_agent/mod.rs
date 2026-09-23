@@ -16,7 +16,6 @@ pub mod desktop;
 pub mod lifecycle;
 pub mod mcp_sync;
 pub(crate) mod opencode;
-pub(crate) mod opencode2;
 pub mod prefs;
 pub(crate) mod remote_threads;
 pub mod setup;
@@ -39,7 +38,8 @@ use crate::util::progress::create_spinner;
 use prefs::AgentPrefs;
 use tui::{App, Outcome};
 
-/// Display names are independent of historical harness identities.
+/// Display names are independent of historical harness identities
+/// (`opencode2` was V2 while V1 was still launchable; both are OpenCode now).
 pub(crate) fn harness_label(slug: &str) -> &str {
     match slug {
         "opencode" | "opencode2" => "OpenCode",
