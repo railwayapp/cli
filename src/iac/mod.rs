@@ -10,6 +10,7 @@ mod engine;
 mod eval;
 mod graph;
 mod json;
+pub mod ownership;
 mod partial;
 pub mod saved_plan;
 

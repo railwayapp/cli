@@ -70,7 +70,13 @@ impl GQLClient {
         Ok(Self::build_client(headers))
     }
 
-    fn build_client(headers: HeaderMap) -> Client {
+    fn build_client(mut headers: HeaderMap) -> Client {
+        // Backend image selection uses capabilities rather than a guessed CLI
+        // release number. Older backends safely ignore this header.
+        headers.insert(
+            "x-railway-opencode-protocols",
+            HeaderValue::from_static("v1,v2"),
+        );
         Client::builder()
             .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
             .user_agent(consts::get_user_agent())

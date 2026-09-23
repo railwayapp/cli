@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
@@ -9,13 +9,12 @@ use is_terminal::IsTerminal;
 use crate::{
     consts::TICK_STRING,
     controllers::{
-        deployment::{stream_build_logs, stream_deploy_logs},
+        deployment::stream_deploy_logs,
         environment::get_matched_environment,
         project::get_project,
         service::get_or_prompt_service,
         upload::{create_deploy_tarball, upload_deploy_tarball},
     },
-    subscription::subscribe_graphql,
     subscriptions::deployment::DeploymentStatus,
     util::{
         detect::detect_services,
@@ -26,6 +25,11 @@ use crate::{
 };
 
 use super::*;
+
+mod build_logs;
+mod deployment_events;
+use build_logs::BuildLogs;
+use deployment_events::{DeploymentErrors, DeploymentStream};
 
 /// Upload and deploy project from the current directory.
 ///
@@ -308,7 +312,7 @@ pub async fn command(args: Args) -> Result<()> {
     let deployment_id = body.deployment_id;
 
     if !args.json {
-        println!("  {}: {}", "Build Logs".green().bold(), body.logs_url);
+        println!("  {}: {}", "Deployment".green().bold(), body.logs_url);
     }
 
     if args.detach {
@@ -342,23 +346,14 @@ pub async fn command(args: Args) -> Result<()> {
     let poll_deployment_id = deployment_id.clone();
     let json_mode = args.json;
     let ci_flag = args.ci;
+    let build_logs = Arc::new(BuildLogs::new(json_mode));
+    let deployment_errors = Arc::new(DeploymentErrors::default());
+    let poll_errors = Arc::clone(&deployment_errors);
+    let streamed_build_logs = Arc::clone(&build_logs);
     let mut tasks = vec![tokio::task::spawn(async move {
-        if let Err(e) = stream_build_logs(build_deployment_id, None, |log| {
-            let should_exit =
-                ci_flag && log.message.starts_with("No changed files matched patterns");
-            if json_mode {
-                print_log(log, true, LogFormat::LevelOnly);
-            } else {
-                println!(
-                    "{}",
-                    crate::util::logs::strip_terminal_controls(&log.message)
-                );
-            }
-            if should_exit {
-                std::process::exit(0);
-            }
-        })
-        .await
+        if let Err(e) = streamed_build_logs
+            .stream(&build_deployment_id, ci_flag)
+            .await
         {
             eprintln!("Failed to stream build logs: {e}");
 
@@ -370,7 +365,13 @@ pub async fn command(args: Args) -> Result<()> {
             // its post-deploy steps).
             if ci_mode {
                 eprintln!("Waiting on the deployment status instead…");
-                poll_deployment_verdict(poll_deployment_id, json_mode).await;
+                poll_deployment_verdict(
+                    poll_deployment_id,
+                    json_mode,
+                    streamed_build_logs,
+                    poll_errors,
+                )
+                .await;
             }
         }
     })];
@@ -394,80 +395,106 @@ pub async fn command(args: Args) -> Result<()> {
     // way. In CI mode the verdict must still arrive: degrade to HTTP polling
     // rather than erroring out of a deploy that is already running.
     let mut stream =
-        match subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
-            id: deployment_id.clone(),
-        })
-        .await
-        {
+        match DeploymentStream::connect(&deployment_id, Arc::clone(&deployment_errors)).await {
             Ok(stream) => stream,
             Err(e) if ci_mode => {
                 eprintln!("Failed to subscribe to the deployment status: {e}");
                 eprintln!("Waiting on the deployment status instead…");
                 // Exits the process with the verdict; the spawned build-log task
                 // keeps printing whatever it can in the meantime.
-                poll_deployment_verdict(deployment_id.clone(), json_mode).await;
+                poll_deployment_verdict(
+                    deployment_id.clone(),
+                    json_mode,
+                    build_logs,
+                    deployment_errors,
+                )
+                .await;
                 return Ok(());
             }
             Err(e) => return Err(e),
         };
 
-    tokio::task::spawn(async move {
-        while let Some(Ok(res)) = stream.next().await {
-            if let Some(errors) = res.errors {
-                if json_mode {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({"error": errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")})
-                    );
-                } else {
-                    eprintln!(
-                        "Failed to get deploy status: {}",
-                        errors
-                            .iter()
-                            .map(|err| err.to_string())
-                            .collect::<Vec<String>>()
-                            .join("; ")
-                    );
+    // Handle status in the foreground so log streams closing before FAILED
+    // or during final log recovery cannot end the command prematurely.
+    let mut log_tasks = futures::future::join_all(tasks);
+    let mut logs_finished = false;
+    let mut deployment_succeeded = false;
+    loop {
+        let response = tokio::select! {
+            response = stream.status.next() => response,
+            _ = &mut log_tasks, if !logs_finished => {
+                logs_finished = true;
+                if deployment_succeeded {
+                    return Ok(());
                 }
-                if ci_mode {
-                    std::process::exit(1);
-                }
+                continue;
+            },
+        };
+        let Some(Ok(res)) = response else { break };
+        if let Some(errors) = res.errors {
+            if json_mode {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"error": errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")})
+                );
+            } else {
+                eprintln!(
+                    "Failed to get deploy status: {}",
+                    errors
+                        .iter()
+                        .map(|err| err.to_string())
+                        .collect::<Vec<String>>()
+                        .join("; ")
+                );
             }
-            if let Some(data) = res.data {
-                match data.deployment.status {
-                    DeploymentStatus::SUCCESS => {
-                        if json_mode {
-                            println!("{}", serde_json::json!({"status": "success"}));
-                        } else {
-                            println!("{}", "Deploy complete".green().bold());
-                        }
-                        if ci_mode {
-                            std::process::exit(0);
-                        }
-                    }
-                    DeploymentStatus::FAILED => {
-                        if json_mode {
-                            println!("{}", serde_json::json!({"status": "failed"}));
-                        } else {
-                            println!("{}", "Deploy failed".red().bold());
-                        }
-                        std::process::exit(1);
-                    }
-                    DeploymentStatus::CRASHED => {
-                        if json_mode {
-                            println!("{}", serde_json::json!({"status": "crashed"}));
-                        } else {
-                            println!("{}", "Deploy crashed".red().bold());
-                        }
-                        std::process::exit(1);
-                    }
-                    _ => {}
-                }
+            if ci_mode {
+                std::process::exit(1);
             }
         }
-    });
+        if let Some(data) = res.data {
+            match data.deployment.status {
+                DeploymentStatus::SUCCESS => {
+                    deployment_succeeded = true;
+                    if json_mode {
+                        println!("{}", serde_json::json!({"status": "success"}));
+                    } else {
+                        println!("{}", "Deploy complete".green().bold());
+                    }
+                    if ci_mode {
+                        std::process::exit(0);
+                    }
+                    if logs_finished {
+                        return Ok(());
+                    }
+                }
+                DeploymentStatus::FAILED => {
+                    build_logs.finish().await;
+                    if json_mode {
+                        println!(
+                            "{}",
+                            deployment_errors.with_error(serde_json::json!({"status": "failed"}))
+                        );
+                    } else {
+                        deployment_errors.print_failure();
+                    }
+                    std::process::exit(1);
+                }
+                DeploymentStatus::CRASHED => {
+                    if json_mode {
+                        println!("{}", serde_json::json!({"status": "crashed"}));
+                    } else {
+                        println!("{}", "Deploy crashed".red().bold());
+                    }
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+    }
 
-    futures::future::join_all(tasks).await;
+    if !logs_finished {
+        log_tasks.await;
+    }
 
     Ok(())
 }
@@ -477,7 +504,12 @@ pub async fn command(args: Args) -> Result<()> {
 /// upload just used, so they work whenever the deploy could start in the
 /// first place. Exits the process once the deployment reaches a terminal
 /// state — mirroring what the status subscription would have done.
-async fn poll_deployment_verdict(deployment_id: String, json_mode: bool) {
+async fn poll_deployment_verdict(
+    deployment_id: String,
+    json_mode: bool,
+    build_logs: Arc<BuildLogs>,
+    deployment_errors: Arc<DeploymentErrors>,
+) {
     use queries::deployment_status::DeploymentStatus as Status;
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -505,10 +537,14 @@ async fn poll_deployment_verdict(deployment_id: String, json_mode: bool) {
                 std::process::exit(0);
             }
             Ok(Status::FAILED) => {
+                build_logs.finish().await;
                 if json_mode {
-                    println!("{}", serde_json::json!({"status": "failed"}));
+                    println!(
+                        "{}",
+                        deployment_errors.with_error(serde_json::json!({"status": "failed"}))
+                    );
                 } else {
-                    println!("{}", "Deploy failed".red().bold());
+                    deployment_errors.print_failure();
                 }
                 std::process::exit(1);
             }
@@ -858,7 +894,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         println!("  {} Build queued", "✓".green());
         println!(
             "  {} {}",
-            "Build Logs:".green().bold(),
+            "Deployment:".green().bold(),
             up_response.logs_url
         );
     }
@@ -922,18 +958,11 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
 
     let json_mode = args.json;
     let build_id_for_logs = up_response.deployment_id.clone();
+    let build_logs = Arc::new(BuildLogs::new(json_mode));
+    let deployment_errors = Arc::new(DeploymentErrors::default());
+    let streamed_build_logs = Arc::clone(&build_logs);
     let _build_task = tokio::task::spawn(async move {
-        let _ = stream_build_logs(build_id_for_logs, None, |log| {
-            if json_mode {
-                print_log(log, true, LogFormat::LevelOnly);
-            } else {
-                println!(
-                    "{}",
-                    crate::util::logs::strip_terminal_controls(&log.message)
-                );
-            }
-        })
-        .await;
+        let _ = streamed_build_logs.stream(&build_id_for_logs, false).await;
     });
 
     // Raw deploy logs are a human nicety; in JSON mode the build-log
@@ -958,11 +987,9 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     // streams ending (they can close before the build finishes, which
     // previously let a failing deploy exit 0).
     let mut status_stream =
-        subscribe_graphql::<subscriptions::Deployment>(subscriptions::deployment::Variables {
-            id: up_response.deployment_id.clone(),
-        })
-        .await?;
-    while let Some(Ok(res)) = status_stream.next().await {
+        DeploymentStream::connect(&up_response.deployment_id, Arc::clone(&deployment_errors))
+            .await?;
+    while let Some(Ok(res)) = status_stream.status.next().await {
         let Some(data) = res.data else { continue };
         match data.deployment.status {
             DeploymentStatus::SUCCESS => {
@@ -982,14 +1009,17 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
                 std::process::exit(0);
             }
             DeploymentStatus::FAILED => {
+                build_logs.finish().await;
                 if json_mode {
-                    crate::util::reporter::emit_json(&json_result("failed"))?;
+                    crate::util::reporter::emit_json(
+                        &deployment_errors.with_error(json_result("failed")),
+                    )?;
                 } else {
                     println!();
-                    println!("  {} {}", "✗".red(), "Build failed".bold());
+                    deployment_errors.print_failure();
                     println!(
                         "     {} {}",
-                        "Logs:".dimmed(),
+                        "Deployment:".dimmed(),
                         up_response.logs_url.bold().underline(),
                     );
                     println!();
@@ -1004,7 +1034,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
                     println!("  {} {}", "✗".red(), "Deploy crashed".bold());
                     println!(
                         "     {} {}",
-                        "Logs:".dimmed(),
+                        "Deployment:".dimmed(),
                         up_response.logs_url.bold().underline(),
                     );
                     println!();

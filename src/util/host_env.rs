@@ -3,15 +3,26 @@
 //!
 //! Service variables are writable by anyone with project MEMBER access, so from
 //! the perspective of the machine running the CLI they are untrusted input. Most
-//! are ordinary configuration, but a handful of names are read by the shell,
-//! dynamic loader, or language runtime *during startup* and decide what code the
-//! child executes. `PROMPT_COMMAND` runs before an interactive shell's first
-//! prompt; `BASH_ENV` and `ENV` are expanded (so command substitution fires)
-//! before a non-interactive shell runs anything. Passing those through means a
+//! are ordinary configuration, but some names are read by the shell, dynamic
+//! loader, or language runtime *during startup* and decide what code the child
+//! executes. `PROMPT_COMMAND` runs before an interactive shell's first prompt;
+//! `BASH_ENV` and `ENV` are expanded (so command substitution fires) before a
+//! non-interactive shell runs anything. Passing those through means a
 //! collaborator picks the command, and it runs as the local user.
 //!
-//! These names are dropped before any local spawn. They are still delivered to
-//! deployed services normally — the boundary is only the local machine.
+//! Four categories qualify, and the fourth is the easiest to overlook: a name
+//! does not have to *contain* a command to choose one. `PATH` decides which
+//! binary every bare command name resolves to, and `HOME` decides which
+//! `.bashrc`/`.zshrc` an interactive shell sources — so they select code just as
+//! surely as `BASH_ENV` does, and a collaborator setting either one picks what
+//! runs. Anything that relocates the search for executables, libraries, or
+//! startup files belongs here.
+//!
+//! These names are dropped before any local spawn. Dropping is deliberate rather
+//! than overriding: the spawn merges what survives onto the inherited
+//! environment, so a dropped name leaves the local machine's own value in place
+//! for the child. They are still delivered to deployed services normally — the
+//! boundary is only the local machine.
 
 use std::collections::BTreeMap;
 
@@ -42,6 +53,26 @@ const UNSAFE_NAMES: &[&str] = &[
     "PERL5OPT",
     "PERL5LIB",
     "PERL5DB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "CLASSPATH",
+    "GEM_HOME",
+    "GEM_PATH",
+    "LUA_PATH",
+    "LUA_CPATH",
+    "R_PROFILE",
+    "R_PROFILE_USER",
+    "PSMODULEPATH",
+    // Where executables, libraries and startup files are searched for. These
+    // name no command themselves; they decide which one a bare name resolves
+    // to, or which startup file gets sourced.
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SHELL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     // Tools that take a command in an environment variable.
     "GIT_SSH",
     "GIT_SSH_COMMAND",
@@ -51,6 +82,9 @@ const UNSAFE_NAMES: &[&str] = &[
     "PAGER",
     "EDITOR",
     "VISUAL",
+    "MANPAGER",
+    "LESSOPEN",
+    "LESSCLOSE",
 ];
 
 /// Names dropped on a (case-insensitive) prefix match. Covers the dynamic
@@ -59,6 +93,12 @@ const UNSAFE_PREFIXES: &[&str] = &[
     "LD_",        // LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, ...
     "DYLD_",      // macOS equivalents
     "BASH_FUNC_", // exported shell functions
+    // git reads its whole config out of the environment when asked:
+    // GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> sets any
+    // key — including `core.pager` and `core.sshCommand`, which execute — with
+    // no file involved. The <n> makes the family open-ended, so it needs a
+    // prefix; GIT_CONFIG/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM fall under it too.
+    "GIT_CONFIG",
 ];
 
 fn is_unsafe(name: &str) -> bool {
@@ -168,6 +208,41 @@ mod tests {
     }
 
     #[test]
+    fn strips_execution_search_and_startup_file_locations() {
+        // The category that decides which code runs without naming any command.
+        let mut vars = map(&[
+            ("PATH", "/tmp/attacker-bin"),
+            ("HOME", "."),
+            ("SHELL", "/tmp/evil-sh"),
+            ("XDG_CONFIG_HOME", "/tmp/attacker-config"),
+            ("DATABASE_URL", "postgres://localhost/app"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(dropped.len(), 4);
+        assert_eq!(vars.keys().collect::<Vec<_>>(), vec!["DATABASE_URL"]);
+    }
+
+    #[test]
+    fn strips_the_open_ended_git_config_family() {
+        // GIT_CONFIG_KEY_<n> can set core.pager or core.sshCommand, so the whole
+        // prefix goes even though the individual names are unbounded.
+        let mut vars = map(&[
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.pager"),
+            ("GIT_CONFIG_VALUE_0", "id"),
+            ("GIT_CONFIG_GLOBAL", "/tmp/attacker.gitconfig"),
+            ("GIT_BRANCH", "main"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(dropped.len(), 4);
+        assert_eq!(vars.keys().collect::<Vec<_>>(), vec!["GIT_BRANCH"]);
+    }
+
+    #[test]
     fn leaves_ordinary_variables_alone() {
         let mut vars = map(&[
             ("DATABASE_URL", "postgres://localhost/app"),
@@ -175,10 +250,14 @@ mod tests {
             ("NODE_ENV", "production"),
             ("LDAP_URL", "ldap://example.com"),
             ("PATH_PREFIX", "/api"),
+            ("HOMEPAGE_URL", "https://example.com"),
+            ("SHELL_TIMEOUT", "30"),
+            ("GEM_API_KEY", "abc123"),
+            ("EDITORIAL_MODE", "on"),
         ]);
 
         assert!(strip_unsafe_host_vars(&mut vars).is_empty());
-        assert_eq!(vars.len(), 5);
+        assert_eq!(vars.len(), 9);
     }
 
     #[test]

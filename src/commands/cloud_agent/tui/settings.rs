@@ -127,7 +127,7 @@ impl Settings {
             .map(|row| match row {
                 Row::Agent => (
                     "Coding agent".into(),
-                    default_harnesses()[self.agent].to_string(),
+                    super::app::harness_label(default_harnesses()[self.agent]).to_string(),
                     harness_blurb(default_harnesses()[self.agent]).into(),
                 ),
                 Row::Project => (
@@ -442,16 +442,16 @@ mod tests {
     fn cycling_the_agent_saves_a_full_snapshot() {
         let mut s = settings();
         // The list leads with `railway`, so one step forward from the start
-        // lands on claude.
+        // lands on grok.
         let outcome = saved(s.right());
-        assert_eq!(outcome.agent, "claude");
+        assert_eq!(outcome.agent, "grok");
         assert_eq!(outcome.theme, "railway");
         assert!(outcome.skills);
         assert_eq!(outcome.project.unwrap().project_id, "p1");
 
         // And it wraps in both directions.
         assert_eq!(saved(s.left()).agent, "railway");
-        assert_eq!(saved(s.left()).agent, "grok");
+        assert_eq!(saved(s.left()).agent, "opencode");
     }
 
     /// Enter on a cycling row steps it forward — a row that says "change me"
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn enter_cycles_too() {
         let mut s = settings();
-        assert_eq!(saved(s.select()).agent, "claude");
+        assert_eq!(saved(s.select()).agent, "grok");
     }
 
     /// The theme row cycles and the card previews it immediately.

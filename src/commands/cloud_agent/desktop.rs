@@ -1,22 +1,25 @@
 //! `railway ca desktop` — hand a cloud agent to a desktop coding app.
 //!
-//! The Claude Code and Codex desktop apps both drive a remote machine over
+//! Claude Code and Codex drive a remote machine over
 //! ordinary SSH, and the relay already is one: `agent:<env>:<name>@ssh.railway.com`
 //! is a complete destination, resolved by name so it survives a recreated VM.
 //! So this command writes config rather than building a transport — an OpenSSH
-//! block for both apps, plus a `sshConfigs` entry for Claude, which keeps its
-//! connections in its own settings file instead of reading `~/.ssh/config`.
+//! block for both apps, plus a `sshConfigs` entry for Claude and a declarative
+//! SSH/project import for Codex. Codex applies the saved import on its next startup.
 //!
 //! What it does beyond writing files is provision: the app expects to arrive at
 //! a machine where its harness is already signed in, so this runs the same
-//! credential and skills pipeline as `railway code` and then stops, without
-//! opening a session. That pass also marks the agent `app_mode`, which is what
+//! credential and skills pipeline as `railway code`. That pass also marks the
+//! agent `app_mode`, which is what
 //! keeps the `~/.profile` autostart from putting a harness where the app expects
 //! a login shell.
 //!
-//! Waking is deliberately not handled here: a sleeping agent refuses the
-//! connection at the relay and a GUI has no hook to wake it, so the summary says
-//! so and names the command. Auto-wake is its own change.
+//! OpenCode uses an HTTP server: this command starts `opencode serve`
+//! in the background and saves the agent's public HTTPS connection and project
+//! in OpenCode Desktop. See the `opencode` and `opencode_config` submodules.
+//!
+//! The shared launch pipeline wakes a reused agent. OpenCode's server and
+//! public endpoint are checked before setup exits.
 
 use std::path::{Path, PathBuf};
 
@@ -30,31 +33,57 @@ use crate::commands::code::{self, LaunchArgs, Progress as _};
 use crate::commands::ssh::config as ssh_config;
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
+use crate::util::shell::shell_join;
 
-/// Set up a desktop coding app to work on a cloud agent over SSH
+use super::opencode;
+mod codex_config;
+mod opencode_config;
+pub(crate) use opencode_config::configure_installed as configure_installed_opencode;
+
+/// Connect a desktop coding app to a cloud agent
 #[derive(Parser)]
-#[clap(
-    after_help = "Examples:\n\n  railway ca desktop --claude              # Claude Code Desktop\n  railway ca desktop --codex               # the Codex app\n  railway ca desktop --claude --codex      # both, on one agent\n\n  railway ca desktop --claude --agent my-box   # an agent you already have\n  railway ca desktop --claude --dir /app/api   # where sessions open\n  railway ca desktop --claude --dry-run        # print the changes, write nothing\n  railway ca desktop --claude --remove         # undo them\n\nWrites an OpenSSH block for the agent (both apps), and for Claude an entry in\n~/.claude/settings.json pointing at that block. Restart the app afterwards.\n\nThe agent must be awake when the app connects — the relay refuses a sleeping\none and a desktop app has no way to wake it. `railway ca wake <name>` does."
-)]
+#[clap(after_help = r#"Examples:
+  railway ca desktop --claude
+  railway ca desktop --codex
+  railway ca desktop --opencode --agent my-box
+  railway ca desktop --opencode --new
+
+Sets up the selected app's connection and credentials without opening the app.
+Uses an existing VM when available; --new creates one, --agent selects one.
+Restart the app after setup to load its connection. The VM stays running;
+railway ca sleep <agent> stops compute. Rerun setup after sleep or restart.
+
+--dry-run previews changes without modifying the VM or local configuration.
+--remove removes local configuration and stops the managed OpenCode server.
+Already-imported Codex connections must also be removed in the app.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
 pub struct Args {
     /// Configure Claude Code Desktop
     #[clap(long)]
     claude: bool,
 
-    /// Configure the Codex app
+    /// Alias for `railway code --codex desktop-only` when selected alone
     #[clap(long)]
     codex: bool,
+
+    /// Start OpenCode on the agent and configure its Desktop app connection
+    #[clap(long)]
+    opencode: bool,
 
     /// Agent to point the app at, by name or id (defaults to this
     /// environment's, creating one if there is none)
     #[clap(long, value_name = "NAME_OR_ID")]
     agent: Option<String>,
 
+    /// Always create a fresh agent instead of reusing this environment's
+    #[clap(long, conflicts_with_all = ["agent", "remove"])]
+    new: bool,
+
     /// Directory sessions open in on the agent
     #[clap(long, default_value = "/app", value_name = "PATH")]
     dir: String,
 
-    /// Host alias to write (defaults to railway-agent-<name>)
+    /// Host alias to write (Codex: railway-<name>; other apps: railway-agent-<name>)
     #[clap(long)]
     alias: Option<String>,
 
@@ -70,7 +99,7 @@ pub struct Args {
     #[clap(long, conflicts_with_all = ["dry_run", "dir"])]
     remove: bool,
 
-    /// Skip the connection check after writing
+    /// Skip SSH probes (backend endpoint authentication is always checked)
     #[clap(long)]
     no_verify: bool,
 
@@ -84,19 +113,25 @@ pub struct Args {
 }
 
 /// A desktop app this command knows how to configure.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum App {
     Claude,
     Codex,
+    OpenCode,
 }
 
 impl App {
+    fn is_opencode(self) -> bool {
+        matches!(self, Self::OpenCode)
+    }
+
     /// The harness slug `railway code` uses, so provisioning seeds the
     /// credential this app's remote half will look for.
     fn harness(self) -> &'static str {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
+            App::OpenCode => "opencode",
         }
     }
 
@@ -104,6 +139,7 @@ impl App {
         match self {
             App::Claude => "Claude Code Desktop",
             App::Codex => "Codex",
+            App::OpenCode => "OpenCode Desktop",
         }
     }
 
@@ -112,6 +148,7 @@ impl App {
         match self {
             App::Claude => "claude",
             App::Codex => "codex",
+            App::OpenCode => "opencode",
         }
     }
 
@@ -119,15 +156,21 @@ impl App {
     fn where_it_appears(self) -> &'static str {
         match self {
             App::Claude => "the environment dropdown, under the name below",
-            App::Codex => "the SSH host list — Codex reads ~/.ssh/config itself",
+            App::Codex => "Connections and the project sidebar",
+            App::OpenCode => "the server picker",
         }
     }
 }
 
 pub async fn command(args: Args) -> Result<()> {
     let apps = selected_apps(&args)?;
+    if let Some(alias) = &args.alias
+        && !ssh_config::is_valid_agent_name(alias)
+    {
+        bail!("--alias must be a single SSH host name (letters, digits, '.', '_' or '-').");
+    }
     let home = dirs::home_dir().context("Unable to get home directory")?;
-    let ssh_config_path = ssh_config::expand_tilde(&args.ssh_config)?;
+    let ssh_config_path = std::path::absolute(ssh_config::expand_tilde(&args.ssh_config)?)?;
 
     if args.remove {
         return remove(&args, &apps, &home, &ssh_config_path).await;
@@ -135,6 +178,19 @@ pub async fn command(args: Args) -> Result<()> {
     if args.dry_run {
         return dry_run(&args, &apps, &home, &ssh_config_path).await;
     }
+    if apps == [App::Codex] {
+        return code::codex_desktop_only(args.codex_launch_args(), args.codex_options()).await;
+    }
+    if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::preflight().await?;
+    }
+    if apps.contains(&App::Codex) {
+        preflight_codex_desktop()?;
+    }
+    let opencode_password = apps
+        .iter()
+        .any(|app| app.is_opencode())
+        .then(opencode::generate_password);
 
     // Same preflight as a launch, and for the same reason: without the flag the
     // create at the end of provisioning is refused, after a credential has
@@ -149,24 +205,46 @@ pub async fn command(args: Args) -> Result<()> {
     // it; later passes are pinned to that id, so `--claude --codex` seeds two
     // credentials on one machine rather than spending two VMs.
     let pinned = args.pinned_agent().await?;
+    // Resolve once, then carry both IDs through every app's provisioning pass.
+    // An environment alone still triggers the project picker in an unlinked
+    // directory, even when --agent already identifies the whole target.
+    let (project_id, environment_id, local_name_project) = if let Some(agent) = &pinned {
+        (agent.project_id.clone(), agent.environment_id.clone(), None)
+    } else {
+        let mut configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        let target = code::resolve_launch(
+            &args.launch_args(apps[0], None, None),
+            &mut configs,
+            &client,
+        )
+        .await?;
+        (
+            target.project_id,
+            target.environment_id,
+            target.local_name_project,
+        )
+    };
     let mut prepared: Option<code::Prepared> = None;
     for app in &apps {
         let progress = code::CliProgress::default();
-        let mut launch = LaunchArgs::for_app_mode(
-            app.harness(),
-            args.project.clone(),
-            // A named agent carries its own environment. Without this the launch
-            // pipeline resolves the *linked* one, fails to find the agent there,
-            // and creates a second VM instead of using the one that was named.
-            pinned
+        let mut launch = args.launch_args(
+            *app,
+            prepared
                 .as_ref()
-                .map(|a| a.environment_id.clone())
-                .or_else(|| args.environment.clone()),
+                .map(|p| p.agent_id.clone())
+                .or_else(|| pinned.as_ref().map(|a| a.id.clone())),
+            Some((&project_id, &environment_id)),
         );
-        launch.agent_id = prepared
-            .as_ref()
-            .map(|p| p.agent_id.clone())
-            .or_else(|| pinned.as_ref().map(|a| a.id.clone()));
+        launch.local_name_project = local_name_project.clone();
+        if let Some(password) = &opencode_password {
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+            launch
+                .boot_variables
+                .insert("OPENCODE_SERVER_PASSWORD".into(), password.clone());
+        }
         // Desktop never opens the session it provisions — FullTerminal is the
         // non-pane style; the remote command is unused after prepare returns.
         let result = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await;
@@ -175,23 +253,18 @@ pub async fn command(args: Args) -> Result<()> {
     }
     let prepared = prepared.expect("selected_apps guarantees at least one app");
 
-    let alias = args
-        .alias
-        .clone()
-        .unwrap_or_else(|| ssh_config::agent_alias(&prepared.agent_name));
-    let block = render_block(
+    let alias = register_ssh(
+        &ssh_config_path,
         &prepared.agent_name,
         &prepared.environment_id,
-        &alias,
         prepared.identity.as_deref(),
+        args.alias.as_deref(),
+        apps.contains(&App::Codex),
     )?;
     let claude_entry = apps
         .contains(&App::Claude)
         .then(|| claude_ssh_entry(&prepared.agent_id, &prepared.agent_name, &alias, &args.dir));
 
-    let marker = ssh_config::agent_marker(&prepared.environment_id, &prepared.agent_name);
-    ssh_config::upsert_marked_block(&ssh_config_path, &marker, &block)
-        .with_context(|| format!("Failed to update {}", ssh_config_path.display()))?;
     if let Some(entry) = claude_entry {
         upsert_claude_ssh_config(&home, entry)?;
     }
@@ -203,9 +276,18 @@ pub async fn command(args: Args) -> Result<()> {
     let checks = if args.no_verify {
         Vec::new()
     } else {
-        verify(&alias, &apps, &ssh_config_path).await
+        let ssh_apps = apps
+            .iter()
+            .copied()
+            .filter(|app| !app.is_opencode())
+            .collect::<Vec<_>>();
+        if ssh_apps.is_empty() {
+            Vec::new()
+        } else {
+            verify(&alias, &ssh_apps, &ssh_config_path).await
+        }
     };
-    if custom_config {
+    if custom_config && apps.iter().any(|app| !app.is_opencode()) {
         println!(
             "\n{} {} is not where the apps look. Make sure {} pulls it in:\n    {}",
             "!".yellow().bold(),
@@ -215,11 +297,30 @@ pub async fn command(args: Args) -> Result<()> {
         );
     }
 
+    if apps.contains(&App::Codex) {
+        require_codex_checks(&checks)?;
+        codex_config::configure(
+            &alias,
+            &prepared.agent_name,
+            &args.dir,
+            &ssh_config_path,
+            &code::CliProgress::default(),
+        )
+        .await?;
+    }
+
+    let connection = if let Some(password) = &opencode_password {
+        println!("\nStarting OpenCode and checking its HTTPS connection...");
+        Some(opencode::start(&alias, &args.dir, &ssh_config_path, password).await?)
+    } else {
+        None
+    };
+
     summarize(
         &prepared,
         &apps,
         &alias,
-        &args.dir,
+        &args,
         &ssh_config_path,
         &home,
         &checks,
@@ -232,10 +333,76 @@ pub async fn command(args: Args) -> Result<()> {
             .join(","),
     )
     .await;
+    if let Some(connection) = connection {
+        println!(
+            "\n{}",
+            if connection.reused {
+                "OpenCode is already running"
+            } else {
+                "OpenCode is ready"
+            }
+            .bold()
+        );
+        let desktop =
+            opencode_config::configure(&connection, &prepared.agent_id, &prepared.agent_name)
+                .await
+                .map(|()| true);
+        code::save_desktop_configuration(&prepared, Some(&connection), &desktop);
+        opencode::show_connection(&connection, &prepared.agent_name, desktop.is_ok())?;
+        desktop.context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
+        println!(
+            "You can close this terminal. Rerun this command after sleeping or restarting the agent."
+        );
+    } else {
+        code::save_desktop_configuration(&prepared, None, &Ok(true));
+    }
+
     Ok(())
 }
 
 impl Args {
+    fn codex_launch_args(&self) -> LaunchArgs {
+        LaunchArgs::for_codex_desktop(
+            self.project.clone(),
+            self.environment.clone(),
+            self.agent.clone(),
+            self.dir.clone(),
+            self.new,
+        )
+    }
+
+    fn codex_options(&self) -> CodexOptions {
+        CodexOptions {
+            alias: self.alias.clone(),
+            ssh_config: Some(self.ssh_config.clone()),
+            no_verify: self.no_verify,
+        }
+    }
+
+    fn launch_args(
+        &self,
+        app: App,
+        agent_id: Option<String>,
+        target: Option<(&str, &str)>,
+    ) -> LaunchArgs {
+        let mut launch = LaunchArgs::for_app_mode(
+            app.harness(),
+            target
+                .map(|(project, _)| project.to_owned())
+                .or_else(|| self.project.clone()),
+            target
+                .map(|(_, environment)| environment.to_owned())
+                .or_else(|| self.environment.clone()),
+        );
+        // Only the first app creates. All later apps seed the same agent.
+        launch.new = self.new && agent_id.is_none();
+        launch.agent_id = agent_id;
+        // A preceding Claude/Codex SSH pass may create the VM before the
+        // OpenCode pass, so request its endpoint on the first pass too.
+        launch.code_endpoint = self.opencode;
+        launch
+    }
+
     /// Resolve `--agent` before any provisioning, so a name that does not exist
     /// fails before a VM is created rather than after.
     async fn pinned_agent(&self) -> Result<Option<ca::Agent>> {
@@ -252,6 +419,141 @@ impl Args {
 /// Where OpenSSH — and so both apps — read per-user config from.
 fn default_ssh_config_path() -> Result<PathBuf> {
     ssh_config::expand_tilde(Path::new("~/.ssh/config"))
+}
+
+/// The file-writing path shared by Desktop setup and the Codex terminal client.
+fn register_ssh(
+    path: &Path,
+    agent_name: &str,
+    environment_id: &str,
+    identity: Option<&Path>,
+    alias: Option<&str>,
+    codex: bool,
+) -> Result<String> {
+    let alias = registered_ssh_alias(path, agent_name, environment_id, alias, codex)?;
+    let marker = ssh_config::agent_marker(environment_id, agent_name);
+    let block = render_block(agent_name, environment_id, &alias, identity)?;
+    ssh_config::upsert_marked_block(path, &marker, &block)
+        .with_context(|| format!("Failed to update {}", path.display()))?;
+    Ok(alias)
+}
+
+fn registered_ssh_alias(
+    path: &Path,
+    agent_name: &str,
+    environment_id: &str,
+    alias: Option<&str>,
+    codex: bool,
+) -> Result<String> {
+    if alias.is_some_and(|alias| !ssh_config::is_valid_agent_name(alias)) {
+        bail!("SSH alias must be a single host name (letters, digits, '.', '_' or '-').");
+    }
+    let marker = ssh_config::agent_marker(environment_id, agent_name);
+    if let Some(alias) = alias {
+        return Ok(alias.to_owned());
+    }
+    let previous = ssh_config::marked_host_alias(path, &marker)?;
+    let legacy_default = ssh_config::agent_alias(agent_name);
+    if codex
+        && previous
+            .as_deref()
+            .is_none_or(|alias| alias == legacy_default)
+    {
+        return Ok(ssh_config::codex_agent_alias(agent_name));
+    }
+    Ok(previous.unwrap_or(legacy_default))
+}
+
+pub(crate) fn preflight_codex_desktop() -> Result<()> {
+    codex_config::preflight()
+}
+
+/// Compatibility options carried by the Desktop command into the shared launcher.
+#[derive(Default)]
+pub(crate) struct CodexOptions {
+    pub alias: Option<String>,
+    pub ssh_config: Option<PathBuf>,
+    pub no_verify: bool,
+}
+
+impl CodexOptions {
+    pub(crate) fn config_path(&self) -> Result<PathBuf> {
+        std::path::absolute(ssh_config::expand_tilde(
+            self.ssh_config
+                .as_deref()
+                .unwrap_or(Path::new("~/.ssh/config")),
+        )?)
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self
+            .alias
+            .as_deref()
+            .is_some_and(|alias| !ssh_config::is_valid_agent_name(alias))
+        {
+            bail!("--alias must be a single SSH host name (letters, digits, '.', '_' or '-').");
+        }
+        self.config_path()?;
+        Ok(())
+    }
+}
+
+/// Register and verify SSH, then import the remote project into Codex Desktop.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct CodexDesktop {
+    pub ssh_alias: String,
+    pub ssh_config_path: PathBuf,
+    pub config_path: PathBuf,
+    pub project_label: String,
+    pub remote_path: String,
+    pub apply_url: String,
+    pub apply_sent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_error: Option<String>,
+}
+
+pub(crate) async fn configure_codex(
+    agent_name: &str,
+    environment_id: &str,
+    identity: Option<&Path>,
+    directory: &str,
+    options: &CodexOptions,
+    progress: &dyn code::Progress,
+) -> Result<CodexDesktop> {
+    let path = options.config_path()?;
+    let alias = register_ssh(
+        &path,
+        agent_name,
+        environment_id,
+        identity,
+        options.alias.as_deref(),
+        true,
+    )?;
+    if !options.no_verify {
+        require_codex_checks(&verify(&alias, &[App::Codex], &path).await)?;
+    }
+    if path != default_ssh_config_path()? {
+        progress.note(&format!(
+            "Codex reads {}. Make sure it contains: Include {}",
+            default_ssh_config_path()?.display(),
+            path.display()
+        ));
+    }
+    codex_config::configure(&alias, agent_name, directory, &path, progress).await
+}
+
+fn require_codex_checks(checks: &[Check]) -> Result<()> {
+    for check in checks {
+        if !check.ok {
+            bail!(
+                "Codex Desktop SSH check failed ({}): {}",
+                check.label,
+                check.detail.as_deref().unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn render_block(
@@ -289,31 +591,58 @@ fn render_block(
 ///
 /// Deliberately not the write path with the writes skipped: provisioning would
 /// still create or wake a VM, and a flag documented as "write nothing" that
-/// quietly bills for a machine is worse than no flag. So this reads an agent
-/// that already exists — it will not create one — and reads the local key
-/// without registering it. The trade is that the identity shown is a best guess
+/// quietly bills for a machine is worse than no flag. Read an existing agent,
+/// or show placeholders for --new, and read the local key without registering
+/// it. The trade is that the identity shown is a best guess
 /// at what a real run would register, which is why it is labelled.
 async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) -> Result<()> {
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
+    let (agent_id, agent_name, environment_id) = if args.new {
+        println!(
+            "Would create a fresh cloud agent (--new). Agent and environment IDs below are placeholders."
+        );
+        println!(
+            "Target: project {}, environment {}",
+            args.project
+                .as_deref()
+                .unwrap_or("linked or configured default"),
+            args.environment
+                .as_deref()
+                .unwrap_or("linked or configured default")
+        );
+        (
+            "NEW_AGENT_ID".into(),
+            "new-agent".into(),
+            "ENVIRONMENT_ID".into(),
+        )
+    } else {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
+        (agent.id, agent.name, agent.environment_id)
+    };
 
     let identity = preferred_local_key().await;
-    let alias = args
-        .alias
-        .clone()
-        .unwrap_or_else(|| ssh_config::agent_alias(&agent.name));
-    let block = render_block(
-        &agent.name,
-        &agent.environment_id,
-        &alias,
-        identity.as_deref(),
+    let alias = registered_ssh_alias(
+        ssh_config_path,
+        &agent_name,
+        &environment_id,
+        args.alias.as_deref(),
+        apps.contains(&App::Codex),
     )?;
+    let block = render_block(&agent_name, &environment_id, &alias, identity.as_deref())?;
 
     println!("\n{}", ssh_config_path.display().to_string().cyan());
     print!("{block}");
+    if apps.contains(&App::Codex) {
+        if apps == [App::Codex] {
+            println!(
+                "Would request a code endpoint for a new VM, then start or reuse the authenticated Codex App Server on its configured port (default 4096; legacy connections use 8080) and verify its public WebSocket endpoint."
+            );
+        }
+        codex_config::preview(&alias, &agent_name, &args.dir)?;
+    }
     if apps.contains(&App::Claude) {
-        let entry = claude_ssh_entry(&agent.id, &agent.name, &alias, &args.dir);
+        let entry = claude_ssh_entry(&agent_id, &agent_name, &alias, &args.dir);
         println!(
             "\n{}",
             claude_settings_path(home).display().to_string().cyan()
@@ -322,6 +651,24 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
             "{}",
             serde_json::to_string_pretty(&json!({ "sshConfigs": [entry] }))?
         );
+    }
+    if apps.iter().any(|app| app.is_opencode()) {
+        println!("\nWould generate credentials for a new agent, or reuse its saved credentials.");
+        println!(
+            "Would request a code endpoint for a new VM, then start password-protected OpenCode on its configured port (default 4096; legacy connections use 8080) from {}.",
+            args.dir
+        );
+        println!(
+            "Would verify the agent's existing HTTPS address and print its connection details."
+        );
+        for target in opencode_config::targets(None).await? {
+            println!(
+                "Would save the authenticated server, default server, and project in {} ({}).",
+                target.name(),
+                target.root.display()
+            );
+        }
+        println!("You may need to restart OpenCode Desktop to load the updated configuration.");
     }
     if identity.is_none() {
         println!(
@@ -332,7 +679,7 @@ async fn dry_run(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path)
     }
     println!(
         "\n{}",
-        "Nothing written, and no agent created or woken (--dry-run).".dimmed()
+        "Nothing written, no agent created or woken, and no process started (--dry-run).".dimmed()
     );
     Ok(())
 }
@@ -365,8 +712,11 @@ fn selected_apps(args: &Args) -> Result<Vec<App>> {
     if args.codex {
         apps.push(App::Codex);
     }
+    if args.opencode {
+        apps.push(App::OpenCode);
+    }
     if apps.is_empty() {
-        bail!("Name an app: --claude, --codex, or both.");
+        bail!("Name an app: --claude, --codex, or --opencode.");
     }
     Ok(apps)
 }
@@ -379,6 +729,39 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     // `--agent` is how that is cleaned up.
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
 
+    let removed_codex = if apps.contains(&App::Codex) {
+        let alias = registered_ssh_alias(
+            ssh_config_path,
+            &agent.name,
+            &agent.environment_id,
+            args.alias.as_deref(),
+            false,
+        )?;
+        let mut removed = codex_config::remove(&alias)?;
+        if args.alias.is_none() {
+            removed |= codex_config::remove(&ssh_config::codex_agent_alias(&agent.name))?;
+        }
+        removed
+    } else {
+        false
+    };
+    let removed_opencode = if apps.iter().any(|app| app.is_opencode()) {
+        opencode_config::remove(&agent.id).await?
+    } else {
+        false
+    };
+    let stopped_opencode =
+        apps.iter().any(|app| app.is_opencode()) && agent.status == ca::Status::Running;
+    if stopped_opencode {
+        let alias = registered_ssh_alias(
+            ssh_config_path,
+            &agent.name,
+            &agent.environment_id,
+            args.alias.as_deref(),
+            false,
+        )?;
+        opencode::stop(&alias, ssh_config_path).await?;
+    }
     let marker = ssh_config::agent_marker(&agent.environment_id, &agent.name);
     let removed_block = ssh_config::remove_marked_block(ssh_config_path, &marker)?;
     let removed_entry = if apps.contains(&App::Claude) {
@@ -386,9 +769,14 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
     } else {
         false
     };
-
-    match (removed_block, removed_entry) {
-        (false, false) => println!(
+    match (
+        removed_block,
+        removed_entry,
+        stopped_opencode,
+        removed_opencode,
+        removed_codex,
+    ) {
+        (false, false, false, false, false) => println!(
             "No `railway ca desktop` config found for agent {}.",
             agent.name.cyan()
         ),
@@ -405,6 +793,21 @@ async fn remove(args: &Args, apps: &[App], home: &Path, ssh_config_path: &Path) 
                     "{} Removed the connection from {}",
                     "✓".green(),
                     claude_settings_path(home).display()
+                );
+            }
+            if stopped_opencode {
+                println!("{} Stopped the managed OpenCode server.", "✓".green());
+            }
+            if removed_opencode {
+                println!(
+                    "{} Removed the managed OpenCode Desktop connection and project.",
+                    "✓".green()
+                );
+            }
+            if removed_codex {
+                println!(
+                    "{} Removed the Codex Desktop import declaration. Remove the already-imported host in Codex Settings → Connections and its project from the sidebar.",
+                    "✓".green()
                 );
             }
             println!(
@@ -549,10 +952,23 @@ async fn verify(alias: &str, apps: &[App], ssh_config_path: &Path) -> Vec<Check>
         )
         .await;
         checks.push(Check {
-            label: format!("{bin} on PATH (login shell)"),
+            label: format!("{} on PATH (login shell)", app.harness()),
             ok: probe.is_ok(),
             detail: probe.err().map(|e| format!("{e:#}")),
         });
+        if app.is_opencode() {
+            let probe = ssh_alias(
+                alias,
+                &["bash", "-lc", "opencode serve --help"],
+                ssh_config_path,
+            )
+            .await;
+            checks.push(Check {
+                label: "opencode serve available".into(),
+                ok: probe.is_ok(),
+                detail: probe.err().map(|e| format!("{e:#}")),
+            });
+        }
     }
     checks
 }
@@ -571,8 +987,13 @@ async fn ssh_alias(alias: &str, command: &[&str], ssh_config_path: &Path) -> Res
         .arg("-o")
         .arg("ConnectTimeout=20")
         .arg("-T")
+        .arg("--")
         .arg(alias)
-        .args(command)
+        // OpenSSH joins argv with spaces before invoking the remote shell.
+        // Quote the whole command so `bash -lc` receives one script argument.
+        .arg(shell_join(
+            &command.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        ))
         .stdin(std::process::Stdio::null());
     let out = cmd.output().await.context("Failed to run `ssh`")?;
     if out.status.success() {
@@ -594,11 +1015,12 @@ fn summarize(
     prepared: &code::Prepared,
     apps: &[App],
     alias: &str,
-    dir: &str,
+    args: &Args,
     ssh_config_path: &Path,
     home: &Path,
     checks: &[Check],
 ) {
+    let dir = &args.dir;
     println!("\n{}", "Cloud agent ready for your desktop app".bold());
     println!("  {}  {}", "Agent  ".dimmed(), prepared.agent_name.bold());
     println!("  {}  {}", "Host   ".dimmed(), alias.bold());
@@ -615,7 +1037,6 @@ fn summarize(
             claude_settings_path(home).display().to_string().bold()
         );
     }
-
     if !checks.is_empty() {
         println!();
         for check in checks {
@@ -627,21 +1048,34 @@ fn summarize(
         }
     }
 
-    println!("\n{}", "Next:".bold());
+    if apps.iter().any(|app| !app.is_opencode()) {
+        println!("\n{}", "Next:".bold());
+    }
     for app in apps {
+        if app.is_opencode() {
+            continue;
+        }
+        if *app == App::Codex {
+            println!(
+                "  Codex — find Railway: {} in {}",
+                prepared.agent_name,
+                app.where_it_appears()
+            );
+            continue;
+        }
         println!(
             "  {} — restart it, then find the agent in {}",
             app.name(),
             app.where_it_appears()
         );
     }
-    // The one thing that will bite a user who does everything right: an agent
-    // asleep by the time they open the app.
-    println!(
-        "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
-        "!".yellow().bold(),
-        format!("railway ca wake {}", prepared.agent_name).cyan()
-    );
+    if !apps.iter().any(|app| app.is_opencode()) {
+        println!(
+            "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
+            "!".yellow().bold(),
+            format!("railway ca wake {}", prepared.agent_name).cyan()
+        );
+    }
     println!(
         "{} stops the compute bill when you're done.",
         format!("railway ca sleep {}", prepared.agent_name).cyan()
@@ -651,9 +1085,167 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn args_for(argv: &[&str]) -> Args {
         Args::parse_from(std::iter::once("desktop").chain(argv.iter().copied()))
+    }
+
+    #[test]
+    fn codex_alias_maps_to_the_canonical_desktop_only_launch() {
+        for extra in [
+            vec![],
+            vec!["--new"],
+            vec![
+                "--agent",
+                "box",
+                "--dir",
+                "/app/a project",
+                "-p",
+                "project",
+                "-e",
+                "env",
+            ],
+        ] {
+            let legacy = args_for(&[vec!["--codex"], extra.clone()].concat());
+            let mut canonical = vec!["code", "--codex", "desktop-only"];
+            if !extra.contains(&"--dir") {
+                canonical.extend(["--dir", "/app"]);
+            }
+            canonical.extend(extra);
+            assert_eq!(
+                legacy.codex_launch_args(),
+                LaunchArgs::try_parse_from(canonical).unwrap()
+            );
+        }
+        let args = args_for(&[
+            "--codex",
+            "--alias",
+            "my-desktop",
+            "--ssh-config",
+            "/custom/ssh config",
+            "--no-verify",
+        ]);
+        let options = args.codex_options();
+        assert_eq!(options.alias.as_deref(), Some("my-desktop"));
+        assert_eq!(
+            options.ssh_config.as_deref(),
+            Some(Path::new("/custom/ssh config"))
+        );
+        assert!(options.no_verify);
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn shared_ssh_registration_preserves_desktop_alias_and_unrelated_hosts() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".ssh/config");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let personal = "Host personal\n    HostName personal.example.com\n";
+        fs::write(&path, personal).unwrap();
+        let old_key = home.path().join("old key");
+        let new_key = home.path().join("new key");
+        let alias = register_ssh(
+            &path,
+            "box",
+            "env-id",
+            Some(&old_key),
+            Some("my-codex"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(alias, "my-codex");
+
+        // Terminal setup uses the same registration without requesting an alias.
+        let alias = register_ssh(&path, "box", "env-id", Some(&new_key), None, true).unwrap();
+        assert_eq!(alias, "my-codex");
+        assert_eq!(
+            registered_ssh_alias(&path, "box", "env-id", None, true).unwrap(),
+            alias
+        );
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.starts_with(personal));
+        assert_eq!(
+            updated.matches("# BEGIN railway:agent:env-id:box").count(),
+            1
+        );
+        assert!(updated.contains("User agent:env-id:box"));
+        assert!(updated.contains("new key"));
+        assert!(!updated.contains("old key"));
+        register_ssh(&path, "box", "env-id", Some(&new_key), None, true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), updated);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn shared_ssh_registration_creates_a_default_and_leaves_ambiguous_blocks_intact() {
+        for (codex, name, expected) in [
+            (false, "box", "railway-agent-box"),
+            (true, "codex-railg-3ed", "railway-codex-railg-3ed"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join(".ssh/config");
+            assert_eq!(
+                register_ssh(&path, name, "env-id", None, None, codex).unwrap(),
+                expected
+            );
+            let existing = fs::read_to_string(&path).unwrap();
+            let ambiguous = existing.replace(&format!("Host {expected}\n"), "Host box other\n");
+            fs::write(&path, &ambiguous).unwrap();
+            assert!(register_ssh(&path, name, "env-id", None, None, codex).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
+            assert!(
+                register_ssh(
+                    &path,
+                    name,
+                    "env-id",
+                    None,
+                    Some("bad\nHost injected"),
+                    codex
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), ambiguous);
+        }
+    }
+
+    #[test]
+    fn codex_registration_migrates_the_legacy_default_in_place() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".ssh/config");
+        let name = "codex-railg-3ed";
+        register_ssh(&path, name, "env-id", None, None, false).unwrap();
+        let legacy = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            registered_ssh_alias(&path, name, "env-id", None, true).unwrap(),
+            "railway-codex-railg-3ed"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        for _ in 0..2 {
+            assert_eq!(
+                register_ssh(&path, name, "env-id", None, None, true).unwrap(),
+                "railway-codex-railg-3ed"
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                legacy.replace(
+                    "Host railway-agent-codex-railg-3ed\n",
+                    "Host railway-codex-railg-3ed\n"
+                )
+            );
+            // Other apps sharing this registration use the migrated host too.
+            assert_eq!(
+                registered_ssh_alias(&path, name, "env-id", None, false).unwrap(),
+                "railway-codex-railg-3ed"
+            );
+        }
     }
 
     #[test]
@@ -666,6 +1258,84 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn the_opencode2_flag_is_gone() {
+        assert!(Args::try_parse_from(["desktop", "--opencode2"]).is_err());
+    }
+
+    #[test]
+    fn opencode_can_be_configured_alone_or_with_other_apps() {
+        assert_eq!(
+            selected_apps(&args_for(&["--opencode"])).unwrap(),
+            vec![App::OpenCode]
+        );
+        assert_eq!(
+            selected_apps(&args_for(&["--claude", "--codex", "--opencode"])).unwrap(),
+            vec![App::Claude, App::Codex, App::OpenCode]
+        );
+        for flag in ["--dry-run", "--remove", "--no-verify"] {
+            assert!(Args::try_parse_from(["desktop", "--opencode", flag]).is_ok());
+        }
+        for flag in ["--port", "--remote-port"] {
+            assert!(Args::try_parse_from(["desktop", "--opencode", flag, "4096"]).is_err());
+        }
+    }
+
+    #[test]
+    fn new_creates_once_and_later_apps_reuse_the_created_agent() {
+        let args = args_for(&[
+            "--claude",
+            "--codex",
+            "--opencode",
+            "--new",
+            "-e",
+            "production",
+        ]);
+        let first = args.launch_args(App::Claude, None, None);
+        assert!(first.new);
+        assert!(first.code_endpoint);
+        assert!(first.agent_id.is_none());
+        assert_eq!(first.environment.as_deref(), Some("production"));
+        for app in [App::Codex, App::OpenCode] {
+            let next = args.launch_args(
+                app,
+                Some("created-agent".into()),
+                Some(("created-project", "created-env")),
+            );
+            assert!(!next.new);
+            assert_eq!(next.agent_id.as_deref(), Some("created-agent"));
+            assert_eq!(next.environment.as_deref(), Some("created-env"));
+            assert_eq!(next.project.as_deref(), Some("created-project"));
+        }
+    }
+
+    #[test]
+    fn desktop_reuses_by_default_and_new_conflicts_with_existing_agent_actions() {
+        let args = args_for(&["--opencode"]);
+        assert!(!args.launch_args(App::OpenCode, None, None).new);
+        let pinned = args.launch_args(
+            App::OpenCode,
+            Some("existing-agent".into()),
+            Some(("other-project", "other-env")),
+        );
+        assert!(!pinned.new);
+        assert_eq!(pinned.agent_id.as_deref(), Some("existing-agent"));
+        assert_eq!(pinned.environment.as_deref(), Some("other-env"));
+        assert_eq!(pinned.project.as_deref(), Some("other-project"));
+        assert!(
+            Args::try_parse_from(["desktop", "--opencode", "--new", "--agent", "existing"])
+                .is_err()
+        );
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--remove"]).is_err());
+        assert!(Args::try_parse_from(["desktop", "--opencode", "--new", "--dry-run"]).is_ok());
+    }
+
+    #[test]
+    fn ssh_only_desktop_setup_does_not_request_a_code_endpoint() {
+        let args = args_for(&["--claude", "--codex", "--new"]);
+        assert!(!args.launch_args(App::Claude, None, None).code_endpoint);
     }
 
     #[test]

@@ -331,6 +331,10 @@ pub(crate) fn agent_alias(agent_name: &str) -> String {
     format!("railway-agent-{}", sanitize_alias(agent_name))
 }
 
+pub(crate) fn codex_agent_alias(agent_name: &str) -> String {
+    format!("railway-{}", sanitize_alias(agent_name))
+}
+
 /// The strict single-token grammar backboard enforces on a coding-agent name at
 /// create: `^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`. `railway ca desktop` renders the
 /// server-returned name verbatim into an OpenSSH `User` line, so a name outside
@@ -375,7 +379,7 @@ pub(crate) fn render_agent_config_block(block: &AgentBlock<'_>) -> String {
     );
     w(
         &mut out,
-        format_args!("# Written by `railway ca desktop` — edit with that, not by hand\n"),
+        format_args!("# Managed by `railway ca desktop` and `railway code`\n"),
     );
     w(&mut out, format_args!("Host {}\n", block.alias));
     w(&mut out, format_args!("    HostName {relay_host}\n"));
@@ -454,6 +458,39 @@ pub(crate) fn upsert_marked_block(path: &Path, config_marker: &str, block: &str)
     };
 
     write_config(path, &updated)
+}
+
+/// Reuse an agent's registered host name when another client prepares the same
+/// machine. In particular, a terminal reconnect must preserve a Desktop --alias.
+pub(crate) fn marked_host_alias(path: &Path, config_marker: &str) -> Result<Option<String>> {
+    let existing = read_config(path)?;
+    let pattern = config_block_regex_with_case(config_marker, false, true)?;
+    let Some(block) = pattern.find(&existing) else {
+        return Ok(None);
+    };
+    for line in block.as_str().lines() {
+        let mut words = line.split_whitespace();
+        if !words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("Host"))
+        {
+            continue;
+        }
+        if let Some(alias) = words.next()
+            && words.next().is_none()
+            && alias
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Ok(Some(alias.to_owned()));
+        }
+        bail!("The managed SSH block {config_marker} must contain one literal Host alias");
+    }
+    bail!("The managed SSH block {config_marker} has no Host alias")
 }
 
 /// Remove the block carrying `config_marker`. `false` means there was none.
@@ -807,7 +844,7 @@ mod tests {
             "\
 # BEGIN railway:agent:env-id:my-box
 # Railway cloud agent: my-box
-# Written by `railway ca desktop` — edit with that, not by hand
+# Managed by `railway ca desktop` and `railway code`
 Host railway-agent-my-box
     HostName ssh.railway.com
     User agent:env-id:my-box

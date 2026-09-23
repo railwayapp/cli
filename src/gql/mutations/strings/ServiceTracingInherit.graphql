@@ -1,0 +1,8 @@
+mutation ServiceTracingInherit($id: String!) {
+  serviceUpdate(id: $id, input: { tracingEnabled: null }) {
+    id
+    name
+    tracingEnabled
+    autoInstrumentationEnabled
+  }
+}

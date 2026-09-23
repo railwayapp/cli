@@ -9,11 +9,16 @@
 //! browse first. `railway ca start` is the one that skips the TUI entirely.
 
 pub mod access;
+pub mod bootstrap;
+pub(crate) mod client_sessions;
+pub(crate) mod codex;
 pub mod desktop;
 mod herdr;
 pub mod lifecycle;
 pub mod mcp_sync;
+pub(crate) mod opencode;
 pub mod prefs;
+pub(crate) mod remote_threads;
 pub mod setup;
 pub mod skills_sync;
 pub mod telemetry;
@@ -34,11 +39,32 @@ use crate::util::progress::create_spinner;
 use prefs::AgentPrefs;
 use tui::{App, Outcome};
 
+/// Display names are independent of historical harness identities
+/// (`opencode2` was V2 while V1 was still launchable; both are OpenCode now).
+pub(crate) fn harness_label(slug: &str) -> &str {
+    match slug {
+        "opencode" | "opencode2" => "OpenCode",
+        _ => slug,
+    }
+}
+
 /// Manage Railway cloud agents
 #[derive(Parser)]
 #[clap(
     args_conflicts_with_subcommands = true,
-    after_help = "Examples:\n\n  railway ca                        # browse and launch agents (TUI)\n  railway ca manage                 # jump straight into the manage screen\n  railway ca setup                  # choose your default agent and skills\n  railway ca setup --show           # print current preferences\n  railway ca desktop --claude       # drive an agent from Claude Code Desktop\n  railway ca desktop --codex        # …or from the Codex app\n  railway ca start --claude         # skip the TUI and launch\n\n  railway ca list                   # every agent you own, everywhere\n  railway ca list -e production     # just this environment\n  railway ca create my-agent        # a VM, without connecting to it\n  railway ca ssh my-agent           # connect to it (starts a session if none)\n  railway ca ssh my-agent -- bash   # a plain shell instead of the agent\n  railway ca sleep my-agent         # stop the compute bill, keep the disk\n  railway ca sleep --all            # every running agent you own\n  railway ca delete my-agent        # the agent and its disk\n\nAgents are addressed by name or id. With neither, commands use this\ndirectory's agent, or your only one, and otherwise list the candidates.\n\n`railway code` is the launcher pointed straight at a session — same flags,\nsame preferences, no browsing: it opens the manage screen with the tree collapsed\nand your default harness already starting (⌥f brings the tree back). `railway\nca start` skips the TUI altogether.\n\nPreferences live in ~/.railway/agent-prefs.json; a flag always wins over\nthem, and RAILWAY_CA_AGENT overrides the saved default for one run. A\ndirectory linked with `railway link` wins over the saved default project too\n— new agents land there instead.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    after_help = r#"Examples:
+  railway ca                         # browse and launch agents
+  railway ca setup                   # choose defaults and skills
+  railway ca ssh my-box               # open a shell
+  railway ca sleep my-box             # stop compute, keep the disk
+  railway ca desktop --codex          # configure a desktop app
+
+Use railway code for a local Codex/OpenCode client connected to a VM.
+Agent flags here launch on the VM. Use --new to create a fresh VM.
+Flags override preferences; the linked project overrides the saved project.
+Disconnecting leaves the VM running. Sleep stops processes and keeps the disk.
+Requires Cloud Agents access.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -52,16 +78,29 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Command {
+    /// Save and select reusable cloud-agent bootstraps
+    Bootstrap(bootstrap::Args),
     /// Configure how cloud agents are launched (default agent, skills)
     Setup(setup::Args),
 
-    /// Set up a desktop coding app to work on a cloud agent over SSH
+    /// Connect a desktop coding app to a cloud agent
     Desktop(desktop::Args),
 
     /// Open the TUI directly on the manage screen, skipping the first-run nudge
     Manage,
 
     /// Launch a coding agent on a cloud agent VM, without the TUI
+    #[clap(after_help = r#"Examples:
+  railway ca start --claude           # launch Claude Code on the VM
+  railway ca start --codex --new       # launch Codex on a new VM
+  railway ca start --claude -- exec "explain this codebase"
+
+Launches on the VM directly, without the management interface.
+Uses your configured agent and project defaults; --new creates a fresh VM.
+Available local credentials are copied to the VM; Claude can mint a setup token.
+Disconnecting leaves the VM running. Use railway ca sleep <agent> to stop compute.
+Requires Cloud Agents access.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
     Start(LaunchArgs),
 
     /// List your cloud agents
@@ -90,6 +129,19 @@ enum Command {
     Herdr(herdr::Args),
 }
 
+/// Shared launch arguments have different help in CA's in-VM execution path.
+pub fn get_dynamic_args(cmd: clap::Command) -> clap::Command {
+    fn in_vm_help(mut cmd: clap::Command) -> clap::Command {
+        for id in ["connection_json", "remote_dir", "remote_agent"] {
+            cmd = cmd.mut_arg(id, |arg| arg.hide(true));
+        }
+        cmd.mut_arg("agent_args", |arg| {
+            arg.help("Arguments to pass to the agent after --")
+        })
+    }
+    in_vm_help(cmd).mut_subcommand("start", in_vm_help)
+}
+
 /// Time one lifecycle verb and report its outcome, passing the result through
 /// unchanged.
 ///
@@ -116,6 +168,7 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Bootstrap(a)) => tracked("bootstrap", bootstrap::command(a)).await,
         Some(Command::Setup(a)) => setup::command(a).await,
         Some(Command::Desktop(a)) => tracked("desktop", desktop::command(a)).await,
         Some(Command::Manage) => browse_into(Some(tui::Screen::Manage)).await,
@@ -133,7 +186,7 @@ pub async fn command(args: Args) -> Result<()> {
         // which means the pane on a terminal and a plain ssh session off one.
         // A TUI in a pipe would be gibberish, and erroring instead would break
         // scripted callers that reasonably expect the launcher.
-        None => crate::commands::code::command(args.launch).await,
+        None => crate::commands::code::launch_in_cloud(args.launch).await,
     }
 }
 
@@ -198,6 +251,7 @@ struct BrowseOpts {
     /// harness are already settled — see [`code::resolve_launch`], which has to
     /// run out here where it can still print and prompt.
     launch: Option<tui::LaunchRequest>,
+    client_pane: Option<tui::ClientPane>,
 }
 
 async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
@@ -249,26 +303,27 @@ pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
             }
         }
     };
+    let mut args = args;
+    args.local_name_project = resolved.local_name_project;
     let launch = tui::LaunchRequest {
         project_id: resolved.project_id,
         environment_id: resolved.environment_id,
-        // Which agent in that environment is the pipeline's call: it reuses
-        // this environment's remembered one, adopts the caller's only one, and
-        // creates one when there is neither — the same answer `railway code`
-        // has always given, now drawn in a pane.
-        agent_id: None,
+        // An explicit --agent wins. Otherwise force_new carries the CLI's
+        // creation policy through the pane into provisioning.
+        agent_id: args.agent_id.clone(),
         session_name: None,
         force_new: args.new,
         new_session: false,
         harness: resolved.harness.to_string(),
         prompt: args.initial_prompt.clone(),
-        label: resolved.harness.to_string(),
+        label: harness_label(resolved.harness).to_string(),
         base: Box::new(args),
     };
     browse_with(BrowseOpts {
         initial_screen: Some(tui::Screen::Manage),
         collapsed: true,
         launch: Some(launch),
+        client_pane: None,
     })
     .await
 }
@@ -283,11 +338,22 @@ async fn browse_with(opts: BrowseOpts) -> Result<()> {
     result
 }
 
+pub(crate) async fn launch_client_in_pane(pane: tui::ClientPane) -> Result<()> {
+    browse_with(BrowseOpts {
+        initial_screen: Some(tui::Screen::Manage),
+        collapsed: true,
+        client_pane: Some(pane),
+        ..Default::default()
+    })
+    .await
+}
+
 async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     let BrowseOpts {
         initial_screen,
         collapsed,
         launch,
+        client_pane,
     } = opts;
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
@@ -392,7 +458,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
         tree,
         target,
         saved.agent.as_deref(),
-        saved.theme.as_deref(),
+        Some(crate::tui_theme::Theme::load_preference().slug),
         default_project_id,
         !first_run,
     );
@@ -411,6 +477,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     // Mirrored so the ⌥s settings card opens showing the saved answer.
     app.skills_enabled = saved.skills.enabled;
     app.hide_tabs = saved.hide_tabs;
+    app.sidebar_width = saved.sidebar_width;
     // What the key check learned. Connects gate on this in-frame: an
     // unregistered key raises a register question instead of a hung prompt.
     app.ssh_key = ssh_key;
@@ -436,7 +503,18 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     // `railway code` is here for its one session, so the TUI leaves when that
     // session ends; bare `railway ca` keeps its tree. Held on the app rather
     // than derived from `autostart`, which the loop consumes on frame one.
-    app.quit_when_done = launch.is_some();
+    app.quit_when_done = launch.is_some() || client_pane.is_some();
+    if let Some(pane) = &client_pane {
+        app.harness = tui::app::HARNESSES
+            .iter()
+            .position(|h| *h == pane.connection.harness())
+            .unwrap_or(0);
+        app.target = target_in_tree(&app.tree, &pane.environment_id);
+        if !app.known_environments.contains(&pane.environment_id) {
+            app.known_environments.push(pane.environment_id.clone());
+        }
+    }
+    app.autostart_client = client_pane;
     // A pipeline that started beside the tree load is adopted by the loop;
     // otherwise the request dispatches normally (and meets the gates) on
     // frame one.
@@ -454,7 +532,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
                 // setting — persist it on the way out rather than making the
                 // user set it again next time. Best-effort: failing to save it
                 // is not worth an error on exit.
-                persist_theme(&home, app.theme.slug);
+                let _ = app.theme.save_preference();
                 // A quit that closed a finished session says so here, on the
                 // restored terminal — the agent is still running (and billing)
                 // even though its session is over.
@@ -462,6 +540,22 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
                     println!("{}", note.dimmed());
                 }
                 return Ok(());
+            }
+            Outcome::OpenShell {
+                agent_id,
+                agent_name,
+            } => {
+                println!(
+                    "\nOpening an SSH shell on {agent_name}. Exit the shell to return to railway ca."
+                );
+                match lifecycle::ssh_shell(agent_id).await {
+                    Ok(0) => {}
+                    Ok(status) => app.toast_error(format!("SSH shell exited with status {status}")),
+                    Err(err) => {
+                        eprintln!("Couldn't open an SSH shell: {err:#}");
+                        pause_for_reentry();
+                    }
+                }
             }
             Outcome::FullScreen(req) => {
                 println!(
@@ -539,15 +633,6 @@ async fn check_ssh_key(client: &reqwest::Client, configs: &Configs) -> tui::app:
         fingerprint: key.fingerprint.clone(),
         public_key: key.public_key.to_string(),
     })
-}
-
-fn persist_theme(home: &std::path::Path, slug: &str) {
-    let mut prefs = AgentPrefs::load_in(home).unwrap_or_default();
-    if prefs.theme.as_deref() == Some(slug) {
-        return;
-    }
-    prefs.theme = Some(slug.to_string());
-    let _ = prefs.save_in(home);
 }
 
 /// Hold the restored terminal until the user is ready, so whatever the launcher

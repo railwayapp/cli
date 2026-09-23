@@ -123,6 +123,8 @@ struct Named {
     name: Option<String>,
     #[serde(default)]
     group_id: Option<String>,
+    #[serde(default)]
+    template_service_id: Option<String>,
 }
 
 pub struct NativeRun {
@@ -218,7 +220,7 @@ pub async fn run(
             "message": diagnostic.message,
         }));
     }
-    let ok = all_diagnostics
+    let mut ok = all_diagnostics
         .iter()
         .all(|d| d.get("severity").and_then(Value::as_str) != Some("error"));
 
@@ -248,16 +250,16 @@ pub async fn run(
 
     let mut apply_result = None;
     if command == "apply" && ok && (!change_set.changes.is_empty() || claim) {
-        apply_result = Some(
-            apply_change_set(
-                &client,
-                &endpoint,
-                &current.id,
-                &change_set,
-                current.config_etag.as_deref(),
-            )
-            .await?,
-        );
+        let result = apply_change_set(
+            &client,
+            &endpoint,
+            &current.id,
+            &change_set,
+            current.config_etag.as_deref(),
+        )
+        .await?;
+        ok = record_apply_outcome(&result, &mut all_diagnostics);
+        apply_result = Some(result);
     }
 
     let serialized = serde_json::to_value(RunnerWire {
@@ -345,6 +347,55 @@ async fn import_current_environment(
     })?)
 }
 
+/// Backboard reports a failed apply through `status` (top-level or per change)
+/// rather than through an error. Fold that into `ok` and a diagnostic so JSON
+/// consumers and the exit code see the failure instead of `ok: true`.
+/// Status vocabulary is backboard's ChangeSetApplyResultShape:
+/// `staged | applying | applied | partially_applied | failed`.
+fn record_apply_outcome(apply_result: &Value, diagnostics: &mut Vec<Value>) -> bool {
+    let status = apply_result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let changes = apply_result
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let failed_changes = changes
+        .iter()
+        .filter(|change| change.get("status").and_then(Value::as_str) == Some("failed"))
+        .map(|change| {
+            change
+                .get("summary")
+                .or_else(|| change.get("path"))
+                .or_else(|| change.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("change")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let succeeded = matches!(status, "applied" | "staged") && failed_changes.is_empty();
+    if succeeded {
+        return true;
+    }
+    let message = if failed_changes.is_empty() {
+        format!("Apply finished with status {status}")
+    } else {
+        format!(
+            "Apply finished with status {status}; failed changes: {}",
+            failed_changes.join(", ")
+        )
+    };
+    diagnostics.push(json!({
+        "severity": "error",
+        "code": "APPLY_FAILED",
+        "path": "",
+        "message": message,
+    }));
+    false
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RunnerWire {
@@ -421,7 +472,7 @@ async fn fill_name_maps(
     let services = post_graphql_raw::<ProjectServicesQuery, _>(
         client,
         endpoint,
-        "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name } } } } }",
+        "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name templateServiceId } } } } }",
         json!({ "projectId": project_id }),
     )
     .await
@@ -430,7 +481,12 @@ async fn fill_name_maps(
         if let Some(name) = edge.node.name {
             options
                 .service_names_by_id
-                .insert(edge.node.id, json!(name));
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(template_service_id) = edge.node.template_service_id {
+            options
+                .template_service_ids_by_id
+                .insert(edge.node.id, json!(template_service_id));
         }
     }
 
@@ -636,6 +692,98 @@ async fn wait_for_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wire_after_apply(ok_before: bool, apply_result: Value) -> Value {
+        let mut diagnostics = if ok_before {
+            Vec::new()
+        } else {
+            vec![json!({ "severity": "error", "path": "", "message": "boom" })]
+        };
+        let ok = ok_before && record_apply_outcome(&apply_result, &mut diagnostics);
+        serde_json::to_value(RunnerWire {
+            ok,
+            command: "apply".to_string(),
+            file: String::new(),
+            current_environment: None,
+            change_set: None,
+            diff: None,
+            diagnostics,
+            current_graph: None,
+            desired_graph: None,
+            apply_result: Some(apply_result),
+            claim: false,
+            preview: None,
+        })
+        .unwrap()
+    }
+
+    fn has_apply_failed_diagnostic(wire: &Value) -> bool {
+        wire["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "APPLY_FAILED" && d["severity"] == "error")
+    }
+
+    #[test]
+    fn failed_apply_result_sets_ok_false_with_diagnostic() {
+        let wire = wire_after_apply(
+            true,
+            json!({
+                "id": "cs-1",
+                "status": "failed",
+                "changes": [
+                    { "kind": "service.create", "summary": "Create web", "status": "applied" },
+                    { "kind": "volume.create", "summary": "Create data", "status": "failed" }
+                ]
+            }),
+        );
+        assert_eq!(wire["ok"], false);
+        assert!(has_apply_failed_diagnostic(&wire));
+        let message = wire["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(message.contains("Create data"), "{message}");
+        assert!(!message.contains("Create web"), "{message}");
+
+        // Backboard may report an overall success status while a change failed.
+        let wire = wire_after_apply(
+            true,
+            json!({ "status": "applied", "changes": [{ "kind": "x", "status": "failed" }] }),
+        );
+        assert_eq!(wire["ok"], false);
+        assert!(has_apply_failed_diagnostic(&wire));
+    }
+
+    #[test]
+    fn partially_applied_or_missing_status_sets_ok_false() {
+        for result in [
+            json!({ "status": "partially_applied", "changes": [] }),
+            json!({ "status": "applying", "changes": [] }),
+            json!({ "changes": [] }),
+        ] {
+            let wire = wire_after_apply(true, result.clone());
+            assert_eq!(wire["ok"], false, "{result}");
+            assert!(has_apply_failed_diagnostic(&wire), "{result}");
+        }
+    }
+
+    #[test]
+    fn successful_apply_result_keeps_ok_true() {
+        for status in ["applied", "staged"] {
+            let wire = wire_after_apply(
+                true,
+                json!({ "status": status, "changes": [{ "kind": "x", "status": "applied" }] }),
+            );
+            assert_eq!(wire["ok"], true, "{status}");
+            assert!(wire["diagnostics"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_apply_with_existing_error_stays_not_ok() {
+        let wire = wire_after_apply(false, json!({ "status": "failed", "changes": [] }));
+        assert_eq!(wire["ok"], false);
+        assert_eq!(wire["diagnostics"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn project_services_query_reads_nested_connection() {

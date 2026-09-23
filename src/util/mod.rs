@@ -17,6 +17,7 @@ pub mod self_update;
 pub mod shell;
 pub mod time;
 pub mod two_factor;
+pub mod update_status;
 pub mod watcher;
 
 /// Spawns a command in a fully detached process group so it survives after the

@@ -1,5 +1,7 @@
 use serde_json::{Map, Value, json};
 
+use crate::controllers::database_engines::parse_image_ref;
+
 use super::graph::{
     Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, resource_addr,
     resource_address, resource_name, resource_type,
@@ -24,6 +26,11 @@ pub struct EnvironmentConfigToGraphOptions {
     pub bucket_names_by_id: Map<String, Value>,
     pub bucket_group_ids_by_id: Map<String, Value>,
     pub custom_domains_by_service_id: Map<String, Value>,
+    /// Railway-managed databases are deployed from the official database
+    /// templates, so a service carries a `templateServiceId` iff it came from a
+    /// template. This is the only provenance the API exposes; without it a
+    /// `redis:7` image is just a service.
+    pub template_service_ids_by_id: Map<String, Value>,
 }
 
 pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
@@ -510,6 +517,17 @@ fn variable_to_config(value: &Value, resource_names_by_id: &Map<String, Value>) 
     }
 }
 
+fn database_engine_from_image(image: &str) -> Option<&'static str> {
+    let image = parse_image_ref(image)?;
+    match image.path.rsplit('/').next()? {
+        "postgres" | "postgresql" | "postgres-ssl" | "postgres-patroni" => Some("postgres"),
+        "mysql" | "mysql-wrapper" => Some("mysql"),
+        "redis" | "redis-sentinel" => Some("redis"),
+        "mongo" | "mongodb" => Some("mongo"),
+        _ => None,
+    }
+}
+
 pub fn environment_config_to_graph(
     config: &Value,
     options: &EnvironmentConfigToGraphOptions,
@@ -617,23 +635,14 @@ pub fn environment_config_to_graph(
             let image_name = service
                 .get("source")
                 .and_then(|source| field_str(source, "image"));
-            let looks_like_database = image_name.is_some_and(|image| {
-                image.contains("postgres")
-                    || image.contains("mysql")
-                    || image.contains("redis")
-                    || image.contains("mongo")
-            });
-            if looks_like_database {
-                let image = image_name.unwrap_or("postgres:16");
-                let engine = if image.contains("mysql") {
-                    "mysql"
-                } else if image.contains("redis") {
-                    "redis"
-                } else if image.contains("mongo") {
-                    "mongo"
-                } else {
-                    "postgres"
-                };
+            let from_template = options
+                .template_service_ids_by_id
+                .get(service_id)
+                .is_some_and(|id| !id.is_null());
+            let database = image_name
+                .filter(|_| from_template)
+                .and_then(|image| database_engine_from_image(image).map(|engine| (image, engine)));
+            if let Some((image, engine)) = database {
                 let output = match engine {
                     "redis" => "REDIS_URL",
                     "mysql" => "MYSQL_URL",

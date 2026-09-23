@@ -104,9 +104,16 @@ pub async fn command(args: Args) -> Result<()> {
 
     let backboard = configs.get_backboard();
     let spinner = create_spinner("Creating a cloud agent".to_string());
-    let agent = ca::create(&client, &backboard, &environment.id, name, None)
-        .await
-        .inspect_err(|_| spinner.finish_and_clear())?;
+    let agent = ca::create(
+        &client,
+        &backboard,
+        &environment.id,
+        name,
+        None,
+        ca::CreateOptions::default(),
+    )
+    .await
+    .inspect_err(|_| spinner.finish_and_clear())?;
     ca::remember(&mut configs, &agent)?;
     spinner.set_message(format!("Waiting for agent {} to start", agent.name));
     let agent = ca::wait_until_running(&client, &backboard, &environment.id, &agent.id)
