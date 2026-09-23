@@ -14,7 +14,19 @@ where
     <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
     <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
 {
-    Ok(Client::build(connect_websocket().await?)
+    Ok(Client::build(connect_websocket("/graphql/v2").await?)
+        .subscribe(StreamingOperation::<T>::new(variables))
+        .await?)
+}
+
+pub async fn subscribe_graphql_internal<T: GraphQLQuery + Send + Sync + Unpin + 'static>(
+    variables: T::Variables,
+) -> Result<Subscription<StreamingOperation<T>>>
+where
+    <T as GraphQLQuery>::Variables: Send + Sync + Unpin,
+    <T as GraphQLQuery>::ResponseData: std::fmt::Debug,
+{
+    Ok(Client::build(connect_websocket("/graphql/internal").await?)
         .subscribe(StreamingOperation::<T>::new(variables))
         .await?)
 }
@@ -22,10 +34,10 @@ where
 /// Open one connection for multiple operations. The caller must drive the
 /// actor for as long as it needs the subscriptions.
 pub async fn connect_graphql() -> Result<(Client, ConnectionActor)> {
-    Ok(Client::build(connect_websocket().await?).await?)
+    Ok(Client::build(connect_websocket("/graphql/v2").await?).await?)
 }
 
-async fn connect_websocket() -> Result<GraphQLWebSocket> {
+async fn connect_websocket(path: &str) -> Result<GraphQLWebSocket> {
     let configs = Configs::new()?;
     let hostname = configs.get_host();
     let client = reqwest::Client::default();
@@ -34,7 +46,7 @@ async fn connect_websocket() -> Result<GraphQLWebSocket> {
     // Railway VM mid-build — 1s is routinely missed even when the network
     // is fine, and every retry misses it the same way.
     let mut request = client
-        .get(format!("wss://backboard.{hostname}/graphql/v2"))
+        .get(format!("wss://backboard.{hostname}{path}"))
         .timeout(Duration::from_secs(10));
 
     if let Some(token) = &Configs::get_railway_token() {

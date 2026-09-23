@@ -916,7 +916,7 @@ cat > ~/.grok/auth.json"#;
 /// Deliberately not `. ~/.profile`: that sources `.bashrc`, whose starship/mise/
 /// zoxide init writes to stdout and would corrupt the AGENT-READY marker this
 /// command parses. Mirrors the image's own export line instead.
-const HARNESS_PATH: &str = r#"export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+pub(crate) const HARNESS_PATH: &str = r#"export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
 
 /// Saved OpenCode conversations are resumed by the VM's `opencode`, which must
 /// be V2. A resume goes straight to the binary rather than through the runtime
