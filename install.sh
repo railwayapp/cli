@@ -458,23 +458,30 @@ SHELL_STARTUP_ACTION=""
 
 # Resolve the version to install. Deliberately lazy: called only after --help and
 # --remove have had their chance to exit, and skipped outright when the caller
-# pinned RAILWAY_VERSION. Resolving eagerly at startup made every invocation
-# depend on an unauthenticated api.github.com call — rate limited to 60/hour per
-# source IP, which shared CI runners exhaust — so an install with a pinned
-# version would fail, and even `--help` and `-r` could not run. (#1030)
+# pinned RAILWAY_VERSION. Use GitHub's latest-release redirect instead of the
+# REST API, whose unauthenticated quota is shared by every client on a public IP.
+# Resolving eagerly also broke pinned installs, --help and --remove. (#1030)
 resolve_railway_version() {
+  local latest_url
+
   if [ -n "${RAILWAY_VERSION-}" ]; then
     return 0
   fi
 
-  RAILWAY_VERSION=$(curl -s --max-time 15 https://api.github.com/repos/railwayapp/cli/releases/latest \
-    | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-) || true
+  latest_url=$(curl --fail --silent --show-error --head --location \
+    --connect-timeout 5 --max-time 15 --output /dev/null \
+    --write-out '%{url_effective}' \
+    https://github.com/railwayapp/cli/releases/latest) || latest_url=""
+
+  # Accept only a release tag from this repository, not a login/error page or
+  # the unresolved /latest URL. A failed request must not supply a version.
+  RAILWAY_VERSION=$(printf '%s\n' "$latest_url" \
+    | sed -n 's|^https://github.com/railwayapp/cli/releases/tag/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p')
 
   if [ -z "$RAILWAY_VERSION" ]; then
     error "Could not determine the latest Railway CLI version from GitHub."
-    info "This is usually a transient network failure, or GitHub's unauthenticated"
-    info "API rate limit (60 requests/hour per IP) on a shared runner."
-    info "Pin a version to skip this lookup entirely:"
+    info "Check that https://github.com/railwayapp/cli/releases/latest is reachable."
+    info "Retry, or pin a known version to skip this lookup entirely:"
     info "  ${BOLD}RAILWAY_VERSION=<x.y.z>${NO_COLOR}"
     exit 1
   fi

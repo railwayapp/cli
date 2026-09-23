@@ -85,20 +85,13 @@ jobs:
           docker run --rm -v "$PWD:/w" -w /w koalaman/shellcheck:stable \
             -s dash -S error install.sh agents.sh
 
-      # install.sh resolves the latest release through unauthenticated
-      # api.github.com, which shared runners rate-limit (60/hour per IP). Resolve
-      # it once here with the workflow token and pin it into the containers.
-      - name: Resolve latest release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName | ltrimstr("v")')
-          test -n "$version"
-          echo "RAILWAY_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Installer version lookup regression tests
+        run: python3 tests/installer_version.py
 
+      # Leave the version unpinned to exercise the same lookup as public installs.
       - name: Install under dash (Debian/Ubuntu /bin/sh)
         run: |
-          docker run --rm -e RAILWAY_VERSION -v "$PWD/install.sh:/install.sh:ro" ubuntu:24.04 sh -c '
+          docker run --rm -v "$PWD/install.sh:/install.sh:ro" ubuntu:24.04 sh -c '
             set -e
             apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
             SHELL=/bin/bash dash -s -- -y < /install.sh
@@ -106,7 +99,7 @@ jobs:
 
       - name: Install under busybox ash (Alpine /bin/sh, no bash present)
         run: |
-          docker run --rm -e RAILWAY_VERSION -v "$PWD/install.sh:/install.sh:ro" alpine:3.20 sh -c '
+          docker run --rm -v "$PWD/install.sh:/install.sh:ro" alpine:3.20 sh -c '
             set -e
             apk add --no-cache curl >/dev/null
             SHELL=/bin/ash sh -s -- -y < /install.sh
