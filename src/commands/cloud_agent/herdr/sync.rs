@@ -506,7 +506,16 @@ fn remember(state: &mut State, plan: &Plan, outcome: &Outcome) {
             };
         }
     }
-    state.machines = plan.matches.clone();
+    // A deleted agent cannot appear in plan.matches. Keep its ownership
+    // evidence when removal failed, or the next sync will treat the leftover
+    // profile as someone else's and never retry it.
+    state.machines.retain(|_, profile| {
+        outcome
+            .failed
+            .iter()
+            .any(|(op, _)| matches!(op, Op::Remove(id) if id == profile))
+    });
+    state.machines.extend(plan.matches.clone());
     state.agent_status = statuses;
     state.sleep_until.retain(|id, until| {
         *until > Utc::now() && plan.statuses.get(id).is_none_or(|s| s != "sleeping")
@@ -927,6 +936,33 @@ mod tests {
         assert!(!synced_within(&state, 30, now));
         state.last_sync = Some("not a date".into());
         assert!(!synced_within(&state, 30, now));
+    }
+
+    #[test]
+    fn failed_removal_is_retried_until_it_succeeds() {
+        let agents = [agent("a1", Status::Running)];
+        let machines = [ours("p1", "a1", true), ours("p9", "gone", true)];
+        let mut state = State::default();
+        state.machines = known(&agents, &machines);
+        let first = plan_for(&agents, &machines, &state);
+        assert_eq!(ops_of(&first), ["remove p9"]);
+        let failed = Outcome {
+            applied: Vec::new(),
+            failed: vec![(Op::Remove("p9".into()), "temporary write failure".into())],
+        };
+        remember(&mut state, &first, &failed);
+        let retry = plan_for(&agents, &machines, &state);
+        assert_eq!(ops_of(&retry), ["remove p9"]);
+        remember(
+            &mut state,
+            &retry,
+            &Outcome {
+                applied: vec![Op::Remove("p9".into())],
+                failed: Vec::new(),
+            },
+        );
+        assert!(!state.machines.contains_key("gone"));
+        assert_eq!(state.machines.get("a1").map(String::as_str), Some("p1"));
     }
 
     #[test]

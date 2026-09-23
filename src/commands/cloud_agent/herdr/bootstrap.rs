@@ -225,6 +225,7 @@ else
 PROFEOF
   then echo "profile: env block added"; else echo "profile: FAILED to write $prof"; fail=1; fi
 fi
+pending_launch="$HOME/.config/railway-ca-herdr-plugin/app-launch-pending.json"
 if ws="$(herdr workspace list 2>/dev/null)"; then
   if command -v python3 >/dev/null 2>&1; then
     has="$(printf '%s' "$ws" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(any(w.get("label")=="app" for w in d.get("result",{}).get("workspaces",[]))))' 2>/dev/null || echo 0)"
@@ -235,14 +236,13 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
   fi
   if [ "$has" = 1 ]; then
     echo "workspace app: exists"
-  elif created="$(herdr workspace create --label app --cwd /app 2>/dev/null)"; then
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "workspace app: FAILED (python3 is required to start @HARNESS_CMD@)"; fail=1
+  elif ! mkdir -p "$(dirname "$pending_launch")"; then
+    echo "workspace app: FAILED to prepare launch tracking"; fail=1
+  elif herdr workspace create --label app --cwd /app > "$pending_launch" 2>/dev/null; then
     echo "workspace app: created (/app)"
     if command -v python3 >/dev/null 2>&1; then
-      root="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null)"
-      if [ -n "$root" ] && [ -n "@HARNESS_CMD@" ]; then
-        sleep 2
-        herdr pane run "$root" "@HARNESS_CMD@" >/dev/null 2>&1 && echo "started @HARNESS_CMD@ in the app workspace"
-      fi
       bare="$(herdr workspace list 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(w["workspace_id"] for w in d.get("result",{}).get("workspaces",[]) if w.get("label")=="/" and w.get("pane_count")==1 and w.get("agent_status") in (None,"unknown")))' 2>/dev/null)"
       for id in $bare; do
         herdr workspace close "$id" >/dev/null 2>&1 && echo "workspace /: closed (bare startup shell)"
@@ -250,6 +250,26 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
     fi
   else
     echo "workspace app: FAILED to create"; fail=1
+  fi
+  # Workspace creation and launching are separate operations. Preserve the
+  # target pane across failures so a retry can finish an existing workspace,
+  # and clear it only after launch succeeds to avoid restarting working agents.
+  if [ -f "$pending_launch" ]; then
+    root="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["root_pane"]["pane_id"])' "$pending_launch" 2>/dev/null)"
+    if [ -z "$root" ] || [ -z "@HARNESS_CMD@" ]; then
+      echo "workspace app: FAILED to resolve pending @HARNESS_CMD@ launch"; fail=1
+    else
+      sleep 2
+      if herdr pane run "$root" "@HARNESS_CMD@" >/dev/null 2>&1; then
+        if rm "$pending_launch"; then
+          echo "started @HARNESS_CMD@ in the app workspace"
+        else
+          echo "workspace app: FAILED to clear pending launch"; fail=1
+        fi
+      else
+        echo "workspace app: FAILED to start @HARNESS_CMD@ in $root"; fail=1
+      fi
+    fi
   fi
 else
   echo "workspace app: FAILED (no herdr server running; connecting starts one)"; fail=1
@@ -541,6 +561,86 @@ mod tests {
                     .map(str::to_owned)
                     .collect()
             }
+        }
+
+        #[test]
+        fn failed_launch_retries_the_existing_workspace_and_does_not_launch_twice() {
+            let vm = Vm::new(WORKSPACES_WITHOUT_APP);
+            vm.install_herdr(
+                r##"#!/bin/bash
+echo "$*" >> "$HOME/herdr.log"
+case "$1 $2" in
+  'workspace list')
+    if [ -f "$HOME/app-created" ]; then
+      echo '{"result":{"workspaces":[{"label":"app","workspace_id":"w9"}]}}'
+    else
+      echo '{"result":{"workspaces":[]}}'
+    fi
+    ;;
+  'workspace create')
+    touch "$HOME/app-created"
+    echo '{"result":{"root_pane":{"pane_id":"w9:p1"}}}'
+    ;;
+  'pane run')
+    [ -f "$HOME/allow-launch" ] || exit 1
+    ;;
+esac
+"##,
+            );
+            let pending = vm
+                .home
+                .path()
+                .join(".config/railway-ca-herdr-plugin/app-launch-pending.json");
+            let out = vm.run();
+            assert!(out.contains("FAILED to start claude in w9:p1"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
+            assert!(pending.exists());
+
+            std::fs::write(vm.home.path().join("allow-launch"), "").unwrap();
+            let out = vm.run();
+            assert!(out.contains("workspace app: exists"), "{out}");
+            assert!(out.contains("started claude"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            assert!(!pending.exists());
+
+            let out = vm.run();
+            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            let calls = vm.herdr_calls();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| c.starts_with("workspace create"))
+                    .count(),
+                1,
+                "{calls:?}"
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| *c == "pane run w9:p1 claude")
+                    .count(),
+                2,
+                "{calls:?}"
+            );
+        }
+
+        #[test]
+        fn an_unreadable_pending_launch_does_not_report_success() {
+            let vm = Vm::new(WORKSPACES_WITH_APP);
+            let pending = vm
+                .home
+                .path()
+                .join(".config/railway-ca-herdr-plugin/app-launch-pending.json");
+            std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+            std::fs::write(&pending, "interrupted response").unwrap();
+            let out = vm.run();
+            assert!(
+                out.contains("FAILED to resolve pending claude launch"),
+                "{out}"
+            );
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
+            assert!(pending.exists());
+            assert!(!vm.herdr_calls().iter().any(|c| c.starts_with("pane run")));
         }
 
         #[test]
