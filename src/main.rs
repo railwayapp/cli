@@ -90,6 +90,7 @@ commands!(
     telemetry_cmd(telemetry),
     templates,
     tcp_proxy as "tcp-proxy",
+    trace(traces, tracing),
     unlink,
     up,
     upgrade,

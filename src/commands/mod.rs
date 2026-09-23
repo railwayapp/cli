@@ -60,6 +60,7 @@ pub mod status;
 pub mod tcp_proxy;
 pub mod telemetry_cmd;
 pub mod templates;
+pub mod trace;
 pub mod unlink;
 pub mod up;
 pub mod upgrade;

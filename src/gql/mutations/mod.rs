@@ -721,3 +721,33 @@ pub struct VolumeInstanceBackupRestore;
     skip_serializing_none
 )]
 pub struct VolumeInstanceBackupScheduleUpdate;
+
+/// `skip_serializing_none` matters here: the resolver treats an absent
+/// `tracingEnabled` as "leave alone" and a null one as "follow the project",
+/// and writes `icon` through as given, so only the flags being changed may
+/// appear in the input. Following the project again is its own document.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceTracingUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceTracingUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceTracingInherit.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceTracingInherit;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ProjectTracingUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ProjectTracingUpdate;
