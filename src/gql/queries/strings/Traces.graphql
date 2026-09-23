@@ -1,0 +1,31 @@
+query Traces(
+  $environmentId: String!
+  $serviceId: String
+  $filter: String
+  $startDate: String
+  $endDate: String
+  $limit: Int
+) {
+  traces(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    filter: $filter
+    startDate: $startDate
+    endDate: $endDate
+    limit: $limit
+  ) {
+    traceId
+    startedAt
+    durationMs
+    rootSpanName
+    rootServiceName
+    rootServiceId
+    rootComponent
+    rootServerAddress
+    rootUrlPath
+    serviceName
+    hasEdge
+    spanCount
+    errorCount
+  }
+}

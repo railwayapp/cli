@@ -1,0 +1,5 @@
+query CloudAgentHarnessEndpoint($id: ID!, $environmentId: ID!) {
+  cloudAgent(id: $id, environmentId: $environmentId) {
+    agentWsUrl
+  }
+}

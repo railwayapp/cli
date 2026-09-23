@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
 
+use super::state::Store;
 use crate::client::GQLClient;
 use crate::commands::code;
 use crate::commands::code::{HARNESS_PATH, LaunchArgs, Progress};
@@ -26,12 +27,42 @@ pub async fn command(args: Args) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let (agent, _) = ca::resolve(&configs, &client, args.agent.as_deref(), None).await?;
     let harness = super::harness::choose(&args.harness, false)?;
-    run(&agent, harness).await
+    run(&agent, harness, &Store::new(&configs)?).await
 }
 
 /// Prepare a running agent's VM for herdr. Idempotent; `new` calls this right
 /// after `herdr machine add`.
-pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
+pub(super) async fn run(agent: &ca::Agent, harness: &str, store: &Store) -> Result<()> {
+    track_bootstrap(store, &agent.id, harness, run_inner(agent, harness)).await.with_context(|| format!(
+        "Herdr setup is incomplete for {}. Connect again, or retry `railway ca herdr bootstrap {} --{harness}`",
+        agent.name, agent.id,
+    ))
+}
+
+async fn track_bootstrap(
+    store: &Store,
+    agent_id: &str,
+    harness: &str,
+    run: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    store
+        .update(|s| {
+            s.bootstrap_pending
+                .insert(agent_id.to_owned(), harness.to_owned());
+        })
+        .await?;
+    let result = run.await;
+    if result.is_ok() {
+        store
+            .update(|s| {
+                s.bootstrap_pending.remove(agent_id);
+            })
+            .await?;
+    }
+    result
+}
+
+async fn run_inner(agent: &ca::Agent, harness: &str) -> Result<()> {
     if !matches!(agent.status, ca::Status::Running) {
         bail!(
             "Agent {} is {}. Wake it first: {}",
@@ -92,13 +123,10 @@ pub async fn run(agent: &ca::Agent, harness: &str) -> Result<()> {
             )
         }
         Outcome::HerdrMissing => {
-            println!(
-                "{} herdr is not installed on agent {}; `herdr machine add` installs it. Re-run {} afterwards.",
-                "!".yellow(),
-                agent.name.cyan(),
-                format!("railway ca herdr bootstrap {}", agent.name).cyan()
-            );
-            Ok(())
+            bail!(
+                "herdr is not installed on agent {}; connect it with `railway ca herdr agents` first",
+                agent.name
+            )
         }
         Outcome::NoMarker => bail!(
             "Bootstrap of agent {} produced no status marker (ssh exit {code}).\n{}\n{}",
@@ -197,6 +225,7 @@ else
 PROFEOF
   then echo "profile: env block added"; else echo "profile: FAILED to write $prof"; fail=1; fi
 fi
+pending_launch="$HOME/.config/railway-ca-herdr-plugin/app-launch-pending.json"
 if ws="$(herdr workspace list 2>/dev/null)"; then
   if command -v python3 >/dev/null 2>&1; then
     has="$(printf '%s' "$ws" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(int(any(w.get("label")=="app" for w in d.get("result",{}).get("workspaces",[]))))' 2>/dev/null || echo 0)"
@@ -207,14 +236,13 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
   fi
   if [ "$has" = 1 ]; then
     echo "workspace app: exists"
-  elif created="$(herdr workspace create --label app --cwd /app 2>/dev/null)"; then
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "workspace app: FAILED (python3 is required to start @HARNESS_CMD@)"; fail=1
+  elif ! mkdir -p "$(dirname "$pending_launch")"; then
+    echo "workspace app: FAILED to prepare launch tracking"; fail=1
+  elif herdr workspace create --label app --cwd /app > "$pending_launch" 2>/dev/null; then
     echo "workspace app: created (/app)"
     if command -v python3 >/dev/null 2>&1; then
-      root="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["root_pane"]["pane_id"])' 2>/dev/null)"
-      if [ -n "$root" ] && [ -n "@HARNESS_CMD@" ]; then
-        sleep 2
-        herdr pane run "$root" "@HARNESS_CMD@" >/dev/null 2>&1 && echo "started @HARNESS_CMD@ in the app workspace"
-      fi
       bare="$(herdr workspace list 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(" ".join(w["workspace_id"] for w in d.get("result",{}).get("workspaces",[]) if w.get("label")=="/" and w.get("pane_count")==1 and w.get("agent_status") in (None,"unknown")))' 2>/dev/null)"
       for id in $bare; do
         herdr workspace close "$id" >/dev/null 2>&1 && echo "workspace /: closed (bare startup shell)"
@@ -223,8 +251,28 @@ if ws="$(herdr workspace list 2>/dev/null)"; then
   else
     echo "workspace app: FAILED to create"; fail=1
   fi
+  # Workspace creation and launching are separate operations. Preserve the
+  # target pane across failures so a retry can finish an existing workspace,
+  # and clear it only after launch succeeds to avoid restarting working agents.
+  if [ -f "$pending_launch" ]; then
+    root="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["root_pane"]["pane_id"])' "$pending_launch" 2>/dev/null)"
+    if [ -z "$root" ] || [ -z "@HARNESS_CMD@" ]; then
+      echo "workspace app: FAILED to resolve pending @HARNESS_CMD@ launch"; fail=1
+    else
+      sleep 2
+      if herdr pane run "$root" "@HARNESS_CMD@" >/dev/null 2>&1; then
+        if rm "$pending_launch"; then
+          echo "started @HARNESS_CMD@ in the app workspace"
+        else
+          echo "workspace app: FAILED to clear pending launch"; fail=1
+        fi
+      else
+        echo "workspace app: FAILED to start @HARNESS_CMD@ in $root"; fail=1
+      fi
+    fi
+  fi
 else
-  echo "workspace app: skipped (no herdr server running; connecting starts one)"
+  echo "workspace app: FAILED (no herdr server running; connecting starts one)"; fail=1
 fi
 "##;
 
@@ -370,6 +418,32 @@ fn script(remote: &Remote) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn failed_bootstrap_preserves_the_selected_harness_for_connect_to_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("state.json"), "backboard", "account");
+        store
+            .update(|s| {
+                s.machines.insert("agent".into(), "profile".into());
+            })
+            .await
+            .unwrap();
+        let result = track_bootstrap(&store, "agent", "codex", async {
+            bail!("provisioning failed")
+        })
+        .await;
+        assert!(result.is_err());
+        let state = store.load().unwrap();
+        assert_eq!(state.machines["agent"], "profile");
+        // The same persisted value the existing-profile Connect path reads.
+        let harness = &state.bootstrap_pending["agent"];
+        assert_eq!(harness, "codex");
+        track_bootstrap(&store, "agent", harness, async { Ok(()) })
+            .await
+            .unwrap();
+        assert!(store.load().unwrap().bootstrap_pending.is_empty());
+    }
+
     #[test]
     fn outcome_reads_markers() {
         assert!(matches!(outcome("HERDR-MISSING\n"), Outcome::HerdrMissing));
@@ -425,6 +499,15 @@ mod tests {
                 vm.install_herdr(&format!(
                     "#!/bin/bash\necho \"$*\" >> \"$HOME/herdr.log\"\nif [ \"$1 $2\" = \"workspace list\" ]; then cat <<'EOF'\n{workspaces}\nEOF\nfi\nif [ \"$1 $2\" = \"workspace create\" ]; then echo '{{\"result\":{{\"root_pane\":{{\"pane_id\":\"w9:p1\"}}}}}}'; fi\n"
                 ));
+                // Never discover or upgrade the host's real Railway CLI. The
+                // script prepends this directory to PATH just as it does on a VM.
+                for tool in ["railway", "curl"] {
+                    use std::os::unix::fs::PermissionsExt;
+                    let path = vm.home.path().join(".local/bin").join(tool);
+                    std::fs::write(&path, "#!/bin/sh\nexit 127\n").unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
                 vm
             }
 
@@ -478,6 +561,86 @@ mod tests {
                     .map(str::to_owned)
                     .collect()
             }
+        }
+
+        #[test]
+        fn failed_launch_retries_the_existing_workspace_and_does_not_launch_twice() {
+            let vm = Vm::new(WORKSPACES_WITHOUT_APP);
+            vm.install_herdr(
+                r##"#!/bin/bash
+echo "$*" >> "$HOME/herdr.log"
+case "$1 $2" in
+  'workspace list')
+    if [ -f "$HOME/app-created" ]; then
+      echo '{"result":{"workspaces":[{"label":"app","workspace_id":"w9"}]}}'
+    else
+      echo '{"result":{"workspaces":[]}}'
+    fi
+    ;;
+  'workspace create')
+    touch "$HOME/app-created"
+    echo '{"result":{"root_pane":{"pane_id":"w9:p1"}}}'
+    ;;
+  'pane run')
+    [ -f "$HOME/allow-launch" ] || exit 1
+    ;;
+esac
+"##,
+            );
+            let pending = vm
+                .home
+                .path()
+                .join(".config/railway-ca-herdr-plugin/app-launch-pending.json");
+            let out = vm.run();
+            assert!(out.contains("FAILED to start claude in w9:p1"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
+            assert!(pending.exists());
+
+            std::fs::write(vm.home.path().join("allow-launch"), "").unwrap();
+            let out = vm.run();
+            assert!(out.contains("workspace app: exists"), "{out}");
+            assert!(out.contains("started claude"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            assert!(!pending.exists());
+
+            let out = vm.run();
+            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            let calls = vm.herdr_calls();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| c.starts_with("workspace create"))
+                    .count(),
+                1,
+                "{calls:?}"
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| *c == "pane run w9:p1 claude")
+                    .count(),
+                2,
+                "{calls:?}"
+            );
+        }
+
+        #[test]
+        fn an_unreadable_pending_launch_does_not_report_success() {
+            let vm = Vm::new(WORKSPACES_WITH_APP);
+            let pending = vm
+                .home
+                .path()
+                .join(".config/railway-ca-herdr-plugin/app-launch-pending.json");
+            std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+            std::fs::write(&pending, "interrupted response").unwrap();
+            let out = vm.run();
+            assert!(
+                out.contains("FAILED to resolve pending claude launch"),
+                "{out}"
+            );
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
+            assert!(pending.exists());
+            assert!(!vm.herdr_calls().iter().any(|c| c.starts_with("pane run")));
         }
 
         #[test]
@@ -631,14 +794,14 @@ mod tests {
         }
 
         #[test]
-        fn no_server_skips_the_workspace() {
+        fn no_server_reports_incomplete_bootstrap() {
             let vm = Vm::new("");
             vm.install_herdr(
                 "#!/bin/bash\necho \"$*\" >> \"$HOME/herdr.log\"\n[ \"$1\" = workspace ] && exit 1\nexit 0\n",
             );
             let out = vm.run();
-            assert!(out.contains("workspace app: skipped"), "{out}");
-            assert!(out.trim_end().ends_with("BOOTSTRAP-OK"), "{out}");
+            assert!(out.contains("workspace app: FAILED"), "{out}");
+            assert!(out.trim_end().ends_with("BOOTSTRAP-FAILED"), "{out}");
         }
 
         #[test]

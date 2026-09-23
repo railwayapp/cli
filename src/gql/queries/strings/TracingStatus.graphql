@@ -1,0 +1,7 @@
+query TracingStatus($environmentId: String!) {
+  tracingStatus(environmentId: $environmentId) {
+    serviceId
+    lastEdgeSpanAt
+    lastServiceSpanAt
+  }
+}

@@ -15,7 +15,7 @@ use crate::util::progress::create_spinner;
 use crate::workspace::{self, Workspace};
 
 use super::herdr_cli::{Herdr, Machine};
-use super::state::State;
+use super::state::Store;
 use super::target;
 
 #[derive(Parser)]
@@ -65,6 +65,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    let store = Store::new(&configs)?;
     let workspaces = workspace::workspaces_with_client(&client, &configs).await?;
     let rows = rows(&workspaces);
     let row = pick_project(rows, args.project.as_deref(), args.environment.as_deref())?;
@@ -103,9 +104,16 @@ pub async fn command(args: Args) -> Result<()> {
 
     let backboard = configs.get_backboard();
     let spinner = create_spinner("Creating a cloud agent".to_string());
-    let agent = ca::create(&client, &backboard, &environment.id, name, None)
-        .await
-        .inspect_err(|_| spinner.finish_and_clear())?;
+    let agent = ca::create(
+        &client,
+        &backboard,
+        &environment.id,
+        name,
+        None,
+        ca::CreateOptions::default(),
+    )
+    .await
+    .inspect_err(|_| spinner.finish_and_clear())?;
     ca::remember(&mut configs, &agent)?;
     spinner.set_message(format!("Waiting for agent {} to start", agent.name));
     let agent = ca::wait_until_running(&client, &backboard, &environment.id, &agent.id)
@@ -130,9 +138,11 @@ pub async fn command(args: Args) -> Result<()> {
         .map(|machines| profile_id_for(&machines, &target))
     {
         Ok(Some(profile)) => {
-            let mut state = State::load()?;
-            state.machines.insert(agent.id.clone(), profile);
-            state.save()?;
+            store
+                .update(|s| {
+                    s.machines.insert(agent.id.clone(), profile);
+                })
+                .await?;
         }
         Ok(None) => {
             warn("herdr did not list the new machine; `railway ca herdr sync` will record it")
@@ -140,18 +150,13 @@ pub async fn command(args: Args) -> Result<()> {
         Err(e) => warn(&format!("could not read herdr machines: {e:#}")),
     }
 
-    if let Err(e) = super::bootstrap::run(&agent, harness).await {
-        warn(&format!(
-            "bootstrap skipped: {e:#}\n  run `railway ca herdr bootstrap {} --{harness}` to retry",
-            agent.name
-        ));
-    }
+    super::bootstrap::run(&agent, harness, &store).await?;
 
     println!(
-        "\n{} is in the herdr sidebar as {}. Open a pane there and run {}.",
+        "\n{} is in the herdr sidebar as {}, provisioned for {}.",
         agent.name.cyan(),
         label.cyan(),
-        "claude".cyan()
+        harness.cyan()
     );
     Ok(())
 }

@@ -1,5 +1,6 @@
 mod authoring;
 mod migrate;
+mod partials;
 mod runner;
 
 use self::authoring::AuthoringLang;
@@ -20,7 +21,7 @@ use super::*;
 const LEGACY_CONFIG_SKILL_SHA256: &str =
     "08dff6674cd2df2d8a37fd2c0f3ef8aa506b353e88005331910387514430e00e";
 
-/// Define, import, preview, and apply your Railway project from .railway/railway.ts (or .py / .go)
+/// Manage Railway configuration and IaC ownership
 #[derive(Parser)]
 pub struct Args {
     #[clap(subcommand)]
@@ -47,6 +48,9 @@ enum Command {
 
     /// Translate railway.json / railway.toml into an authoring file
     Migrate(migrate::MigrateArgs),
+
+    /// List, release, or transfer named IaC partial ownership without changing resources
+    Partials(partials::Args),
 }
 
 #[derive(Parser, Clone)]
@@ -158,6 +162,11 @@ struct PullArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    // Ownership management must also work without an authoring file and must
+    // not perform the legacy authoring-skill cleanup below.
+    if let Command::Partials(args) = args.command {
+        return partials::command(args).await;
+    }
     if let Ok(cwd) = std::env::current_dir() {
         match remove_generated_legacy_skill(&cwd, LEGACY_CONFIG_SKILL_SHA256) {
             Ok(true) => eprintln!(
@@ -204,6 +213,7 @@ pub async fn command(args: Args) -> Result<()> {
         Command::Init(args) => init_config(args).await,
         Command::Pull(args) => pull_config(args).await,
         Command::Migrate(args) => migrate::migrate_config(args).await,
+        Command::Partials(_) => unreachable!(),
     }
 }
 
@@ -665,7 +675,9 @@ fn render_graph_as_railway(
         out.push('\n');
     }
 
-    let mut names = Vec::new();
+    // Source aliases share the module scope with resource idents; seed the pool so a
+    // repo `frontend` and a service `frontend` never both become `const frontend`.
+    let mut names: Vec<String> = source_aliases.keys().cloned().collect();
     let mut resource_names = std::collections::HashMap::new();
     let mut group_names = std::collections::HashMap::new();
     let import_names: std::collections::HashSet<&str> = imports.iter().copied().collect();
@@ -2176,6 +2188,26 @@ mod tests {
         assert!(rendered.contains("source: github"));
         assert!(rendered.contains("start: \"pnpm start\""));
         assert!(!rendered.contains("registryCredentials"));
+    }
+
+    #[test]
+    fn pull_renderer_never_reuses_a_source_alias_for_a_service_ident() {
+        let source = json!({ "repo": "org/frontend" });
+        let mut frontend = service_resource(source.clone(), json!({}));
+        frontend.address = Some("service.frontend".to_string());
+        frontend.name = "frontend".to_string();
+        let worker = service_resource(source, json!({}));
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources: vec![frontend, worker],
+        };
+
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript);
+
+        assert_eq!(rendered.matches("const frontend =").count(), 1);
+        assert!(rendered.contains("const frontend = github(\"org/frontend\")"));
+        assert!(rendered.contains("const frontend2 = service(\"frontend\""));
+        assert_eq!(rendered.matches("source: frontend,").count(), 2);
     }
 
     #[test]

@@ -38,6 +38,26 @@ pub struct TargetArgs {
     project: Option<String>,
 }
 
+impl TargetArgs {
+    /// Resolve creation/bootstrap scope with the launcher's directory and preference precedence.
+    pub(crate) async fn resolve(
+        self,
+        configs: &mut Configs,
+        client: &reqwest::Client,
+    ) -> Result<String> {
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+        let mut prefs = super::prefs::AgentPrefs::load_in(&home).unwrap_or_default();
+        let mut args = LaunchArgs::default();
+        args.project = self.project;
+        args.environment = self.environment;
+        Ok(
+            code::resolve_target(configs, client, &args, &mut prefs, &home)
+                .await?
+                .environment_id,
+        )
+    }
+}
+
 #[derive(Parser)]
 pub struct ListArgs {
     /// Include agents belonging to other members of the environment. Requires
@@ -55,10 +75,38 @@ pub struct ListArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca create my-box
+  railway ca create my-box --bootstrap dev
+  railway ca create my-box --from-checkpoint <checkpoint-id>
+
+Creates a VM without connecting. Uses the local default bootstrap unless
+--no-bootstrap or --from-checkpoint is given. --bootstrap accepts a name;
+--from-checkpoint requires a cloud-agent checkpoint ID."#)]
 pub struct CreateArgs {
     /// Name for the agent (defaults to a generated one)
     #[clap(value_name = "NAME")]
     name: Option<String>,
+
+    /// Provision the public code endpoint (defaults to port 4096)
+    #[clap(long)]
+    code_endpoint: bool,
+
+    /// Provision the public code endpoint on this port
+    #[clap(long, value_parser = ca::parse_code_port)]
+    code_port: Option<u16>,
+
+    /// Restore this cloud-agent checkpoint into the new VM
+    #[clap(long, value_name = "CHECKPOINT_ID")]
+    from_checkpoint: Option<String>,
+
+    /// Start from this named bootstrap instead of your local environment default
+    #[clap(long, conflicts_with_all = ["from_checkpoint", "no_bootstrap"])]
+    bootstrap: Option<String>,
+
+    /// Create a clean VM without your local environment default bootstrap
+    #[clap(long, conflicts_with = "from_checkpoint")]
+    no_bootstrap: bool,
 
     /// Set a variable on the agent (repeatable, comma-separable). Values may
     /// reference other variables — `DB_URL=postgres.DATABASE_URL` or the full
@@ -114,14 +162,25 @@ pub struct SleepArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway ca ssh my-box                    # open a shell
+  railway ca ssh my-box --session          # attach to or start a session
+  railway ca ssh my-box --resume           # resume the latest Claude conversation
+  railway ca ssh my-box -- ls -la /app     # run a command
+
+Disconnecting leaves the VM running. Sleep ends its processes and keeps its disk."#)]
 pub struct SshArgs {
     /// Agent name or ID (defaults to this directory's, or your only one)
     #[clap(value_name = "AGENT")]
     agent: Option<String>,
 
-    /// Attach to this durable session by name, rather than the agent's only one
-    #[clap(long, value_name = "NAME")]
+    /// Attach to a durable session, optionally by name, instead of opening a shell
+    #[clap(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "", conflicts_with = "command")]
     session: Option<String>,
+
+    /// Resume the most recent Claude conversation in a new terminal session
+    #[clap(long, conflicts_with_all = ["session", "command"])]
+    resume: bool,
 
     /// Accepted for compatibility; agents now always stay running on
     /// disconnect. `railway ca sleep` stops the compute bill
@@ -131,10 +190,23 @@ pub struct SshArgs {
     #[clap(flatten)]
     target: TargetArgs,
 
-    /// Run this command instead of attaching to a session (`-- bash` for a
-    /// plain shell)
+    /// Run this command instead of opening a shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+impl SshArgs {
+    /// A plain SSH connection always opens a shell, even on a VM configured
+    /// to autostart a harness. Session attachment and resume are explicit.
+    fn remote_command(&self) -> Option<Vec<String>> {
+        if !self.command.is_empty() {
+            Some(self.command.clone())
+        } else if self.session.is_some() || self.resume {
+            None
+        } else {
+            Some(vec![code::LOGIN_SHELL_COMMAND.to_string()])
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -264,14 +336,21 @@ pub async fn create(args: CreateArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let (configs, client) = (&mut configs, &client);
-    let (project, environment) = (args.target.project.clone(), args.target.environment.clone());
-    let (_, environment_id) =
-        resolve_project_and_env(configs, client, project, environment).await?;
+    let environment_id = args.target.resolve(configs, client).await?;
     let variables = variables_to_input(&args.env_files, &args.variables)?
         .map(serde_json::to_value)
         .transpose()?;
 
     let backboard = configs.get_backboard();
+    let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        configs,
+        client,
+        &backboard,
+        &environment_id,
+        args.bootstrap.as_deref(),
+        args.no_bootstrap || args.from_checkpoint.is_some(),
+    )
+    .await?;
     let spinner = (!args.json).then(|| create_spinner("Creating a cloud agent".to_string()));
     let agent = match ca::create(
         client,
@@ -279,6 +358,11 @@ pub async fn create(args: CreateArgs) -> Result<()> {
         &environment_id,
         args.name.clone(),
         variables,
+        ca::CreateOptions {
+            code_port: args.code_port.or(args.code_endpoint.then_some(4096)),
+            checkpoint_id: args.from_checkpoint,
+            bootstrap_id: bootstrap.map(|b| b.id),
+        },
     )
     .await
     {
@@ -351,27 +435,18 @@ pub async fn create(args: CreateArgs) -> Result<()> {
 pub async fn wake(args: WakeArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let (configs, client) = (&mut configs, &client);
+    wake_with(&mut configs, &client, args).await
+}
+
+async fn wake_with(configs: &mut Configs, client: &reqwest::Client, args: WakeArgs) -> Result<()> {
     let (project, environment) = (args.target.project.clone(), args.target.environment.clone());
     let scoped = scope(configs, client, project, environment).await?;
     let (agent, _) = ca::resolve(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
     let backboard = configs.get_backboard();
 
-    match agent.status {
-        ca::Status::Running => {
-            println!("Agent {} is already awake.", agent.name.cyan());
-            ca::remember(configs, &agent)?;
-            return Ok(());
-        }
-        ca::Status::Sleeping => ca::wake(client, &backboard, &agent.id).await?,
-        // Something else is already booting it; a second wake would be noise.
-        ca::Status::Starting => {}
-        _ => bail!(
-            "Agent {} is {} and cannot be woken.",
-            agent.name,
-            agent.status.label()
-        ),
-    }
+    // The inventory is an observation. Let the mutation's live state check
+    // decide whether waking is necessary, including when we last saw RUNNING.
+    ca::wake(client, &backboard, &agent.id).await?;
     ca::remember(configs, &agent)?;
 
     if args.no_wait {
@@ -405,20 +480,18 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
             }
             None => ca::list_mine(client, &backboard).await?,
         };
-        let awake: Vec<_> = agents
-            .into_iter()
-            .filter(|a| matches!(a.status, ca::Status::Running | ca::Status::Starting))
-            .collect();
-        if awake.is_empty() {
-            println!("No running agents to sleep.");
+        // A sleeping observation may predate a wake elsewhere. Send the intent
+        // for every agent; the server handles already-asleep agents as no-ops.
+        if agents.is_empty() {
+            println!("No cloud agents to sleep.");
             return Ok(());
         }
         telemetry::track_lifecycle("sleep_all", Duration::ZERO, None).await;
-        let spinner = create_spinner(format!("Sleeping {} agents", awake.len()));
+        let spinner = create_spinner(format!("Requesting sleep for {} agents", agents.len()));
         // Concurrently: each sleep now flushes the agent's disk over ssh first,
         // and run in sequence that would make the cost-control command take a
         // second per agent — slow enough that people stop reaching for it.
-        let failed: Vec<String> = futures::future::join_all(awake.iter().map(|agent| {
+        let failed: Vec<String> = futures::future::join_all(agents.iter().map(|agent| {
             let backboard = backboard.clone();
             async move {
                 ca::sleep(client, &backboard, &agent.environment_id, &agent.id)
@@ -432,27 +505,17 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
         .flatten()
         .collect();
         spinner.finish_and_clear();
-        println!("✓ Slept {} agents.", awake.len() - failed.len());
+        println!(
+            "✓ Sleep requested for {} agents.",
+            agents.len() - failed.len()
+        );
         if !failed.is_empty() {
-            bail!("Some agents are still running:\n{}", failed.join("\n"));
+            bail!("Some sleep requests failed:\n{}", failed.join("\n"));
         }
         return Ok(());
     }
 
     let (agent, _) = ca::resolve(configs, client, args.agent.as_deref(), scoped.as_deref()).await?;
-    match agent.status {
-        ca::Status::Sleeping => {
-            println!("Agent {} is already asleep.", agent.name.cyan());
-            return Ok(());
-        }
-        ca::Status::Running | ca::Status::Starting => {}
-        _ => bail!(
-            "Agent {} is {} — there is nothing running to sleep.",
-            agent.name,
-            agent.status.label()
-        ),
-    }
-
     let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
     let result = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
     spinner.finish_and_clear();
@@ -462,7 +525,7 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
     // still reports it running. Claiming a state the next command contradicts is
     // worse than describing the action taken.
     println!(
-        "✓ Sleeping agent {} — its disk is kept, compute stops billing.",
+        "✓ Sleep requested for agent {} — its disk is kept; compute stops billing once it is asleep.",
         agent.name.cyan()
     );
     Ok(())
@@ -528,6 +591,23 @@ pub async fn ssh(args: SshArgs) -> Result<()> {
     }
 }
 
+/// The TUI's shell shortcut targets an existing VM by ID. Return the SSH
+/// status instead of exiting the CLI, so the manage screen can resume.
+pub(super) async fn ssh_shell(agent_id: String) -> Result<i32> {
+    ssh_connect(SshArgs {
+        agent: Some(agent_id),
+        session: None,
+        resume: false,
+        keep_awake: false,
+        target: TargetArgs {
+            environment: None,
+            project: None,
+        },
+        command: Vec::new(),
+    })
+    .await
+}
+
 /// Connect, and hand back what the remote side exited with.
 async fn ssh_connect(args: SshArgs) -> Result<i32> {
     let mut configs = Configs::new()?;
@@ -582,7 +662,15 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
                 "{}",
                 format!("No cloud agents yet — creating one in {where_label}.").dimmed()
             );
-            let agent = ca::create(client, &backboard, &environment_id, None, None).await?;
+            let agent = ca::create(
+                client,
+                &backboard,
+                &environment_id,
+                None,
+                None,
+                ca::CreateOptions::default(),
+            )
+            .await?;
             (agent, ca::Resolution::Sole)
         }
     };
@@ -630,10 +718,9 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
             Err(e) => Err(e),
         },
         _ => Err(anyhow::anyhow!(
-            "Agent {} is {} — it cannot be connected to. `railway ca delete {}` and create a new one.",
+            "Agent {} is reported as {} and cannot be connected to. Check `railway ca list` and retry, or use `railway ca create` to create a separate agent.",
             agent.name,
-            agent.status.label(),
-            agent.name
+            agent.status.label()
         )),
     };
     if let Some(spinner) = spinner {
@@ -642,15 +729,16 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     ready?;
     ca::remember(configs, &agent)?;
 
-    let connected = if !args.command.is_empty() {
+    let connected = if let Some(command) = args.remote_command() {
         telemetry::track_lifecycle_detached("ssh_command");
-        run_command(&agent, &args.command).await
+        run_command(&agent, &command).await
     } else {
         attach(
             client,
             &backboard,
             &agent,
-            args.session.as_deref(),
+            args.session.as_deref().filter(|name| !name.is_empty()),
+            args.resume,
             was_running,
         )
         .await
@@ -689,8 +777,8 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
 }
 
 /// Run one command on the agent instead of attaching. This is ssh's ordinary
-/// trailing-command behaviour, and `railway ca ssh -- bash` is how you get a
-/// plain shell on a box whose default is a coding agent.
+/// trailing-command behaviour. Bare `railway ca ssh` supplies the login-shell
+/// command with the harness autostart disabled.
 async fn run_command(agent: &ca::Agent, command: &[String]) -> Result<i32> {
     let info = code::connect_info(&agent.environment_id, &agent.id).await?;
     let command = command.to_vec();
@@ -719,8 +807,26 @@ async fn attach(
     backboard: &str,
     agent: &ca::Agent,
     requested: Option<&str>,
+    resume: bool,
     was_running: bool,
 ) -> Result<i32> {
+    // An explicit --resume doesn't attach at all: the user is saying the
+    // conversation they want has no terminal any more (a sleep or reboot took
+    // it), so reopen the newest one directly.
+    if resume {
+        let threads = resumable_threads(client, backboard, agent).await?;
+        let Some(thread) = threads.into_iter().next() else {
+            bail!(
+                "Agent {} has no resumable Claude conversations. \
+                 `railway ca ssh {} --session` starts a fresh session.",
+                agent.name,
+                agent.name,
+            );
+        };
+        telemetry::track_lifecycle_detached("ssh_resume_session");
+        return start_session(agent, Some(thread.session_id)).await;
+    }
+
     let sessions = ca::list_sessions(client, backboard, &agent.id).await?;
     let mut running: Vec<_> = sessions.into_iter().filter(|s| s.running).collect();
 
@@ -757,8 +863,15 @@ async fn attach(
         }
         None => match running.len() {
             0 => {
+                // No terminal to attach to — but the platform may still know
+                // conversations whose transcripts survived on the disk (a
+                // sleep or reboot ends every terminal, never the work).
+                if let Some(id) = offer_resume(client, backboard, agent).await? {
+                    telemetry::track_lifecycle_detached("ssh_resume_session");
+                    return start_session(agent, Some(id)).await;
+                }
                 telemetry::track_lifecycle_detached("ssh_new_session");
-                return start_session(agent).await;
+                return start_session(agent, None).await;
             }
             1 => running[0].name.clone(),
             _ => bail!(
@@ -793,13 +906,115 @@ async fn attach(
     Ok(code)
 }
 
+/// The conversations `claude --resume <id>` can reopen on this agent, newest
+/// first. Claude only: it is the one harness with a verified resume-by-id CLI.
+/// Read failures degrade to "none" — resume is an offer, and a listing hiccup
+/// must not block connecting.
+async fn resumable_threads(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &ca::Agent,
+) -> Result<Vec<ca::SessionThread>> {
+    let threads = ca::list_session_threads(client, backboard, &agent.id, &agent.environment_id)
+        .await
+        .unwrap_or_default();
+    Ok(threads
+        .into_iter()
+        .filter(|thread| thread.harness == "claude" && !thread.session_id.is_empty())
+        .collect())
+}
+
+/// One line per resumable conversation, prompt first — the prompt is how the
+/// user recognizes their work; the state and age qualify it.
+struct ResumeChoice(ca::SessionThread);
+
+impl std::fmt::Display for ResumeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prompt = self.0.prompt.as_deref().unwrap_or("(no prompt recorded)");
+        let mut prompt: String = prompt.chars().take(56).collect();
+        if self
+            .0
+            .prompt
+            .as_deref()
+            .is_some_and(|p| p.chars().count() > 56)
+        {
+            prompt.push('…');
+        }
+        write!(
+            f,
+            "{prompt} · {}{}",
+            self.0.state,
+            thread_age(&self.0.updated_at)
+        )
+    }
+}
+
+/// " · 3h ago" when the thread's timestamp parses, nothing when it doesn't.
+fn thread_age(updated_at: &str) -> String {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return String::new();
+    };
+    let minutes = (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_minutes();
+    let age = match minutes {
+        m if m < 1 => "just now".to_string(),
+        m if m < 60 => format!("{m}m ago"),
+        m if m < 60 * 24 => format!("{}h ago", m / 60),
+        m => format!("{}d ago", m / (60 * 24)),
+    };
+    format!(" · {age}")
+}
+
+/// When the agent has resumable conversations and a person is at the terminal,
+/// ask whether to reopen one; `None` means start fresh (the default, and the
+/// only behavior for scripted callers).
+async fn offer_resume(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent: &ca::Agent,
+) -> Result<Option<String>> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(None);
+    }
+    let threads = resumable_threads(client, backboard, agent).await?;
+    if threads.is_empty() {
+        return Ok(None);
+    }
+    let mut options = vec!["Start a fresh session".to_string()];
+    options.extend(
+        threads
+            .iter()
+            .take(5)
+            .map(|thread| format!("Resume: {}", ResumeChoice(thread.clone()))),
+    );
+    let picked = crate::util::prompt::prompt_select_with_cancel(
+        &format!(
+            "{} has Claude conversations from before it last stopped",
+            agent.name
+        ),
+        options.clone(),
+    )?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let index = options.iter().position(|option| *option == picked);
+    Ok(match index {
+        Some(0) | None => None,
+        Some(i) => threads.get(i - 1).map(|thread| thread.session_id.clone()),
+    })
+}
+
 /// Start the agent's first session: install and configure the harness, then run
 /// it under a *named* durable session so the platform tracks it, it survives
-/// this ssh dying, and the next `railway ca ssh` reattaches instead of starting
-/// a second copy.
-async fn start_session(agent: &ca::Agent) -> Result<i32> {
-    let harness = code::default_harness()?;
-    let launch = LaunchArgs::for_target(
+/// this ssh dying, and the next `railway ca ssh --session` reattaches instead of starting
+/// a second copy. With a resume id, the session relaunches Claude continuing
+/// that conversation instead of starting the default harness fresh.
+async fn start_session(agent: &ca::Agent, resume_session_id: Option<String>) -> Result<i32> {
+    let harness = match resume_session_id {
+        // The id came from a claude thread; the default harness may differ.
+        Some(_) => "claude",
+        None => code::default_harness()?,
+    };
+    let mut launch = LaunchArgs::for_target(
         agent.project_id.clone(),
         agent.environment_id.clone(),
         harness,
@@ -807,10 +1022,20 @@ async fn start_session(agent: &ca::Agent) -> Result<i32> {
         None,
         Some(agent.id.clone()),
     );
+    launch.resume_session_id = resume_session_id;
 
     println!(
         "{}",
-        format!("No session on {} yet — starting {harness}.", agent.name).dimmed()
+        if launch.resume_session_id.is_some() {
+            format!("Resuming your Claude conversation on {}.", agent.name)
+        } else {
+            format!(
+                "No session on {} yet — starting {}.",
+                agent.name,
+                super::harness_label(harness)
+            )
+        }
+        .dimmed()
     );
     let progress = code::CliProgress::default();
     let prepared = code::prepare(&launch, &progress, code::SessionStyle::FullTerminal).await?;
@@ -902,6 +1127,113 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    #[test]
+    fn create_accepts_checkpoint_and_optional_code_endpoint() {
+        let args = CreateArgs::try_parse_from([
+            "create",
+            "restored",
+            "--from-checkpoint",
+            "checkpoint",
+            "--code-port",
+            "5000",
+        ])
+        .unwrap();
+        assert_eq!(args.from_checkpoint.as_deref(), Some("checkpoint"));
+        assert_eq!(args.code_port, Some(5000));
+        assert!(
+            !CreateArgs::try_parse_from(["create", "plain"])
+                .unwrap()
+                .code_endpoint
+        );
+        assert!(
+            CreateArgs::try_parse_from(["create", "coded", "--code-endpoint"])
+                .unwrap()
+                .code_endpoint
+        );
+        assert!(CreateArgs::try_parse_from(["create", "--code-port", "8080"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn wake_sends_intent_even_when_the_inventory_reports_running() {
+        for status in ["RUNNING", "STARTING", "SLEEPING", "FAILED", "FUTURE_STATE"] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            server.stub(
+                "MyCloudAgents",
+                json!({"myCloudAgents": [{
+                    "id": "existing", "name": "my-agent", "status": status,
+                    "projectId": "project", "environmentId": "env",
+                    "createdAt": "2026-09-10T00:00:00Z"
+                }]}),
+            );
+            server.stub(
+                "CloudAgentWake",
+                json!({"cloudAgentWake": {
+                    "id": "existing", "status": "STARTING"
+                }}),
+            );
+            server.stub_graphql_error("CloudAgentWake", "cannot wake now");
+            wake_with(
+                &mut configs,
+                &reqwest::Client::new(),
+                WakeArgs::parse_from(["wake", "my-agent", "--no-wait"]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                server.variables_for("CloudAgentWake"),
+                vec![json!({"id": "existing"})]
+            );
+            assert!(
+                server.variables_for("CloudAgent").is_empty(),
+                "--no-wait must not poll"
+            );
+            assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+
+            // A newer server-side refusal must not be hidden by the old status.
+            let error = wake_with(
+                &mut configs,
+                &reqwest::Client::new(),
+                WakeArgs::parse_from(["wake", "my-agent", "--no-wait"]),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("cannot wake now"), "{error}");
+        }
+    }
+
+    #[test]
+    fn ssh_defaults_to_a_shell_and_attaches_only_when_requested() {
+        let bare = SshArgs::try_parse_from(["ssh", "my-agent"]).unwrap();
+        assert_eq!(
+            bare.remote_command(),
+            Some(vec![code::LOGIN_SHELL_COMMAND.to_string()])
+        );
+        let attached =
+            SshArgs::try_parse_from(["ssh", "my-agent", "--session", "railway-abc"]).unwrap();
+        assert_eq!(attached.remote_command(), None);
+        let automatic = SshArgs::try_parse_from(["ssh", "my-agent", "--session"]).unwrap();
+        assert_eq!(automatic.remote_command(), None);
+        assert_eq!(automatic.session.as_deref(), Some(""));
+        let resumed = SshArgs::try_parse_from(["ssh", "my-agent", "--resume"]).unwrap();
+        assert_eq!(resumed.remote_command(), None);
+        let command =
+            SshArgs::try_parse_from(["ssh", "my-agent", "--", "bash", "-lc", "pwd"]).unwrap();
+        assert_eq!(
+            command.remote_command(),
+            Some(vec!["bash".into(), "-lc".into(), "pwd".into()])
+        );
+        for flag in [vec!["--resume"], vec!["--session", "railway-abc"]] {
+            let mut args = vec!["ssh", "my-agent"];
+            args.extend(flag);
+            args.extend(["--", "bash"]);
+            assert!(SshArgs::try_parse_from(args).is_err());
+        }
+    }
 
     #[test]
     fn truncate_leaves_short_values_alone() {

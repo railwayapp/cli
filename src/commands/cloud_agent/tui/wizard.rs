@@ -146,6 +146,7 @@ pub fn harness_blurb(slug: &str) -> &'static str {
         "claude" => "Anthropic's Claude Code",
         "codex" => "OpenAI's Codex",
         "grok" => "xAI's Grok",
+        "opencode" | "opencode2" => "OpenCode",
         "railway" => "Railway's own agent — no sign-in needed",
         "shell" => "No agent — just a shell on the VM",
         // Named rather than folded into a catch-all: an unknown slug is a
@@ -314,7 +315,12 @@ impl Wizard {
             // session, not a default agent to save.
             Step::Agent => super::app::default_harnesses()
                 .iter()
-                .map(|slug| ((*slug).to_string(), harness_blurb(slug).to_string()))
+                .map(|slug| {
+                    (
+                        super::app::harness_label(slug).to_string(),
+                        harness_blurb(slug).to_string(),
+                    )
+                })
                 .collect(),
             Step::Skills => vec![
                 (

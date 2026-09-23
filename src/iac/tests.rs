@@ -112,6 +112,25 @@ fn env_config(config: Value) -> super::graph::RailwayGraph {
     )
 }
 
+/// Import `config` with every service keyed by name and marked as deployed
+/// from a template, which is how Railway-managed databases show up.
+fn managed_db_config(config: Value) -> super::graph::RailwayGraph {
+    let ids: Vec<&str> = config["services"]
+        .as_object()
+        .map(|services| services.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    environment_config_to_graph(
+        &config,
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            template_service_ids_by_id: super::compiler::map_from_str(
+                &ids.iter().map(|id| (*id, "tpl")).collect::<Vec<_>>(),
+            ),
+            ..Default::default()
+        },
+    )
+}
+
 fn diff(
     current: &super::graph::RailwayGraph,
     desired: &super::graph::RailwayGraph,
@@ -271,6 +290,7 @@ fn imported_database_without_explicit_region_is_clean() {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             service_names_by_id: super::compiler::map_from_str(&[("db-id", "postgres")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db-id", "tpl-postgres")]),
             ..Default::default()
         },
     );
@@ -335,6 +355,7 @@ fn imported_postgres(networking: Option<Value>) -> super::graph::RailwayGraph {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             service_names_by_id: super::compiler::map_from_str(&[("db-id", "postgres")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db-id", "tpl-postgres")]),
             ..Default::default()
         },
     )
@@ -354,7 +375,7 @@ fn empty_database_tcp_proxies_converge_when_no_proxy_exists() {
     )]);
     assert!(diff(&current, &desired).changes.is_empty());
 
-    let current = env_config(json!({
+    let current = managed_db_config(json!({
         "services": {
             "cache": {
                 "source": { "image": "railwayapp/redis:8.2" },
@@ -367,6 +388,81 @@ fn empty_database_tcp_proxies_converge_when_no_proxy_exists() {
         json!({ "tcpProxies": {} }),
     )]);
     assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn redis_image_without_template_provenance_imports_as_service() {
+    let current = env_config(json!({
+        "services": { "cache": { "source": { "image": "redis:7" } } }
+    }));
+    let cache = &current.resources[0];
+    assert_eq!(cache["address"], "service.cache");
+    assert_eq!(cache["type"], "service");
+    assert_eq!(cache["source"], image("redis:7"));
+
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({ "source": image("redis:7") }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn redis_image_with_template_provenance_imports_as_database() {
+    let current = managed_db_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let cache = &current.resources[0];
+    assert_eq!(cache["address"], "database.cache");
+    assert_eq!(cache["engine"], "redis");
+}
+
+#[test]
+fn service_declared_over_managed_database_is_not_replaced() {
+    let current = managed_db_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({ "source": image("railwayapp/redis:8.2") }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(result.changes.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(result.diagnostics[0].severity, "warning");
+    assert_eq!(result.diagnostics[0].path, "resources.service.cache");
+
+    // Edits on the mismatched pair still apply as the same service.
+    let desired = graph_from(vec![service(
+        "cache",
+        json!({
+            "source": image("railwayapp/redis:8.2"),
+            "variables": { "MAXMEMORY": { "type": "literal", "value": "1gb" } }
+        }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_only_variable_set(&result, "MAXMEMORY", "service.cache");
+
+    // And the other way round: a plain service declared as database().
+    let current = env_config(json!({
+        "services": { "cache": { "source": { "image": "railwayapp/redis:8.2" } } }
+    }));
+    let result = diff(&current, &graph_from(vec![redis("cache")]));
+    assert!(result.changes.is_empty());
+    assert_eq!(result.diagnostics.len(), 1);
+
+    let mut cache = redis("cache");
+    cache["variables"] = json!({ "MAXMEMORY": { "type": "literal", "value": "1gb" } });
+    let result = diff(&current, &graph_from(vec![cache]));
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_only_variable_set(&result, "MAXMEMORY", "database.cache");
+}
+
+fn assert_only_variable_set(result: &super::change_set::ChangeSet, variable: &str, address: &str) {
+    assert_eq!(kinds(result), vec!["variable.set".to_string()]);
+    assert_eq!(result.changes[0]["variable"], variable);
+    assert_eq!(result.changes[0]["address"], address);
 }
 
 #[test]
@@ -541,7 +637,7 @@ fn round_tripped_config_plans_no_changes() {
 
 #[test]
 fn template_database_start_command_does_not_churn() {
-    let current = env_config(json!({
+    let current = managed_db_config(json!({
         "services": {
             "cache": {
                 "source": { "image": "ghcr.io/railwayapp-templates/redis:8" },
@@ -656,6 +752,7 @@ fn never_deletes_database_realized_volume() {
         &EnvironmentConfigToGraphOptions {
             project_name: Some("app".into()),
             volume_names_by_id: super::compiler::map_from_str(&[("vol-1", "postgres-volume")]),
+            template_service_ids_by_id: super::compiler::map_from_str(&[("db", "tpl-postgres")]),
             ..Default::default()
         },
     );
@@ -1178,6 +1275,94 @@ fn omits_unreferenced_canvas_groups() {
             .iter()
             .any(|r| r["address"] == "group.Test-only Sandbox")
     );
+}
+
+#[test]
+fn bucket_creation_requires_region() {
+    let current = graph_from(vec![]);
+    for resource in [
+        json!({ "type": "bucket", "name": "assets" }),
+        json!({ "type": "bucket", "name": "assets", "config": {} }),
+        json!({ "type": "bucket", "name": "assets", "config": { "region": null } }),
+    ] {
+        let desired = graph_from(vec![resource]);
+        let result = diff(&current, &desired);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == "error"
+                    && diagnostic.path == "resources.bucket.assets.config.region"
+                    && diagnostic.message.contains("missing a region")
+            }),
+            "expected a missing-region diagnostic, got {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn bucket_creation_rejects_invalid_regions() {
+    let current = graph_from(vec![]);
+    for region in [
+        json!(""),
+        json!("auto"),
+        json!("us-east4-eqdc4a"),
+        json!("IAD"),
+        json!(" iad "),
+        json!(42),
+        json!(false),
+        json!([]),
+        json!({ "region": "iad" }),
+    ] {
+        let desired = graph_from(vec![json!({
+            "type": "bucket", "name": "assets", "config": { "region": region }
+        })]);
+        let result = diff(&current, &desired);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.severity == "error"
+                    && diagnostic.path == "resources.bucket.assets.config.region"
+                    && diagnostic.message.contains("sjc, iad, ams, sin")
+            }),
+            "expected an invalid-region diagnostic for {region}, got {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn bucket_creation_accepts_storage_regions() {
+    let current = graph_from(vec![]);
+    for region in ["sjc", "iad", "ams", "sin"] {
+        let desired = graph_from(vec![bucket("assets", region)]);
+        let result = diff(&current, &desired);
+        assert!(result.diagnostics.is_empty(), "region {region}");
+        assert_eq!(kinds(&result), ["resource.create"]);
+    }
+}
+
+#[test]
+fn bucket_creation_error_remains_with_a_co_created_service() {
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![
+        json!({ "type": "bucket", "name": "assets" }),
+        service("web", json!({ "source": image("nginx:latest") })),
+    ]);
+    let result = diff(&current, &desired);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == "error" && diagnostic.path == "resources.bucket.assets.config.region"
+    }));
+    assert!(result.changes.iter().any(|change| {
+        change["kind"] == "resource.create" && change["address"] == "service.web"
+    }));
+}
+
+#[test]
+fn bucket_existing_unchanged_region_does_not_need_create_validation() {
+    let current = env_config(json!({ "buckets": { "assets": { "region": "legacy-region" } } }));
+    let desired = graph_from(vec![bucket("assets", "legacy-region")]);
+    let result = diff(&current, &desired);
+    assert!(result.diagnostics.is_empty());
+    assert!(result.changes.is_empty());
 }
 
 #[test]

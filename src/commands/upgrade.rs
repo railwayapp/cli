@@ -3,6 +3,8 @@ use std::process::Command;
 use is_terminal::IsTerminal;
 
 use crate::util::install_method::InstallMethod;
+use crate::util::progress::UpdateStep;
+use crate::util::update_status::{self, SkillsOutcome};
 
 use super::*;
 
@@ -62,7 +64,11 @@ fn retry_command(rollback: bool, yes: bool, elevated: bool) -> String {
     parts.join(" ")
 }
 
-fn run_upgrade_command(method: InstallMethod) -> Result<()> {
+fn run_upgrade_command(method: InstallMethod) -> Result<String> {
+    // Capture before replacement; current_exe() can point at a deleted inode
+    // after a package manager swaps the running executable on Linux.
+    let executable = std::env::current_exe().context("Failed to locate the CLI binary")?;
+    let executable = verification_path(method, &executable);
     let (program, args) = method
         .package_manager_command()
         .context("Cannot auto-upgrade for this install method")?;
@@ -90,28 +96,150 @@ fn run_upgrade_command(method: InstallMethod) -> Result<()> {
         );
     }
 
-    println!("{} {} {}", "Running:".bold(), program, args.join(" "));
-    println!();
-
-    let status = Command::new(program)
-        .args(&args)
-        .status()
-        .context(format!("Failed to execute {}", program))?;
+    let installing = UpdateStep::start(&format!("Installing CLI with {}", method.name()));
+    let output = match Command::new(program).args(&args).output() {
+        Ok(output) => output,
+        Err(error) => {
+            installing.finish("✗", "CLI installation failed");
+            return Err(error).with_context(|| format!("Failed to execute {program}"));
+        }
+    };
 
     // Clean up stale PID file from a previous background updater.
     let _ = std::fs::remove_file(&pid_path);
 
-    if !status.success() {
+    if !output.status.success() {
+        installing.finish("✗", "CLI installation failed");
         bail!(
-            "Upgrade command failed with exit code: {}",
-            status.code().unwrap_or(-1)
+            "{} {} failed (exit {}):\n{}\n{}",
+            program,
+            args.join(" "),
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
         );
     }
 
-    println!();
-    println!("{}", "Upgrade complete!".green().bold());
+    // Package managers resolve their own target. Check the binary they actually
+    // installed instead of claiming whatever GitHub happened to report earlier.
+    let verified = Command::new(executable)
+        .arg("--version")
+        .env("RAILWAY_NO_AUTO_UPDATE", "1")
+        .env("DO_NOT_TRACK", "1")
+        .output();
+    let version = match verified
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| installed_version(&String::from_utf8_lossy(&output.stdout)))
+    {
+        Some(version) => version,
+        None => {
+            installing.finish(
+                "·",
+                "CLI install finished; installed version could not be verified",
+            );
+            bail!(
+                "Run `railway --version` to verify the installation, then `railway skills update` to synchronize skills."
+            );
+        }
+    };
+    update_status::record_installed(&version);
+    crate::util::check_update::UpdateCheck::clear_after_update();
+    let summary = if version == env!("CARGO_PKG_VERSION") {
+        format!("CLI already up to date · v{version}")
+    } else {
+        format!(
+            "CLI installed · v{} → v{}",
+            env!("CARGO_PKG_VERSION"),
+            version
+        )
+    };
+    installing.finish("✓", &summary);
 
-    Ok(())
+    Ok(version)
+}
+
+/// Versioned package-manager directories can disappear during an upgrade.
+/// Resolve their stable entry point before checking the installed executable.
+fn verification_path(method: InstallMethod, executable: &std::path::Path) -> std::path::PathBuf {
+    if method == InstallMethod::Homebrew {
+        if let Some(cellar) = executable
+            .ancestors()
+            .find(|path| path.file_name().is_some_and(|name| name == "Cellar"))
+        {
+            if let (Some(prefix), Ok(relative)) = (cellar.parent(), executable.strip_prefix(cellar))
+            {
+                let mut parts = relative.components();
+                if let (Some(formula), Some(_version)) = (parts.next(), parts.next()) {
+                    return prefix.join("opt").join(formula).join(parts.as_path());
+                }
+            }
+        }
+    } else if method == InstallMethod::Scoop {
+        if let Some(app) = executable.ancestors().find(|path| {
+            path.file_name().is_some_and(|name| name == "railway")
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == "apps")
+        }) {
+            if let Ok(relative) = executable.strip_prefix(app) {
+                let mut parts = relative.components();
+                if parts.next().is_some() {
+                    return app.join("current").join(parts.as_path());
+                }
+            }
+        }
+    }
+    executable.to_path_buf()
+}
+
+fn installed_version(output: &str) -> Option<String> {
+    let version = output.trim().strip_prefix("railway ")?;
+    let core = version.split(['-', '+']).next()?;
+    let parts: Vec<_> = core.split('.').collect();
+    (parts.len() == 3
+        && parts.iter().all(|part| part.parse::<u64>().is_ok())
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
+    .then(|| version.to_string())
+}
+
+async fn finish_upgrade(version: &str) {
+    let step = UpdateStep::start("Synchronizing agent skills");
+    let outcome = match skills::sync_for_upgrade(version).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let outcome = SkillsOutcome::Failed {
+                message: error.to_string(),
+            };
+            update_status::record_skills(version, outcome.clone());
+            outcome
+        }
+    };
+    let symbol = if matches!(outcome, SkillsOutcome::Synced { .. }) {
+        "✓"
+    } else {
+        "·"
+    };
+    step.finish(symbol, &outcome.summary());
+    if matches!(outcome, SkillsOutcome::Failed { .. }) {
+        eprintln!("  Details: railway autoupdate status");
+    }
+    let ready = if matches!(outcome, SkillsOutcome::Failed { .. }) {
+        "CLI ready"
+    } else {
+        "Ready"
+    };
+    if version == env!("CARGO_PKG_VERSION") {
+        eprintln!("\n{ready}. v{version} is active.");
+    } else {
+        eprintln!("\n{ready}. v{version} will be used on your next command.");
+    }
+    // This explicit flow already presented the result. Don't repeat it as an
+    // automatic receipt on the next invocation.
+    update_status::mark_presented(version);
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -163,9 +291,9 @@ pub async fn command(args: Args) -> Result<()> {
 
     validate_interaction(args.yes, std::io::stdout().is_terminal())?;
 
-    println!(
-        "{} {} ({})",
-        "Current version:".bold(),
+    eprintln!(
+        "\n{} · v{} · {}\n",
+        "Updating Railway".bold(),
         env!("CARGO_PKG_VERSION"),
         method.name()
     );
@@ -173,8 +301,8 @@ pub async fn command(args: Args) -> Result<()> {
     // Order matters: check self-update first, then unknown, then package manager.
     match method {
         method if method.can_self_update() && method.can_write_binary() => {
-            println!();
-            crate::util::self_update::self_update_interactive().await?;
+            let version = crate::util::self_update::self_update_interactive().await?;
+            finish_upgrade(&version).await;
         }
         method if method.can_self_update() => {
             // Shell install but binary location not writable by current user
@@ -234,8 +362,8 @@ pub async fn command(args: Args) -> Result<()> {
             )?;
         }
         method if method.can_auto_upgrade() => {
-            println!();
-            run_upgrade_command(method)?;
+            let version = run_upgrade_command(method)?;
+            finish_upgrade(&version).await;
         }
         InstallMethod::Shell => {
             // Shell install on a platform where self-update is unsupported
@@ -274,7 +402,7 @@ pub async fn command(args: Args) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, validate_interaction};
+    use super::{Args, installed_version, validate_interaction};
     use clap::Parser;
 
     #[test]
@@ -300,5 +428,20 @@ mod tests {
     fn non_interactive_upgrade_requires_yes() {
         assert!(validate_interaction(false, false).is_err());
         assert!(validate_interaction(true, false).is_ok());
+    }
+
+    #[test]
+    fn package_manager_version_is_verified_from_cli_output() {
+        assert_eq!(
+            installed_version("railway 5.50.0\n").as_deref(),
+            Some("5.50.0")
+        );
+        assert_eq!(
+            installed_version("railway 5.50.0-beta.1\n").as_deref(),
+            Some("5.50.0-beta.1")
+        );
+        assert!(installed_version("npm 10.0.0").is_none());
+        assert!(installed_version("railway something-went-wrong").is_none());
+        assert!(installed_version("railway 5.50.0\nextra output").is_none());
     }
 }
