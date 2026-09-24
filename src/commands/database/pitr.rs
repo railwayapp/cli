@@ -361,24 +361,32 @@ async fn print_status(
     // as "unavailable".
     //
     // `cluster_role` is structural: after a Patroni failover the root is a
-    // replica whose pg_stat_archiver is frozen, so an HA cluster probes every
-    // member in parallel and reports from whichever one is out of recovery,
-    // falling back to the root when none answers as primary.
+    // replica whose pg_stat_archiver is frozen. An HA cluster first runs only
+    // the cheap archiver query on every member in parallel to find the one out
+    // of recovery, then runs the full probe there. `pgbackrest info` reads the
+    // cluster-wide archive, so it would return the same answer from any member
+    // and only needs to run once. Falls back to the root when no member
+    // answers as primary or the leader's full probe can't run.
     let live = if include_live && root_pitr.enabled && live_probe_applies(&pitr) {
         if members.is_empty() {
-            Some(probe_pitr_live(ctx, &root.root_id).await)
+            Some(probe_pitr_live(ctx, &root.root_id, true).await)
         } else {
             let probes = futures::future::join_all(
-                members.iter().map(|m| probe_pitr_live(ctx, &m.service.id)),
+                members
+                    .iter()
+                    .map(|m| probe_pitr_live(ctx, &m.service.id, false)),
             )
             .await;
             for (member, probe) in members.iter_mut().zip(&probes) {
                 member.live_role = live_role(probe);
             }
             let probes = members.iter().map(|m| m.service.id.clone()).zip(probes);
-            match pick_live_probe(probes, &root.root_id) {
-                Some(probe) => Some(probe),
-                None => Some(probe_pitr_live(ctx, &root.root_id).await),
+            let target = pick_probe_target(probes, &root.root_id);
+            let probe = probe_pitr_live(ctx, &target, true).await;
+            if !probe.available && target != root.root_id {
+                Some(probe_pitr_live(ctx, &root.root_id, true).await)
+            } else {
+                Some(probe)
             }
         }
     } else {
@@ -1891,15 +1899,35 @@ async fn schedule_list(
 /// along with it.
 const LIVE_PROBE_TIMEOUT_SECS: u64 = 10;
 
-async fn probe_pitr_live(ctx: &ServiceContext, service_id: &str) -> PitrLiveProbe {
+/// `with_coverage` also runs `pgbackrest info` (an S3 read of the archive);
+/// without it only the `pg_stat_archiver` query runs.
+async fn probe_pitr_live(
+    ctx: &ServiceContext,
+    service_id: &str,
+    with_coverage: bool,
+) -> PitrLiveProbe {
     let attempt = async {
         let instance_id =
             get_service_instance_id(&ctx.client, &ctx.configs, &ctx.environment_id, service_id)
                 .await
                 .context("No live deployment found for this service")?;
 
+        let coverage = async {
+            if with_coverage {
+                Some(
+                    exec_probe_in_container(
+                        &instance_id,
+                        PGBACKREST_INFO_PROBE,
+                        PITR_PROBE_TIMEOUT,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            }
+        };
         let (pgbackrest_result, archiver_result) = tokio::join!(
-            exec_probe_in_container(&instance_id, PGBACKREST_INFO_PROBE, PITR_PROBE_TIMEOUT),
+            coverage,
             exec_probe_in_container(&instance_id, ARCHIVER_PROBE_QUERY, PITR_PROBE_TIMEOUT),
         );
 
@@ -1909,11 +1937,12 @@ async fn probe_pitr_live(ctx: &ServiceContext, service_id: &str) -> PitrLiveProb
         };
 
         match pgbackrest_result {
-            Ok(output) => apply_pgbackrest_info(&mut probe, &output),
-            Err(err) => {
+            Some(Ok(output)) => apply_pgbackrest_info(&mut probe, &output),
+            Some(Err(err)) => {
                 probe.backup_coverage_error =
                     Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
             }
+            None => {}
         }
         match archiver_result {
             Ok(output) => apply_archiver_output(&mut probe, &output),
@@ -1960,22 +1989,17 @@ fn live_role(probe: &PitrLiveProbe) -> Option<String> {
         .map(|r| if r { "replica" } else { "leader" }.to_string())
 }
 
-/// Picks the probe to report for an HA cluster: the member that answered as
-/// primary, else the root's own probe (`None` if the root wasn't probed).
-fn pick_live_probe(
+/// Picks which HA member to run the full probe on: the one whose archiver
+/// probe answered as primary, else the root.
+fn pick_probe_target(
     probes: impl IntoIterator<Item = (String, PitrLiveProbe)>,
     root_service_id: &str,
-) -> Option<PitrLiveProbe> {
-    let mut root_probe = None;
-    for (service_id, probe) in probes {
-        if probe.available && probe.in_recovery == Some(false) {
-            return Some(probe);
-        }
-        if service_id == root_service_id {
-            root_probe = Some(probe);
-        }
-    }
-    root_probe
+) -> String {
+    probes
+        .into_iter()
+        .find(|(_, probe)| probe.available && probe.in_recovery == Some(false))
+        .map(|(service_id, _)| service_id)
+        .unwrap_or_else(|| root_service_id.to_string())
 }
 
 /// Loosely parses `pgbackrest info --output=json`'s shape (an array of
@@ -2202,7 +2226,8 @@ struct PitrStatusOutput {
 }
 
 /// Best-effort live coverage/archiver probe (`pgbackrest info` + `pg_stat_archiver`
-/// over SSH into the root service's running container). `available == false`
+/// over SSH into the reporting member's running container: the HA leader, else
+/// the root). `available == false`
 /// means the probe itself couldn't run at all (no live deployment, no SSH key,
 /// unreachable, timed out); `backup_coverage_error`/`archiver_error` mean the
 /// probe connected but one half of the two independent sub-probes failed
@@ -2621,44 +2646,40 @@ mod tests {
     }
 
     #[test]
-    fn pick_live_probe_prefers_primary_then_root() {
-        let probe = |in_recovery: Option<bool>, last: &str| PitrLiveProbe {
-            available: true,
+    fn pick_probe_target_prefers_primary_then_root() {
+        let probe = |available: bool, in_recovery: Option<bool>| PitrLiveProbe {
+            available,
             in_recovery,
-            archiver_last_archived_at: Some(last.to_string()),
             ..PitrLiveProbe::default()
         };
 
         // Post-failover: the root is a replica, the leader is another member.
-        let picked = pick_live_probe(
+        let target = pick_probe_target(
             vec![
-                ("root".to_string(), probe(Some(true), "stale")),
-                ("member-2".to_string(), probe(Some(false), "fresh")),
+                ("root".to_string(), probe(true, Some(true))),
+                ("member-2".to_string(), probe(true, Some(false))),
             ],
             "root",
-        )
-        .unwrap();
-        assert_eq!(picked.archiver_last_archived_at.as_deref(), Some("fresh"));
-
-        // No member answered as primary: fall back to the root's probe.
-        let picked = pick_live_probe(
-            vec![
-                ("member-2".to_string(), PitrLiveProbe::default()),
-                ("root".to_string(), probe(None, "root")),
-            ],
-            "root",
-        )
-        .unwrap();
-        assert_eq!(picked.archiver_last_archived_at.as_deref(), Some("root"));
-
-        // Root not among the probed members and no primary: caller probes root.
-        assert!(
-            pick_live_probe(
-                vec![("member-2".to_string(), probe(Some(true), "x"))],
-                "root"
-            )
-            .is_none()
         );
+        assert_eq!(target, "member-2");
+
+        // No member answered as primary: fall back to the root.
+        let target = pick_probe_target(
+            vec![
+                ("member-2".to_string(), probe(true, Some(true))),
+                ("root".to_string(), probe(true, None)),
+            ],
+            "root",
+        );
+        assert_eq!(target, "root");
+
+        // A member that couldn't be probed is never picked, even with a stale
+        // recovery flag.
+        let target = pick_probe_target(
+            vec![("member-2".to_string(), probe(false, Some(false)))],
+            "root",
+        );
+        assert_eq!(target, "root");
     }
 
     #[test]
