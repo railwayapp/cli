@@ -365,29 +365,18 @@ async fn print_status(
     // the cheap archiver query on every member in parallel to find the one out
     // of recovery, then runs the full probe there. `pgbackrest info` reads the
     // cluster-wide archive, so it would return the same answer from any member
-    // and only needs to run once. Falls back to the root when no member
-    // answers as primary or the leader's full probe can't run.
+    // and only needs to run once. If no primary can be confirmed, report
+    // unavailable instead of treating the structural root as the primary.
     let live = if include_live && root_pitr.enabled && live_probe_applies(&pitr) {
-        if members.is_empty() {
-            Some(probe_pitr_live(ctx, &root.root_id, true).await)
-        } else {
-            let probes = futures::future::join_all(
-                members
-                    .iter()
-                    .map(|m| probe_pitr_live(ctx, &m.service.id, false)),
+        if ha_state.is_cluster {
+            Some(
+                probe_pitr_ha(&mut members, |service_id, with_coverage| async move {
+                    probe_pitr_live(ctx, &service_id, with_coverage).await
+                })
+                .await,
             )
-            .await;
-            for (member, probe) in members.iter_mut().zip(&probes) {
-                member.live_role = live_role(probe);
-            }
-            let probes = members.iter().map(|m| m.service.id.clone()).zip(probes);
-            let target = pick_probe_target(probes, &root.root_id);
-            let probe = probe_pitr_live(ctx, &target, true).await;
-            if !probe.available && target != root.root_id {
-                Some(probe_pitr_live(ctx, &root.root_id, true).await)
-            } else {
-                Some(probe)
-            }
+        } else {
+            Some(probe_pitr_live(ctx, &root.root_id, true).await)
         }
     } else {
         None
@@ -1989,17 +1978,48 @@ fn live_role(probe: &PitrLiveProbe) -> Option<String> {
         .map(|r| if r { "replica" } else { "leader" }.to_string())
 }
 
-/// Picks which HA member to run the full probe on: the one whose archiver
-/// probe answered as primary, else the root.
-fn pick_probe_target(
-    probes: impl IntoIterator<Item = (String, PitrLiveProbe)>,
-    root_service_id: &str,
-) -> String {
-    probes
-        .into_iter()
-        .find(|(_, probe)| probe.available && probe.in_recovery == Some(false))
-        .map(|(service_id, _)| service_id)
-        .unwrap_or_else(|| root_service_id.to_string())
+/// Probe only a confirmed HA primary; structural roles never select a target.
+async fn probe_pitr_ha<F, Fut>(members: &mut [PitrMemberStatus], probe_member: F) -> PitrLiveProbe
+where
+    F: Fn(String, bool) -> Fut,
+    Fut: std::future::Future<Output = PitrLiveProbe>,
+{
+    let probes = futures::future::join_all(
+        members
+            .iter()
+            .map(|m| probe_member(m.service.id.clone(), false)),
+    )
+    .await;
+    for (member, probe) in members.iter_mut().zip(&probes) {
+        member.live_role = live_role(probe);
+    }
+    let Some(index) = probes
+        .iter()
+        .position(|probe| probe.available && probe.in_recovery == Some(false))
+    else {
+        return PitrLiveProbe {
+            unavailable_reason: Some("No HA member could be confirmed as primary".to_string()),
+            ..PitrLiveProbe::default()
+        };
+    };
+
+    let mut probe = probe_member(members[index].service.id.clone(), true).await;
+    members[index].live_role = live_role(&probe);
+    // Leadership can change between discovery and the full probe. Coverage
+    // belongs to the shared archive, but archiver data is valid only when this
+    // query still confirms a primary. Never substitute the root on failure.
+    if probe.available && probe.in_recovery != Some(false) {
+        probe.archiver_healthy = None;
+        probe.archiver_last_archived_at = None;
+        probe.max_restore_time = None;
+        if probe.archiver_error.is_none() {
+            probe.archiver_error = Some(match probe.in_recovery {
+                Some(true) => "Selected HA member is no longer primary".to_string(),
+                _ => "Could not confirm the selected HA member is still primary".to_string(),
+            });
+        }
+    }
+    probe
 }
 
 /// Loosely parses `pgbackrest info --output=json`'s shape (an array of
@@ -2226,9 +2246,9 @@ struct PitrStatusOutput {
 }
 
 /// Best-effort live coverage/archiver probe (`pgbackrest info` + `pg_stat_archiver`
-/// over SSH into the reporting member's running container: the HA leader, else
-/// the root). `available == false`
-/// means the probe itself couldn't run at all (no live deployment, no SSH key,
+/// over SSH into a confirmed HA primary or a standalone service).
+/// `available == false` means no HA primary was found or the probe itself
+/// couldn't run at all (no live deployment, no SSH key,
 /// unreachable, timed out); `backup_coverage_error`/`archiver_error` mean the
 /// probe connected but one half of the two independent sub-probes failed
 /// (e.g. `pgbackrest` not installed on a non-official image, or the Postgres
@@ -2645,41 +2665,157 @@ mod tests {
         assert_eq!(live_role(&probe), None);
     }
 
-    #[test]
-    fn pick_probe_target_prefers_primary_then_root() {
-        let probe = |available: bool, in_recovery: Option<bool>| PitrLiveProbe {
-            available,
-            in_recovery,
-            ..PitrLiveProbe::default()
-        };
+    fn ha_probe_members() -> Vec<PitrMemberStatus> {
+        [("root", "root"), ("member-2", "replica")]
+            .into_iter()
+            .map(|(id, role)| PitrMemberStatus {
+                service: ResourceRef {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                },
+                cluster_role: Some(role.to_string()),
+                live_role: None,
+                enabled: true,
+                bucket_wired: true,
+            })
+            .collect()
+    }
 
-        // Post-failover: the root is a replica, the leader is another member.
-        let target = pick_probe_target(
-            vec![
-                ("root".to_string(), probe(true, Some(true))),
-                ("member-2".to_string(), probe(true, Some(false))),
-            ],
-            "root",
-        );
-        assert_eq!(target, "member-2");
+    #[tokio::test]
+    async fn ha_probe_requires_a_confirmed_primary() {
+        // Neither an unknown root role nor an unreachable member with a stale
+        // primary flag permits a full probe. An empty HA member list also
+        // stays unavailable rather than taking the standalone path.
+        for (available, in_recovery) in [(true, Some(true)), (true, None), (false, Some(false))] {
+            let mut members = ha_probe_members();
+            let live = probe_pitr_ha(&mut members, |_, with_coverage| {
+                assert!(!with_coverage, "must not fall back to a full root probe");
+                std::future::ready(PitrLiveProbe {
+                    available,
+                    in_recovery,
+                    ..PitrLiveProbe::default()
+                })
+            })
+            .await;
+            assert!(!live.available);
+            assert!(
+                live.unavailable_reason
+                    .unwrap()
+                    .contains("confirmed as primary")
+            );
+            assert!(live.archiver_healthy.is_none());
+            assert!(live.archiver_last_archived_at.is_none());
+            assert!(live.max_restore_time.is_none());
+        }
+        let live = probe_pitr_ha(&mut [], |_, _| -> std::future::Ready<PitrLiveProbe> {
+            panic!("no members to probe");
+        })
+        .await;
+        assert!(!live.available);
+    }
 
-        // No member answered as primary: fall back to the root.
-        let target = pick_probe_target(
-            vec![
-                ("member-2".to_string(), probe(true, Some(true))),
-                ("root".to_string(), probe(true, None)),
-            ],
-            "root",
-        );
-        assert_eq!(target, "root");
+    #[tokio::test]
+    async fn ha_probe_reads_only_the_live_primary() {
+        // Either structural member can be primary, including the root when
+        // confirmed by the live query.
+        for primary in ["root", "member-2"] {
+            let mut members = ha_probe_members();
+            let full_probes = std::cell::Cell::new(0);
+            let live = probe_pitr_ha(&mut members, |id, with_coverage| {
+                if with_coverage {
+                    assert_eq!(id, primary);
+                    full_probes.set(full_probes.get() + 1);
+                }
+                std::future::ready(PitrLiveProbe {
+                    available: true,
+                    in_recovery: Some(id != primary),
+                    archiver_healthy: with_coverage.then_some(true),
+                    backup_set_count: with_coverage.then_some(3),
+                    ..PitrLiveProbe::default()
+                })
+            })
+            .await;
+            assert_eq!(full_probes.get(), 1);
+            assert_eq!(live.archiver_healthy, Some(true));
+            assert_eq!(live.backup_set_count, Some(3));
+            for member in &members {
+                assert_eq!(
+                    member.live_role.as_deref(),
+                    Some(if member.service.id == primary {
+                        "leader"
+                    } else {
+                        "replica"
+                    })
+                );
+            }
+        }
+    }
 
-        // A member that couldn't be probed is never picked, even with a stale
-        // recovery flag.
-        let target = pick_probe_target(
-            vec![("member-2".to_string(), probe(false, Some(false)))],
-            "root",
-        );
-        assert_eq!(target, "root");
+    #[tokio::test]
+    async fn ha_probe_does_not_fall_back_when_primary_probe_fails() {
+        let mut members = ha_probe_members();
+        let live = probe_pitr_ha(&mut members, |id, with_coverage| {
+            std::future::ready(if with_coverage {
+                assert_eq!(id, "member-2", "must not retry on the root");
+                PitrLiveProbe {
+                    unavailable_reason: Some("probe timed out".to_string()),
+                    ..PitrLiveProbe::default()
+                }
+            } else {
+                PitrLiveProbe {
+                    available: true,
+                    in_recovery: Some(id == "root"),
+                    ..PitrLiveProbe::default()
+                }
+            })
+        })
+        .await;
+        assert!(!live.available);
+        assert_eq!(live.unavailable_reason.as_deref(), Some("probe timed out"));
+        assert!(members[1].live_role.is_none());
+    }
+
+    #[tokio::test]
+    async fn ha_probe_discards_archiver_data_if_primary_is_no_longer_confirmed() {
+        for role in [Some(true), None] {
+            let mut members = ha_probe_members();
+            let live = probe_pitr_ha(&mut members, |id, with_coverage| {
+                std::future::ready(if with_coverage {
+                    assert_eq!(id, "member-2");
+                    PitrLiveProbe {
+                        available: true,
+                        in_recovery: role,
+                        backup_set_count: Some(3),
+                        archiver_healthy: Some(true),
+                        archiver_last_archived_at: Some("stale archive time".to_string()),
+                        max_restore_time: Some("stale restore time".to_string()),
+                        ..PitrLiveProbe::default()
+                    }
+                } else {
+                    PitrLiveProbe {
+                        available: true,
+                        in_recovery: Some(id == "root"),
+                        ..PitrLiveProbe::default()
+                    }
+                })
+            })
+            .await;
+            assert!(live.available);
+            assert_eq!(live.backup_set_count, Some(3));
+            assert!(live.archiver_error.is_some());
+            let json = serde_json::to_value(&live).unwrap();
+            for field in [
+                "archiverHealthy",
+                "archiverLastArchivedAt",
+                "maxRestoreTime",
+            ] {
+                assert!(
+                    json.get(field).is_none(),
+                    "stale {field} must not reach JSON"
+                );
+            }
+            assert_eq!(members[1].live_role.as_deref(), role.map(|_| "replica"));
+        }
     }
 
     #[test]
