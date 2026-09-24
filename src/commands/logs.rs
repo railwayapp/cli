@@ -855,9 +855,13 @@ pub async fn command(args: Args) -> Result<()> {
         }
     } else if show_build_logs {
         if should_stream {
-            stream_build_logs(deployment_id.clone(), args.filter.clone(), |log| {
-                print_log(log, args.json, LogFormat::LevelOnly)
-            })
+            stream_build_logs(
+                &client,
+                &backboard,
+                deployment_id.clone(),
+                args.filter.clone(),
+                |log| print_log(log, args.json, LogFormat::LevelOnly),
+            )
             .await?;
         } else {
             fetch_build_logs(

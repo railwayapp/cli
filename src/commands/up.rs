@@ -9,7 +9,7 @@ use is_terminal::IsTerminal;
 use crate::{
     consts::TICK_STRING,
     controllers::{
-        deployment::stream_deploy_logs,
+        deployment::{BuildLogContext, stream_deploy_logs},
         environment::get_matched_environment,
         project::get_project,
         service::get_or_prompt_service,
@@ -342,7 +342,6 @@ pub async fn command(args: Args) -> Result<()> {
     //  the WebSocket subscription fails because the deployment isn't ready yet.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let build_deployment_id = deployment_id.clone();
     let poll_deployment_id = deployment_id.clone();
     let json_mode = args.json;
     let ci_flag = args.ci;
@@ -351,10 +350,7 @@ pub async fn command(args: Args) -> Result<()> {
     let poll_errors = Arc::clone(&deployment_errors);
     let streamed_build_logs = Arc::clone(&build_logs);
     let mut tasks = vec![tokio::task::spawn(async move {
-        if let Err(e) = streamed_build_logs
-            .stream(&build_deployment_id, ci_flag)
-            .await
-        {
+        if let Err(e) = streamed_build_logs.stream(ci_flag).await {
             eprintln!("Failed to stream build logs: {e}");
 
             // Losing the log stream is not a build failure. In CI mode the
@@ -452,6 +448,11 @@ pub async fn command(args: Args) -> Result<()> {
             }
         }
         if let Some(data) = res.data {
+            build_logs.set_context(BuildLogContext::new(
+                data.deployment.environment_id,
+                data.deployment.snapshot_id,
+                data.deployment.created_at,
+            ));
             match data.deployment.status {
                 DeploymentStatus::SUCCESS => {
                     deployment_succeeded = true;
@@ -524,6 +525,11 @@ async fn poll_deployment_verdict(
                 },
             )
             .await?;
+            build_logs.set_context(BuildLogContext::new(
+                data.deployment.environment_id,
+                data.deployment.snapshot_id,
+                data.deployment.created_at,
+            ));
             Ok::<_, anyhow::Error>(data.deployment.status)
         }
         .await;
@@ -957,12 +963,11 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let json_mode = args.json;
-    let build_id_for_logs = up_response.deployment_id.clone();
     let build_logs = Arc::new(BuildLogs::new(json_mode));
     let deployment_errors = Arc::new(DeploymentErrors::default());
     let streamed_build_logs = Arc::clone(&build_logs);
     let _build_task = tokio::task::spawn(async move {
-        let _ = streamed_build_logs.stream(&build_id_for_logs, false).await;
+        let _ = streamed_build_logs.stream(false).await;
     });
 
     // Raw deploy logs are a human nicety; in JSON mode the build-log
@@ -991,6 +996,11 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
             .await?;
     while let Some(Ok(res)) = status_stream.status.next().await {
         let Some(data) = res.data else { continue };
+        build_logs.set_context(BuildLogContext::new(
+            data.deployment.environment_id,
+            data.deployment.snapshot_id,
+            data.deployment.created_at,
+        ));
         match data.deployment.status {
             DeploymentStatus::SUCCESS => {
                 if json_mode {
