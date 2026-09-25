@@ -216,6 +216,30 @@ fn dockerfile_build_defaults_do_not_drift() {
 }
 
 #[test]
+fn default_restart_policy_does_not_drift() {
+    // The API returns null for default restart policy fields (ON_FAILURE / 10),
+    // so the current graph has no restart fields. The desired graph explicitly
+    // declares the defaults. The plan should be empty.
+    let current = graph_from(vec![service("web", json!({ "deploy": {} }))]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "deploy": { "restartPolicyType": "ON_FAILURE", "restartPolicyMaxRetries": 10 } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn non_default_restart_policy_is_planned() {
+    let current = graph_from(vec![service("web", json!({ "deploy": {} }))]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "deploy": { "restartPolicyType": "NEVER" } }),
+    )]);
+    assert_eq!(diff(&current, &desired).changes.len(), 1);
+    assert_eq!(diff(&current, &desired).changes[0]["field"], "deploy");
+}
+
+#[test]
 fn volume_upsize_is_safe_downsize_is_destructive() {
     let small = graph_from(vec![volume("data", json!({ "sizeMB": 1024 }))]);
     let large = graph_from(vec![volume("data", json!({ "sizeMB": 2048 }))]);
