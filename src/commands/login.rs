@@ -16,19 +16,16 @@ use super::*;
 
 /// Sign in to Railway — also creates a new account if you don't have one.
 ///
-/// Uses a single OAuth flow for both sign-in and sign-up. Brand-new
-/// accounts are detected automatically and land on a welcome page;
-/// existing users see the standard sign-in confirmation. Use
-/// --browserless for SSH sessions, remote dev boxes, or any
-/// environment where a local browser can't open.
+/// Uses a single OAuth device-code flow for both sign-in and sign-up:
+/// the CLI prints a one-click sign-in link (plus a short code) that you
+/// complete in a browser on any device. Brand-new accounts are detected
+/// automatically and land on a welcome page; existing users see the
+/// standard sign-in confirmation.
 #[derive(Parser)]
 pub struct Args {
-    /// Use a device-code flow instead of opening a browser. Prints
-    /// a sign-in link + short code to use from any device. Only
-    /// needed when this machine truly has no browser — the CLI
-    /// already auto-detects SSH, CI, and missing DISPLAY. If a human
-    /// is at this machine (including under a coding agent), omit
-    /// this flag: the browser flow completes far more reliably.
+    /// Deprecated: the device-code flow is now always used, so this flag
+    /// no longer changes behavior. Retained for backward compatibility
+    /// with scripts that still pass it.
     #[clap(short, long)]
     pub browserless: bool,
 }
@@ -67,42 +64,28 @@ pub async fn command(args: Args) -> Result<()> {
 
     let host = configs.get_host();
 
-    // `login` is an explicit auth request, so we always attempt it —
-    // only the transport varies. Device-code when the user asked for it
-    // (--browserless) or no local browser is reachable (CI/SSH/no
-    // DISPLAY); otherwise open a browser. browser_login itself falls
-    // back to device-code if `open` fails. Neither path needs a TTY.
+    // `login` is an explicit auth request, so we always attempt it.
+    // Every sign-in now uses the device-code flow (see
+    // `ExecutionContext::login_transport`); the transport no longer
+    // varies by environment. Neither path needs a TTY.
     let ctx = crate::exec_context::ExecutionContext::detect(false, false);
     let transport_choice = ctx.login_transport(args.browserless);
 
-    // Why this transport was chosen, for funnel telemetry. Env
-    // constraints win over the flag: "flag_browserless" is reported
-    // only when a browser was otherwise reachable, so it counts exactly
-    // the sessions a bare `railway login` would have sent down the
-    // (far more reliable) browser path. browser_login overwrites both
-    // labels if its `open` attempt fails and it falls back.
+    // Why this transport was chosen, for funnel telemetry. Device-code
+    // is now the default for every sign-in ("default_device_code"); the
+    // environment labels (env_ci/env_ssh/no_display) and the explicit
+    // "flag_browserless" are still recorded so we can see how sessions
+    // would have been routed under the old browser-preferring logic.
     let mut reason = match transport_choice {
         crate::exec_context::AuthTransport::Browser => "browser",
         crate::exec_context::AuthTransport::DeviceCode => {
             headless_reason().unwrap_or(if args.browserless {
                 "flag_browserless"
             } else {
-                "unknown"
+                "default_device_code"
             })
         }
     };
-
-    // --browserless on a machine that has a browser: honor the flag,
-    // but say so in the output. Agents (the dominant source of this
-    // combination) read command output at exactly this moment, and the
-    // browser path completes far more often for watched sessions.
-    if reason == "flag_browserless" {
-        println!(
-            "  {} A browser is available on this machine — `railway login` without {} opens it directly and completes more reliably.",
-            "→".cyan(),
-            "--browserless".bold(),
-        );
-    }
 
     let mut transport = match transport_choice {
         crate::exec_context::AuthTransport::DeviceCode => "device_code",
