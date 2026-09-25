@@ -199,6 +199,9 @@ pub async fn command(args: Args) -> Result<()> {
     let service = args
         .service
         .or_else(|| linked_project.as_ref().and_then(|lp| lp.service.clone()));
+    let service = service
+        .map(|s| resolve_service_id(&project, &s))
+        .transpose()?;
     let environment_input = match args.environment.clone() {
         Some(env) => env,
         None => linked_project
@@ -833,14 +836,14 @@ async fn add(
         .iter()
         .find(|s| s.node.id == service)
         .map(|s| s.node.name.clone())
-        .unwrap();
+        .ok_or_else(|| anyhow!("Service not found"))?;
     let environment_name = project
         .environments
         .edges
         .iter()
         .find(|e| e.node.id == environment)
         .map(|e| e.node.name.clone())
-        .unwrap();
+        .ok_or_else(|| anyhow!("Environment not found"))?;
 
     // check if there is a volume already mounted on the service in that environment
     if !project
@@ -954,5 +957,101 @@ struct Volume(ProjectVolumeInstanceNode);
 impl Display for Volume {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0.volume.name)
+    }
+}
+
+/// Resolve a service argument (name or ID) to its service ID.
+fn resolve_service_id(project: &ProjectProject, service_arg: &str) -> Result<String> {
+    project
+        .services
+        .edges
+        .iter()
+        .find(|edge| edge.node.name.eq_ignore_ascii_case(service_arg) || edge.node.id == service_arg)
+        .map(|edge| edge.node.id.clone())
+        .ok_or_else(|| anyhow!("Service '{}' not found", service_arg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queries::project::*;
+
+    fn make_service_edge(id: &str, name: &str) -> ProjectProjectServicesEdges {
+        ProjectProjectServicesEdges {
+            node: ProjectProjectServicesEdgesNode {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+        }
+    }
+
+    fn make_project(services: Vec<ProjectProjectServicesEdges>) -> ProjectProject {
+        ProjectProject {
+            id: "proj_123".to_string(),
+            name: "test-project".to_string(),
+            workspace_id: Some("ws_123".to_string()),
+            deleted_at: None,
+            workspace: Some(ProjectProjectWorkspace {
+                name: "test-workspace".to_string(),
+            }),
+            buckets: ProjectProjectBuckets { edges: vec![] },
+            environments: ProjectProjectEnvironments { edges: vec![] },
+            services: ProjectProjectServices { edges: services },
+        }
+    }
+
+    #[test]
+    fn resolve_by_name() {
+        let project = make_project(vec![
+            make_service_edge("svc_abc123", "my-api"),
+        ]);
+        let result = resolve_service_id(&project, "my-api").unwrap();
+        assert_eq!(result, "svc_abc123");
+    }
+
+    #[test]
+    fn resolve_by_name_case_insensitive() {
+        let project = make_project(vec![
+            make_service_edge("svc_abc123", "My-Api"),
+        ]);
+        let result = resolve_service_id(&project, "my-api").unwrap();
+        assert_eq!(result, "svc_abc123");
+    }
+
+    #[test]
+    fn resolve_by_id() {
+        let project = make_project(vec![
+            make_service_edge("svc_abc123", "my-api"),
+        ]);
+        let result = resolve_service_id(&project, "svc_abc123").unwrap();
+        assert_eq!(result, "svc_abc123");
+    }
+
+    #[test]
+    fn resolve_not_found() {
+        let project = make_project(vec![
+            make_service_edge("svc_abc123", "my-api"),
+        ]);
+        let result = resolve_service_id(&project, "nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn resolve_empty_services() {
+        let project = make_project(vec![]);
+        let result = resolve_service_id(&project, "anything");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_picks_correct_service() {
+        let project = make_project(vec![
+            make_service_edge("svc_111", "frontend"),
+            make_service_edge("svc_222", "backend"),
+            make_service_edge("svc_333", "worker"),
+        ]);
+        assert_eq!(resolve_service_id(&project, "backend").unwrap(), "svc_222");
+        assert_eq!(resolve_service_id(&project, "svc_333").unwrap(), "svc_333");
     }
 }
