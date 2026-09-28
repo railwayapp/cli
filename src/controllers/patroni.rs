@@ -16,6 +16,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Deserialize;
 
 use super::exec::{exec_in_container, exec_probe_in_container};
@@ -156,6 +157,48 @@ fn switchover_command(body: &str) -> String {
         prelude = RESTAPI_AUTH_PRELUDE,
         max_time = SWITCHOVER_CURL_MAX_TIME_SECS,
     )
+}
+
+/// Probes every instance concurrently and returns the first `/cluster` view
+/// that parses, with the instance it came from, all within `budget` -- an
+/// unreachable member cannot hold up a healthy one.
+///
+/// `Err` carries one reason per instance -- those that failed with their own
+/// error, and those still pending when the budget ran out -- so the caller
+/// can name every member instead of reporting a bare "unreachable".
+pub async fn probe_first_available(
+    instance_ids: &[String],
+    budget: Duration,
+) -> Result<(String, Vec<PatroniMember>), Vec<(String, String)>> {
+    let mut pending: FuturesUnordered<_> = instance_ids
+        .iter()
+        .map(|id| async move { (id.clone(), probe_cluster(id).await) })
+        .collect();
+    let mut failures: Vec<(String, String)> = Vec::with_capacity(instance_ids.len());
+    let deadline = tokio::time::sleep(budget);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            next = pending.next() => match next {
+                Some((id, Ok(members))) => return Ok((id, members)),
+                Some((id, Err(err))) => failures.push((id, format!("{err:#}"))),
+                None => return Err(failures),
+            },
+            _ = &mut deadline => {
+                // Whatever is still in flight gets a timeout reason; dropping
+                // `pending` abandons those probes.
+                for id in instance_ids {
+                    if !failures.iter().any(|(failed, _)| failed == id) {
+                        failures.push((
+                            id.clone(),
+                            format!("Patroni probe timed out after {}s", budget.as_secs()),
+                        ));
+                    }
+                }
+                return Err(failures);
+            }
+        }
+    }
 }
 
 /// `POST localhost:8008/switchover` against `instance_id`'s container,
