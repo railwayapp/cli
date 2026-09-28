@@ -14,7 +14,7 @@
 //! schedules and restore ride the volume-instance mutations, which are
 //! engine-agnostic server-side.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -34,6 +34,7 @@ use crate::{
         database_plugins,
         db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
         exec::exec_probe_in_container,
+        patroni::{self, PatroniMember},
         project::{ServiceContext, resolve_service_context},
         template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
     },
@@ -314,7 +315,7 @@ async fn print_status(
         .map(|s| database_plugins::compute_pitr_state(s, &pitr))
         .unwrap_or_default();
 
-    let members: Vec<PitrMemberStatus> = if ha_state.is_cluster {
+    let mut members: Vec<PitrMemberStatus> = if ha_state.is_cluster {
         ha_state
             .members
             .iter()
@@ -331,6 +332,7 @@ async fn print_status(
                         name: m.service_name.clone(),
                     },
                     cluster_role: m.cluster_role.clone(),
+                    live_role: None,
                     enabled: state.enabled,
                     bucket_wired: state.bucket_wired,
                 }
@@ -358,8 +360,27 @@ async fn print_status(
     // nothing. An engine that declares no probe implementation renders no
     // coverage section at all: there is nothing to run, which is not the same
     // as "unavailable".
+    //
+    // `cluster_role` is structural: after a Patroni failover the root is a
+    // replica whose pg_stat_archiver is frozen, so an HA cluster reads the
+    // archiver from the member Patroni names as leader (see `probe_pitr_ha`).
     let live = if include_live && root_pitr.enabled && live_probe_applies(&pitr) {
-        Some(probe_pitr_live(ctx, &root.root_id).await)
+        if ha_state.is_cluster {
+            let nodes = ha_nodes(&members, config, &root.root_id);
+            Some(
+                probe_pitr_ha(
+                    &mut members,
+                    &nodes,
+                    || discover_ha_cluster(ctx, &nodes),
+                    |instance_id, parts| async move {
+                        probe_pitr_live_on_instance(&instance_id, parts).await
+                    },
+                )
+                .await,
+            )
+        } else {
+            Some(probe_pitr_live(ctx, &root.root_id).await)
+        }
     } else {
         None
     };
@@ -414,10 +435,15 @@ fn print_pitr_status(output: &PitrStatusOutput) {
         println!();
         println!("{}", "Members:".bold());
         for member in &output.members {
+            let role = member.cluster_role.as_deref().unwrap_or("-");
+            let role = match &member.live_role {
+                Some(live) => format!("{role}, {live}"),
+                None => role.to_string(),
+            };
             println!(
-                "  {:<24} {:<10} {}",
+                "  {:<24} {:<16} {}",
                 member.service.name,
-                member.cluster_role.as_deref().unwrap_or("-"),
+                role,
                 status_label(member.enabled)
             );
         }
@@ -1856,77 +1882,394 @@ async fn schedule_list(
     Ok(())
 }
 
-/// Total time budget for `status`'s live coverage/archiver probe. Kept short
-/// -- this is a best-effort addition to `status`, never worth making the
-/// whole command feel slow (or hang) when the service isn't reachable.
-/// 10s (up from 5s): the coverage half now actually reads backup.info from
-/// the S3 archive bucket (it previously failed before ever reaching S3), and
-/// a slow endpoint inside a 5s joint budget would time out the archiver half
-/// along with it.
+/// Time budget for each stage of `status`'s live probe. Kept short -- this
+/// is a best-effort addition to `status`, never worth making the whole
+/// command feel slow (or hang) when the service isn't reachable -- but wide
+/// enough for the coverage half's backup.info read from the S3 archive
+/// bucket, which shares the stage with the archiver query. A standalone
+/// service runs one stage; an HA cluster runs two (Patroni leader discovery,
+/// then the probe on the leader), so its worst case is about twice this.
 const LIVE_PROBE_TIMEOUT_SECS: u64 = 10;
 
-async fn probe_pitr_live(ctx: &ServiceContext, root_service_id: &str) -> PitrLiveProbe {
-    let attempt = async {
-        let instance_id = get_service_instance_id(
-            &ctx.client,
-            &ctx.configs,
-            &ctx.environment_id,
-            root_service_id,
-        )
-        .await
-        .context("No live deployment found for this service")?;
+/// Which halves of the live probe to run on a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeParts {
+    /// `pgbackrest info` plus the `pg_stat_archiver` query.
+    Full,
+    /// `pgbackrest info` only. The archive is cluster-wide, so coverage reads
+    /// the same from any member, while archiver counters only mean something
+    /// on the leader.
+    CoverageOnly,
+}
 
-        let (pgbackrest_result, archiver_result) = tokio::join!(
-            exec_probe_in_container(&instance_id, PGBACKREST_INFO_PROBE, PITR_PROBE_TIMEOUT),
-            exec_probe_in_container(&instance_id, ARCHIVER_PROBE_QUERY, PITR_PROBE_TIMEOUT),
-        );
-
-        let mut probe = PitrLiveProbe {
-            available: true,
-            ..PitrLiveProbe::default()
-        };
-
-        match pgbackrest_result {
-            Ok(output) => apply_pgbackrest_info(&mut probe, &output),
-            Err(err) => {
-                probe.backup_coverage_error =
-                    Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
-            }
-        }
-        match archiver_result {
-            Ok(output) => apply_archiver_output(&mut probe, &output),
-            Err(err) => {
-                probe.archiver_error =
-                    Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
-            }
-        }
-
-        Ok::<_, anyhow::Error>(probe)
-    };
-
+/// Standalone path: resolve the service's live instance and run the full
+/// probe there, inside one time budget.
+async fn probe_pitr_live(ctx: &ServiceContext, service_id: &str) -> PitrLiveProbe {
     // A missing local SSH key is by far the most common reason this probe
     // can't run at all -- check for it up front (no network call) so the
     // failure reason is specific instead of a generic SSH timeout/refusal.
     if let Err(reason) = preflight_db_stats_ssh().await {
-        return PitrLiveProbe {
-            available: false,
-            unavailable_reason: Some(reason),
-            ..PitrLiveProbe::default()
-        };
+        return unavailable(reason);
     }
+    let attempt = async {
+        let instance_id =
+            get_service_instance_id(&ctx.client, &ctx.configs, &ctx.environment_id, service_id)
+                .await
+                .context("No live deployment found for this service")?;
+        Ok::<_, anyhow::Error>(run_pitr_probes(&instance_id, ProbeParts::Full).await)
+    };
+    finish_probe(timeout(Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS), attempt).await)
+}
 
-    match timeout(Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS), attempt).await {
+/// HA path: the instance was resolved (and the SSH preflight ran) during
+/// leader discovery, so only the probe itself is budgeted here.
+async fn probe_pitr_live_on_instance(instance_id: &str, parts: ProbeParts) -> PitrLiveProbe {
+    finish_probe(
+        timeout(
+            Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS),
+            run_pitr_probes(instance_id, parts),
+        )
+        .await
+        .map(Ok),
+    )
+}
+
+/// The two independent sub-probes, joined: `pgbackrest info` (an S3 read of
+/// the archive) and the `pg_stat_archiver` query. Either half failing leaves
+/// the other's data intact.
+async fn run_pitr_probes(instance_id: &str, parts: ProbeParts) -> PitrLiveProbe {
+    let archiver = async {
+        match parts {
+            ProbeParts::Full => Some(
+                exec_probe_in_container(instance_id, ARCHIVER_PROBE_QUERY, PITR_PROBE_TIMEOUT)
+                    .await,
+            ),
+            ProbeParts::CoverageOnly => None,
+        }
+    };
+    let (pgbackrest_result, archiver_result) = tokio::join!(
+        exec_probe_in_container(instance_id, PGBACKREST_INFO_PROBE, PITR_PROBE_TIMEOUT),
+        archiver,
+    );
+
+    let mut probe = PitrLiveProbe {
+        available: true,
+        ..PitrLiveProbe::default()
+    };
+    match pgbackrest_result {
+        Ok(output) => apply_pgbackrest_info(&mut probe, &output),
+        Err(err) => {
+            probe.backup_coverage_error =
+                Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+        }
+    }
+    match archiver_result {
+        Some(Ok(output)) => apply_archiver_output(&mut probe, &output),
+        Some(Err(err)) => {
+            probe.archiver_error = Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+        }
+        None => {}
+    }
+    probe
+}
+
+fn finish_probe(
+    outcome: Result<Result<PitrLiveProbe>, tokio::time::error::Elapsed>,
+) -> PitrLiveProbe {
+    match outcome {
         Ok(Ok(probe)) => probe,
-        Ok(Err(err)) => PitrLiveProbe {
-            available: false,
-            unavailable_reason: Some(format!("{err:#}")),
-            ..PitrLiveProbe::default()
-        },
-        Err(_) => PitrLiveProbe {
-            available: false,
-            unavailable_reason: Some(format!("probe timed out after {LIVE_PROBE_TIMEOUT_SECS}s")),
-            ..PitrLiveProbe::default()
-        },
+        Ok(Err(err)) => unavailable(format!("{err:#}")),
+        Err(_) => unavailable(format!("probe timed out after {LIVE_PROBE_TIMEOUT_SECS}s")),
+    }
+}
+
+fn unavailable(reason: String) -> PitrLiveProbe {
+    PitrLiveProbe {
+        available: false,
+        unavailable_reason: Some(reason),
+        ..PitrLiveProbe::default()
+    }
+}
+
+/// One data node of an HA cluster: its Railway identity and the name its
+/// coordinator knows it by (`database_plugins::member_identity_name`). Built
+/// in the same order as the `PitrMemberStatus` list it describes.
+#[derive(Debug, Clone)]
+struct HaNode {
+    service_id: String,
+    service_name: String,
+    node_name: String,
+}
+
+/// Each listed member's coordinator identity, in the same order.
+fn ha_nodes(
+    members: &[PitrMemberStatus],
+    config: &EnvironmentConfig,
+    root_id: &str,
+) -> Vec<HaNode> {
+    members
+        .iter()
+        .map(|m| HaNode {
+            service_id: m.service.id.clone(),
+            service_name: m.service.name.clone(),
+            node_name: database_plugins::member_identity_name(
+                config,
+                root_id,
+                &m.service.id,
+                &m.service.name,
+            ),
+        })
+        .collect()
+}
+
+/// `live_role` of a member Patroni's cluster view does not list: its Patroni
+/// is down or it never joined, so it holds no role at all right now.
+const LIVE_ROLE_ABSENT: &str = "absent";
+
+/// Why Patroni's cluster view could not be read, plus -- when any member has
+/// a live deployment -- one instance to read the cluster-wide archive
+/// coverage from anyway.
+#[derive(Debug)]
+struct HaDiscoveryFailure {
+    reason: String,
+    coverage_from: Option<String>,
+}
+
+impl HaDiscoveryFailure {
+    fn without_coverage(reason: String) -> Self {
+        Self {
+            reason,
+            coverage_from: None,
+        }
+    }
+}
+
+/// Patroni's live view of an HA cluster, joined to Railway's member list.
+struct HaClusterView {
+    /// Live deployment instance per member service id; a member with no
+    /// live deployment is absent.
+    instance_ids: BTreeMap<String, String>,
+    /// The instance whose Patroni answered `/cluster`. Coverage can be read
+    /// from here even when no member holds leadership.
+    answered_by: String,
+    members: Vec<PatroniMember>,
+}
+
+/// Resolve every data node's live instance and read Patroni's `/cluster`
+/// view from the first member that answers. Every failure path names the
+/// member(s) involved: an unreachable member can mean anything from a wedged
+/// cluster to the caller's own SSH setup, and only the underlying error tells
+/// those apart.
+async fn discover_ha_cluster(
+    ctx: &ServiceContext,
+    nodes: &[HaNode],
+) -> Result<HaClusterView, HaDiscoveryFailure> {
+    preflight_db_stats_ssh()
+        .await
+        .map_err(HaDiscoveryFailure::without_coverage)?;
+    let service_ids: Vec<String> = nodes.iter().map(|n| n.service_id.clone()).collect();
+    let instance_ids = patroni::resolve_instance_ids(ctx, &service_ids)
+        .await
+        .map_err(|err| {
+            HaDiscoveryFailure::without_coverage(format!(
+                "could not resolve the members' live deployments: {err:#}"
+            ))
+        })?;
+    let live: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| instance_ids.get(&n.service_id).cloned())
+        .collect();
+    if live.is_empty() {
+        return Err(HaDiscoveryFailure::without_coverage(
+            "no HA member has a live deployment".to_string(),
+        ));
+    }
+    match patroni::probe_first_available(&live, Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS)).await
+    {
+        Ok((answered_by, members)) => Ok(HaClusterView {
+            instance_ids,
+            answered_by,
+            members,
+        }),
+        Err(failures) => Err(HaDiscoveryFailure {
+            reason: describe_discovery_failures(nodes, &instance_ids, &failures),
+            // A container can run Postgres and pgBackRest with its Patroni
+            // API down; the archive coverage does not need Patroni.
+            coverage_from: live.first().cloned(),
+        }),
+    }
+}
+
+/// One line naming every member and why Patroni could not be read from it.
+fn describe_discovery_failures(
+    nodes: &[HaNode],
+    instance_ids: &BTreeMap<String, String>,
+    failures: &[(String, String)],
+) -> String {
+    let parts: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            let reason = match instance_ids.get(&node.service_id) {
+                None => "no live deployment".to_string(),
+                Some(instance_id) => failures
+                    .iter()
+                    .find(|(id, _)| id == instance_id)
+                    .map(|(_, reason)| reason.clone())
+                    .unwrap_or_else(|| "not probed".to_string()),
+            };
+            format!("{}: {reason}", node.service_name)
+        })
+        .collect();
+    format!(
+        "Patroni could not be reached on any HA member ({})",
+        parts.join("; ")
+    )
+}
+
+/// Join Patroni's member list onto the Railway members (case-insensitive
+/// node-name match, as `ha status` does), record every member's live role,
+/// and pick the one member Patroni calls `leader`. `Err` when Patroni
+/// reports no leader or more than one: both leave the archiver counters
+/// without an owner, and picking a member anyway would report a frozen or
+/// divergent pg_stat_archiver as the cluster's.
+fn select_ha_leader(
+    members: &mut [PitrMemberStatus],
+    nodes: &[HaNode],
+    view: &[PatroniMember],
+) -> Result<usize, String> {
+    debug_assert_eq!(members.len(), nodes.len());
+    let mut leaders = Vec::new();
+    for (index, (member, node)) in members.iter_mut().zip(nodes).enumerate() {
+        let entry = view
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&node.node_name));
+        member.live_role = match entry {
+            Some(m) if m.role.is_empty() => None,
+            Some(m) => Some(m.role.clone()),
+            None => Some(LIVE_ROLE_ABSENT.to_string()),
+        };
+        if entry.is_some_and(|m| m.role == "leader") {
+            leaders.push(index);
+        }
+    }
+    match leaders.as_slice() {
+        [index] => Ok(*index),
+        [] => {
+            let unmatched: Vec<&str> = view
+                .iter()
+                .filter(|m| m.role == "leader")
+                .map(|m| m.name.as_str())
+                .collect();
+            if unmatched.is_empty() {
+                Err(
+                    "Patroni reports no leader, so no member is archiving WAL right now"
+                        .to_string(),
+                )
+            } else {
+                Err(format!(
+                    "Patroni's leader ({}) matches no member of this cluster",
+                    unmatched.join(", ")
+                ))
+            }
+        }
+        many => Err(format!(
+            "Patroni reports {} leaders ({}); archiver health has no single owner",
+            many.len(),
+            many.iter()
+                .map(|i| members[*i].service.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Probe an HA cluster: establish the leader through Patroni, then read
+/// coverage and archiver health from that member only. Without a single
+/// leader, or without any Patroni answer, the cluster-wide archive coverage
+/// is still read from a live member and only the archiver half is withheld;
+/// the structural root is never substituted for the leader.
+async fn probe_pitr_ha<D, DFut, P, PFut>(
+    members: &mut [PitrMemberStatus],
+    nodes: &[HaNode],
+    discover: D,
+    probe_instance: P,
+) -> PitrLiveProbe
+where
+    D: FnOnce() -> DFut,
+    DFut: std::future::Future<Output = Result<HaClusterView, HaDiscoveryFailure>>,
+    P: Fn(String, ProbeParts) -> PFut,
+    PFut: std::future::Future<Output = PitrLiveProbe>,
+{
+    let view = match discover().await {
+        Ok(view) => view,
+        Err(failure) => {
+            return match failure.coverage_from {
+                Some(instance_id) => coverage_only(
+                    probe_instance(instance_id, ProbeParts::CoverageOnly).await,
+                    failure.reason,
+                ),
+                None => unavailable(failure.reason),
+            };
+        }
+    };
+    match select_ha_leader(members, nodes, &view.members) {
+        Ok(index) => {
+            let leader_name = members[index].service.name.clone();
+            let Some(instance_id) = view.instance_ids.get(&members[index].service.id) else {
+                return unavailable(format!(
+                    "{leader_name} is the Patroni leader but has no live deployment"
+                ));
+            };
+            let mut probe = probe_instance(instance_id.clone(), ProbeParts::Full).await;
+            // Leadership can change between discovery and the probe. Coverage
+            // belongs to the shared archive, but archiver data is valid only
+            // while pg_is_in_recovery() still says primary.
+            if probe.available && probe.in_recovery != Some(false) {
+                let reason = match probe.in_recovery {
+                    Some(true) => format!("{leader_name} is no longer the primary"),
+                    _ => format!("could not confirm {leader_name} is still the primary"),
+                };
+                discard_archiver_data(&mut probe, reason);
+                if probe.in_recovery == Some(true) {
+                    members[index].live_role = Some("replica".to_string());
+                }
+            }
+            probe
+        }
+        Err(reason) => {
+            // No single owner for the archiver counters, but the archive is
+            // cluster-wide: read coverage from the member that answered
+            // Patroni and say why archiver health is missing.
+            coverage_only(
+                probe_instance(view.answered_by.clone(), ProbeParts::CoverageOnly).await,
+                reason,
+            )
+        }
+    }
+}
+
+/// A coverage-only probe, with `reason` saying why the archiver half is
+/// missing -- or, when even coverage could not be read, why nothing was.
+fn coverage_only(mut probe: PitrLiveProbe, reason: String) -> PitrLiveProbe {
+    if probe.available {
+        discard_archiver_data(&mut probe, reason);
+    } else {
+        probe.unavailable_reason = Some(match probe.unavailable_reason.take() {
+            Some(existing) => format!("{reason}; coverage probe failed: {existing}"),
+            None => reason,
+        });
+    }
+    probe
+}
+
+/// Drop archiver-derived fields that no longer describe the cluster's
+/// primary, keeping a probe-level error already recorded over `reason`.
+fn discard_archiver_data(probe: &mut PitrLiveProbe, reason: String) {
+    probe.archiver_healthy = None;
+    probe.archiver_last_archived_at = None;
+    probe.max_restore_time = None;
+    if probe.archiver_error.is_none() {
+        probe.archiver_error = Some(reason);
     }
 }
 
@@ -2023,7 +2366,8 @@ exec gosu postgres pgbackrest --stanza=main info --output=json
 const ARCHIVER_PROBE_QUERY: &str = concat!(
     "PGHOST=localhost PGPORT=5432 PGSSLMODE=disable psql -t -A -F',' -q -c \"",
     "SELECT archived_count, coalesce(last_archived_time::text, ''), failed_count, ",
-    "coalesce(last_failed_time::text, ''), coalesce(((pg_last_committed_xact()).timestamp)::text, '') ",
+    "coalesce(last_failed_time::text, ''), coalesce(((pg_last_committed_xact()).timestamp)::text, ''), ",
+    "pg_is_in_recovery() ",
     "FROM pg_stat_archiver\"",
 );
 
@@ -2047,6 +2391,12 @@ fn apply_archiver_output(probe: &mut PitrLiveProbe, output: &str) {
 
     probe.archiver_last_archived_at = last_archived_time.clone();
     probe.max_restore_time = last_committed_at;
+    // psql prints booleans as `t`/`f`; anything else leaves the role unknown.
+    probe.in_recovery = match fields.get(5).map(|f| f.trim()) {
+        Some("t") => Some(true),
+        Some("f") => Some(false),
+        _ => None,
+    };
 
     // "Field empty" (no failure/archive ever recorded) and "field present but
     // unparseable" are different things: the first is a definitive state, the
@@ -2122,6 +2472,11 @@ struct PitrProgressOutput {
 struct PitrMemberStatus {
     service: ResourceRef,
     cluster_role: Option<String>,
+    /// Live coordinator role (`leader`, `replica`, `sync_standby`, ...) from
+    /// Patroni's cluster view, when the probe read it; `absent` when that view
+    /// does not list the member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_role: Option<String>,
     enabled: bool,
     bucket_wired: bool,
 }
@@ -2144,9 +2499,11 @@ struct PitrStatusOutput {
 }
 
 /// Best-effort live coverage/archiver probe (`pgbackrest info` + `pg_stat_archiver`
-/// over SSH into the root service's running container). `available == false`
-/// means the probe itself couldn't run at all (no live deployment, no SSH key,
-/// unreachable, timed out); `backup_coverage_error`/`archiver_error` mean the
+/// over SSH into the Patroni leader of an HA cluster, or into a standalone
+/// service). `available == false` means the probe couldn't run at all (no
+/// live deployment, no SSH key, unreachable, timed out) or, for a cluster,
+/// that neither Patroni nor the archive could be read from any member;
+/// `backup_coverage_error`/`archiver_error` mean the
 /// probe connected but one half of the two independent sub-probes failed
 /// (e.g. `pgbackrest` not installed on a non-official image, or the Postgres
 /// user lacks `pg_monitor`) while the other still reports.
@@ -2181,6 +2538,10 @@ struct PitrLiveProbe {
     /// a best-effort CLI probe, not a replacement for the admin fleet monitor.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_restore_time: Option<String>,
+    /// `pg_is_in_recovery()` on the probed member -- `Some(false)` is the
+    /// primary, whose pg_stat_archiver is the only one that advances.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_recovery: Option<bool>,
 }
 
 #[cfg(test)]
@@ -2536,6 +2897,488 @@ mod tests {
             "5,Mon Jul 28 10:00:00 2026,1,2026-07-28 09:00:00+00,",
         );
         assert_eq!(probe.archiver_healthy, None);
+    }
+
+    #[test]
+    fn apply_archiver_output_parses_recovery_flag() {
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,,f");
+        assert_eq!(probe.in_recovery, Some(false));
+
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,,t");
+        assert_eq!(probe.in_recovery, Some(true));
+
+        // Older five-column output still parses; the role is just unknown.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,");
+        assert!(probe.archiver_error.is_none());
+        assert_eq!(probe.in_recovery, None);
+    }
+
+    fn ha_probe_members() -> (Vec<PitrMemberStatus>, Vec<HaNode>) {
+        let members = [
+            ("root", "Postgres", "root"),
+            ("member-2", "Postgres-2", "replica"),
+        ]
+        .into_iter()
+        .map(|(id, name, role)| PitrMemberStatus {
+            service: ResourceRef {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            cluster_role: Some(role.to_string()),
+            live_role: None,
+            enabled: true,
+            bucket_wired: true,
+        })
+        .collect();
+        // The root's Patroni name is template-authored ("postgres-1"), never
+        // its own service name -- the case `member_identity_name` exists for.
+        let nodes = vec![
+            HaNode {
+                service_id: "root".to_string(),
+                service_name: "Postgres".to_string(),
+                node_name: "postgres-1".to_string(),
+            },
+            HaNode {
+                service_id: "member-2".to_string(),
+                service_name: "Postgres-2".to_string(),
+                node_name: "postgres-2".to_string(),
+            },
+        ];
+        (members, nodes)
+    }
+
+    fn patroni_member(name: &str, role: &str) -> PatroniMember {
+        PatroniMember {
+            name: name.to_string(),
+            role: role.to_string(),
+            state: "running".to_string(),
+            ..PatroniMember::default()
+        }
+    }
+
+    fn cluster_view(
+        instances: &[(&str, &str)],
+        answered_by: &str,
+        members: Vec<PatroniMember>,
+    ) -> HaClusterView {
+        HaClusterView {
+            instance_ids: instances
+                .iter()
+                .map(|(service, instance)| (service.to_string(), instance.to_string()))
+                .collect(),
+            answered_by: answered_by.to_string(),
+            members,
+        }
+    }
+
+    fn two_member_view(leader: &str) -> HaClusterView {
+        cluster_view(
+            &[("root", "inst-root"), ("member-2", "inst-2")],
+            "inst-root",
+            vec![
+                patroni_member(
+                    "postgres-1",
+                    if leader == "root" {
+                        "leader"
+                    } else {
+                        "replica"
+                    },
+                ),
+                patroni_member(
+                    "postgres-2",
+                    if leader == "member-2" {
+                        "leader"
+                    } else {
+                        "replica"
+                    },
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn select_ha_leader_joins_patroni_roles_by_node_name() {
+        // Case-insensitive on Patroni's side, like `ha status`.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("POSTGRES-1", "replica"),
+            patroni_member("postgres-2", "leader"),
+        ];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(1));
+        assert_eq!(members[0].live_role.as_deref(), Some("replica"));
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+
+        // The root can be the live leader too; the structural role never decides,
+        // and Patroni's own vocabulary is kept.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "leader"),
+            patroni_member("postgres-2", "sync_standby"),
+        ];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(0));
+        assert_eq!(members[1].live_role.as_deref(), Some("sync_standby"));
+    }
+
+    #[test]
+    fn select_ha_leader_refuses_zero_or_many_leaders() {
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "replica"),
+            patroni_member("postgres-2", "replica"),
+        ];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(err.contains("no leader"), "{err}");
+        // Roles are still recorded so the Members listing stays truthful.
+        assert_eq!(members[0].live_role.as_deref(), Some("replica"));
+
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "leader"),
+            patroni_member("postgres-2", "leader"),
+        ];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(
+            err.contains("2 leaders") && err.contains("Postgres, Postgres-2"),
+            "{err}"
+        );
+
+        // A leader Patroni knows but Railway doesn't is never adopted.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [patroni_member("postgres-9", "leader")];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(err.contains("postgres-9"), "{err}");
+        assert!(
+            members
+                .iter()
+                .all(|m| m.live_role.as_deref() == Some(LIVE_ROLE_ABSENT))
+        );
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reads_only_the_patroni_leader() {
+        for leader in ["root", "member-2"] {
+            let (mut members, nodes) = ha_probe_members();
+            let probes = std::cell::RefCell::new(Vec::new());
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || std::future::ready(Ok(two_member_view(leader))),
+                |instance_id, parts| {
+                    probes.borrow_mut().push((instance_id, parts));
+                    std::future::ready(PitrLiveProbe {
+                        available: true,
+                        in_recovery: Some(false),
+                        archiver_healthy: Some(true),
+                        backup_set_count: Some(3),
+                        ..PitrLiveProbe::default()
+                    })
+                },
+            )
+            .await;
+            let expected = if leader == "root" {
+                "inst-root"
+            } else {
+                "inst-2"
+            };
+            assert_eq!(
+                *probes.borrow(),
+                vec![(expected.to_string(), ProbeParts::Full)]
+            );
+            assert_eq!(live.archiver_healthy, Some(true));
+            assert_eq!(live.backup_set_count, Some(3));
+            assert!(live.archiver_error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reports_discovery_failure_without_probing() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Err(HaDiscoveryFailure::without_coverage(
+                    "Patroni could not be reached on any HA member (Postgres: no SSH keys found)"
+                        .to_string(),
+                )))
+            },
+            |_, _| -> std::future::Ready<PitrLiveProbe> {
+                panic!("nothing to probe without a cluster view")
+            },
+        )
+        .await;
+        assert!(!live.available);
+        assert!(
+            live.unavailable_reason
+                .unwrap()
+                .contains("no SSH keys found")
+        );
+        assert!(members.iter().all(|m| m.live_role.is_none()));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_keeps_coverage_when_no_single_leader() {
+        let (mut members, nodes) = ha_probe_members();
+        let probes = std::cell::RefCell::new(Vec::new());
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Ok(cluster_view(
+                    &[("root", "inst-root"), ("member-2", "inst-2")],
+                    "inst-2",
+                    vec![
+                        patroni_member("postgres-1", "replica"),
+                        patroni_member("postgres-2", "replica"),
+                    ],
+                )))
+            },
+            |instance_id, parts| {
+                probes.borrow_mut().push((instance_id, parts));
+                std::future::ready(PitrLiveProbe {
+                    available: true,
+                    backup_set_count: Some(3),
+                    ..PitrLiveProbe::default()
+                })
+            },
+        )
+        .await;
+        // Coverage is read once, from the member that answered Patroni,
+        // without the archiver half.
+        assert_eq!(
+            *probes.borrow(),
+            vec![("inst-2".to_string(), ProbeParts::CoverageOnly)]
+        );
+        assert!(live.available);
+        assert_eq!(live.backup_set_count, Some(3));
+        assert!(
+            live.archiver_error
+                .as_deref()
+                .unwrap()
+                .contains("no leader")
+        );
+        let json = serde_json::to_value(&live).unwrap();
+        for field in [
+            "archiverHealthy",
+            "archiverLastArchivedAt",
+            "maxRestoreTime",
+        ] {
+            assert!(json.get(field).is_none(), "{field} must not reach JSON");
+        }
+    }
+
+    #[tokio::test]
+    async fn ha_probe_does_not_fall_back_when_leader_probe_fails() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || std::future::ready(Ok(two_member_view("member-2"))),
+            |instance_id, _| {
+                assert_eq!(instance_id, "inst-2", "must not retry on the root");
+                std::future::ready(unavailable("probe timed out".to_string()))
+            },
+        )
+        .await;
+        assert!(!live.available);
+        assert_eq!(live.unavailable_reason.as_deref(), Some("probe timed out"));
+        // Patroni's view still stands in the Members listing.
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_leader_without_live_deployment_is_unavailable() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Ok(cluster_view(
+                    &[("root", "inst-root")],
+                    "inst-root",
+                    vec![
+                        patroni_member("postgres-1", "replica"),
+                        patroni_member("postgres-2", "leader"),
+                    ],
+                )))
+            },
+            |_, _| -> std::future::Ready<PitrLiveProbe> { panic!("no instance to probe") },
+        )
+        .await;
+        assert!(!live.available);
+        assert!(live.unavailable_reason.unwrap().contains("Postgres-2"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_discards_archiver_data_if_leader_is_no_longer_primary() {
+        for role in [Some(true), None] {
+            let (mut members, nodes) = ha_probe_members();
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || std::future::ready(Ok(two_member_view("member-2"))),
+                |_, _| {
+                    std::future::ready(PitrLiveProbe {
+                        available: true,
+                        in_recovery: role,
+                        backup_set_count: Some(3),
+                        archiver_healthy: Some(true),
+                        archiver_last_archived_at: Some("stale archive time".to_string()),
+                        max_restore_time: Some("stale restore time".to_string()),
+                        ..PitrLiveProbe::default()
+                    })
+                },
+            )
+            .await;
+            assert!(live.available);
+            assert_eq!(live.backup_set_count, Some(3));
+            assert!(live.archiver_error.is_some());
+            let json = serde_json::to_value(&live).unwrap();
+            for field in [
+                "archiverHealthy",
+                "archiverLastArchivedAt",
+                "maxRestoreTime",
+            ] {
+                assert!(
+                    json.get(field).is_none(),
+                    "stale {field} must not reach JSON"
+                );
+            }
+            let expected_role = if role == Some(true) {
+                "replica"
+            } else {
+                "leader"
+            };
+            assert_eq!(members[1].live_role.as_deref(), Some(expected_role));
+        }
+    }
+
+    #[test]
+    fn select_ha_leader_marks_members_patroni_does_not_list() {
+        let (mut members, nodes) = ha_probe_members();
+        let view = [patroni_member("postgres-2", "leader")];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(1));
+        assert_eq!(members[0].live_role.as_deref(), Some(LIVE_ROLE_ABSENT));
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reads_coverage_when_patroni_answers_nowhere() {
+        for coverage_ok in [true, false] {
+            let (mut members, nodes) = ha_probe_members();
+            let probes = std::cell::RefCell::new(Vec::new());
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || {
+                    std::future::ready(Err(HaDiscoveryFailure {
+                        reason: "Patroni could not be reached on any HA member".to_string(),
+                        coverage_from: Some("inst-root".to_string()),
+                    }))
+                },
+                |instance_id, parts| {
+                    probes.borrow_mut().push((instance_id, parts));
+                    std::future::ready(if coverage_ok {
+                        PitrLiveProbe {
+                            available: true,
+                            backup_set_count: Some(3),
+                            ..PitrLiveProbe::default()
+                        }
+                    } else {
+                        unavailable("probe timed out after 10s".to_string())
+                    })
+                },
+            )
+            .await;
+            assert_eq!(
+                *probes.borrow(),
+                vec![("inst-root".to_string(), ProbeParts::CoverageOnly)]
+            );
+            if coverage_ok {
+                assert!(live.available);
+                assert_eq!(live.backup_set_count, Some(3));
+                assert!(
+                    live.archiver_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("could not be reached")
+                );
+            } else {
+                assert!(!live.available);
+                let reason = live.unavailable_reason.unwrap();
+                assert!(
+                    reason.contains("could not be reached") && reason.contains("timed out"),
+                    "{reason}"
+                );
+            }
+            assert!(members.iter().all(|m| m.live_role.is_none()));
+        }
+    }
+
+    #[test]
+    fn ha_nodes_use_the_declared_patroni_identity() {
+        use crate::controllers::config::{ClusterWiring, ServiceInstance, Variable};
+
+        let var = |value: &str| {
+            Some(Variable {
+                value: Some(value.to_string()),
+                ..Variable::default()
+            })
+        };
+        let mut root = ServiceInstance {
+            cluster_role: Some("root".to_string()),
+            cluster_wiring: Some(ClusterWiring {
+                replica_node_name_variable: Some("PATRONI_NAME".to_string()),
+                ..ClusterWiring::default()
+            }),
+            ..ServiceInstance::default()
+        };
+        root.variables
+            .insert("PATRONI_NAME".to_string(), var("postgres-1"));
+        let mut replica = ServiceInstance {
+            parent_service_id: Some("root".to_string()),
+            cluster_role: Some("replica".to_string()),
+            ..ServiceInstance::default()
+        };
+        replica
+            .variables
+            .insert("PATRONI_NAME".to_string(), var("postgres-2"));
+        let mut config = EnvironmentConfig::default();
+        config.services.insert("root".to_string(), root);
+        config.services.insert("member-2".to_string(), replica);
+
+        let (members, _) = ha_probe_members();
+        let nodes = ha_nodes(&members, &config, "root");
+        // The root joins Patroni by its template-authored name, never by its
+        // display name ("Postgres").
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|n| n.node_name.as_str())
+                .collect::<Vec<_>>(),
+            ["postgres-1", "postgres-2"]
+        );
+    }
+
+    #[test]
+    fn describe_discovery_failures_names_every_member() {
+        let (_, nodes) = ha_probe_members();
+        let instances: BTreeMap<String, String> = [("root".to_string(), "inst-root".to_string())]
+            .into_iter()
+            .collect();
+        let failures = [(
+            "inst-root".to_string(),
+            "Patroni probe timed out after 10s".to_string(),
+        )];
+        let text = describe_discovery_failures(&nodes, &instances, &failures);
+        assert!(
+            text.contains("Postgres: Patroni probe timed out after 10s"),
+            "{text}"
+        );
+        assert!(text.contains("Postgres-2: no live deployment"), "{text}");
     }
 
     #[test]
