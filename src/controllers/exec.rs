@@ -69,7 +69,27 @@ pub(crate) async fn exec_in_container(instance_id: &str, command: &str) -> Resul
         bail!("SSH command failed ({status}): {detail}");
     }
 
-    Ok(String::from_utf8(output.stdout)?)
+    let stdout = String::from_utf8(output.stdout)?;
+    if is_relay_account_manifest(&stdout) {
+        // Exit 0, but nothing ran in any container: parsing the manifest as
+        // probe output would turn it into a false reading (an empty Patroni
+        // member list reads as "no leader").
+        bail!(
+            "the SSH relay did not route to {instance_id}: it answered with its account manifest, which it serves when the target is not an instance this SSH key's account can reach"
+        );
+    }
+    Ok(stdout)
+}
+
+/// `ssh <target>@ssh.railway.com` answers a target it cannot route to an
+/// instance with a JSON manifest of the caller's account and the SSH
+/// actions it offers (`{"status":"ready","account":{...},"actions":[...]}`),
+/// and exits 0. No probe command prints that shape.
+fn is_relay_account_manifest(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok_and(|value| {
+        value.get("status").and_then(|s| s.as_str()) == Some("ready")
+            && value.get("account").is_some_and(|a| a.is_object())
+    })
 }
 
 /// Transport-level failure classifier for the retrying probe wrapper: true
@@ -157,7 +177,7 @@ pub(crate) async fn exec_probe_in_container(
 
 #[cfg(test)]
 mod tests {
-    use super::is_transient_exec_error;
+    use super::{is_relay_account_manifest, is_transient_exec_error};
 
     #[test]
     fn transient_and_deterministic_exec_errors_are_told_apart() {
@@ -181,6 +201,30 @@ mod tests {
         ));
         assert!(!is_transient_exec_error(
             "SSH command failed (exit code 255): Host key verification failed"
+        ));
+    }
+
+    #[test]
+    fn relay_account_manifest_is_not_probe_output() {
+        // What the relay prints for a target it cannot route (trimmed).
+        assert!(is_relay_account_manifest(
+            r#"{"status":"ready","account":{"user":{"name":"A"},"workspaces":[],"projects":[],"truncated":false},"actions":[],"dashboard":"https://railway.com","description":"This SSH key is registered to your Railway account"}
+"#
+        ));
+        // Real probe output never matches.
+        assert!(!is_relay_account_manifest(
+            "5,2026-07-28 10:00:00+00,0,,,f\n"
+        ));
+        assert!(!is_relay_account_manifest(
+            r#"{"members":[{"name":"postgres-1","role":"leader","state":"running"}],"scope":"pg"}"#
+        ));
+        assert!(!is_relay_account_manifest(
+            r#"[{"name":"main","backup":[],"archive":[]}]"#
+        ));
+        assert!(!is_relay_account_manifest(""));
+        // A different status is some other document, not the manifest.
+        assert!(!is_relay_account_manifest(
+            r#"{"status":"error","account":{}}"#
         ));
     }
 }
