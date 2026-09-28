@@ -59,6 +59,8 @@ query EnvironmentInstances(
           cronSchedule
           nextCronRunAt
           startCommand
+          tracingEnabled
+          autoInstrumentationEnabled
         }
       }
       pageInfo {

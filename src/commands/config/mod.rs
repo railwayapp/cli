@@ -1031,6 +1031,7 @@ fn render_service_body(
         &mut lines,
     );
     render_networking(resource.networking.as_ref(), lang, &mut lines);
+    render_tracing(resource.tracing.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -1405,6 +1406,27 @@ fn render_deploy(
             &code_value(&serde_json::Value::Object(remaining), lang),
         ));
     }
+}
+
+/// Only the switches that are on: Railway serialises an untraced service
+/// without a `tracing` block, and a plan treats a false switch as absent.
+fn render_tracing(
+    tracing: Option<&serde_json::Value>,
+    lang: AuthoringLang,
+    lines: &mut Vec<String>,
+) {
+    let Some(tracing) = tracing.and_then(|value| value.as_object()) else {
+        return;
+    };
+    let on: serde_json::Map<String, serde_json::Value> = tracing
+        .iter()
+        .filter(|(_, value)| value.as_bool() == Some(true))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if on.is_empty() {
+        return;
+    }
+    lines.push(lang.config_field("tracing", &code_value(&serde_json::Value::Object(on), lang)));
 }
 
 fn is_image_source(source: Option<&serde_json::Value>) -> bool {
@@ -2095,6 +2117,7 @@ mod tests {
             volume_attachments: None,
             config: None,
             group_id: None,
+            tracing: None,
         }
     }
 
@@ -2116,6 +2139,7 @@ mod tests {
             volume_attachments: None,
             config: None,
             group_id: None,
+            tracing: None,
         }
     }
 
@@ -2232,6 +2256,32 @@ mod tests {
         assert!(rendered.contains("source: image(\"nginx:latest\")"));
         assert!(rendered.contains("cpu: 2"));
         assert!(rendered.contains("memoryBytes: 2000000000"));
+    }
+
+    #[test]
+    fn pull_renderer_authors_tracing_switches_that_are_on() {
+        let mut resource = service_resource(json!({ "image": "nginx:latest" }), json!({}));
+        resource.tracing = Some(json!({ "enabled": true, "autoInstrumentation": true }));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert!(rendered.contains("tracing: {"), "{rendered}");
+        assert!(rendered.contains("enabled: true"), "{rendered}");
+        assert!(rendered.contains("autoInstrumentation: true"), "{rendered}");
+
+        resource.tracing = Some(json!({ "enabled": false }));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert!(!rendered.contains("tracing"), "{rendered}");
     }
 
     #[test]

@@ -9,7 +9,10 @@ use crate::{
     client::post_graphql,
     controllers::{
         environment::get_matched_environment,
-        project::{ensure_project_and_environment_exist, get_project, resolve_project_id_or_name},
+        project::{
+            ensure_project_and_environment_exist, get_environment_instances, get_project,
+            resolve_project_id_or_name,
+        },
     },
     errors::RailwayError,
     util::{progress::create_spinner_if, time::parse_time},
@@ -21,10 +24,10 @@ const DEFAULT_TRACES: i64 = 100;
 const MAX_TRACES: i64 = 500;
 const MAX_SPANS: i64 = 2000;
 
-/// Manage tracing for a service or project and inspect its traces
+/// Manage tracing for a service in an environment and inspect its traces
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway trace status\n  railway trace status --all\n  railway trace enable --service api\n  railway trace enable --auto-instrument\n  railway trace enable --project-default --sample-rate 0.25\n  railway trace disable\n  railway trace inherit\n  railway trace list --since 30m --errors\n  railway trace list --all --filter '@http.route:/api/users @duration:>500' --json\n  railway trace get 4bf92f3577b34da6a3ce929d0e0e4736\n\nAutomation notes:\n  `list --json` prints one trace summary per line and `get --json` one span per line, like `railway logs --json`.\n  Tracing is a service-wide setting, not per environment; --environment only scopes status, list and get.\n  Changing tracing needs a user or workspace token. A project token (RAILWAY_TOKEN) can only read."
+    after_help = "Examples:\n\n  railway trace status\n  railway trace status --all\n  railway trace enable --service api\n  railway trace enable --auto-instrument\n  railway trace enable --all --environment staging\n  railway trace disable\n  railway trace list --since 30m --errors\n  railway trace list --all --filter '@http.route:/api/users @duration:>500' --json\n  railway trace get 4bf92f3577b34da6a3ce929d0e0e4736\n\nAutomation notes:\n  `list --json` prints one trace summary per line and `get --json` one span per line, like `railway logs --json`.\n  Tracing is set per service and environment. --environment picks the environment; it defaults to the linked one.\n  Changing tracing needs a user or workspace token. A project token (RAILWAY_TOKEN) can only read."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -49,18 +52,15 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Turn tracing on for a service, or for the project default with --project-default
-    Enable(EnableArgs),
+    /// Turn tracing on for a service in the environment, or for every service with --all
+    Enable(SwitchArgs),
 
-    /// Turn tracing off for a service, or for the project default with --project-default
-    Disable(DisableArgs),
-
-    /// Clear a service's tracing override so it follows the project default again
-    Inherit,
+    /// Turn tracing off for a service in the environment, or for every service with --all
+    Disable(SwitchArgs),
 
     /// Show tracing settings and when spans were last exported
     Status {
-        /// Show every service in the project
+        /// Show every service in the environment
         #[clap(short = 'a', long)]
         all: bool,
     },
@@ -83,29 +83,14 @@ enum Commands {
 }
 
 #[derive(Parser)]
-struct EnableArgs {
-    /// Also turn on auto-instrumentation (eBPF/OBI) for the service
-    #[clap(long, conflicts_with = "project_default")]
+struct SwitchArgs {
+    /// Also switch auto-instrumentation (eBPF/OBI) the same way
+    #[clap(long)]
     auto_instrument: bool,
 
-    /// Change the project default instead of one service
-    #[clap(long)]
-    project_default: bool,
-
-    /// Fraction of client-facing requests the edge traces, 0 to 1 (with --project-default)
-    #[clap(long, requires = "project_default", value_parser = parse_sample_rate)]
-    sample_rate: Option<f64>,
-}
-
-#[derive(Parser)]
-struct DisableArgs {
-    /// Also turn off auto-instrumentation (eBPF/OBI) for the service
-    #[clap(long, conflicts_with = "project_default")]
-    auto_instrument: bool,
-
-    /// Change the project default instead of one service
-    #[clap(long)]
-    project_default: bool,
+    /// Change every service in the environment instead of one
+    #[clap(short = 'a', long, conflicts_with = "service")]
+    all: bool,
 }
 
 #[derive(Parser)]
@@ -145,42 +130,11 @@ pub async fn command(args: Args) -> Result<()> {
     } = args;
 
     match command {
-        Commands::Enable(enable) => {
-            if enable.project_default {
-                set_project_tracing(project, environment, true, enable.sample_rate, json).await
-            } else {
-                set_service_tracing(
-                    project,
-                    service,
-                    environment,
-                    ServiceChange::Set {
-                        enabled: true,
-                        auto_instrument: enable.auto_instrument,
-                    },
-                    json,
-                )
-                .await
-            }
+        Commands::Enable(switch) => {
+            set_service_tracing(project, service, environment, switch, true, json).await
         }
-        Commands::Disable(disable) => {
-            if disable.project_default {
-                set_project_tracing(project, environment, false, None, json).await
-            } else {
-                set_service_tracing(
-                    project,
-                    service,
-                    environment,
-                    ServiceChange::Set {
-                        enabled: false,
-                        auto_instrument: disable.auto_instrument,
-                    },
-                    json,
-                )
-                .await
-            }
-        }
-        Commands::Inherit => {
-            set_service_tracing(project, service, environment, ServiceChange::Inherit, json).await
+        Commands::Disable(switch) => {
+            set_service_tracing(project, service, environment, switch, false, json).await
         }
         Commands::Status { all } => status(project, service, environment, all, json).await,
         Commands::List(list_args) => list(project, service, environment, list_args, json).await,
@@ -197,31 +151,22 @@ struct Scope {
     client: reqwest::Client,
     configs: Configs,
     project: queries::RailwayProject,
-    /// `(id, name)` of the environment, when one was asked for.
-    environment: Option<(String, String)>,
+    /// `(id, name)` of the environment every subcommand works in.
+    environment: (String, String),
     linked_service: Option<String>,
-}
-
-impl Scope {
-    fn environment(&self) -> Result<&(String, String)> {
-        self.environment
-            .as_ref()
-            .context("No environment linked. Use --environment when using --project")
-    }
 }
 
 /// Project and environment from the flags or the linked project, like
 /// `resolve_service_context`, but the service is picked separately so
-/// project-wide commands work without one.
+/// environment-wide commands work without one.
 async fn resolve_scope(
     project_arg: Option<String>,
     environment_arg: Option<String>,
-    need_environment: bool,
 ) -> Result<Scope> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
-    if need_environment && project_arg.is_some() && environment_arg.is_none() {
+    if project_arg.is_some() && environment_arg.is_none() {
         bail!("--environment is required when using --project");
     }
 
@@ -254,22 +199,16 @@ async fn resolve_scope(
                 .or_else(|| lp.environment.clone())
         })
     });
-    let environment = match environment_id_or_name {
-        Some(env) => {
-            let environment = get_matched_environment(&project, env)?;
-            Some((environment.id, environment.name))
-        }
-        None if need_environment => {
-            bail!("No environment linked. Use --environment when using --project")
-        }
-        None => None,
+    let Some(environment_id_or_name) = environment_id_or_name else {
+        bail!("No environment linked. Use --environment when using --project");
     };
+    let environment = get_matched_environment(&project, environment_id_or_name)?;
 
     Ok(Scope {
         client,
         configs,
         project,
-        environment,
+        environment: (environment.id, environment.name),
         linked_service: linked_project.and_then(|lp| lp.service),
     })
 }
@@ -308,14 +247,9 @@ fn pick_service(scope: &Scope, service_arg: Option<&str>) -> Result<(String, Str
 // --- Settings ---
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectTracing {
+pub struct EnvironmentRef {
     pub id: String,
     pub name: String,
-    /// Whether services without their own override are traced.
-    pub tracing_enabled: bool,
-    /// Fraction of requests the edge traces, 0 to 1. None is Railway's default.
-    pub sample_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -323,9 +257,7 @@ pub struct ProjectTracing {
 pub struct ServiceTracing {
     pub id: String,
     pub name: String,
-    /// The service's own setting: true or false pins it, None follows the project.
-    pub tracing_override: Option<bool>,
-    /// Whether the service is traced once the project default is applied.
+    /// Whether requests to the service are traced in this environment.
     pub tracing_enabled: bool,
     pub auto_instrumentation_enabled: bool,
     /// Auto-instrumentation only does anything while tracing is enabled.
@@ -341,64 +273,51 @@ pub struct ServiceTracingStatus {
     pub last_service_span_at: Option<String>,
 }
 
-/// A service's override wins; otherwise the project decides. Returns
-/// `(tracing enabled, auto-instrumentation active)`.
-pub fn effective_tracing(
-    project_default: bool,
-    service_override: Option<bool>,
-    auto_instrumentation_enabled: bool,
-) -> (bool, bool) {
-    let enabled = service_override.unwrap_or(project_default);
-    (enabled, enabled && auto_instrumentation_enabled)
+/// OBI is one way a traced service gets its spans, so it is off with tracing.
+pub fn auto_instrumentation_active(tracing_enabled: bool, auto_instrumentation: bool) -> bool {
+    tracing_enabled && auto_instrumentation
 }
 
 struct TracingSettings {
-    project: ProjectTracing,
+    environment: EnvironmentRef,
     services: Vec<ServiceTracing>,
 }
 
+/// The tracing switches of every service instance in the environment.
 async fn fetch_tracing_settings(scope: &Scope) -> Result<TracingSettings> {
-    let project = post_graphql::<queries::TracingSettings, _>(
+    let (environment_id, environment_name) = &scope.environment;
+    let instances = get_environment_instances(
         &scope.client,
-        scope.configs.get_backboard(),
-        queries::tracing_settings::Variables {
-            project_id: scope.project.id.clone(),
-        },
+        &scope.configs,
+        &scope.project.id,
+        environment_id,
     )
-    .await?
-    .project;
+    .await?;
 
-    let project_tracing = ProjectTracing {
-        id: project.id,
-        name: project.name,
-        tracing_enabled: project.tracing_enabled,
-        sample_rate: project.tracing_sample_rate,
-    };
-    let mut services: Vec<ServiceTracing> = project
-        .services
-        .edges
+    let mut services: Vec<ServiceTracing> = instances
+        .service_instances
         .into_iter()
         .map(|edge| {
             let node = edge.node;
-            let (enabled, auto_active) = effective_tracing(
-                project_tracing.tracing_enabled,
-                node.tracing_enabled,
-                node.auto_instrumentation_enabled,
-            );
             ServiceTracing {
-                id: node.id,
-                name: node.name,
-                tracing_override: node.tracing_enabled,
-                tracing_enabled: enabled,
+                id: node.service_id,
+                name: node.service_name,
+                tracing_enabled: node.tracing_enabled,
                 auto_instrumentation_enabled: node.auto_instrumentation_enabled,
-                auto_instrumentation_active: auto_active,
+                auto_instrumentation_active: auto_instrumentation_active(
+                    node.tracing_enabled,
+                    node.auto_instrumentation_enabled,
+                ),
             }
         })
         .collect();
-    services.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    services.sort_by_key(|service| service.name.to_lowercase());
 
     Ok(TracingSettings {
-        project: project_tracing,
+        environment: EnvironmentRef {
+            id: environment_id.clone(),
+            name: environment_name.clone(),
+        },
         services,
     })
 }
@@ -409,22 +328,19 @@ fn find_service(settings: &TracingSettings, service_id: &str) -> Result<ServiceT
         .iter()
         .find(|s| s.id == service_id)
         .cloned()
-        .with_context(|| format!("Service {service_id} not found in project"))
-}
-
-enum ServiceChange {
-    Set {
-        enabled: bool,
-        auto_instrument: bool,
-    },
-    Inherit,
+        .with_context(|| {
+            format!(
+                "Service {service_id} is not in environment {}",
+                settings.environment.name
+            )
+        })
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ServiceChangeOutput {
-    project: ProjectTracing,
-    service: ServiceTracing,
+    environment: EnvironmentRef,
+    services: Vec<ServiceTracing>,
     updated_fields: Vec<&'static str>,
 }
 
@@ -432,58 +348,68 @@ async fn set_service_tracing(
     project: Option<String>,
     service: Option<String>,
     environment: Option<String>,
-    change: ServiceChange,
+    switch: SwitchArgs,
+    enabled: bool,
     json: bool,
 ) -> Result<()> {
-    let scope = resolve_scope(project, environment, false).await?;
-    let (service_id, service_name) = pick_service(&scope, service.as_deref())?;
-    let backboard = scope.configs.get_backboard();
+    let scope = resolve_scope(project, environment).await?;
+    let environment_name = scope.environment.1.clone();
+    let before = fetch_tracing_settings(&scope).await?;
+
+    let targets: Vec<ServiceTracing> = if switch.all {
+        before.services.clone()
+    } else {
+        let (service_id, _) = pick_service(&scope, service.as_deref())?;
+        vec![find_service(&before, &service_id)?]
+    };
+    if targets.is_empty() {
+        bail!("No services in environment {environment_name}.");
+    }
 
     let spinner = create_spinner_if(
         !json,
-        format!("Updating tracing for {}...", service_name.bold()),
+        match targets.as_slice() {
+            [target] => format!(
+                "Updating tracing for {} in {}...",
+                target.name.bold(),
+                environment_name.bold()
+            ),
+            _ => format!(
+                "Updating tracing for {} services in {}...",
+                targets.len(),
+                environment_name.bold()
+            ),
+        },
     );
 
-    let updated_fields: Vec<&'static str> = match change {
-        ServiceChange::Set {
-            enabled,
-            auto_instrument,
-        } => {
-            post_graphql::<mutations::ServiceTracingUpdate, _>(
-                &scope.client,
-                &backboard,
-                mutations::service_tracing_update::Variables {
-                    id: service_id.clone(),
-                    input: mutations::service_tracing_update::ServiceUpdateInput {
-                        tracing_enabled: Some(enabled),
-                        auto_instrumentation_enabled: auto_instrument.then_some(enabled),
-                        icon: None,
-                        name: None,
-                    },
+    let backboard = scope.configs.get_backboard();
+    for target in &targets {
+        post_graphql::<mutations::ServiceInstanceUpdate, _>(
+            &scope.client,
+            &backboard,
+            mutations::service_instance_update::Variables {
+                service_id: target.id.clone(),
+                environment_id: Some(scope.environment.0.clone()),
+                input: mutations::service_instance_update::ServiceInstanceUpdateInput {
+                    tracing_enabled: Some(enabled),
+                    auto_instrumentation_enabled: switch.auto_instrument.then_some(enabled),
+                    ..Default::default()
                 },
-            )
-            .await?;
-            if auto_instrument {
-                vec!["tracingEnabled", "autoInstrumentationEnabled"]
-            } else {
-                vec!["tracingEnabled"]
-            }
-        }
-        ServiceChange::Inherit => {
-            post_graphql::<mutations::ServiceTracingInherit, _>(
-                &scope.client,
-                &backboard,
-                mutations::service_tracing_inherit::Variables {
-                    id: service_id.clone(),
-                },
-            )
-            .await?;
-            vec!["tracingEnabled"]
-        }
+            },
+        )
+        .await?;
+    }
+    let updated_fields: Vec<&'static str> = if switch.auto_instrument {
+        vec!["tracingEnabled", "autoInstrumentationEnabled"]
+    } else {
+        vec!["tracingEnabled"]
     };
 
     let settings = fetch_tracing_settings(&scope).await?;
-    let service = find_service(&settings, &service_id)?;
+    let services: Vec<ServiceTracing> = targets
+        .iter()
+        .map(|target| find_service(&settings, &target.id))
+        .collect::<Result<_>>()?;
 
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
@@ -493,104 +419,40 @@ async fn set_service_tracing(
         println!(
             "{}",
             serde_json::to_string_pretty(&ServiceChangeOutput {
-                project: settings.project,
-                service,
+                environment: settings.environment,
+                services,
                 updated_fields,
             })?
         );
         return Ok(());
     }
 
-    println!(
-        "Updated {}: {}.",
-        service.name.bold(),
-        format_tracing_state(&service)
-    );
-    println!("{}", format_project_default(&settings.project));
-    if service.auto_instrumentation_enabled && !service.auto_instrumentation_active {
+    match services.as_slice() {
+        [service] => {
+            println!(
+                "Updated {} in {}: {}.",
+                service.name.bold(),
+                environment_name.bold(),
+                format_tracing_state(service)
+            );
+        }
+        _ => {
+            println!(
+                "Updated {} services in {}.",
+                services.len(),
+                environment_name.bold()
+            );
+            print_status_table(&services, None);
+        }
+    }
+    if services
+        .iter()
+        .any(|s| s.auto_instrumentation_enabled && !s.auto_instrumentation_active)
+    {
         println!(
             "Auto-instrumentation is on but does nothing until the service's tracing is enabled."
         );
     }
-    println!("{}", TRACING_EFFECTS_NOTE.dimmed());
-
-    Ok(())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectChangeOutput {
-    project: ProjectTracing,
-    services: Vec<ServiceTracing>,
-    updated_fields: Vec<&'static str>,
-}
-
-async fn set_project_tracing(
-    project: Option<String>,
-    environment: Option<String>,
-    enabled: bool,
-    sample_rate: Option<f64>,
-    json: bool,
-) -> Result<()> {
-    let scope = resolve_scope(project, environment, false).await?;
-
-    let spinner = create_spinner_if(
-        !json,
-        format!(
-            "Updating the tracing default for {}...",
-            scope.project.name.bold()
-        ),
-    );
-
-    post_graphql::<mutations::ProjectTracingUpdate, _>(
-        &scope.client,
-        scope.configs.get_backboard(),
-        mutations::project_tracing_update::Variables {
-            id: scope.project.id.clone(),
-            input: mutations::project_tracing_update::ProjectUpdateInput {
-                tracing_enabled: Some(enabled),
-                tracing_sample_rate: sample_rate,
-                base_environment_id: None,
-                bot_pr_environments: None,
-                description: None,
-                focused_pr_environments: None,
-                is_public: None,
-                name: None,
-                pr_deploys: None,
-            },
-        },
-    )
-    .await?;
-
-    let updated_fields = if sample_rate.is_some() {
-        vec!["tracingEnabled", "tracingSampleRate"]
-    } else {
-        vec!["tracingEnabled"]
-    };
-    let settings = fetch_tracing_settings(&scope).await?;
-
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ProjectChangeOutput {
-                project: settings.project,
-                services: settings.services,
-                updated_fields,
-            })?
-        );
-        return Ok(());
-    }
-
-    println!(
-        "Updated {}. {}",
-        settings.project.name.bold(),
-        format_project_default(&settings.project)
-    );
-    print_status_table(&settings.services, None);
     println!("{}", TRACING_EFFECTS_NOTE.dimmed());
 
     Ok(())
@@ -602,7 +464,7 @@ const TRACING_EFFECTS_NOTE: &str = "Edge tracing follows within seconds. Auto-in
 
 #[derive(Serialize)]
 struct StatusOutput {
-    project: ProjectTracing,
+    environment: EnvironmentRef,
     services: Vec<ServiceTracingStatus>,
 }
 
@@ -617,8 +479,8 @@ async fn status(
         bail!("--all and --service cannot be used together");
     }
 
-    let scope = resolve_scope(project, environment, true).await?;
-    let (environment_id, environment_name) = scope.environment()?.clone();
+    let scope = resolve_scope(project, environment).await?;
+    let (environment_id, environment_name) = scope.environment.clone();
     let only_service = if all {
         None
     } else {
@@ -628,6 +490,9 @@ async fn status(
     let spinner = create_spinner_if(!json, "Fetching tracing status...".into());
 
     let settings = fetch_tracing_settings(&scope).await?;
+    if let Some(service_id) = &only_service {
+        find_service(&settings, service_id)?;
+    }
     let activity = post_graphql::<queries::TracingStatus, _>(
         &scope.client,
         scope.configs.get_backboard(),
@@ -664,7 +529,7 @@ async fn status(
         println!(
             "{}",
             serde_json::to_string_pretty(&StatusOutput {
-                project: settings.project,
+                environment: settings.environment,
                 services,
             })?
         );
@@ -673,12 +538,11 @@ async fn status(
 
     println!(
         "Tracing for project {} in environment {}",
-        settings.project.name.bold(),
+        scope.project.name.bold(),
         environment_name.bold()
     );
-    println!("{}", format_project_default(&settings.project));
     if services.is_empty() {
-        println!("No services in this project.");
+        println!("No services in this environment.");
         return Ok(());
     }
     println!();
@@ -693,35 +557,8 @@ async fn status(
     Ok(())
 }
 
-fn format_sample_rate(rate: Option<f64>) -> String {
-    match rate {
-        None => "100% (Railway default)".to_string(),
-        Some(rate) => format!("{}%", (rate * 1000.0).round() / 10.0),
-    }
-}
-
-fn format_project_default(project: &ProjectTracing) -> String {
-    format!(
-        "Project default: tracing {}, sample rate {}",
-        on_off(project.tracing_enabled),
-        format_sample_rate(project.sample_rate)
-    )
-}
-
 fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
-}
-
-fn tracing_cell(service: &ServiceTracing) -> String {
-    format!(
-        "{} ({})",
-        on_off(service.tracing_enabled),
-        if service.tracing_override.is_none() {
-            "follows project"
-        } else {
-            "pinned"
-        }
-    )
 }
 
 fn auto_instrumentation_cell(service: &ServiceTracing) -> &'static str {
@@ -739,7 +576,7 @@ fn auto_instrumentation_cell(service: &ServiceTracing) -> &'static str {
 fn format_tracing_state(service: &ServiceTracing) -> String {
     format!(
         "tracing {}, auto-instrumentation {}",
-        tracing_cell(service),
+        on_off(service.tracing_enabled),
         auto_instrumentation_cell(service)
     )
 }
@@ -763,7 +600,7 @@ fn print_status_table(services: &[ServiceTracing], activity: Option<&Activity>) 
         .map(|service| {
             let mut row = vec![
                 service.name.clone(),
-                tracing_cell(service),
+                on_off(service.tracing_enabled).to_string(),
                 auto_instrumentation_cell(service).to_string(),
             ];
             if let Some(activity) = activity {
@@ -849,8 +686,8 @@ async fn list(
     }
     let filter = compose_trace_filter(args.errors, args.filter.as_deref());
 
-    let scope = resolve_scope(project, environment, true).await?;
-    let (environment_id, environment_name) = scope.environment()?.clone();
+    let scope = resolve_scope(project, environment).await?;
+    let (environment_id, environment_name) = scope.environment.clone();
     let service = if args.all {
         None
     } else {
@@ -1099,8 +936,8 @@ async fn get(
     max_spans: Option<i64>,
     json: bool,
 ) -> Result<()> {
-    let scope = resolve_scope(project, environment, true).await?;
-    let (environment_id, environment_name) = scope.environment()?.clone();
+    let scope = resolve_scope(project, environment).await?;
+    let (environment_id, environment_name) = scope.environment.clone();
 
     let spinner = create_spinner_if(!json, "Fetching trace...".into());
 
@@ -1174,16 +1011,6 @@ async fn get(
 }
 
 // --- Parsing and layout ---
-
-fn parse_sample_rate(value: &str) -> std::result::Result<f64, String> {
-    let rate: f64 = value
-        .parse()
-        .map_err(|_| "sample rate must be a number from 0 to 1".to_string())?;
-    if !(0.0..=1.0).contains(&rate) {
-        return Err("sample rate must be a number from 0 to 1".to_string());
-    }
-    Ok(rate)
-}
 
 fn parse_limit(value: &str) -> std::result::Result<i64, String> {
     let limit: i64 = value
@@ -1282,31 +1109,24 @@ mod tests {
     fn parses_subcommands() {
         assert!(matches!(
             Args::parse_from(["trace", "enable", "--auto-instrument"]).command,
-            Commands::Enable(EnableArgs {
+            Commands::Enable(SwitchArgs {
                 auto_instrument: true,
-                project_default: false,
-                sample_rate: None,
+                all: false,
             })
         ));
         assert!(matches!(
-            Args::parse_from(["trace", "enable", "--project-default", "--sample-rate", "0.25"])
-                .command,
-            Commands::Enable(EnableArgs {
-                project_default: true,
-                sample_rate: Some(rate),
-                ..
-            }) if rate == 0.25
-        ));
-        assert!(matches!(
-            Args::parse_from(["trace", "disable", "--project-default"]).command,
-            Commands::Disable(DisableArgs {
-                project_default: true,
+            Args::parse_from(["trace", "enable", "--all", "-e", "staging"]).command,
+            Commands::Enable(SwitchArgs {
                 auto_instrument: false,
+                all: true,
             })
         ));
         assert!(matches!(
-            Args::parse_from(["trace", "inherit", "-s", "api"]).command,
-            Commands::Inherit
+            Args::parse_from(["trace", "disable", "-a", "--auto-instrument"]).command,
+            Commands::Disable(SwitchArgs {
+                auto_instrument: true,
+                all: true,
+            })
         ));
         assert!(matches!(
             Args::parse_from(["trace", "status", "--all"]).command,
@@ -1342,30 +1162,16 @@ mod tests {
             ])
             .is_err()
         );
-        assert!(Args::try_parse_from(["trace", "enable", "--sample-rate", "0.5"]).is_err());
-        assert!(
-            Args::try_parse_from([
-                "trace",
-                "enable",
-                "--project-default",
-                "--sample-rate",
-                "1.5"
-            ])
-            .is_err()
-        );
-        assert!(
-            Args::try_parse_from(["trace", "enable", "--project-default", "--auto-instrument"])
-                .is_err()
-        );
+        assert!(Args::try_parse_from(["trace", "enable", "--all", "-s", "api"]).is_err());
+        assert!(Args::try_parse_from(["trace", "inherit"]).is_err());
+        assert!(Args::try_parse_from(["trace", "enable", "--project-default"]).is_err());
     }
 
     #[test]
-    fn service_override_wins_over_project_default() {
-        assert_eq!(effective_tracing(false, None, true), (false, false));
-        assert_eq!(effective_tracing(true, None, true), (true, true));
-        assert_eq!(effective_tracing(true, Some(false), true), (false, false));
-        assert_eq!(effective_tracing(false, Some(true), false), (true, false));
-        assert_eq!(effective_tracing(false, Some(true), true), (true, true));
+    fn auto_instrumentation_is_inactive_while_tracing_is_off() {
+        assert!(!auto_instrumentation_active(false, true));
+        assert!(!auto_instrumentation_active(true, false));
+        assert!(auto_instrumentation_active(true, true));
     }
 
     #[test]
@@ -1413,7 +1219,6 @@ mod tests {
             tracing: ServiceTracing {
                 id: "svc".into(),
                 name: "api".into(),
-                tracing_override: None,
                 tracing_enabled: true,
                 auto_instrumentation_enabled: false,
                 auto_instrumentation_active: false,
@@ -1423,15 +1228,13 @@ mod tests {
         };
         let value = serde_json::to_value(status).unwrap();
         assert_eq!(value["tracingEnabled"], true);
-        assert!(value["tracingOverride"].is_null());
+        assert_eq!(value["autoInstrumentationActive"], false);
+        assert!(value.get("tracingOverride").is_none());
         assert!(value["lastEdgeSpanAt"].is_null());
     }
 
     #[test]
-    fn formats_sample_rates_and_durations() {
-        assert_eq!(format_sample_rate(None), "100% (Railway default)");
-        assert_eq!(format_sample_rate(Some(0.25)), "25%");
-        assert_eq!(format_sample_rate(Some(0.001)), "0.1%");
+    fn formats_durations() {
         assert_eq!(format_duration_ms(12.34), "12.3ms");
         assert_eq!(format_duration_ms(1500.0), "1.50s");
     }
