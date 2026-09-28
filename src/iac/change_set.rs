@@ -189,6 +189,9 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
             diff_top_level_field(previous, resource, "deploy", &mut changes);
         }
         diff_top_level_field(previous, resource, "groupId", &mut changes);
+        if resource_type(resource) == "service" {
+            diff_top_level_field(previous, resource, "tracing", &mut changes);
+        }
         diff_networking(previous, resource, &mut changes, &mut diagnostics);
         if resource_type(previous) == "bucket" && resource_type(resource) == "bucket" {
             if bucket_region(previous) != bucket_region(resource) {
@@ -1098,12 +1101,32 @@ fn update(
         "path": format!("resources.{address}.{field_name}"),
         "summary": summary,
         "severity": severity,
-        "deployEffect": if field_name == "config" || field_name == "groupId" { "none" } else { "deploy" },
+        "deployEffect": deploy_effect_for_update(field_name, details.as_deref()),
     });
     if let Some(details) = details.filter(|details| !details.is_empty()) {
         change["details"] = json!(details);
     }
     change
+}
+
+/// Auto-instrumentation reaches running containers live; only
+/// `tracing.enabled` needs a deploy, for the OpenTelemetry variables. Mirrors
+/// backboard's `changesThatSkipRedeploy`.
+fn deploy_effect_for_update(field_name: &str, details: Option<&[String]>) -> &'static str {
+    if field_name == "config" || field_name == "groupId" {
+        return "none";
+    }
+    if field_name == "tracing" {
+        if let Some(details) = details.filter(|details| !details.is_empty()) {
+            if details
+                .iter()
+                .all(|detail| detail.starts_with("tracing.autoInstrumentation"))
+            {
+                return "none";
+            }
+        }
+    }
+    "deploy"
 }
 
 fn format_variable_diff_value(
@@ -1282,6 +1305,11 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
             copy.remove("dockerfilePath");
         }
+    }
+    if field_name == "tracing" {
+        // Railway serialises only the switches that are on, so a false or null
+        // switch is the same as no switch, and no switches is no block.
+        copy.retain(|_, child| child.as_bool() == Some(true));
     }
     if field_name == "networking" {
         // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service

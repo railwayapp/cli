@@ -636,6 +636,99 @@ fn round_tripped_config_plans_no_changes() {
 }
 
 #[test]
+fn tracing_round_trips_and_false_switches_are_not_drift() {
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "tracing": { "enabled": true, "autoInstrumentation": true }
+        }),
+    )]);
+    let compiled = graph_to_environment_config(&desired, &CompileOptions::default());
+    assert_eq!(
+        compiled["services"]["web"]["tracing"],
+        json!({ "enabled": true, "autoInstrumentation": true })
+    );
+    let current = environment_config_to_graph(
+        &compiled,
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            ..Default::default()
+        },
+    );
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    // Railway serialises an untraced service without a block; an authored
+    // `{ enabled: false }` means the same thing.
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1"), "tracing": { "enabled": false } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn tracing_changes_plan_an_update_with_the_right_deploy_effect() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+
+    let enable = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1"), "tracing": { "enabled": true } }),
+    )]);
+    let result = diff(&current, &enable);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "tracing");
+    assert_eq!(result.changes[0]["after"], json!({ "enabled": true }));
+    assert_eq!(result.changes[0]["deployEffect"], "deploy");
+
+    let auto_only = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "tracing": { "autoInstrumentation": true }
+        }),
+    )]);
+    let result = diff(&current, &auto_only);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+
+    let traced = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "tracing": { "enabled": true, "autoInstrumentation": true }
+            }
+        }
+    }));
+    let untraced = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1") }),
+    )]);
+    let result = diff(&traced, &untraced);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "tracing");
+    assert!(result.changes[0]["after"].is_null());
+    assert_eq!(result.changes[0]["deployEffect"], "deploy");
+}
+
+#[test]
+fn new_service_carries_tracing_on_the_create() {
+    let current = env_config(json!({ "services": {} }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1"), "tracing": { "enabled": true } }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(kinds(&result), vec!["resource.create"]);
+    assert_eq!(result.changes[0]["resource"]["tracing"], json!({ "enabled": true }));
+}
+
+#[test]
 fn template_database_start_command_does_not_churn() {
     let current = managed_db_config(json!({
         "services": {

@@ -465,6 +465,7 @@ fn service_to_environment_config(
         "clusterRole",
         "replicaConfig",
         "clusterDisplay",
+        "tracing",
     ] {
         if let Some(value) = field(service, key) {
             config[key] = value.clone();
@@ -738,6 +739,11 @@ pub fn environment_config_to_graph(
             }
             if let Some(config_file) = service.get("configFile") {
                 node["configFile"] = config_file.clone();
+            }
+            // Per-environment tracing switches. Railway only serialises the
+            // ones that are on, so an untraced service has no block at all.
+            if let Some(tracing) = service.get("tracing").filter(|t| t.is_object()) {
+                node["tracing"] = tracing.clone();
             }
             if let Some(group_id) = field_str(service, "groupId") {
                 node["groupId"] = json!(

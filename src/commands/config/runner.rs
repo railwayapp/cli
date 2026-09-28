@@ -173,6 +173,7 @@ pub(super) struct DesiredResource {
     pub(super) volume_attachments: Option<serde_json::Map<String, Value>>,
     pub(super) config: Option<Value>,
     pub(super) group_id: Option<String>,
+    pub(super) tracing: Option<Value>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
