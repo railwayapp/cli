@@ -1,8 +1,0 @@
-mutation ProjectTracingUpdate($id: String!, $input: ProjectUpdateInput!) {
-  projectUpdate(id: $id, input: $input) {
-    id
-    name
-    tracingEnabled
-    tracingSampleRate
-  }
-}

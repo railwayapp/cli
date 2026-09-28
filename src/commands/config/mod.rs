@@ -1426,10 +1426,7 @@ fn render_tracing(
     if on.is_empty() {
         return;
     }
-    lines.push(lang.config_field(
-        "tracing",
-        &code_value(&serde_json::Value::Object(on), lang),
-    ));
+    lines.push(lang.config_field("tracing", &code_value(&serde_json::Value::Object(on), lang)));
 }
 
 fn is_image_source(source: Option<&serde_json::Value>) -> bool {

@@ -725,7 +725,10 @@ fn new_service_carries_tracing_on_the_create() {
     )]);
     let result = diff(&current, &desired);
     assert_eq!(kinds(&result), vec!["resource.create"]);
-    assert_eq!(result.changes[0]["resource"]["tracing"], json!({ "enabled": true }));
+    assert_eq!(
+        result.changes[0]["resource"]["tracing"],
+        json!({ "enabled": true })
+    );
 }
 
 #[test]
