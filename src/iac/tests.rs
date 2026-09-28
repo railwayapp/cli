@@ -240,6 +240,30 @@ fn non_default_restart_policy_is_planned() {
 }
 
 #[test]
+fn default_sleep_application_does_not_drift() {
+    let current = env_config(json!({
+        "services": { "api": { "source": { "image": "ghcr.io/acme/api:1" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "api",
+        json!({ "source": image("ghcr.io/acme/api:1"), "deploy": { "sleepApplication": false } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn empty_watch_patterns_do_not_drift() {
+    let current = env_config(json!({
+        "services": { "engine": { "source": { "image": "ghcr.io/acme/engine:1" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "engine",
+        json!({ "source": image("ghcr.io/acme/engine:1"), "build": { "watchPatterns": [] } }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
 fn volume_upsize_is_safe_downsize_is_destructive() {
     let small = graph_from(vec![volume("data", json!({ "sizeMB": 1024 }))]);
     let large = graph_from(vec![volume("data", json!({ "sizeMB": 2048 }))]);

@@ -1282,6 +1282,9 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
             copy.remove("dockerfilePath");
         }
+        if copy.get("watchPatterns") == Some(&json!([])) {
+            copy.remove("watchPatterns");
+        }
     }
     if field_name == "networking" {
         // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service
@@ -1297,6 +1300,9 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         }
         if copy.get("runtime") == Some(&json!("V2")) {
             copy.remove("runtime");
+        }
+        if copy.get("sleepApplication") == Some(&json!(false)) {
+            copy.remove("sleepApplication");
         }
         if copy.get("restartPolicyType") == Some(&json!("ON_FAILURE")) {
             copy.remove("restartPolicyType");
