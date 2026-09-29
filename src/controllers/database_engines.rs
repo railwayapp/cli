@@ -31,8 +31,8 @@ pub enum SwitchoverMechanism {
     /// The data nodes expose the platform's generic role/switchover REST
     /// contract (`clusterWiring.dataNodeRoleCheck` / `dataNodeSwitchover`):
     /// GET role on a node says whether it is the primary, POST switchover asks
-    /// that node's own colocated coordinator to make it one. Redis (Sentinel)
-    /// and MySQL (Group Replication).
+    /// that node's own colocated coordinator to make it one. Redis (Sentinel),
+    /// MySQL (Group Replication) and MongoDB (replica set).
     DeclaredHttp,
 }
 
@@ -164,6 +164,20 @@ pub const REDIS: DatabaseEngine = DatabaseEngine {
         legacy_active_variable: None,
         switchover: SwitchoverMechanism::DeclaredHttp,
     }),
+    pitr: None,
+    pooling: None,
+};
+
+pub const MONGO: DatabaseEngine = DatabaseEngine {
+    key: "mongo",
+    display_name: "MongoDB",
+    ha: Some(HaCompanion {
+        template_code: "mongo-ha",
+        // mongo-ha has declared haActiveVariable since it shipped.
+        legacy_active_variable: None,
+        switchover: SwitchoverMechanism::DeclaredHttp,
+    }),
+    // No mongo image ships a continuous archiver.
     pitr: None,
     pooling: None,
 };
@@ -382,6 +396,10 @@ mod tests {
             REDIS.ha_template_code_for(None),
             Some("redis-ha".to_string())
         );
+        assert_eq!(
+            MONGO.ha_template_code_for(None),
+            Some("mongo-ha".to_string())
+        );
     }
 
     #[test]
@@ -407,11 +425,15 @@ mod tests {
         // No Redis image ships a continuous archiver.
         assert!(REDIS.pitr.is_none());
         assert!(REDIS.pooling.is_none());
+        // Nor does any mongo image, and no mongo pooler companion ships.
+        assert!(MONGO.pitr.is_none());
+        assert!(MONGO.pooling.is_none());
         // Every engine here ships an HA companion; that is the feature this
         // registry exists for.
         assert!(POSTGRES.ha.is_some());
         assert!(MYSQL.ha.is_some());
         assert!(REDIS.ha.is_some());
+        assert!(MONGO.ha.is_some());
         // Both shipped engines roll their clusters through the platform's
         // rolling HA enable/disable workflow -- MySQL's archiver runs off
         // whichever member is the writable primary, the same as Postgres.

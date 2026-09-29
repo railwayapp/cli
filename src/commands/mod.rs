@@ -37,6 +37,7 @@ pub mod logout;
 pub mod logs;
 pub mod mcp;
 pub mod metrics;
+pub mod mongo;
 pub mod mysql;
 pub mod open;
 pub mod outbound_networking;
