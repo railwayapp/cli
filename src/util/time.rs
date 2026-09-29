@@ -52,23 +52,27 @@ fn parse_relative_time(input: &str) -> Option<DateTime<Utc>> {
         return None;
     }
 
-    let (num_str, unit) = input.split_at(input.len() - 1);
+    let unit = input.chars().next_back()?;
+    let num_str = &input[..input.len() - unit.len_utf8()];
     let num: i64 = num_str.parse().ok()?;
 
     if num < 0 {
         return None;
     }
 
+    // The checked constructors return None instead of panicking when the
+    // amount does not fit, and `checked_sub_signed` does the same when the
+    // resulting date is out of range.
     let duration = match unit {
-        "s" => Duration::seconds(num),
-        "m" => Duration::minutes(num),
-        "h" => Duration::hours(num),
-        "d" => Duration::days(num),
-        "w" => Duration::weeks(num),
-        _ => return None,
-    };
+        's' => Duration::try_seconds(num),
+        'm' => Duration::try_minutes(num),
+        'h' => Duration::try_hours(num),
+        'd' => Duration::try_days(num),
+        'w' => Duration::try_weeks(num),
+        _ => None,
+    }?;
 
-    Some(Utc::now() - duration)
+    Utc::now().checked_sub_signed(duration)
 }
 
 #[cfg(test)]
@@ -127,6 +131,19 @@ mod tests {
         assert!(parse_time("invalid").is_err());
         assert!(parse_time("").is_err());
         assert!(parse_time("abc123").is_err());
+    }
+
+    #[test]
+    fn test_parse_relative_overflow_is_an_error() {
+        assert!(parse_time("9223372036854775807w").is_err());
+        assert!(parse_time("99999999999999d").is_err());
+        assert!(parse_time("99999999999h").is_err());
+    }
+
+    #[test]
+    fn test_parse_multibyte_unit_is_an_error() {
+        assert!(parse_time("5é").is_err());
+        assert!(parse_time("5分").is_err());
     }
 
     #[test]
