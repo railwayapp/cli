@@ -72,6 +72,7 @@ commands!(
     logs,
     mcp,
     metrics,
+    mongo,
     open,
     outbound_networking as "outbound-network",
     mysql,

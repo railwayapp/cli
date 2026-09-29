@@ -1428,7 +1428,7 @@ struct HaStatusOutput {
 mod tests {
     use super::*;
     use crate::controllers::config::{ServiceInstance, Variable};
-    use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
+    use crate::controllers::database_engines::{MONGO, MYSQL, POSTGRES, REDIS};
     use clap::Parser;
 
     #[test]
@@ -2042,8 +2042,8 @@ mod tests {
     #[test]
     fn each_engine_declares_the_switchover_mechanism_its_cluster_actually_speaks() {
         // Postgres nodes run a coordinator with a cluster-wide member API;
-        // Redis and MySQL colocate theirs and expose only the per-node
-        // contract. Driving one through the other's path reaches nothing.
+        // Redis, MySQL and MongoDB colocate theirs and expose only the
+        // per-node contract. Driving one through the other's path reaches nothing.
         assert_eq!(
             POSTGRES.ha.unwrap().switchover,
             SwitchoverMechanism::Patroni
@@ -2054,6 +2054,10 @@ mod tests {
         );
         assert_eq!(
             MYSQL.ha.unwrap().switchover,
+            SwitchoverMechanism::DeclaredHttp
+        );
+        assert_eq!(
+            MONGO.ha.unwrap().switchover,
             SwitchoverMechanism::DeclaredHttp
         );
     }
