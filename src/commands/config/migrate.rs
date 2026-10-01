@@ -654,7 +654,9 @@ fn emit_service_fields(cac: &CacFile) -> Vec<String> {
         fields.push(format!("    preDeploy: {rendered},"));
     }
     if let Some(timeout) = cac.deploy.pre_deploy_timeout_seconds {
-        fields.push(format!("    deploy: {{ preDeployTimeoutSeconds: {timeout} }},"));
+        fields.push(format!(
+            "    deploy: {{ preDeployTimeoutSeconds: {timeout} }},"
+        ));
     }
     if let Some(dockerfile) = &cac.build.dockerfile_path {
         fields.push(format!(
