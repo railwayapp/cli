@@ -14,9 +14,8 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 
 use crate::{
-    client::{GQLClient, post_graphql, post_graphql_raw},
+    client::{GQLClient, post_graphql_raw},
     config::Configs,
-    gql::mutations::{self, ServiceInstanceUpdate},
     util::cac_deprecation::{find_all_cac_files, find_cac_file},
 };
 
@@ -24,7 +23,8 @@ use super::*;
 
 #[derive(Parser)]
 pub struct MigrateArgs {
-    /// Write files and clear Railway Config File settings (default is dry-run).
+    /// Write `.railway/railway.ts` (default is dry-run). Services keep using
+    /// Config as Code until `railway config apply` switches them over.
     #[clap(long)]
     apply: bool,
 
@@ -142,7 +142,7 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     if !args.apply {
         println!("{emitted}");
         eprintln!(
-            "\n{} Dry-run only. Re-run with {} to write {} and clear Railway Config File settings.",
+            "\n{} Dry-run only. Re-run with {} to write {}.",
             "Note:".yellow().bold(),
             "railway config migrate --apply".cyan(),
             format!(".railway/railway.{ext}").cyan()
@@ -190,8 +190,6 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         _ => {}
     }
 
-    clear_railway_config_files(&services).await?;
-
     if args.delete_files {
         for service in &services {
             fs::remove_file(&service.path)
@@ -205,11 +203,18 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     }
 
     eprintln!(
-        "\n{} Run {} then {}.",
+        "\n{} Run {} then {}. Apply switches these services off Config as Code.",
         "Next:".dimmed(),
         "railway config plan".cyan(),
         "railway config apply".cyan()
     );
+    if args.delete_files {
+        eprintln!(
+            "{} Push the deleted files only after {}. Until then the services still read them.",
+            "Note:".yellow().bold(),
+            "railway config apply".cyan()
+        );
+    }
     Ok(())
 }
 
@@ -762,80 +767,6 @@ fn json_to_ts(value: &JsonValue) -> String {
         JsonValue::Bool(b) => b.to_string(),
         JsonValue::Null => "null".to_string(),
     }
-}
-
-async fn clear_railway_config_files(services: &[CacService]) -> Result<()> {
-    let configs = Configs::new()?;
-    let linked = match configs.get_linked_project().await {
-        Ok(linked) => linked,
-        Err(_) => {
-            eprintln!(
-                "{} No linked project — skipped clearing Railway Config File. Clear it in the dashboard if set.",
-                "Warning:".yellow().bold()
-            );
-            return Ok(());
-        }
-    };
-
-    let Some(environment_id) = linked.environment.clone() else {
-        eprintln!(
-            "{} No linked environment — skipped clearing Railway Config File.",
-            "Warning:".yellow().bold()
-        );
-        return Ok(());
-    };
-
-    let mut ids: Vec<(String, String)> = services
-        .iter()
-        .filter_map(|service| {
-            service
-                .service_id
-                .clone()
-                .map(|id| (service.name.clone(), id))
-        })
-        .collect();
-    if ids.is_empty() {
-        if let Some(service_id) = linked.service.clone() {
-            let name = services
-                .first()
-                .map(|service| service.name.clone())
-                .unwrap_or_else(|| "linked service".to_string());
-            ids.push((name, service_id));
-        }
-    }
-    if ids.is_empty() {
-        eprintln!(
-            "{} No service IDs to clear — skipped clearing Railway Config File.",
-            "Warning:".yellow().bold()
-        );
-        return Ok(());
-    }
-
-    let client = GQLClient::new_authorized(&configs)?;
-    for (name, service_id) in ids {
-        let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
-            railway_config_file: Some(String::new()),
-            ..Default::default()
-        };
-        let vars = mutations::service_instance_update::Variables {
-            service_id,
-            environment_id: Some(environment_id.clone()),
-            input,
-        };
-        post_graphql::<ServiceInstanceUpdate, _>(&client, configs.get_backboard(), vars)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to clear railwayConfigFile on {name}. Clear it in the dashboard if set."
-                )
-            })?;
-        eprintln!(
-            "{} Cleared Railway Config File on {}",
-            "Updated".green().bold(),
-            name.cyan()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

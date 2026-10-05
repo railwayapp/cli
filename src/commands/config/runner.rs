@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::Stdio};
+use std::{collections::HashSet, env, path::PathBuf, process::Stdio};
 
 use is_terminal::IsTerminal;
 
@@ -238,7 +238,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
             if !args.json {
                 print_response_with_options(&preview, args.verbose);
             }
-            return Ok(());
+            return switch_off_config_as_code(&configs, "apply", &preview).await;
         }
 
         let destructive = has_destructive_changes(&preview);
@@ -283,6 +283,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         if !output.ok {
             bail!(runner_diagnostics_message(&output));
         }
+        switch_off_config_as_code(&configs, command, &output).await?;
         maybe_detailed_exit(&args, command, &output);
         return Ok(());
     }
@@ -292,8 +293,108 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         bail!(runner_diagnostics_message(&output));
     }
 
+    switch_off_config_as_code(&configs, command, &output).await?;
     maybe_detailed_exit(&args, command, &output);
 
+    Ok(())
+}
+
+/// Applying is the cutover from Config as Code. Once the environment matches the
+/// authoring file, clear the Railway Config File path on the services it declares.
+/// Clearing any earlier leaves those services with neither config until apply runs.
+async fn switch_off_config_as_code(
+    configs: &Configs,
+    command: &str,
+    response: &RunnerResponse,
+) -> Result<()> {
+    let applied = response
+        .apply_result
+        .as_ref()
+        .is_none_or(|result| result.status == "applied");
+    if command != "apply" || !response.ok || !applied {
+        return Ok(());
+    }
+    let (Some(environment), Some(graph)) = (&response.current_environment, &response.desired_graph)
+    else {
+        return Ok(());
+    };
+    let declared: HashSet<&str> = graph
+        .resources
+        .iter()
+        .filter(|resource| resource.r#type == "service")
+        .map(|resource| resource.name.as_str())
+        .collect();
+    if declared.is_empty() {
+        return Ok(());
+    }
+
+    #[derive(Deserialize)]
+    struct EnvQuery {
+        environment: EnvNode,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EnvNode {
+        service_instances: InstanceConnection,
+    }
+    #[derive(Deserialize)]
+    struct InstanceConnection {
+        edges: Vec<InstanceEdge>,
+    }
+    #[derive(Deserialize)]
+    struct InstanceEdge {
+        node: InstanceNode,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct InstanceNode {
+        service_id: String,
+        service_name: String,
+        railway_config_file: Option<String>,
+    }
+
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let environment_id = environment.environment_id.clone();
+    let instances = post_graphql_raw::<EnvQuery, _>(
+        &client,
+        &endpoint,
+        "query IacConfigFiles($id: String!) { environment(id: $id) { serviceInstances(first: 1000) { edges { node { serviceId serviceName railwayConfigFile } } } } }",
+        serde_json::json!({ "id": environment_id }),
+    )
+    .await?
+    .environment
+    .service_instances
+    .edges;
+
+    for InstanceEdge { node } in instances {
+        let path = node.railway_config_file.unwrap_or_default();
+        if path.trim().is_empty() || !declared.contains(node.service_name.as_str()) {
+            continue;
+        }
+        let vars = mutations::service_instance_update::Variables {
+            service_id: node.service_id,
+            environment_id: Some(environment_id.clone()),
+            input: mutations::service_instance_update::ServiceInstanceUpdateInput {
+                railway_config_file: Some(String::new()),
+                ..Default::default()
+            },
+        };
+        post_graphql::<mutations::ServiceInstanceUpdate, _>(&client, &endpoint, vars)
+            .await
+            .with_context(|| {
+                format!(
+                    "Applied, but could not clear Railway Config File on {}. Clear it in the dashboard.",
+                    node.service_name
+                )
+            })?;
+        eprintln!(
+            "{} {} off Config as Code ({})",
+            "Switched".green().bold(),
+            node.service_name.cyan(),
+            path.dimmed()
+        );
+    }
     Ok(())
 }
 
