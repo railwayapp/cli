@@ -9,7 +9,7 @@ use crate::{
         },
         variables::{
             EditSnapshot, SEALED_TOKEN, Variable, apply_service_variable_changes,
-            get_service_variables, get_service_variables_for_edit,
+            get_service_variables_for_edit,
             get_service_variables_including_sealed, reject_reserved_keys,
         },
     },

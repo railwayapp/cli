@@ -14,19 +14,19 @@ pub mod ownership;
 mod partial;
 pub mod saved_plan;
 
-#[allow(dead_code)]
+#[allow(unused)]
 pub use change_set::{ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
-#[allow(dead_code)]
+#[allow(unused)]
 pub use compiler::{
     CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
     graph_to_environment_config, project_definition_to_graph,
 };
 pub use engine::{NativeRun, run as run_native};
-#[allow(dead_code)]
+#[allow(unused)]
 pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
-#[allow(dead_code)]
+#[allow(unused)]
 pub use graph::{RAILWAY_GRAPH_VERSION, RailwayGraph, resource_address, validate_graph};
-#[allow(dead_code)]
+#[allow(unused)]
 pub use partial::{needs_partial_claim_apply, parse_partial_name};
 
 pub fn use_legacy_ts_runner(explicit_runner: Option<&str>) -> bool {

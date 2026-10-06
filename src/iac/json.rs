@@ -1,17 +1,5 @@
 use serde_json::{Map, Value};
 
-pub fn clone_value(value: &Value) -> Value {
-    value.clone()
-}
-
-pub fn as_object(value: &Value) -> Option<&Map<String, Value>> {
-    value.as_object()
-}
-
-pub fn as_object_mut(value: &mut Value) -> Option<&mut Map<String, Value>> {
-    value.as_object_mut()
-}
-
 pub fn field<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
     value.get(name)
 }
@@ -80,14 +68,3 @@ fn prune_empty_at(value: Value, path: &[&str]) -> Value {
     }
 }
 
-pub fn merge_objects(base: Value, extra: Value) -> Value {
-    match (base, extra) {
-        (Value::Object(mut left), Value::Object(right)) => {
-            for (key, value) in right {
-                left.insert(key, value);
-            }
-            Value::Object(left)
-        }
-        (_, extra) => extra,
-    }
-}
