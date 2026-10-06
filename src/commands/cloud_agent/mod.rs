@@ -55,7 +55,7 @@ pub(crate) fn harness_label(slug: &str) -> &str {
     after_help = r#"Examples:
   railway ca                         # browse and launch agents
   railway ca setup                   # choose defaults and skills
-  railway ca ssh my-box               # open a shell
+  railway ca connect my-box           # open a shell
   railway ca sleep my-box             # stop compute, keep the disk
   railway ca desktop --codex          # configure a desktop app
 
@@ -112,8 +112,8 @@ Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
     Create(lifecycle::CreateArgs),
 
     /// Connect to an existing cloud agent over SSH
-    #[clap(visible_alias = "connect")]
-    Ssh(lifecycle::SshArgs),
+    #[clap(visible_alias = "ssh")]
+    Connect(lifecycle::SshArgs),
 
     /// Wake a sleeping agent
     Wake(lifecycle::WakeArgs),
@@ -175,7 +175,7 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Command::Start(a)) => crate::commands::code::launch(a).await,
         Some(Command::List(a)) => tracked("list", lifecycle::list(a)).await,
         Some(Command::Create(a)) => tracked("create", lifecycle::create(a)).await,
-        Some(Command::Ssh(a)) => lifecycle::ssh(a).await,
+        Some(Command::Connect(a)) => lifecycle::ssh(a).await,
         Some(Command::Wake(a)) => tracked("wake", lifecycle::wake(a)).await,
         Some(Command::Sleep(a)) => tracked("sleep", lifecycle::sleep(a)).await,
         Some(Command::Delete(a)) => tracked("delete", lifecycle::delete(a)).await,
