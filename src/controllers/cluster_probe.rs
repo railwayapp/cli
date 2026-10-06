@@ -216,16 +216,24 @@ const HEALTH_API_AUTH_PRELUDE: &str = concat!(
 /// The wget twin of [`HEALTH_API_AUTH_PRELUDE`]: same credential, same
 /// "blank password = open node" rule, delivered to GNU wget instead of curl.
 ///
+/// Everything the switchover writes to disk lives in ONE private directory,
+/// `$HA_TMP`, created before anything else: `mktemp -d` makes it `0700`, and
+/// `umask 077` makes every file inside it `0600` too, so either layer alone
+/// keeps the credential private. A single `EXIT` trap removes it, with
+/// `HUP`/`INT`/`TERM` routed through that trap when the SSH session drops,
+/// so every way out of the exec (an answer, a transport failure, the exit 64
+/// below, a signal) leaves nothing behind. It holds the wgetrc carrying the
+/// credential and the response head [`WGET_SWITCHOVER_RESULT`] reads the
+/// status from.
+///
 /// wget has no config-from-stdin (`--config=/dev/stdin` on a pipe is refused:
 /// "Exiting due to error in /dev/stdin"), and `--user`/`--password` would put
 /// the secret in argv, which every process in the container can read. So the
-/// credential goes into a wgetrc document in a `mktemp` file -- created `0600`
-/// and owned by the exec's user, the same visibility the container already
-/// gives `HEALTH_API_PASSWORD` itself through `/proc/<pid>/environ` -- and
-/// argv carries only that file's path (`--config=<path>`). The file is
-/// written by `printf`, a shell builtin, so no process is spawned with the
-/// secret, and it is removed on exit (an `EXIT` trap, with `HUP`/`INT`/`TERM`
-/// routed through it when the SSH session drops).
+/// credential goes into a wgetrc document at `$HA_TMP/wgetrc` -- readable
+/// only by the exec's user, the same visibility the container already gives
+/// `HEALTH_API_PASSWORD` itself through `/proc/<pid>/environ` -- and argv
+/// carries only that file's path (`--config=<path>`). The file is written by
+/// `printf`, a shell builtin, so no process is spawned with the secret.
 ///
 /// wgetrc has no quoting: a value is the rest of its line with surrounding
 /// whitespace stripped, and `#`, `=`, `"`, `\`, `$` and `'` are literal in
@@ -238,35 +246,51 @@ const HEALTH_API_AUTH_PRELUDE: &str = concat!(
 /// `auth_no_challenge = on` sends the credential preemptively, as `curl`
 /// does, instead of waiting for the 401 challenge.
 const WGET_HEALTH_API_AUTH_PRELUDE: &str = concat!(
+    r#"umask 077; HA_TMP=$(mktemp -d) || exit 1; trap 'rm -rf "$HA_TMP"' EXIT; trap 'exit 129' HUP INT TERM; "#,
     r#"ha_trim() { v=$1; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}; printf '%s' "$v"; }; "#,
     r#"HEALTH_API_PW=$(ha_trim "${HEALTH_API_PASSWORD:-}"); "#,
     r#"HEALTH_API_USER=$(ha_trim "${HEALTH_API_USERNAME:-}"); [ -n "$HEALTH_API_USER" ] || HEALTH_API_USER=railway; "#,
     r#"if [ -n "$HEALTH_API_PW" ]; then nl=$(printf '\nx'); nl=${nl%x}; cr=$(printf '\r'); "#,
     r#"case "$HEALTH_API_USER$HEALTH_API_PW" in *"$nl"*|*"$cr"*) echo 'HEALTH_API_USERNAME/HEALTH_API_PASSWORD contains a line break, which wget cannot send; refusing the request' >&2; exit 64;; esac; "#,
-    r#"HEALTH_API_RC=$(mktemp) || exit 1; trap 'rm -f "$HEALTH_API_RC"' EXIT; trap 'exit 129' HUP INT TERM; "#,
-    r#"printf 'auth_no_challenge = on\nhttp_user = %s\nhttp_password = %s\n' "$HEALTH_API_USER" "$HEALTH_API_PW" > "$HEALTH_API_RC"; "#,
-    r#"set -- --config="$HEALTH_API_RC"; else set -- --no-config; fi; "#,
+    r#"printf 'auth_no_challenge = on\nhttp_user = %s\nhttp_password = %s\n' "$HEALTH_API_USER" "$HEALTH_API_PW" > "$HA_TMP/wgetrc"; "#,
+    r#"set -- --config="$HA_TMP/wgetrc"; else set -- --no-config; fi; "#,
 );
 
-/// Turns wget's response head (on the pipe) into the `\nHTTP_STATUS:<code>`
-/// trailer `curl -w` writes, so one parser reads both clients. The body goes
-/// straight to stdout through fd 3 while the response head is read off
-/// stderr; when no status line arrived at all, whatever wget said instead is
-/// passed through as the diagnostic.
-const WGET_STATUS_TRAILER: &str = concat!(
-    r#"{ s=; o=; while IFS= read -r l; do l=${l#"${l%%[! ]*}"}; "#,
-    r#"case $l in HTTP/[0-9]*) s=${l#* }; s=${s%% *};; *) o="$o$l ";; esac; done; "#,
-    r#"if [ -n "$s" ]; then printf '\nHTTP_STATUS:%s' "$s"; else printf '%s' "$o"; fi; }"#,
+/// Runs once wget has exited, and turns what it left behind into the shape
+/// `curl -w` gives: the body (already on stdout, the only thing written
+/// there) followed by the `\nHTTP_STATUS:<code>` trailer, so
+/// [`parse_switchover_response`] reads both clients unchanged.
+///
+/// wget runs as a plain command and its exit code is captured straight away
+/// in `$rc`. The status is the LAST `HTTP/<ver> <code>` line of the response
+/// head `-S` wrote to `$HA_TMP/head` (after a redirect, the final answer
+/// counts), read in pure sh.
+/// - A status was read: any HTTP answer, 4xx/5xx included, exits 0, the way
+///   `curl -s` does. The code and body carry the verdict.
+/// - No status line: nothing answered over HTTP. Typical cases are a refused
+///   connection (wget exit 4) or no `wget` on `PATH` (127, and the shell's
+///   own "not found" lands in the head file). The head file is relayed to
+///   stderr and the exec exits with wget's own code, so [`exec_in_container`]
+///   reports "SSH command failed (exit code N): ..." with the real cause.
+///   A wget exit 0 with no status line exits 1, so it reads as a failure.
+const WGET_SWITCHOVER_RESULT: &str = concat!(
+    r#"rc=$?; s=; while IFS= read -r l || [ -n "$l" ]; do l=${l#"${l%%[! ]*}"}; "#,
+    r#"case $l in HTTP/[0-9]*) s=${l#* }; s=${s%% *};; esac; done < "$HA_TMP/head"; "#,
+    r#"if [ -n "$s" ]; then printf '\nHTTP_STATUS:%s' "$s"; exit 0; fi; "#,
+    r#"while IFS= read -r l || [ -n "$l" ]; do printf '%s\n' "$l"; done < "$HA_TMP/head" >&2; "#,
+    r#"printf 'wget got no HTTP response (exit %s)\n' "$rc" >&2; [ "$rc" -ne 0 ] || rc=1; exit "$rc""#,
 );
 
 /// The exact shell text the switchover runs, so a test can pin both halves:
 /// the credential resolution and the request itself.
 ///
 /// curl: the config document is piped into curl on every run; curl reads it
-/// only when `$@` says `-K -`. wget: `$@` is `--config=<0600 file>` or
+/// only when `$@` says `-K -`. wget: `$@` is `--config=$HA_TMP/wgetrc` or
 /// `--no-config`; `--content-on-error` keeps the coordinator's refusal body,
-/// and `--timeout`/`--tries=1` bound the request as curl's `--max-time` does
-/// (the exec's own deadline in [`request_switchover`] caps both).
+/// stderr (the response head) goes to `$HA_TMP/head` for
+/// [`WGET_SWITCHOVER_RESULT`], and `--timeout`/`--tries=1` bound the request
+/// as curl's `--max-time` does (the exec's own deadline in
+/// [`request_switchover`] caps both).
 fn switchover_command(client: NodeHttpClient, endpoint: &ResolvedEndpoint) -> String {
     match client {
         NodeHttpClient::Curl => format!(
@@ -276,9 +300,9 @@ fn switchover_command(client: NodeHttpClient, endpoint: &ResolvedEndpoint) -> St
             path = endpoint.path,
         ),
         NodeHttpClient::Wget => format!(
-            r#"{prelude}{{ wget -q -S -O - --content-on-error --timeout=8 --tries=1 "$@" --method=POST http://localhost:{port}{path} 2>&1 >&3 | {trailer}; }} 3>&1"#,
+            r#"{prelude}wget -q -S -O - --content-on-error --timeout=8 --tries=1 "$@" --method=POST http://localhost:{port}{path} 2>"$HA_TMP/head"; {result}"#,
             prelude = WGET_HEALTH_API_AUTH_PRELUDE,
-            trailer = WGET_STATUS_TRAILER,
+            result = WGET_SWITCHOVER_RESULT,
             port = endpoint.port,
             path = endpoint.path,
         ),
@@ -697,7 +721,24 @@ mod tests {
                     .map(|d| std::path::Path::new(d).join(tool))
                     .find(|p| p.exists())
                     .unwrap();
-                std::os::unix::fs::symlink(real, dir.join("bin").join(tool)).unwrap();
+                if tool == "mktemp" {
+                    // Records every path it creates, so `leftovers` checks
+                    // THAT path is gone: macOS's `mktemp -d` ignores
+                    // `TMPDIR`, which would leave the node dir check vacuous.
+                    let wrapper = dir.join("bin").join(tool);
+                    std::fs::write(
+                        &wrapper,
+                        format!(
+                            "#!/bin/sh\nd=$({} \"$@\") || exit $?\nprintf '%s\\n' \"$d\" >> \"$MKTEMP_LOG\"\nprintf '%s\\n' \"$d\"\n",
+                            real.display()
+                        ),
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                } else {
+                    std::os::unix::fs::symlink(real, dir.join("bin").join(tool)).unwrap();
+                }
             }
             if let Some(script) = wget_script {
                 let shim = dir.join("bin").join("wget");
@@ -716,6 +757,7 @@ mod tests {
                 .env("PATH", self.dir.join("bin"))
                 .env("TMPDIR", &self.dir)
                 .env("SHIM_LOG", self.dir.join("wget.log"))
+                .env("MKTEMP_LOG", self.dir.join("mktemp.log"))
                 .envs(env.iter().copied())
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -735,13 +777,28 @@ mod tests {
             std::fs::read_to_string(self.dir.join("wget.log")).unwrap_or_default()
         }
 
-        /// Files left behind in the node's temp dir (the credential file must
-        /// not be one of them).
+        /// Every path the command's `mktemp` created.
+        fn created(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.join("mktemp.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// What the command left behind: entries in the node's temp dir, and
+        /// any path its `mktemp` created that still exists (the credential
+        /// file and the response head must not be among them).
         fn leftovers(&self) -> Vec<String> {
             std::fs::read_dir(&self.dir)
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                .filter(|n| n != "bin" && n != "wget.log")
+                .filter(|n| n != "bin" && n != "wget.log" && n != "mktemp.log")
+                .chain(
+                    self.created()
+                        .into_iter()
+                        .filter(|p| std::path::Path::new(p).exists()),
+                )
                 .collect()
         }
     }
@@ -754,9 +811,9 @@ mod tests {
     }
 
     /// A GNU wget stand-in: records argv (and, for `--config=<file>`, the
-    /// file's permissions and content) to `$SHIM_LOG`, writes the response
-    /// head to stderr as `-S` does, the body to stdout, and exits with
-    /// wget's code for that status.
+    /// file's and its directory's permissions and the file's content) to
+    /// `$SHIM_LOG`, writes the response head to stderr as `-S` does, the body
+    /// to stdout, and exits with wget's code for that status.
     #[cfg(unix)]
     fn wget_shim(status_line: &str, body: &str, exit: u8) -> String {
         format!(
@@ -766,6 +823,7 @@ mod tests {
                 "  printf 'ARG:%s\\n' \"$a\" >> \"$SHIM_LOG\"\n",
                 "  case $a in --config=*) f=${{a#--config=}};\n",
                 "    perm=$(/bin/ls -l \"$f\"); printf 'PERM:%.10s\\n' \"$perm\" >> \"$SHIM_LOG\";\n",
+                "    perm=$(/bin/ls -ld \"${{f%/*}}\"); printf 'DIRPERM:%.10s\\n' \"$perm\" >> \"$SHIM_LOG\";\n",
                 "    while IFS= read -r line; do printf 'CFG:%s\\n' \"$line\" >> \"$SHIM_LOG\"; done < \"$f\";;\n",
                 "  esac\n",
                 "done\n",
@@ -857,33 +915,93 @@ mod tests {
             log.contains("ARG:http://localhost:8080/switchover"),
             "{log}"
         );
+        // The response head went to the private dir, which is gone.
+        assert!(node.leftovers().is_empty(), "{:?}", node.leftovers());
     }
 
+    /// Any HTTP answer is the coordinator's verdict, as with `curl -s`: wget
+    /// exits 8 on a 409 (6 on a 401), yet the exec exits 0 with the body and
+    /// the trailer, and the Rust side refuses with the coordinator's reason.
+    /// (GNU wget writes no body for a 401 even with `--content-on-error`, so
+    /// that refusal carries only its code.)
     #[cfg(unix)]
     #[test]
     fn a_wget_refusal_surfaces_the_coordinators_body() {
-        let node = FakeNode::new(
-            "wget-refusal",
-            Some(&wget_shim(
-                "HTTP/1.1 409 Conflict",
-                "candidate is not in sync",
-                8,
-            )),
-        );
+        for (status_line, code, body, wget_exit) in [
+            ("HTTP/1.1 409 Conflict", 409, "candidate is not in sync", 8),
+            ("HTTP/1.1 401 Unauthorized", 401, "", 6),
+        ] {
+            let node = FakeNode::new(
+                "wget-refusal",
+                Some(&wget_shim(status_line, body, wget_exit)),
+            );
+            let out = node.run(
+                &switchover_command(NodeHttpClient::Wget, &endpoint()),
+                &[("HEALTH_API_PASSWORD", "s3cret")],
+            );
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(stdout, format!("{body}\nHTTP_STATUS:{code}"));
+            let err = parse_switchover_response(&stdout).unwrap_err().to_string();
+            assert!(err.contains(&code.to_string()), "{err}");
+            assert!(err.contains(body), "{err}");
+            assert!(node.leftovers().is_empty(), "{:?}", node.leftovers());
+        }
+    }
+
+    /// Nothing answered over HTTP: wget exits 4 on a refused connection and,
+    /// under `-q`, prints no response head. The exec has to fail with that
+    /// exit code -- an exit 0 here reads as "unexpected response" and hides
+    /// the real cause from `exec_in_container`'s error.
+    #[cfg(unix)]
+    #[test]
+    fn a_wget_switchover_that_reaches_nothing_fails_with_wgets_exit_code() {
+        let node = FakeNode::new("wget-sw-refused", Some("#!/bin/sh\nexit 4\n"));
         let out = node.run(
             &switchover_command(NodeHttpClient::Wget, &endpoint()),
             &[("HEALTH_API_PASSWORD", "s3cret")],
         );
-        assert!(out.status.success());
-        let err = parse_switchover_response(&String::from_utf8_lossy(&out.stdout))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("409"), "{err}");
-        assert!(err.contains("candidate is not in sync"), "{err}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(!stdout.contains("HTTP_STATUS"), "{stdout:?}");
+        assert!(stderr.contains("no HTTP response (exit 4)"), "{stderr:?}");
+        assert_eq!(node.created().len(), 1, "one private dir per exec");
+        assert!(node.leftovers().is_empty(), "{:?}", node.leftovers());
     }
 
-    /// The credential reaches wget through a 0600 wgetrc file named in argv,
-    /// never through argv itself, and the file is gone once the exec ends.
+    /// An image with no `wget` at all: the exec exits 127 and the shell's own
+    /// "not found" reaches stderr, instead of an exit 0 carrying that text.
+    #[cfg(unix)]
+    #[test]
+    fn a_wget_switchover_without_wget_on_the_path_exits_127() {
+        let node = FakeNode::new("no-wget", None);
+        let out = node.run(&switchover_command(NodeHttpClient::Wget, &endpoint()), &[]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(127),
+            "stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(!stdout.contains("HTTP_STATUS"), "{stdout:?}");
+        assert!(stderr.contains("wget"), "{stderr:?}");
+        assert_eq!(node.created().len(), 1, "one private dir per exec");
+        assert!(node.leftovers().is_empty(), "{:?}", node.leftovers());
+    }
+
+    /// The credential reaches wget through a wgetrc file named in argv, never
+    /// through argv itself. The file is 0600 inside a 0700 directory, and
+    /// both are gone once the exec ends.
     /// wgetrc has no quoting, so the shim reading the file back line by line
     /// is what wget reads: `key = <rest of line, trimmed>`.
     #[cfg(unix)]
@@ -912,8 +1030,15 @@ mod tests {
                 .all(|a| !a.contains("w#rd") && !a.contains("s3cret")),
             "{args:?}"
         );
-        assert!(args.iter().any(|a| a.starts_with("--config=")), "{args:?}");
+        // The wgetrc lives inside the exec's one private dir.
+        let created = node.created();
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert!(
+            args.contains(&format!("--config={}/wgetrc", created[0]).as_str()),
+            "{args:?}"
+        );
         assert!(log.contains("PERM:-rw-------"), "{log}");
+        assert!(log.contains("DIRPERM:drwx------"), "{log}");
         let cfg: Vec<&str> = log.lines().filter_map(|l| l.strip_prefix("CFG:")).collect();
         assert_eq!(
             cfg,
@@ -948,7 +1073,8 @@ mod tests {
 
     /// wgetrc cannot carry a line break inside a value. Sending what is left
     /// of the password would authenticate as a different string, so nothing
-    /// is sent at all.
+    /// is sent at all. The private dir already exists on this path (it is
+    /// created before the credential is read), so the trap must remove it.
     #[cfg(unix)]
     #[test]
     fn a_credential_wget_cannot_carry_is_refused_before_any_request() {
@@ -963,6 +1089,7 @@ mod tests {
         assert_eq!(out.status.code(), Some(64));
         assert!(String::from_utf8_lossy(&out.stderr).contains("line break"));
         assert!(node.log().is_empty(), "wget must not run: {}", node.log());
+        assert_eq!(node.created().len(), 1, "the private dir exists here too");
         assert!(node.leftovers().is_empty(), "{:?}", node.leftovers());
     }
 }
