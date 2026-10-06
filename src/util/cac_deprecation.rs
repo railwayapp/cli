@@ -125,17 +125,6 @@ pub fn find_all_cac_files(start: &Path) -> Vec<PathBuf> {
     by_dir.into_values().collect()
 }
 
-fn display_path(path: &Path) -> String {
-    std::env::current_dir()
-        .ok()
-        .and_then(|cwd| {
-            path.strip_prefix(&cwd)
-                .ok()
-                .map(|p| p.display().to_string())
-        })
-        .unwrap_or_else(|| path.display().to_string())
-}
-
 /// Emit a deprecation warning when a CaC file is found near the cwd.
 pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
     if disabled_by_env() || should_skip_for_args(raw_args) {
@@ -151,11 +140,10 @@ pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
     let Ok(cwd) = std::env::current_dir() else {
         return;
     };
-    let Some(path) = find_cac_file(&cwd) else {
+    if find_cac_file(&cwd).is_none() {
         return;
-    };
+    }
 
-    let shown = display_path(&path);
     let message = format!(
         "Config as Code (railway.json / railway.toml) is deprecated. Prefer Infrastructure as Code (.railway/railway.ts). Run `railway config migrate` or see https://docs.railway.com/infrastructure-as-code#migrating-from-config-as-code"
     );

@@ -1966,6 +1966,7 @@ fn authoring_file_for_write(cwd: &Path) -> Result<PathBuf> {
     }))
 }
 
+#[cfg(test)]
 fn find_railway_file(start: &Path) -> Option<PathBuf> {
     find_railway_files(start).into_iter().next()
 }

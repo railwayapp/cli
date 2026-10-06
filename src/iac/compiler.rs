@@ -908,10 +908,15 @@ fn volume_attachments_from_environment_config(
     }
 }
 
+// Reserved patch-composition path: diffs a desired config against the current
+// one and marks removed resources/variables for deletion. Kept for a future
+// patch-based apply; not wired into the current plan/apply flow.
+#[allow(dead_code)]
 pub fn compose_patch(current_config: &Value, desired_config: &Value) -> Value {
     prune_empty(add_deletion_markers(current_config, desired_config))
 }
 
+#[allow(dead_code)]
 fn add_deletion_markers(current_config: &Value, desired_config: &Value) -> Value {
     let mut next = desired_config.clone();
     if let Some(volumes) = current_config.get("volumes").and_then(Value::as_object) {
@@ -986,6 +991,7 @@ fn add_deletion_markers(current_config: &Value, desired_config: &Value) -> Value
     next
 }
 
+#[allow(dead_code)]
 pub fn map_from_str(map: &[(&str, &str)]) -> Map<String, Value> {
     map.iter()
         .map(|(k, v)| ((*k).to_string(), json!(*v)))
