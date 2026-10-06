@@ -22,7 +22,7 @@ use crate::controllers::{
     cluster_probe,
     cluster_scale::{self, EdgeScaleSummary, ScaleClusterParams, ScaleDimensionSummary},
     config::{ClusterWiring, EnvironmentConfig, fetch_environment_config},
-    database_engines::{DatabaseEngine, SwitchoverMechanism},
+    database_engines::{DatabaseEngine, NodeHttpClient, SwitchoverMechanism},
     database_plugins::{self, HaState},
     patroni,
     project::{ServiceContext, resolve_service_context},
@@ -350,7 +350,7 @@ async fn probe_data_nodes(
                 BTreeMap::new()
             }
         },
-        Some(SwitchoverMechanism::DeclaredHttp) => {
+        Some(SwitchoverMechanism::DeclaredHttp { http_client }) => {
             let Some(wiring) = wiring else {
                 return BTreeMap::new();
             };
@@ -363,6 +363,7 @@ async fn probe_data_nodes(
                 }
             };
             cluster_probe::probe_nodes(
+                http_client,
                 &instance_ids,
                 wiring.data_node_health_check.as_ref(),
                 wiring.data_node_role_check.as_ref(),
@@ -1216,8 +1217,9 @@ async fn switchover(
         Some(SwitchoverMechanism::Patroni) => {
             switchover_via_patroni(&ctx, &config, &root, &ha_state, candidate, json).await
         }
-        Some(SwitchoverMechanism::DeclaredHttp) => {
-            switchover_via_declared_endpoint(&ctx, &config, &root, candidate, json).await
+        Some(SwitchoverMechanism::DeclaredHttp { http_client }) => {
+            switchover_via_declared_endpoint(&ctx, &config, &root, candidate, http_client, json)
+                .await
         }
         None => bail!(
             "{} has no high-availability companion template.",
@@ -1323,6 +1325,7 @@ async fn switchover_via_declared_endpoint(
     config: &EnvironmentConfig,
     root: &super::RootContext,
     candidate: &database_plugins::HaMember,
+    http_client: NodeHttpClient,
     json: bool,
 ) -> Result<()> {
     let wiring = cluster_wiring(config, &root.root_id).with_context(|| {
@@ -1351,8 +1354,13 @@ async fn switchover_via_declared_endpoint(
     if let Some(role_endpoint) = cluster_probe::resolve(wiring.data_node_role_check.as_ref()) {
         let mut one = BTreeMap::new();
         one.insert(candidate.service_id.clone(), instance_id.clone());
-        let statuses =
-            cluster_probe::probe_nodes(&one, None, wiring.data_node_role_check.as_ref()).await;
+        let statuses = cluster_probe::probe_nodes(
+            http_client,
+            &one,
+            None,
+            wiring.data_node_role_check.as_ref(),
+        )
+        .await;
         let _ = role_endpoint;
         if statuses
             .get(&candidate.service_id)
@@ -1363,7 +1371,7 @@ async fn switchover_via_declared_endpoint(
         }
     }
 
-    cluster_probe::request_switchover(instance_id, &endpoint)
+    cluster_probe::request_switchover(http_client, instance_id, &endpoint)
         .await
         .context("Switchover request failed")?;
 
@@ -2048,13 +2056,21 @@ mod tests {
             POSTGRES.ha.unwrap().switchover,
             SwitchoverMechanism::Patroni
         );
+        // The per-node contract is reached by exec'ing an HTTP client inside
+        // the node's own container, so it must be the one that image ships:
+        // redis-ha's image has `wget` and no `curl`; mysql-ha's keeps the
+        // `curl` its Oracle Linux base bundles.
         assert_eq!(
             REDIS.ha.unwrap().switchover,
-            SwitchoverMechanism::DeclaredHttp
+            SwitchoverMechanism::DeclaredHttp {
+                http_client: NodeHttpClient::Wget
+            }
         );
         assert_eq!(
             MYSQL.ha.unwrap().switchover,
-            SwitchoverMechanism::DeclaredHttp
+            SwitchoverMechanism::DeclaredHttp {
+                http_client: NodeHttpClient::Curl
+            }
         );
     }
 }

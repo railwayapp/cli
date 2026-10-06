@@ -33,7 +33,29 @@ pub enum SwitchoverMechanism {
     /// GET role on a node says whether it is the primary, POST switchover asks
     /// that node's own colocated coordinator to make it one. Redis (Sentinel)
     /// and MySQL (Group Replication).
-    DeclaredHttp,
+    DeclaredHttp {
+        /// The HTTP client the data node's image ships, which the CLI runs
+        /// inside the node's container to reach those localhost endpoints.
+        http_client: NodeHttpClient,
+    },
+}
+
+/// An HTTP client binary a data node's image ships on its `PATH`.
+///
+/// The CLI reaches a node's localhost endpoints by exec'ing a client inside
+/// that node's own container, so the client has to be one the image actually
+/// carries -- a probe that names a binary the image does not ship exits 127
+/// on every node and reads as the whole cluster being unreachable. Which one
+/// ships is a fact about the engine's image, declared here rather than
+/// detected per exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeHttpClient {
+    /// `curl`. The official `mysql` base (Oracle Linux) bundles it.
+    Curl,
+    /// GNU `wget`. The official `redis` (Debian) and `mongo` (Ubuntu) bases
+    /// ship no HTTP client at all; the HA images install `wget` for their
+    /// own `HEALTHCHECK` and nothing else.
+    Wget,
 }
 
 /// The engine's HA companion template, when one ships.
@@ -140,7 +162,9 @@ pub const MYSQL: DatabaseEngine = DatabaseEngine {
         template_code: "mysql-ha",
         // mysql-ha has declared haActiveVariable since it shipped.
         legacy_active_variable: None,
-        switchover: SwitchoverMechanism::DeclaredHttp,
+        switchover: SwitchoverMechanism::DeclaredHttp {
+            http_client: NodeHttpClient::Curl,
+        },
     }),
     pitr: Some(PitrSpec {
         template_code: "mysql-pitr",
@@ -162,7 +186,10 @@ pub const REDIS: DatabaseEngine = DatabaseEngine {
     ha: Some(HaCompanion {
         template_code: "redis-ha",
         legacy_active_variable: None,
-        switchover: SwitchoverMechanism::DeclaredHttp,
+        // redis-ha's `redis-sentinel` image installs `wget` and no `curl`.
+        switchover: SwitchoverMechanism::DeclaredHttp {
+            http_client: NodeHttpClient::Wget,
+        },
     }),
     pitr: None,
     pooling: None,
