@@ -619,6 +619,7 @@ pub(super) fn skills_configured_for_slug(home: &Path, slug: &str) -> bool {
                 .join("use-railway")
         })
         .is_some_and(|path| path.is_dir())
+        || (slug == "pi" && skills_configured_for_slug(home, "universal"))
 }
 
 /// Every skill name this CLI has installed, across every target it manages.
@@ -1134,6 +1135,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
 
         assert!(skills_configured_for_slug(home.path(), "universal"));
+        assert!(skills_configured_for_slug(home.path(), "pi"));
         assert!(!skills_configured_for_slug(home.path(), "cursor"));
     }
 
