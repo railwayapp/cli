@@ -10,21 +10,29 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use serde::Deserialize;
+use is_terminal::IsTerminal;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::{
     client::{GQLClient, post_graphql, post_graphql_raw},
     config::Configs,
     gql::mutations::{self, ServiceInstanceUpdate},
+    iac::{EvalContext, evaluate_file_with_context},
     util::cac_deprecation::{find_all_cac_files, find_cac_file},
+    util::prompt::prompt_confirm_with_default,
 };
 
 use super::*;
 
 #[derive(Parser)]
 pub struct MigrateArgs {
-    /// Write files and clear Railway Config File settings (default is dry-run).
+    #[clap(subcommand)]
+    command: Option<MigrateCommand>,
+
+    /// Write `.railway/railway.ts` (default is dry-run). This only touches the
+    /// filesystem. Services keep reading Config as Code until you run
+    /// `railway config migrate cutover`.
     #[clap(long)]
     apply: bool,
 
@@ -32,7 +40,12 @@ pub struct MigrateArgs {
     #[clap(long)]
     force: bool,
 
-    /// Delete discovered `railway.json` / `railway.toml` after a successful apply.
+    /// Print the full generated authoring file instead of a summary.
+    #[clap(long)]
+    show: bool,
+
+    /// Delete discovered `railway.json` / `railway.toml` from disk. Push the
+    /// deletions only after cutover; the platform reads them until then.
     #[clap(long)]
     delete_files: bool,
 
@@ -44,6 +57,37 @@ pub struct MigrateArgs {
     /// Authoring language to emit: `ts` (default), `py`, or `go`.
     #[clap(long, default_value = "ts")]
     lang: String,
+}
+
+#[derive(Parser)]
+enum MigrateCommand {
+    /// Switch services off Config as Code so IaC can manage them. Saves a
+    /// snapshot of the current config-file paths so the switch is reversible.
+    Cutover(CutoverArgs),
+
+    /// Restore the Config as Code paths saved by the last cutover.
+    Undo(UndoArgs),
+
+    /// Show migration progress: which services still read Config as Code.
+    Status,
+}
+
+#[derive(Parser)]
+struct CutoverArgs {
+    /// Cut over only this service.
+    #[clap(long)]
+    service: Option<String>,
+
+    /// Skip the confirmation prompt.
+    #[clap(long)]
+    yes: bool,
+}
+
+#[derive(Parser)]
+struct UndoArgs {
+    /// Skip the confirmation prompt.
+    #[clap(long)]
+    yes: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -62,7 +106,6 @@ struct CacBuild {
     build_command: Option<String>,
     dockerfile_path: Option<String>,
     watch_patterns: Option<Vec<String>>,
-    nixpacks_config_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -73,25 +116,31 @@ struct CacDeploy {
     pre_deploy_timeout_seconds: Option<i64>,
     healthcheck_path: Option<String>,
     healthcheck_timeout: Option<i64>,
-    restart_policy_type: Option<String>,
-    restart_policy_max_retries: Option<i64>,
     num_replicas: Option<i64>,
     region: Option<String>,
     multi_region_config: Option<JsonValue>,
     cron_schedule: Option<String>,
-    sleep_application: Option<bool>,
-    draining_seconds: Option<i64>,
-    overlap_seconds: Option<i64>,
 }
 
 struct CacService {
     name: String,
     path: PathBuf,
-    service_id: Option<String>,
     cac: CacFile,
 }
 
 pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
+    match &args.command {
+        Some(MigrateCommand::Cutover(cutover_args)) => cutover(cutover_args).await,
+        Some(MigrateCommand::Undo(undo_args)) => undo(undo_args).await,
+        Some(MigrateCommand::Status) => migrate_status().await,
+        None => generate(args).await,
+    }
+}
+
+/// Discover Config as Code files and write `.railway/railway.ts`. Filesystem
+/// only — the remote cutover is a separate, reversible step so a generate can
+/// never leave a service with neither config.
+async fn generate(args: MigrateArgs) -> Result<()> {
     if !matches!(args.lang.as_str(), "ts" | "py" | "go") {
         bail!("--lang must be one of: ts, py, go");
     }
@@ -117,44 +166,48 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         _ => emit_railway_ts(&project_name, &services, named_partial),
     };
 
-    for service in &services {
-        eprintln!(
-            "{} {} → {}",
-            "Found".dimmed(),
-            display_rel(&cwd, &service.path).cyan(),
-            service.name.cyan()
-        );
-    }
-    if services.len() > 1 {
-        eprintln!(
-            "{} {} services into one {}",
-            "Merging".dimmed(),
-            services.len().to_string().cyan(),
-            format!(".railway/railway.{ext}").cyan()
-        );
-    } else {
-        eprintln!(
-            "{} service {}",
-            "Migrating".dimmed(),
-            services[0].name.cyan()
-        );
+    // `--show` prints just the file so `migrate --show > out.ts` works.
+    if args.show && !args.apply {
+        println!("{emitted}");
+        return Ok(());
     }
 
+    let environment = linked_environment_name().await;
+    print_migration_preview(&cwd, &services, &project_name, environment.as_deref(), ext);
+
+    let interactive = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+
+    // --apply writes unconditionally. Bare `migrate` in a terminal asks;
+    // piped/non-interactive stays a pure dry run.
     if !args.apply {
-        println!("{emitted}");
+        if !interactive {
+            eprintln!(
+                "\n{} Nothing changed. This was a dry run.",
+                "Note:".dimmed()
+            );
+            eprintln!("\n{}", "Next".bold());
+            eprintln!(
+                "  {} {}   write the file",
+                "•".dimmed(),
+                "railway config migrate --apply".cyan()
+            );
+            return Ok(());
+        }
         eprintln!(
-            "\n{} Dry-run only. Re-run with {} to write {} and clear Railway Config File settings.",
-            "Note:".yellow().bold(),
-            "railway config migrate --apply".cyan(),
-            format!(".railway/railway.{ext}").cyan()
+            "\n{} Nothing changed yet. This was a dry run.",
+            "Note:".dimmed()
         );
-        eprintln!(
-            "  {} Review with {} then {}",
-            "→".cyan(),
-            "railway config plan".cyan(),
-            "railway config apply".cyan()
-        );
-        return Ok(());
+        eprintln!();
+        let write =
+            prompt_confirm_with_default(&format!("Write .railway/railway.{ext} now?"), false)?;
+        if !write {
+            eprintln!(
+                "\n{} When you're ready: {}",
+                "Note:".dimmed(),
+                "railway config migrate --apply".cyan()
+            );
+            return Ok(());
+        }
     }
 
     if railway_file.exists() && !args.force {
@@ -168,9 +221,9 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     fs::write(&railway_file, &emitted)
         .with_context(|| format!("Failed to write {}", railway_file.display()))?;
     eprintln!(
-        "{} {}",
+        "\n{} {}",
         "Wrote".green().bold(),
-        railway_file.display().to_string().cyan()
+        display_rel(&cwd, &railway_file).cyan()
     );
     match args.lang.as_str() {
         "go" => {
@@ -191,8 +244,6 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
         _ => {}
     }
 
-    clear_railway_config_files(&services).await?;
-
     if args.delete_files {
         for service in &services {
             fs::remove_file(&service.path)
@@ -203,15 +254,201 @@ pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
                 display_rel(&cwd, &service.path).cyan()
             );
         }
+        eprintln!(
+            "  {} Push these deletions only after cutover — the platform reads them until then.",
+            "!".yellow().bold()
+        );
+    }
+
+    // Offer the next step. Cutover redeploys services, so we only reach it
+    // behind an explicit human confirmation in a terminal.
+    if interactive {
+        eprintln!(
+            "\n{} switches these services off Config as Code and redeploys them.",
+            "Cutover".bold()
+        );
+        eprintln!(
+            "  {} Environments that inherit this one pick it up too. A snapshot is saved for undo.",
+            "!".yellow().bold()
+        );
+        let go = prompt_confirm_with_default("Switch them off now? (cutover)", false)?;
+        if go {
+            let declared: HashSet<String> = services
+                .iter()
+                .map(|service| service.name.clone())
+                .collect();
+            return run_cutover(declared, None, true).await;
+        }
+        eprintln!(
+            "\n{} File written. When you're ready: {}",
+            "Note:".dimmed(),
+            "railway config migrate cutover".cyan()
+        );
+        return Ok(());
+    }
+
+    eprintln!("\n{}", "Next".bold());
+    eprintln!(
+        "  {} {}   switch these services off Config as Code (saves a snapshot)",
+        "•".dimmed(),
+        "railway config migrate cutover".cyan()
+    );
+    eprintln!(
+        "  {} {}             preview the IaC changes",
+        "•".dimmed(),
+        "railway config plan".cyan()
+    );
+    eprintln!(
+        "  {} {}            hand management to IaC",
+        "•".dimmed(),
+        "railway config apply".cyan()
+    );
+    eprintln!(
+        "\n{} Cutover clears each service's Config File path and redeploys it, so\n  run it right before {}. Config as Code keeps working until then.",
+        "Note:".yellow().bold(),
+        "railway config plan".cyan()
+    );
+    Ok(())
+}
+
+async fn linked_environment_name() -> Option<String> {
+    let configs = Configs::new().ok()?;
+    let linked = configs.get_linked_project().await.ok()?;
+    linked.environment_name
+}
+
+fn pluralize(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// Short, scannable preview of what migration found and generated. The full
+/// file is written on apply, or printed with `--show`. Columns are padded on
+/// the plain strings before coloring so ANSI codes don't break alignment.
+fn print_migration_preview(
+    cwd: &Path,
+    services: &[CacService],
+    project_name: &str,
+    environment: Option<&str>,
+    ext: &str,
+) {
+    eprintln!("\n{}", "Railway configuration".bold());
+    eprintln!("  {}      {}", "Project".dimmed(), project_name.cyan());
+    if let Some(env) = environment {
+        eprintln!("  {}  {}", "Environment".dimmed(), env.cyan());
+    }
+
+    let count = services.len();
+    eprintln!(
+        "\n{} {} managed by Config as Code",
+        "Found".bold(),
+        pluralize(count, "service")
+    );
+    let path_width = services
+        .iter()
+        .map(|service| display_rel(cwd, &service.path).chars().count())
+        .max()
+        .unwrap_or(0);
+    for service in services {
+        let padded = format!(
+            "{:<width$}",
+            display_rel(cwd, &service.path),
+            width = path_width
+        );
+        eprintln!(
+            "  {}  {} {}",
+            padded.dimmed(),
+            "→".dimmed(),
+            service.name.cyan()
+        );
+    }
+
+    let scope = if count > 1 {
+        format!("merged, {count} services")
+    } else {
+        format!("service {}", services[0].name)
+    };
+    eprintln!(
+        "\n{} {} ({})",
+        "Generated".bold(),
+        format!(".railway/railway.{ext}").cyan(),
+        scope.dimmed()
+    );
+    let name_width = services
+        .iter()
+        .map(|service| service.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for service in services {
+        let (builder, carried) = summarize_cac(&service.cac);
+        let name_padded = format!("{:<width$}", service.name, width = name_width);
+        let builder_padded = format!("{builder:<10}");
+        eprintln!(
+            "  {}  {}  {}",
+            name_padded.cyan(),
+            builder_padded.magenta(),
+            carried.dimmed()
+        );
     }
 
     eprintln!(
-        "\n{} Run {} then {}.",
-        "Next:".dimmed(),
-        "railway config plan".cyan(),
-        "railway config apply".cyan()
+        "\n  {} Run {} for the full file.",
+        "→".dimmed(),
+        "railway config migrate --show".cyan()
     );
-    Ok(())
+}
+
+/// A one-line summary of what a Config as Code file carries into IaC.
+fn summarize_cac(cac: &CacFile) -> (String, String) {
+    let builder = cac
+        .build
+        .builder
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "—".to_string());
+
+    let mut carried = Vec::new();
+    if cac.build.build_command.is_some() {
+        carried.push("build".to_string());
+    }
+    if cac.build.dockerfile_path.is_some() {
+        carried.push("dockerfile".to_string());
+    }
+    if cac.deploy.start_command.is_some() {
+        carried.push("start".to_string());
+    }
+    if cac.deploy.healthcheck_path.is_some() {
+        carried.push("healthcheck".to_string());
+    }
+    if let Some(timeout) = cac.deploy.healthcheck_timeout {
+        carried.push(format!("healthcheckTimeout {timeout}"));
+    }
+    if cac.deploy.pre_deploy_command.is_some() {
+        carried.push("preDeploy".to_string());
+    }
+    if let Some(replicas) = cac.deploy.num_replicas {
+        carried.push(format!("replicas {replicas}"));
+    }
+    if cac.deploy.multi_region_config.is_some() {
+        carried.push("regions".to_string());
+    }
+    if cac.deploy.cron_schedule.is_some() {
+        carried.push("cron".to_string());
+    }
+    if cac.deploy.region.is_some() {
+        carried.push("region".to_string());
+    }
+
+    let summary = if carried.is_empty() {
+        "no overrides".to_string()
+    } else {
+        carried.join(" + ")
+    };
+    (builder, summary)
 }
 
 async fn discover_cac_services(
@@ -249,7 +486,6 @@ async fn discover_cac_services(
         services.push(CacService {
             name: meta.name.clone(),
             path,
-            service_id: Some(meta.id.clone()),
             cac,
         });
     }
@@ -260,12 +496,7 @@ async fn discover_cac_services(
         }
         let name = guess_service_name(cwd, &path);
         let cac = parse_cac_file(&path)?;
-        services.push(CacService {
-            name,
-            path,
-            service_id: None,
-            cac,
-        });
+        services.push(CacService { name, path, cac });
     }
 
     apply_service_filter(&mut services, service_filter)?;
@@ -330,7 +561,6 @@ fn display_rel(cwd: &Path, path: &Path) -> String {
 }
 
 struct EnvCacMeta {
-    id: String,
     name: String,
 }
 
@@ -432,13 +662,7 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
             .cloned()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| guess_service_name(root, Path::new(rel)));
-        index.insert(
-            rel.to_string(),
-            EnvCacMeta {
-                id: id.clone(),
-                name,
-            },
-        );
+        index.insert(rel.to_string(), EnvCacMeta { name });
     }
     Ok(index)
 }
@@ -770,75 +994,502 @@ fn json_to_ts(value: &JsonValue) -> String {
     }
 }
 
-async fn clear_railway_config_files(services: &[CacService]) -> Result<()> {
-    let configs = Configs::new()?;
-    let linked = match configs.get_linked_project().await {
-        Ok(linked) => linked,
-        Err(_) => {
-            eprintln!(
-                "{} No linked project — skipped clearing Railway Config File. Clear it in the dashboard if set.",
-                "Warning:".yellow().bold()
-            );
-            return Ok(());
+// ===== Cutover / undo / status =====
+//
+// Generate only writes files. Switching services off Config as Code is a
+// separate, explicit, reversible step: it clears each service's config-file
+// path (which redeploys it) so IaC can manage it, after saving a snapshot of
+// the previous paths so the switch can be undone.
+
+const SNAPSHOT_FILE: &str = ".cac-migration.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CutoverSnapshot {
+    version: u32,
+    environment_id: String,
+    environment_name: Option<String>,
+    created_at: String,
+    services: Vec<SnapshotService>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotService {
+    service_id: String,
+    service_name: String,
+    railway_config_file: String,
+}
+
+/// A service in the linked environment that still reads Config as Code.
+struct CacInstance {
+    service_id: String,
+    service_name: String,
+    config_file: String,
+}
+
+fn snapshot_path(cwd: &Path) -> PathBuf {
+    cwd.join(".railway").join(SNAPSHOT_FILE)
+}
+
+fn write_snapshot(cwd: &Path, snapshot: &CutoverSnapshot) -> Result<()> {
+    fs::create_dir_all(cwd.join(".railway"))?;
+    let path = snapshot_path(cwd);
+    let body = serde_json::to_string_pretty(snapshot)?;
+    fs::write(&path, body).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn read_snapshot(cwd: &Path) -> Result<Option<CutoverSnapshot>> {
+    let path = snapshot_path(cwd);
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(
+            serde_json::from_str(&contents)
+                .with_context(|| format!("Failed to parse {}", path.display()))?,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("Failed to read {}", path.display())),
+    }
+}
+
+fn find_authoring_file(cwd: &Path) -> Option<PathBuf> {
+    const NAMES: &[&str] = &["railway.ts", "railway.py", "railway.go"];
+    for dir in [cwd.to_path_buf(), cwd.join(".railway")] {
+        for name in NAMES {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
-    };
+    }
+    None
+}
 
-    let Some(environment_id) = linked.environment.clone() else {
-        eprintln!(
-            "{} No linked environment — skipped clearing Railway Config File.",
-            "Warning:".yellow().bold()
-        );
-        return Ok(());
+/// Evaluate the authoring file to learn which services (and databases) it
+/// declares, so cutover never touches a service that hasn't been migrated yet.
+async fn declared_services(cwd: &Path) -> Result<HashSet<String>> {
+    let file = find_authoring_file(cwd).context(
+        "No .railway/railway.{ts,py,go} found. Run `railway config migrate --apply` first.",
+    )?;
+    let ctx = match Configs::new() {
+        Ok(configs) => match configs.get_linked_project().await {
+            Ok(linked) => EvalContext::from_linked_project(&linked, "migrate"),
+            Err(_) => EvalContext::default(),
+        },
+        Err(_) => EvalContext::default(),
     };
-
-    let mut ids: Vec<(String, String)> = services
+    let evaluated = evaluate_file_with_context(&file, &ctx)?;
+    Ok(evaluated
+        .graph
+        .resources
         .iter()
-        .filter_map(|service| {
-            service
-                .service_id
-                .clone()
-                .map(|id| (service.name.clone(), id))
+        .filter(|resource| {
+            matches!(
+                resource.get("type").and_then(JsonValue::as_str),
+                Some("service") | Some("database")
+            )
         })
-        .collect();
-    if ids.is_empty() {
-        if let Some(service_id) = linked.service.clone() {
-            let name = services
-                .first()
-                .map(|service| service.name.clone())
-                .unwrap_or_else(|| "linked service".to_string());
-            ids.push((name, service_id));
-        }
+        .filter_map(|resource| resource.get("name").and_then(JsonValue::as_str))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+async fn fetch_cac_instances(configs: &Configs, environment_id: &str) -> Result<Vec<CacInstance>> {
+    #[derive(Deserialize)]
+    struct EnvQuery {
+        environment: EnvNode,
     }
-    if ids.is_empty() {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EnvNode {
+        service_instances: Conn,
+    }
+    #[derive(Deserialize)]
+    struct Conn {
+        edges: Vec<Edge>,
+    }
+    #[derive(Deserialize)]
+    struct Edge {
+        node: Node,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Node {
+        service_id: String,
+        service_name: String,
+        railway_config_file: Option<String>,
+    }
+
+    let client = GQLClient::new_authorized(configs)?;
+    let edges = post_graphql_raw::<EnvQuery, _>(
+        &client,
+        &configs.get_backboard(),
+        "query IacCutoverInstances($id: String!) { environment(id: $id) { serviceInstances(first: 1000) { edges { node { serviceId serviceName railwayConfigFile } } } } }",
+        json!({ "id": environment_id }),
+    )
+    .await?
+    .environment
+    .service_instances
+    .edges;
+
+    Ok(edges
+        .into_iter()
+        .filter_map(|edge| {
+            let config_file = edge.node.railway_config_file.unwrap_or_default();
+            if config_file.trim().is_empty() || !is_cac_config_file(config_file.trim()) {
+                return None;
+            }
+            Some(CacInstance {
+                service_id: edge.node.service_id,
+                service_name: edge.node.service_name,
+                config_file,
+            })
+        })
+        .collect())
+}
+
+async fn set_config_file(
+    configs: &Configs,
+    service_id: &str,
+    environment_id: &str,
+    value: &str,
+) -> Result<()> {
+    let client = GQLClient::new_authorized(configs)?;
+    let vars = mutations::service_instance_update::Variables {
+        service_id: service_id.to_string(),
+        environment_id: Some(environment_id.to_string()),
+        input: mutations::service_instance_update::ServiceInstanceUpdateInput {
+            railway_config_file: Some(value.to_string()),
+            ..Default::default()
+        },
+    };
+    post_graphql::<ServiceInstanceUpdate, _>(&client, configs.get_backboard(), vars).await?;
+    Ok(())
+}
+
+async fn cutover(args: &CutoverArgs) -> Result<()> {
+    let cwd = std::env::current_dir().context("Unable to get current directory")?;
+    let declared = declared_services(&cwd).await?;
+    run_cutover(declared, args.service.as_deref(), args.yes).await
+}
+
+/// Switch the declared services that still read Config as Code over to IaC.
+/// `assume_yes` skips the final confirmation (the caller already confirmed),
+/// but the affected services and the warning are always shown first.
+async fn run_cutover(
+    declared: HashSet<String>,
+    service_filter: Option<&str>,
+    assume_yes: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("Unable to get current directory")?;
+    let configs = Configs::new()?;
+    let linked = configs
+        .get_linked_project()
+        .await
+        .context("No linked project. Run `railway link` first.")?;
+    let environment_id = linked
+        .environment
+        .clone()
+        .context("No linked environment. Run `railway link` first.")?;
+    let env_label = linked
+        .environment_name
+        .clone()
+        .unwrap_or_else(|| environment_id.clone());
+
+    let mut targets: Vec<CacInstance> = fetch_cac_instances(&configs, &environment_id)
+        .await?
+        .into_iter()
+        .filter(|instance| declared.contains(&instance.service_name))
+        .filter(|instance| service_filter.is_none_or(|name| instance.service_name == name))
+        .collect();
+    targets.sort_by(|a, b| a.service_name.cmp(&b.service_name));
+
+    if targets.is_empty() {
+        if let Some(name) = service_filter {
+            bail!(
+                "Service {name} is not managed by Config as Code in {env_label}, or is not declared in your IaC file."
+            );
+        }
         eprintln!(
-            "{} No service IDs to clear — skipped clearing Railway Config File.",
-            "Warning:".yellow().bold()
+            "{} No declared services are still on Config as Code in {}.",
+            "Nothing to do.".green().bold(),
+            env_label.cyan()
         );
         return Ok(());
     }
 
-    let client = GQLClient::new_authorized(&configs)?;
-    for (name, service_id) in ids {
-        let input = mutations::service_instance_update::ServiceInstanceUpdateInput {
-            railway_config_file: Some(String::new()),
-            ..Default::default()
-        };
-        let vars = mutations::service_instance_update::Variables {
-            service_id,
-            environment_id: Some(environment_id.clone()),
-            input,
-        };
-        post_graphql::<ServiceInstanceUpdate, _>(&client, configs.get_backboard(), vars)
+    eprintln!("{}", "Cutover".bold());
+    eprintln!("  {}  {}", "Environment".dimmed(), env_label.cyan());
+    eprintln!();
+    eprintln!(
+        "This switches {} service(s) off Config as Code:",
+        targets.len().to_string().cyan()
+    );
+    for target in &targets {
+        eprintln!(
+            "  {} {}  clears {}",
+            "-".red(),
+            target.service_name.cyan(),
+            target.config_file.dimmed()
+        );
+    }
+    eprintln!();
+    eprintln!(
+        "{} Each service redeploys as IaC takes over, and environments that\n  inherit {} pick this up too.",
+        "!".red().bold(),
+        env_label.cyan()
+    );
+    eprintln!(
+        "{} Current paths are saved to {} — undo with {}.",
+        "!".yellow().bold(),
+        ".railway/.cac-migration.json".cyan(),
+        "railway config migrate undo".cyan()
+    );
+    eprintln!();
+
+    if !assume_yes
+        && !prompt_confirm_with_default("Switch these services off Config as Code?", false)?
+    {
+        eprintln!(
+            "\n{} No changes made. When you're ready: {}",
+            "Aborted.".yellow().bold(),
+            "railway config migrate cutover".cyan()
+        );
+        return Ok(());
+    }
+
+    // Snapshot before mutating so undo always has the previous paths.
+    let snapshot = CutoverSnapshot {
+        version: 1,
+        environment_id: environment_id.clone(),
+        environment_name: linked.environment_name.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        services: targets
+            .iter()
+            .map(|target| SnapshotService {
+                service_id: target.service_id.clone(),
+                service_name: target.service_name.clone(),
+                railway_config_file: target.config_file.clone(),
+            })
+            .collect(),
+    };
+    write_snapshot(&cwd, &snapshot)?;
+
+    for target in &targets {
+        set_config_file(&configs, &target.service_id, &environment_id, "")
             .await
             .with_context(|| {
                 format!(
-                    "Failed to clear railwayConfigFile on {name}. Clear it in the dashboard if set."
+                    "Failed to switch {} off Config as Code. Run `railway config migrate undo` to restore, or clear it in the dashboard.",
+                    target.service_name
                 )
             })?;
         eprintln!(
-            "{} Cleared Railway Config File on {}",
-            "Updated".green().bold(),
-            name.cyan()
+            "{} {} off Config as Code",
+            "Switched".green().bold(),
+            target.service_name.cyan()
+        );
+    }
+
+    eprintln!("\n{}", "Next".bold());
+    eprintln!(
+        "  {} {}   preview the IaC changes",
+        "•".dimmed(),
+        "railway config plan".cyan()
+    );
+    eprintln!(
+        "  {} {}  hand management to IaC",
+        "•".dimmed(),
+        "railway config apply".cyan()
+    );
+    eprintln!(
+        "\n{} Changed your mind? {} restores the paths above.",
+        "Note:".dimmed(),
+        "railway config migrate undo".cyan()
+    );
+    Ok(())
+}
+
+async fn undo(args: &UndoArgs) -> Result<()> {
+    let cwd = std::env::current_dir().context("Unable to get current directory")?;
+    let snapshot = read_snapshot(&cwd)?
+        .context("No cutover snapshot found (.railway/.cac-migration.json). Nothing to undo.")?;
+    let configs = Configs::new()?;
+    let linked = configs
+        .get_linked_project()
+        .await
+        .context("No linked project. Run `railway link` first.")?;
+    let environment_id = linked
+        .environment
+        .clone()
+        .context("No linked environment. Run `railway link` first.")?;
+    if environment_id != snapshot.environment_id {
+        bail!(
+            "The snapshot was taken for environment {}. Link that environment before running undo.",
+            snapshot
+                .environment_name
+                .as_deref()
+                .unwrap_or(&snapshot.environment_id)
+        );
+    }
+    if snapshot.services.is_empty() {
+        eprintln!(
+            "{} The snapshot has no services to restore.",
+            "Nothing to do.".green().bold()
+        );
+        return Ok(());
+    }
+
+    eprintln!("{}", "Undo cutover".bold());
+    eprintln!(
+        "Restores the Config as Code path for {} service(s):",
+        snapshot.services.len().to_string().cyan()
+    );
+    for service in &snapshot.services {
+        eprintln!(
+            "  {} {}  {}",
+            "+".green(),
+            service.service_name.cyan(),
+            service.railway_config_file.dimmed()
+        );
+    }
+    eprintln!(
+        "{} Each service redeploys back onto Config as Code.",
+        "!".yellow().bold()
+    );
+    eprintln!();
+
+    if !args.yes && !prompt_confirm_with_default("Restore these Config as Code paths?", false)? {
+        eprintln!("\n{} No changes made.", "Aborted.".yellow().bold());
+        return Ok(());
+    }
+
+    for service in &snapshot.services {
+        set_config_file(
+            &configs,
+            &service.service_id,
+            &environment_id,
+            &service.railway_config_file,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to restore Config as Code on {}.",
+                service.service_name
+            )
+        })?;
+        eprintln!(
+            "{} {} → {}",
+            "Restored".green().bold(),
+            service.service_name.cyan(),
+            service.railway_config_file.dimmed()
+        );
+    }
+
+    // Consume the snapshot so a second undo can't replay a stale state.
+    let _ = fs::remove_file(snapshot_path(&cwd));
+    eprintln!(
+        "\n{} Services are back on Config as Code.",
+        "Done.".green().bold()
+    );
+    Ok(())
+}
+
+async fn migrate_status() -> Result<()> {
+    let cwd = std::env::current_dir().context("Unable to get current directory")?;
+    let configs = Configs::new()?;
+    let linked = configs
+        .get_linked_project()
+        .await
+        .context("No linked project. Run `railway link` first.")?;
+    let environment_id = linked
+        .environment
+        .clone()
+        .context("No linked environment. Run `railway link` first.")?;
+    let env_label = linked
+        .environment_name
+        .clone()
+        .unwrap_or_else(|| environment_id.clone());
+
+    let authoring = find_authoring_file(&cwd);
+    let declared = if authoring.is_some() {
+        declared_services(&cwd).await.ok()
+    } else {
+        None
+    };
+    let instances = fetch_cac_instances(&configs, &environment_id).await?;
+
+    eprintln!("{}", "Migration status".bold());
+    eprintln!("  {}  {}", "Environment".dimmed(), env_label.cyan());
+    match &authoring {
+        Some(file) => eprintln!(
+            "  {}     {}",
+            "IaC file".dimmed(),
+            display_rel(&cwd, file).cyan()
+        ),
+        None => eprintln!(
+            "  {}     {}",
+            "IaC file".dimmed(),
+            "none — run `railway config migrate --apply`".yellow()
+        ),
+    }
+    eprintln!();
+
+    if instances.is_empty() {
+        eprintln!(
+            "{} No services in {} read Config as Code.",
+            "✓".green(),
+            env_label.cyan()
+        );
+    } else {
+        eprintln!(
+            "Still on Config as Code ({}):",
+            instances.len().to_string().cyan()
+        );
+        for instance in &instances {
+            let marker = match &declared {
+                Some(set) if set.contains(&instance.service_name) => "declared in IaC".green(),
+                Some(_) => "not in IaC file".yellow(),
+                None => "".normal(),
+            };
+            eprintln!(
+                "  {} {}  {}  {}",
+                "-".red(),
+                instance.service_name.cyan(),
+                instance.config_file.dimmed(),
+                marker
+            );
+        }
+    }
+
+    if let Some(snapshot) = read_snapshot(&cwd)? {
+        eprintln!(
+            "\n{} A cutover snapshot exists ({} service(s)). Undo with {}.",
+            "Note:".dimmed(),
+            snapshot.services.len().to_string().cyan(),
+            "railway config migrate undo".cyan()
+        );
+    }
+
+    eprintln!("\n{}", "Next".bold());
+    if authoring.is_none() {
+        eprintln!(
+            "  {} {}   generate the IaC file",
+            "•".dimmed(),
+            "railway config migrate --apply".cyan()
+        );
+    } else if !instances.is_empty() {
+        eprintln!(
+            "  {} {}   switch declared services off Config as Code",
+            "•".dimmed(),
+            "railway config migrate cutover".cyan()
+        );
+    } else {
+        eprintln!(
+            "  {} {}   preview the IaC changes",
+            "•".dimmed(),
+            "railway config plan".cyan()
         );
     }
     Ok(())
@@ -852,7 +1503,6 @@ mod tests {
         CacService {
             name: name.to_string(),
             path: PathBuf::from(name),
-            service_id: None,
             cac,
         }
     }
@@ -1024,5 +1674,43 @@ healthcheckPath = "/"
         let cac = parse_cac_file(&path).unwrap();
         assert_eq!(cac.build.build_command.as_deref(), Some("cargo build"));
         assert_eq!(cac.deploy.start_command.as_deref(), Some("./app"));
+    }
+
+    #[test]
+    fn snapshot_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        assert!(read_snapshot(cwd).unwrap().is_none());
+        let snapshot = CutoverSnapshot {
+            version: 1,
+            environment_id: "env-1".into(),
+            environment_name: Some("production".into()),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            services: vec![SnapshotService {
+                service_id: "svc-1".into(),
+                service_name: "web".into(),
+                railway_config_file: "packages/web/railway.json".into(),
+            }],
+        };
+        write_snapshot(cwd, &snapshot).unwrap();
+        let restored = read_snapshot(cwd).unwrap().expect("snapshot present");
+        assert_eq!(restored.environment_id, "env-1");
+        assert_eq!(restored.services.len(), 1);
+        assert_eq!(restored.services[0].service_name, "web");
+        assert_eq!(
+            restored.services[0].railway_config_file,
+            "packages/web/railway.json"
+        );
+    }
+
+    #[test]
+    fn finds_authoring_file_in_cwd_and_railway_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        assert!(find_authoring_file(cwd).is_none());
+        let railway = cwd.join(".railway");
+        fs::create_dir_all(&railway).unwrap();
+        fs::write(railway.join("railway.ts"), "export default {}").unwrap();
+        assert_eq!(find_authoring_file(cwd), Some(railway.join("railway.ts")));
     }
 }

@@ -25,6 +25,7 @@ fn command_is_exempt(command: &str) -> bool {
             | "check_updates"
             | "check-updates"
             | "completion"
+            | "config"
             | "docs"
             | "help"
             | "login"
