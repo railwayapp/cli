@@ -102,7 +102,6 @@ struct CacBuild {
     build_command: Option<String>,
     dockerfile_path: Option<String>,
     watch_patterns: Option<Vec<String>>,
-    nixpacks_config_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -112,21 +111,15 @@ struct CacDeploy {
     pre_deploy_command: Option<JsonValue>,
     healthcheck_path: Option<String>,
     healthcheck_timeout: Option<i64>,
-    restart_policy_type: Option<String>,
-    restart_policy_max_retries: Option<i64>,
     num_replicas: Option<i64>,
     region: Option<String>,
     multi_region_config: Option<JsonValue>,
     cron_schedule: Option<String>,
-    sleep_application: Option<bool>,
-    draining_seconds: Option<i64>,
-    overlap_seconds: Option<i64>,
 }
 
 struct CacService {
     name: String,
     path: PathBuf,
-    service_id: Option<String>,
     cac: CacFile,
 }
 
@@ -360,7 +353,6 @@ async fn discover_cac_services(
         services.push(CacService {
             name: meta.name.clone(),
             path,
-            service_id: Some(meta.id.clone()),
             cac,
         });
     }
@@ -374,7 +366,6 @@ async fn discover_cac_services(
         services.push(CacService {
             name,
             path,
-            service_id: None,
             cac,
         });
     }
@@ -441,7 +432,6 @@ fn display_rel(cwd: &Path, path: &Path) -> String {
 }
 
 struct EnvCacMeta {
-    id: String,
     name: String,
 }
 
@@ -545,10 +535,7 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
             .unwrap_or_else(|| guess_service_name(root, Path::new(rel)));
         index.insert(
             rel.to_string(),
-            EnvCacMeta {
-                id: id.clone(),
-                name,
-            },
+            EnvCacMeta { name },
         );
     }
     Ok(index)
@@ -1376,7 +1363,6 @@ mod tests {
         CacService {
             name: name.to_string(),
             path: PathBuf::from(name),
-            service_id: None,
             cac,
         }
     }
