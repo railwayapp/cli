@@ -67,4 +67,3 @@ fn prune_empty_at(value: Value, path: &[&str]) -> Value {
         other => other,
     }
 }
-

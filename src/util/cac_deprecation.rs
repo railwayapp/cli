@@ -125,8 +125,6 @@ pub fn find_all_cac_files(start: &Path) -> Vec<PathBuf> {
     by_dir.into_values().collect()
 }
 
-
-
 /// Emit a deprecation warning when a CaC file is found near the cwd.
 pub fn maybe_warn(raw_args: &[String], command: Option<&str>) {
     if disabled_by_env() || should_skip_for_args(raw_args) {
