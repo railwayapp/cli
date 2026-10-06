@@ -129,9 +129,9 @@ struct CacService {
 
 pub async fn migrate_config(args: MigrateArgs) -> Result<()> {
     match &args.command {
-        Some(MigrateCommand::Cutover(cutover_args)) => return cutover(cutover_args).await,
-        Some(MigrateCommand::Undo(undo_args)) => return undo(undo_args).await,
-        Some(MigrateCommand::Status) => return migrate_status().await,
+        Some(MigrateCommand::Cutover(cutover_args)) => cutover(cutover_args).await,
+        Some(MigrateCommand::Undo(undo_args)) => undo(undo_args).await,
+        Some(MigrateCommand::Status) => migrate_status().await,
         None => generate(args).await,
     }
 }
@@ -180,7 +180,10 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     // piped/non-interactive stays a pure dry run.
     if !args.apply {
         if !interactive {
-            eprintln!("\n{} Nothing changed. This was a dry run.", "Note:".dimmed());
+            eprintln!(
+                "\n{} Nothing changed. This was a dry run.",
+                "Note:".dimmed()
+            );
             eprintln!("\n{}", "Next".bold());
             eprintln!(
                 "  {} {}   write the file",
@@ -189,7 +192,10 @@ async fn generate(args: MigrateArgs) -> Result<()> {
             );
             return Ok(());
         }
-        eprintln!("\n{} Nothing changed yet. This was a dry run.", "Note:".dimmed());
+        eprintln!(
+            "\n{} Nothing changed yet. This was a dry run.",
+            "Note:".dimmed()
+        );
         eprintln!();
         let write =
             prompt_confirm_with_default(&format!("Write .railway/railway.{ext} now?"), false)?;
@@ -266,8 +272,10 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         );
         let go = prompt_confirm_with_default("Switch them off now? (cutover)", false)?;
         if go {
-            let declared: HashSet<String> =
-                services.iter().map(|service| service.name.clone()).collect();
+            let declared: HashSet<String> = services
+                .iter()
+                .map(|service| service.name.clone())
+                .collect();
             return run_cutover(declared, None, true).await;
         }
         eprintln!(
@@ -349,7 +357,12 @@ fn print_migration_preview(
             display_rel(cwd, &service.path),
             width = path_width
         );
-        eprintln!("  {}  {} {}", padded.dimmed(), "→".dimmed(), service.name.cyan());
+        eprintln!(
+            "  {}  {} {}",
+            padded.dimmed(),
+            "→".dimmed(),
+            service.name.cyan()
+        );
     }
 
     let scope = if count > 1 {
@@ -482,11 +495,7 @@ async fn discover_cac_services(
         }
         let name = guess_service_name(cwd, &path);
         let cac = parse_cac_file(&path)?;
-        services.push(CacService {
-            name,
-            path,
-            cac,
-        });
+        services.push(CacService { name, path, cac });
     }
 
     apply_service_filter(&mut services, service_filter)?;
@@ -652,10 +661,7 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
             .cloned()
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| guess_service_name(root, Path::new(rel)));
-        index.insert(
-            rel.to_string(),
-            EnvCacMeta { name },
-        );
+        index.insert(rel.to_string(), EnvCacMeta { name });
     }
     Ok(index)
 }
@@ -1361,7 +1367,12 @@ async fn undo(args: &UndoArgs) -> Result<()> {
             &service.railway_config_file,
         )
         .await
-        .with_context(|| format!("Failed to restore Config as Code on {}.", service.service_name))?;
+        .with_context(|| {
+            format!(
+                "Failed to restore Config as Code on {}.",
+                service.service_name
+            )
+        })?;
         eprintln!(
             "{} {} → {}",
             "Restored".green().bold(),
@@ -1406,7 +1417,11 @@ async fn migrate_status() -> Result<()> {
     eprintln!("{}", "Migration status".bold());
     eprintln!("  {}  {}", "Environment".dimmed(), env_label.cyan());
     match &authoring {
-        Some(file) => eprintln!("  {}     {}", "IaC file".dimmed(), display_rel(&cwd, file).cyan()),
+        Some(file) => eprintln!(
+            "  {}     {}",
+            "IaC file".dimmed(),
+            display_rel(&cwd, file).cyan()
+        ),
         None => eprintln!(
             "  {}     {}",
             "IaC file".dimmed(),
