@@ -70,6 +70,7 @@ struct CacBuild {
 struct CacDeploy {
     start_command: Option<String>,
     pre_deploy_command: Option<JsonValue>,
+    pre_deploy_timeout_seconds: Option<i64>,
     healthcheck_path: Option<String>,
     healthcheck_timeout: Option<i64>,
     restart_policy_type: Option<String>,
@@ -652,6 +653,11 @@ fn emit_service_fields(cac: &CacFile) -> Vec<String> {
         };
         fields.push(format!("    preDeploy: {rendered},"));
     }
+    if let Some(timeout) = cac.deploy.pre_deploy_timeout_seconds {
+        fields.push(format!(
+            "    deploy: {{ preDeployTimeoutSeconds: {timeout} }},"
+        ));
+    }
     if let Some(dockerfile) = &cac.build.dockerfile_path {
         fields.push(format!(
             "    // dockerfilePath from CaC: {}",
@@ -924,6 +930,21 @@ mod tests {
         let out = emit_railway_ts("api", &services, true);
         assert!(out.contains("preDeploy: \"npx prisma migrate deploy\""));
         assert!(!out.contains("// preDeployCommand from CaC"));
+    }
+
+    #[test]
+    fn emits_pre_deploy_timeout_under_deploy() {
+        let cac = CacFile {
+            deploy: CacDeploy {
+                pre_deploy_command: Some(serde_json::json!(["npx prisma migrate deploy"])),
+                pre_deploy_timeout_seconds: Some(600),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let services = [svc("api", cac)];
+        let out = emit_railway_ts("api", &services, true);
+        assert!(out.contains("deploy: { preDeployTimeoutSeconds: 600 }"));
     }
 
     #[test]
