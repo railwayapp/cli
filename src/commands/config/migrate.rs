@@ -40,6 +40,10 @@ pub struct MigrateArgs {
     #[clap(long)]
     force: bool,
 
+    /// Print the full generated authoring file instead of a summary.
+    #[clap(long)]
+    show: bool,
+
     /// Delete discovered `railway.json` / `railway.toml` from disk. Push the
     /// deletions only after cutover; the platform reads them until then.
     #[clap(long)]
@@ -161,57 +165,37 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         _ => emit_railway_ts(&project_name, &services, named_partial),
     };
 
-    for service in &services {
-        eprintln!(
-            "{} {} → {}",
-            "Found".dimmed(),
-            display_rel(&cwd, &service.path).cyan(),
-            service.name.cyan()
-        );
+    // `--show` prints just the file so `migrate --show > out.ts` works.
+    if args.show && !args.apply {
+        println!("{emitted}");
+        return Ok(());
     }
-    if services.len() > 1 {
-        eprintln!(
-            "{} {} services into one {}",
-            "Merging".dimmed(),
-            services.len().to_string().cyan(),
-            format!(".railway/railway.{ext}").cyan()
-        );
-    } else {
-        eprintln!(
-            "{} service {}",
-            "Migrating".dimmed(),
-            services[0].name.cyan()
-        );
-    }
+
+    let environment = linked_environment_name().await;
+    print_migration_preview(&cwd, &services, &project_name, environment.as_deref(), ext);
 
     let interactive = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
 
-    // --apply writes unconditionally. Bare `migrate` in a terminal shows the
-    // file and asks; piped/non-interactive stays a pure dry run so the
-    // generated file can still be captured from stdout.
+    // --apply writes unconditionally. Bare `migrate` in a terminal asks;
+    // piped/non-interactive stays a pure dry run.
     if !args.apply {
-        println!("{emitted}");
         if !interactive {
+            eprintln!("\n{} Nothing changed. This was a dry run.", "Note:".dimmed());
+            eprintln!("\n{}", "Next".bold());
             eprintln!(
-                "\n{} Dry-run only. Nothing was written and no services were changed.",
-                "Note:".yellow().bold(),
-            );
-            eprintln!(
-                "  {} Re-run with {} to write {}.",
-                "→".cyan(),
-                "railway config migrate --apply".cyan(),
-                format!(".railway/railway.{ext}").cyan()
+                "  {} {}   write the file",
+                "•".dimmed(),
+                "railway config migrate --apply".cyan()
             );
             return Ok(());
         }
+        eprintln!("\n{} Nothing changed yet. This was a dry run.", "Note:".dimmed());
         eprintln!();
-        let write = prompt_confirm_with_default(
-            &format!("Write .railway/railway.{ext} now?"),
-            false,
-        )?;
+        let write =
+            prompt_confirm_with_default(&format!("Write .railway/railway.{ext} now?"), false)?;
         if !write {
             eprintln!(
-                "\n{} Nothing written and no services changed. When you're ready: {}",
+                "\n{} When you're ready: {}",
                 "Note:".dimmed(),
                 "railway config migrate --apply".cyan()
             );
@@ -230,9 +214,9 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     fs::write(&railway_file, &emitted)
         .with_context(|| format!("Failed to write {}", railway_file.display()))?;
     eprintln!(
-        "{} {}",
+        "\n{} {}",
         "Wrote".green().bold(),
-        railway_file.display().to_string().cyan()
+        display_rel(&cwd, &railway_file).cyan()
     );
     match args.lang.as_str() {
         "go" => {
@@ -316,6 +300,141 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         "railway config plan".cyan()
     );
     Ok(())
+}
+
+async fn linked_environment_name() -> Option<String> {
+    let configs = Configs::new().ok()?;
+    let linked = configs.get_linked_project().await.ok()?;
+    linked.environment_name
+}
+
+fn pluralize(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// Short, scannable preview of what migration found and generated. The full
+/// file is written on apply, or printed with `--show`. Columns are padded on
+/// the plain strings before coloring so ANSI codes don't break alignment.
+fn print_migration_preview(
+    cwd: &Path,
+    services: &[CacService],
+    project_name: &str,
+    environment: Option<&str>,
+    ext: &str,
+) {
+    eprintln!("\n{}", "Railway configuration".bold());
+    eprintln!("  {}      {}", "Project".dimmed(), project_name.cyan());
+    if let Some(env) = environment {
+        eprintln!("  {}  {}", "Environment".dimmed(), env.cyan());
+    }
+
+    let count = services.len();
+    eprintln!(
+        "\n{} {} managed by Config as Code",
+        "Found".bold(),
+        pluralize(count, "service")
+    );
+    let path_width = services
+        .iter()
+        .map(|service| display_rel(cwd, &service.path).chars().count())
+        .max()
+        .unwrap_or(0);
+    for service in services {
+        let padded = format!(
+            "{:<width$}",
+            display_rel(cwd, &service.path),
+            width = path_width
+        );
+        eprintln!("  {}  {} {}", padded.dimmed(), "→".dimmed(), service.name.cyan());
+    }
+
+    let scope = if count > 1 {
+        format!("merged, {count} services")
+    } else {
+        format!("service {}", services[0].name)
+    };
+    eprintln!(
+        "\n{} {} ({})",
+        "Generated".bold(),
+        format!(".railway/railway.{ext}").cyan(),
+        scope.dimmed()
+    );
+    let name_width = services
+        .iter()
+        .map(|service| service.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for service in services {
+        let (builder, carried) = summarize_cac(&service.cac);
+        let name_padded = format!("{:<width$}", service.name, width = name_width);
+        let builder_padded = format!("{builder:<10}");
+        eprintln!(
+            "  {}  {}  {}",
+            name_padded.cyan(),
+            builder_padded.magenta(),
+            carried.dimmed()
+        );
+    }
+
+    eprintln!(
+        "\n  {} Run {} for the full file.",
+        "→".dimmed(),
+        "railway config migrate --show".cyan()
+    );
+}
+
+/// A one-line summary of what a Config as Code file carries into IaC.
+fn summarize_cac(cac: &CacFile) -> (String, String) {
+    let builder = cac
+        .build
+        .builder
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "—".to_string());
+
+    let mut carried = Vec::new();
+    if cac.build.build_command.is_some() {
+        carried.push("build".to_string());
+    }
+    if cac.build.dockerfile_path.is_some() {
+        carried.push("dockerfile".to_string());
+    }
+    if cac.deploy.start_command.is_some() {
+        carried.push("start".to_string());
+    }
+    if cac.deploy.healthcheck_path.is_some() {
+        carried.push("healthcheck".to_string());
+    }
+    if let Some(timeout) = cac.deploy.healthcheck_timeout {
+        carried.push(format!("healthcheckTimeout {timeout}"));
+    }
+    if cac.deploy.pre_deploy_command.is_some() {
+        carried.push("preDeploy".to_string());
+    }
+    if let Some(replicas) = cac.deploy.num_replicas {
+        carried.push(format!("replicas {replicas}"));
+    }
+    if cac.deploy.multi_region_config.is_some() {
+        carried.push("regions".to_string());
+    }
+    if cac.deploy.cron_schedule.is_some() {
+        carried.push("cron".to_string());
+    }
+    if cac.deploy.region.is_some() {
+        carried.push("region".to_string());
+    }
+
+    let summary = if carried.is_empty() {
+        "no overrides".to_string()
+    } else {
+        carried.join(" + ")
+    };
+    (builder, summary)
 }
 
 async fn discover_cac_services(
