@@ -145,20 +145,20 @@ struct ChangeOperationResult {
     outputs: Option<Value>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredGraph {
     pub(super) project: Option<DesiredProject>,
     pub(super) resources: Vec<DesiredResource>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredProject {
     pub(super) name: String,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredResource {
     pub(super) address: Option<String>,
