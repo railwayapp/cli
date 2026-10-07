@@ -1693,3 +1693,60 @@ fn legacy_runner_only_when_explicitly_requested() {
     assert!(!super::use_legacy_ts_runner(None));
     assert!(super::use_legacy_ts_runner(Some("railway-iac-ts")));
 }
+
+#[test]
+fn pre_deploy_timeout_round_trips_through_plan_and_apply() {
+    // `deploy.preDeployTimeoutSeconds` has no special casing anywhere in the
+    // engine: it rides along inside the opaque `deploy` block. Pin that so a
+    // future allowlist or normaliser cannot drop it silently.
+    let current = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "deploy": { "preDeployCommand": ["npm run migrate"] }
+            }
+        }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "deploy": { "preDeployCommand": ["npm run migrate"], "preDeployTimeoutSeconds": 600 }
+        }),
+    )]);
+
+    let change_set = diff(&current, &desired);
+    assert_eq!(kinds(&change_set), vec!["resource.update"]);
+    let change = &change_set.changes[0];
+    assert_eq!(change["field"], "deploy");
+    assert_eq!(change["after"]["preDeployTimeoutSeconds"], json!(600));
+    assert_eq!(change["deployEffect"], "deploy");
+    let details = change["details"].as_array().unwrap();
+    assert_eq!(details.len(), 1);
+    assert!(
+        details[0]
+            .as_str()
+            .unwrap()
+            .starts_with("deploy.preDeployTimeoutSeconds"),
+        "unexpected detail: {}",
+        details[0]
+    );
+
+    // Converged state plans nothing.
+    let converged = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "deploy": { "preDeployCommand": ["npm run migrate"], "preDeployTimeoutSeconds": 600 }
+            }
+        }
+    }));
+    assert!(diff(&converged, &desired).changes.is_empty());
+
+    // Compiling the desired graph back to an environment config keeps it too.
+    let config = graph_to_environment_config(&desired, &CompileOptions::default());
+    assert_eq!(
+        config["services"]["web"]["deploy"]["preDeployTimeoutSeconds"],
+        json!(600)
+    );
+}
