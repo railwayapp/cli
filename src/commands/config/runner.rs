@@ -6,9 +6,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::util::{
-    progress::{create_spinner_if, fail_spinner, success_spinner},
-    prompt::prompt_confirm_with_default,
+use crate::{
+    client::{GQLClient, post_graphql},
+    gql::queries,
+    util::{
+        progress::{create_spinner_if, fail_spinner, success_spinner},
+        prompt::prompt_confirm_with_default,
+    },
 };
 
 use super::*;
@@ -75,6 +79,10 @@ pub struct Args {
     /// Tree hash written into `--out`. Defaults to `git rev-parse HEAD:.railway`.
     #[clap(long)]
     pub(super) source_tree: Option<String>,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    pub(super) environment: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -398,6 +406,71 @@ pub(super) async fn ensure_config_context_with_prompt(
     Ok((Configs::new()?, linked_project, token, auth_type))
 }
 
+/// `--environment` replaces the linked environment for eval, fetch, and apply.
+///
+/// A project token cannot read other environments, so a different target fails
+/// before the list query.
+async fn target_linked_environment(
+    configs: &Configs,
+    linked: &LinkedProject,
+    requested: Option<&str>,
+    auth_type: &str,
+) -> Result<LinkedProject> {
+    let Some(requested) = requested else {
+        return Ok(linked.clone());
+    };
+    if auth_type == "project-token" {
+        let token_id = linked.environment.as_deref().unwrap_or_default();
+        let token_name = linked.environment_name.as_deref();
+        if super::environment::token_targets_other(token_id, token_name, requested) {
+            let label = super::environment::scoped_environment_label(token_id, token_name);
+            bail!(super::environment::token_scope_error(label, requested));
+        }
+        return Ok(linked.clone());
+    }
+    let environments = list_project_environments(configs, &linked.project).await?;
+    let resolved = super::environment::resolve_environment(requested, &environments)?;
+    let mut targeted = linked.clone();
+    targeted.environment = Some(resolved.id.clone());
+    targeted.environment_name = Some(resolved.name.clone());
+    Ok(targeted)
+}
+
+async fn list_project_environments(
+    configs: &Configs,
+    project_id: &str,
+) -> Result<Vec<super::environment::NamedEnvironment>> {
+    let client = GQLClient::new_authorized(configs)?;
+    let mut after: Option<String> = None;
+    let mut environments = Vec::new();
+    loop {
+        let vars = queries::environments::Variables {
+            project_id: project_id.to_string(),
+            is_ephemeral: None,
+            first: Some(500),
+            after: after.clone(),
+        };
+        let response =
+            post_graphql::<queries::Environments, _>(&client, configs.get_backboard(), vars)
+                .await?;
+        let page = response.environments;
+        for edge in page.edges {
+            environments.push(super::environment::NamedEnvironment {
+                id: edge.node.id,
+                name: edge.node.name,
+            });
+        }
+        if !page.page_info.has_next_page {
+            break;
+        }
+        match page.page_info.end_cursor {
+            Some(cursor) if Some(&cursor) != after.as_ref() => after = Some(cursor),
+            _ => break,
+        }
+    }
+    Ok(environments)
+}
+
 fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
     if let Some(token) = Configs::get_railway_token() {
         return Ok((token, "project-token"));
@@ -432,6 +505,16 @@ async fn apply_pinned_plan(args: &Args, path: &PathBuf) -> Result<()> {
     let cwd = env::current_dir().context("Unable to get current working directory")?;
     let plan = crate::iac::saved_plan::read_plan(path)?;
     crate::iac::saved_plan::assert_source_tree(&plan, &cwd)?;
+    if let Some(requested) = args.environment.as_deref() {
+        let (configs, linked, _, auth_type) = ensure_config_context().await?;
+        let targeted =
+            target_linked_environment(&configs, &linked, Some(requested), auth_type).await?;
+        super::environment::ensure_pinned_plan_environment(
+            &plan.environment_id,
+            requested,
+            targeted.environment_id()?,
+        )?;
+    }
     guard_destructive_apply(args, plan.destructive)?;
 
     if !args.yes && !args.json {
@@ -475,6 +558,14 @@ async fn invoke_runner(
     auth_type: &str,
     command: &str,
 ) -> Result<(RunnerResponse, Value)> {
+    let linked_project = target_linked_environment(
+        configs,
+        linked_project,
+        args.environment.as_deref(),
+        auth_type,
+    )
+    .await?;
+    let linked_project = &linked_project;
     let cwd_path = env::current_dir().context("Unable to get current working directory")?;
     if !crate::iac::use_legacy_ts_runner(args.runner.as_deref()) {
         let value = crate::iac::run_native(
