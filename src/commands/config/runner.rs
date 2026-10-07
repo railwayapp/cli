@@ -93,6 +93,8 @@ pub(super) struct RunnerResponse {
     apply_result: Option<ChangeSetApplyResult>,
     deployment_id: Option<String>,
     staged_patch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_policy: Option<crate::iac::VariablePolicyReport>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -680,6 +682,35 @@ fn runner_cwd(runner: &str) -> Option<PathBuf> {
     dist_dir.parent().map(|path| path.to_path_buf())
 }
 
+fn print_variable_policy(response: &RunnerResponse) {
+    let Some(policy) = &response.variable_policy else {
+        return;
+    };
+    let railway_variables = response
+        .current_graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .resources
+                .iter()
+                .map(|resource| {
+                    resource
+                        .variables
+                        .as_ref()
+                        .map(|variables| variables.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+    let line = crate::iac::format_variable_policy_line(policy, railway_variables);
+    if let Some((label, rest)) = line.split_once(": ") {
+        println!("{} {}", format!("{label}:").dimmed(), rest.cyan());
+    } else {
+        println!("{}", line.dimmed());
+    }
+}
+
 /// Terraform-style one-line summary printed atop the change list.
 fn plan_summary_line(changes: &[Change]) -> String {
     let (mut add, mut change, mut destroy) = (0usize, 0usize, 0usize);
@@ -782,11 +813,14 @@ pub(super) fn print_response_with_options_and_next(
             .as_deref()
             .unwrap_or(&environment.environment_id);
         println!("{} {}", "Environment".dimmed(), environment_name.cyan());
+        print_variable_policy(response);
         if verbose {
             if let Some(project_id) = &environment.project_id {
                 println!("{} {}", "Project ID".dimmed(), project_id.dimmed());
             }
         }
+    } else {
+        print_variable_policy(response);
     }
     println!();
 

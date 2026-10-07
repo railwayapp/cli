@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::config::LinkedProject;
 
-use super::compiler::project_definition_to_graph;
+use super::compiler::{normalize_resource_env, project_definition_to_graph};
 use super::graph::RailwayGraph;
 use super::partial::parse_partial_name;
 
@@ -88,7 +88,7 @@ pub fn evaluate_file_with_context(file: &Path, ctx: &EvalContext) -> Result<Eval
     })
 }
 
-fn normalize_project(mut project: Value) -> Value {
+pub(crate) fn normalize_project(mut project: Value) -> Value {
     if project.get("resources").is_none() {
         if let Some(resources) = project.get("Resources").cloned() {
             project["resources"] = resources;
@@ -125,6 +125,7 @@ fn normalize_project(mut project: Value) -> Value {
                     resource["build"] = json!({ "buildCommand": build });
                 }
             }
+            normalize_resource_env(resource);
         }
     }
     if project.get("name").is_none() {

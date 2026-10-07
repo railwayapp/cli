@@ -1,9 +1,14 @@
+use std::collections::{BTreeMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::controllers::regions::BucketRegion;
 
-use super::graph::{RailwayGraph, resource_addr, resource_address, resource_name, resource_type};
+use super::graph::{
+    RailwayGraph, VariablePolicyReport, resource_addr, resource_address, resource_name,
+    resource_type,
+};
 use super::json::{field, field_str, stable_stringify};
 use super::partial::{
     IacPartials, effective_partial, foreign_resource_message, has_named_partials,
@@ -84,6 +89,9 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
         return change_set_result(changes, diagnostics, options.partial, declared);
     }
 
+    let mut compiled = compile_variable_policy(options.current, options.desired);
+    diagnostics.append(&mut compiled.diagnostics);
+
     for resource in &options.desired.resources {
         let address = resource_addr(resource);
         let previous = current_by.get(&address);
@@ -111,13 +119,14 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
                 continue;
             }
         }
+        diagnose_variable_declarations(resource, &compiled, &mut diagnostics);
         if previous.is_none() {
             diagnose_unsupported_custom_domains(resource, &mut diagnostics, None);
             diagnose_new_bucket_region(resource, &mut diagnostics);
             changes.push(json!({
                 "kind": "resource.create",
                 "address": address,
-                "resource": resource,
+                "resource": without_ignored_variables(resource, &compiled),
                 "path": format!("resources.{address}"),
                 "summary": format!("Create {} {}", resource_type(resource), resource_name(resource)),
                 "severity": "safe",
@@ -178,6 +187,8 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
             &mut changes,
             &desired_by,
             options.reveal_values,
+            &compiled,
+            &mut diagnostics,
         );
         diff_top_level_field(previous, resource, "source", &mut changes);
         diff_top_level_field(previous, resource, "build", &mut changes);
@@ -313,26 +324,396 @@ pub fn render_change_set(change_set: &ChangeSet) -> String {
         .join("\n")
 }
 
+struct ParsedPattern {
+    raw: String,
+    service: Option<String>,
+    glob: String,
+}
+
+impl ParsedPattern {
+    fn matches(&self, resource_name: &str, key: &str) -> bool {
+        if let Some(service) = &self.service {
+            if service != resource_name {
+                return false;
+            }
+        }
+        glob_match(&self.glob, key)
+    }
+}
+
+struct CompiledVariables {
+    managed: bool,
+    parse_error: bool,
+    patterns: Vec<ParsedPattern>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+enum PatternFault {
+    Empty,
+    Slash,
+    EmptyKey,
+}
+
+pub fn variable_policy_report(
+    current: &RailwayGraph,
+    desired: &RailwayGraph,
+) -> VariablePolicyReport {
+    let compiled = compile_variable_policy(current, desired);
+    let mut by_pattern = BTreeMap::new();
+    for pattern in &compiled.patterns {
+        by_pattern.insert(pattern.raw.clone(), count_matches(pattern, current));
+    }
+    VariablePolicyReport {
+        managed: desired.variables.managed,
+        ignore: desired.variables.ignore.clone(),
+        default: desired.variables.default,
+        ignored_count: count_ignored(&compiled.patterns, current),
+        by_pattern,
+    }
+}
+
+fn compile_variable_policy(current: &RailwayGraph, desired: &RailwayGraph) -> CompiledVariables {
+    let policy = &desired.variables;
+    let mut diagnostics = Vec::new();
+    if let Some(message) = &policy.error {
+        diagnostics.push(Diagnostic {
+            severity: "error".into(),
+            path: "variables".into(),
+            message: message.clone(),
+        });
+        return CompiledVariables {
+            managed: policy.managed,
+            parse_error: true,
+            patterns: Vec::new(),
+            diagnostics,
+        };
+    }
+    let names = resource_names(current, desired);
+    let mut patterns = Vec::new();
+    for raw in &policy.ignore {
+        match parse_pattern(raw) {
+            Ok(pattern) => {
+                if let Some(service) = &pattern.service {
+                    if !names.contains(service) {
+                        diagnostics.push(Diagnostic {
+                            severity: "error".into(),
+                            path: "variables.ignore".into(),
+                            message: format!(
+                                "variables.ignore pattern \"{raw}\" names \"{service}\", which is neither in the file nor on Railway."
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                patterns.push(pattern);
+            }
+            Err(fault) => diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: "variables.ignore".into(),
+                message: pattern_fault_message(raw, fault),
+            }),
+        }
+    }
+    for pattern in &patterns {
+        if !pattern_matches_any(pattern, current) && !pattern_matches_any(pattern, desired) {
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                path: "variables.ignore".into(),
+                message: format!(
+                    "variables.ignore pattern \"{}\" matches no variable.",
+                    pattern.raw
+                ),
+            });
+        }
+    }
+    CompiledVariables {
+        managed: policy.managed,
+        parse_error: false,
+        patterns,
+        diagnostics,
+    }
+}
+
+fn parse_pattern(raw: &str) -> Result<ParsedPattern, PatternFault> {
+    if raw.is_empty() {
+        return Err(PatternFault::Empty);
+    }
+    if raw.matches('/').count() > 1 {
+        return Err(PatternFault::Slash);
+    }
+    if let Some((service, key)) = raw.split_once('/') {
+        if service.is_empty() || key.is_empty() {
+            return Err(PatternFault::EmptyKey);
+        }
+        return Ok(ParsedPattern {
+            raw: raw.to_string(),
+            service: Some(service.to_string()),
+            glob: key.to_string(),
+        });
+    }
+    Ok(ParsedPattern {
+        raw: raw.to_string(),
+        service: None,
+        glob: raw.to_string(),
+    })
+}
+
+fn pattern_fault_message(raw: &str, fault: PatternFault) -> String {
+    match fault {
+        PatternFault::Empty => "variables.ignore contains an empty pattern.".into(),
+        PatternFault::Slash => {
+            format!("variables.ignore pattern \"{raw}\" has more than one '/'.")
+        }
+        PatternFault::EmptyKey => {
+            format!("variables.ignore pattern \"{raw}\" has an empty key.")
+        }
+    }
+}
+
+fn resource_names(current: &RailwayGraph, desired: &RailwayGraph) -> HashSet<String> {
+    current
+        .resources
+        .iter()
+        .chain(desired.resources.iter())
+        .map(|resource| resource_name(resource).to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn pattern_matches_any(pattern: &ParsedPattern, graph: &RailwayGraph) -> bool {
+    graph.resources.iter().any(|resource| {
+        let name = resource_name(resource);
+        resource
+            .get("variables")
+            .and_then(Value::as_object)
+            .is_some_and(|vars| vars.keys().any(|key| pattern.matches(name, key)))
+    })
+}
+
+fn count_matches(pattern: &ParsedPattern, graph: &RailwayGraph) -> usize {
+    graph
+        .resources
+        .iter()
+        .map(|resource| {
+            let name = resource_name(resource);
+            resource
+                .get("variables")
+                .and_then(Value::as_object)
+                .map(|vars| vars.keys().filter(|key| pattern.matches(name, key)).count())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn count_ignored(patterns: &[ParsedPattern], graph: &RailwayGraph) -> usize {
+    graph
+        .resources
+        .iter()
+        .map(|resource| {
+            let name = resource_name(resource);
+            resource
+                .get("variables")
+                .and_then(Value::as_object)
+                .map(|vars| {
+                    vars.keys()
+                        .filter(|key| patterns.iter().any(|pattern| pattern.matches(name, key)))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn first_match<'a>(patterns: &'a [ParsedPattern], name: &str, key: &str) -> Option<&'a str> {
+    patterns
+        .iter()
+        .find(|pattern| pattern.matches(name, key))
+        .map(|pattern| pattern.raw.as_str())
+}
+
+fn has_variables_object(resource: &Value) -> bool {
+    resource.get("variables").is_some_and(Value::is_object)
+}
+
+fn filtered_variables(
+    variables: Option<&Value>,
+    patterns: &[ParsedPattern],
+    name: &str,
+) -> Map<String, Value> {
+    variables
+        .and_then(Value::as_object)
+        .map(|vars| {
+            vars.iter()
+                .filter(|(key, _)| first_match(patterns, name, key).is_none())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn non_ignored_keys(
+    variables: Option<&Value>,
+    patterns: &[ParsedPattern],
+    name: &str,
+) -> Vec<String> {
+    let mut keys: Vec<String> = variables
+        .and_then(Value::as_object)
+        .map(|vars| {
+            vars.keys()
+                .filter(|key| first_match(patterns, name, key).is_none())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn missing_env_message(name: &str, keys: &[String]) -> String {
+    let list = if keys.len() > 8 {
+        format!(
+            "{}\u{2026}",
+            keys.iter()
+                .take(8)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        keys.join(", ")
+    };
+    format!(
+        "{name} declares no env but Railway has {} variables ({list}). Declare them, mark them preserve(), or add them to variables.ignore.",
+        keys.len()
+    )
+}
+
+fn diagnose_variable_declarations(
+    resource: &Value,
+    policy: &CompiledVariables,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if policy.parse_error {
+        return;
+    }
+    let Some(vars) = resource.get("variables").and_then(Value::as_object) else {
+        return;
+    };
+    if !policy.managed {
+        if resource_type(resource) == "service" {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables", resource_addr(resource)),
+                message: format!(
+                    "Variables are unmanaged (project variables.managed is false). Remove env from {} or set managed: true.",
+                    resource_name(resource)
+                ),
+            });
+        }
+        return;
+    }
+    for key in vars.keys() {
+        if let Some(pattern) = first_match(&policy.patterns, resource_name(resource), key) {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables.{key}", resource_addr(resource)),
+                message: format!(
+                    "{}.{} is declared and also ignored by \"{pattern}\".",
+                    resource_name(resource),
+                    key
+                ),
+            });
+        }
+    }
+}
+
+fn without_ignored_variables(resource: &Value, policy: &CompiledVariables) -> Value {
+    if !policy.managed || policy.parse_error {
+        return resource.clone();
+    }
+    let mut resource = resource.clone();
+    let name = resource_name(&resource).to_string();
+    let empty = resource
+        .get("variables")
+        .and_then(Value::as_object)
+        .is_some_and(|vars| {
+            vars.keys()
+                .all(|key| first_match(&policy.patterns, &name, key).is_some())
+        });
+    if let Some(vars) = resource.get_mut("variables").and_then(Value::as_object_mut) {
+        vars.retain(|key, _| first_match(&policy.patterns, &name, key).is_none());
+    }
+    if empty {
+        if let Some(obj) = resource.as_object_mut() {
+            obj.remove("variables");
+        }
+    }
+    resource
+}
+
+/// `*` is the only metacharacter and matches any run of characters, including
+/// empty. The match is case-sensitive and covers the whole key.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut p = 0;
+    let mut t = 0;
+    let mut star_p = None;
+    let mut star_t = 0;
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == text[t] {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star_p = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
 fn diff_variables(
     previous: &Value,
     resource: &Value,
     changes: &mut Vec<Value>,
     resources_by_address: &Map<String, Value>,
     reveal_values: bool,
+    policy: &CompiledVariables,
+    diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if policy.parse_error || !policy.managed {
+        return;
+    }
+    let name = resource_name(resource);
+    // Template databases do not carry variables on the imported graph. Only
+    // services are asked to declare env; a database with no variables key
+    // keeps today's diff, which sees nothing to delete.
+    if resource_type(resource) == "service" && !has_variables_object(resource) {
+        let keys = non_ignored_keys(previous.get("variables"), &policy.patterns, name);
+        if !keys.is_empty() {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables", resource_addr(resource)),
+                message: missing_env_message(name, &keys),
+            });
+        }
+        return;
+    }
     if previous.get("variables").is_none() && resource.get("variables").is_none() {
         return;
     }
-    let before = previous
-        .get("variables")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let after = resource
-        .get("variables")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let before = filtered_variables(previous.get("variables"), &policy.patterns, name);
+    let after = filtered_variables(resource.get("variables"), &policy.patterns, name);
     for (key, value) in &after {
         if is_preserved_variable(value) {
             continue;

@@ -3,8 +3,8 @@ use serde_json::{Map, Value, json};
 use crate::controllers::database_engines::parse_image_ref;
 
 use super::graph::{
-    Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, resource_addr,
-    resource_address, resource_name, resource_type,
+    Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicy,
+    resource_addr, resource_address, resource_name, resource_type,
 };
 use super::json::{field, field_str, prune_empty};
 
@@ -39,6 +39,9 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
             .get("resources")
             .or_else(|| definition.get("services")),
     );
+    for resource in &mut resources {
+        normalize_resource_env(resource);
+    }
     let mut seen: std::collections::HashSet<String> = resources.iter().map(resource_addr).collect();
 
     for resource in resources.clone() {
@@ -120,6 +123,7 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
                 .unwrap_or("imported-project")
                 .to_string(),
         },
+        variables: variable_policy(definition),
         environments: definition
             .get("environments")
             .and_then(Value::as_array)
@@ -136,6 +140,99 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
             .unwrap_or_default(),
         resources,
         edges,
+    }
+}
+
+/// Authoring files say `env`; the graph and the diff speak `variables`.
+/// A missing key stays missing so an omitted env is not an empty map.
+pub(crate) fn normalize_resource_env(resource: &mut Value) {
+    let Some(obj) = resource.as_object_mut() else {
+        return;
+    };
+    let Some(env) = obj.remove("env") else {
+        return;
+    };
+    if obj.contains_key("variables") {
+        return;
+    }
+    obj.insert("variables".to_string(), coerce_env_map(env));
+}
+
+fn coerce_env_map(value: Value) -> Value {
+    let Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = Map::new();
+    for (key, value) in map {
+        let value = match value {
+            Value::String(text) => json!({ "type": "literal", "value": text }),
+            other => other,
+        };
+        out.insert(key, value);
+    }
+    Value::Object(out)
+}
+
+fn variable_policy(definition: &Value) -> VariablePolicy {
+    let Some(raw) = definition.get("variables") else {
+        return VariablePolicy::default();
+    };
+    if raw.is_null() {
+        return VariablePolicy::default();
+    }
+    let Some(obj) = raw.as_object() else {
+        return VariablePolicy {
+            managed: true,
+            ignore: Vec::new(),
+            default: false,
+            error: Some("project.variables must be an object with managed and ignore".into()),
+        };
+    };
+    let managed = match obj.get("managed") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return VariablePolicy {
+                managed: true,
+                ignore: Vec::new(),
+                default: false,
+                error: Some("project.variables.managed must be a boolean".into()),
+            };
+        }
+    };
+    let ignore = match obj.get("ignore") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => {
+            let mut ignore = Vec::new();
+            for item in items {
+                match item.as_str() {
+                    Some(pattern) => ignore.push(pattern.to_string()),
+                    None => {
+                        return VariablePolicy {
+                            managed,
+                            ignore: Vec::new(),
+                            default: false,
+                            error: Some("project.variables.ignore entries must be strings".into()),
+                        };
+                    }
+                }
+            }
+            ignore
+        }
+        Some(_) => {
+            return VariablePolicy {
+                managed,
+                ignore: Vec::new(),
+                default: false,
+                error: Some("project.variables.ignore must be an array of strings".into()),
+            };
+        }
+    };
+    VariablePolicy {
+        managed,
+        ignore,
+        default: false,
+        error: None,
     }
 }
 
