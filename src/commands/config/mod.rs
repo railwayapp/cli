@@ -2363,6 +2363,25 @@ mod tests {
     }
 
     #[test]
+    fn pull_renderer_keeps_pre_deploy_timeout_in_the_deploy_block() {
+        let resource = service_resource(
+            json!({ "image": "ghcr.io/acme/web:1" }),
+            json!({ "preDeployCommand": ["npm run migrate"], "preDeployTimeoutSeconds": 600 }),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+
+        assert!(rendered.contains("preDeploy: \"npm run migrate\""));
+        assert!(rendered.contains("preDeployTimeoutSeconds: 600"));
+    }
+
+    #[test]
     fn pull_renderer_preserves_registry_credentials_for_image_sources() {
         let resource = service_resource(
             json!({ "image": "ghcr.io/acme/private:latest" }),
