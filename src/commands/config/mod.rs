@@ -1,4 +1,5 @@
 mod authoring;
+mod environment;
 mod migrate;
 mod partials;
 mod runner;
@@ -58,6 +59,10 @@ struct SharedArgs {
     /// Path to the Railway configuration file. Defaults to nearest .railway/railway.{ts,py,go}.
     #[clap(long)]
     file: Option<PathBuf>,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    environment: Option<String>,
 
     /// Output raw runner JSON.
     #[clap(long)]
@@ -139,6 +144,10 @@ struct PullArgs {
     /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    environment: Option<String>,
 
     /// Output raw imported graph JSON instead of writing files.
     #[clap(long)]
@@ -336,7 +345,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
             args.force,
         )?,
         InitMode::ImportFromRailway => {
-            write_pulled_config(&railway_file, args.force, None, true, false).await?
+            write_pulled_config(&railway_file, args.force, None, true, false, None).await?
         }
         InitMode::MinimalFile => write_new(
             &railway_file,
@@ -448,7 +457,8 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
 
     if args.json {
-        let graph = load_current_graph(args.runner, args.include_variables).await?;
+        let graph =
+            load_current_graph(args.runner, args.include_variables, args.environment).await?;
         println!("{}", serde_json::to_string_pretty(&graph)?);
         return Ok(());
     }
@@ -460,6 +470,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         args.runner,
         !args.omit_preserved_variables,
         args.include_variables,
+        args.environment,
     )
     .await?;
     let wrote_readme = write_asset_if_missing(&readme_file, &iac_readme(lang))?;
@@ -506,8 +517,9 @@ async fn write_pulled_config(
     runner: Option<String>,
     preserve_variables: bool,
     include_variables: bool,
+    environment: Option<String>,
 ) -> Result<()> {
-    let graph = load_current_graph(runner, include_variables).await?;
+    let graph = load_current_graph(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
@@ -519,6 +531,7 @@ async fn write_pulled_config(
 async fn load_current_graph(
     runner: Option<String>,
     decrypt_variables: bool,
+    environment: Option<String>,
 ) -> Result<runner::DesiredGraph> {
     // The native engine's `current` command reads live state and does not
     // evaluate an authoring file. The legacy TypeScript runner still requires
@@ -546,6 +559,7 @@ async fn load_current_graph(
         out: None,
         plan: None,
         source_tree: None,
+        environment,
     };
     let response = runner::run(&args, "current").await?;
     drop(temp_dir);
@@ -1888,6 +1902,7 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         out: args.out,
         plan: args.plan,
         source_tree: args.source_tree,
+        environment: args.environment,
     })
     .await
 }
