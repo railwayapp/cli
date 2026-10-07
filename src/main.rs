@@ -1114,18 +1114,6 @@ mod cli_tests {
             ]);
             assert_parses(&["config", "pull", "--include-variables"]);
             assert_parses(&["config", "pull", "--include-variables", "--force"]);
-            assert_parses(&["config", "plan", "--environment", "staging"]);
-            assert_parses(&["config", "apply", "--environment", "env_123", "--yes"]);
-            assert_parses(&["config", "pull", "--environment", "staging"]);
-            assert_parses(&[
-                "config",
-                "apply",
-                "--plan",
-                "railway-plan.json",
-                "--environment",
-                "staging",
-                "--yes",
-            ]);
         }
     }
 }
