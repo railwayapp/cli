@@ -23,6 +23,8 @@ use crate::{
     util::prompt::prompt_confirm_with_default,
 };
 
+use super::authoring::AuthoringLang;
+use super::runner;
 use super::*;
 
 #[derive(Parser)]
@@ -150,8 +152,28 @@ async fn generate(args: MigrateArgs) -> Result<()> {
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let services = discover_cac_services(&cwd, args.service.as_deref()).await?;
-    let project_name = project_name_for_emit(&cwd, &services).await;
+    // Same import pull uses: no decryption, so variables render as preserve().
+    let mut graph = load_current_graph(None, false).await?;
+    if graph
+        .project
+        .as_ref()
+        .is_none_or(|project| project.name.trim().is_empty())
+    {
+        graph.project = Some(runner::DesiredProject {
+            name: project_name_for_emit(&cwd, &services).await,
+        });
+    }
+    let project_name = graph
+        .project
+        .as_ref()
+        .map(|project| project.name.clone())
+        .unwrap_or_default();
     let named_partial = services.len() == 1;
+    let lang = match args.lang.as_str() {
+        "py" => AuthoringLang::Python,
+        "go" => AuthoringLang::Go,
+        _ => AuthoringLang::TypeScript,
+    };
 
     let railway_dir = cwd.join(".railway");
     let ext = match args.lang.as_str() {
@@ -160,11 +182,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         _ => "ts",
     };
     let railway_file = railway_dir.join(format!("railway.{ext}"));
-    let emitted = match args.lang.as_str() {
-        "py" => emit_railway_py(&project_name, &services, named_partial),
-        "go" => emit_railway_go(&project_name, &services, named_partial),
-        _ => emit_railway_ts(&project_name, &services, named_partial),
-    };
+    let emitted = render_migrated(&graph, &services, lang, named_partial);
 
     // `--show` prints just the file so `migrate --show > out.ts` works.
     if args.show && !args.apply {
@@ -746,252 +764,314 @@ fn guess_service_name(cwd: &Path, cac_path: &Path) -> String {
         .unwrap_or_else(|| "web".to_string())
 }
 
-fn emit_railway_py(project_name: &str, services: &[CacService], named_partial: bool) -> String {
-    let mut stmts = Vec::new();
-    let mut idents = Vec::new();
-    for service in services {
-        let ident = service_ident(&service.name, &idents);
-        let mut kwargs = Vec::new();
-        if let Some(cmd) = &service.cac.build.build_command {
-            kwargs.push(format!("        build={}", js_string(cmd)));
-        }
-        if let Some(cmd) = &service.cac.deploy.start_command {
-            kwargs.push(format!("        start={}", js_string(cmd)));
-        }
-        if let Some(path) = &service.cac.deploy.healthcheck_path {
-            kwargs.push(format!("        healthcheck={}", js_string(path)));
-        }
-        stmts.push(if kwargs.is_empty() {
-            format!("    {ident} = service({})", js_string(&service.name))
-        } else {
-            format!(
-                "    {ident} = service(\n        {},\n{},\n    )",
-                js_string(&service.name),
-                kwargs.join(",\n")
-            )
-        });
-        idents.push(ident);
-    }
-    let partial = if named_partial {
-        format!(
-            "\n# This repository manages only its own resources in the environment. Other\n# repositories export their own partial name.\n# See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nPARTIAL = {}\n",
-            js_string(&services[0].name)
-        )
+fn render_migrated(
+    graph: &runner::DesiredGraph,
+    services: &[CacService],
+    lang: AuthoringLang,
+    named_partial: bool,
+) -> String {
+    let services = if named_partial {
+        &services[..services.len().min(1)]
     } else {
-        String::new()
+        services
     };
-    format!(
-        r#"from railway_sdk import define_railway, project, service
-{partial}
-@define_railway
-def main(ctx=None):
-{stmts}
-    return project({project}, resources=[{resources}])
-"#,
-        stmts = stmts.join("\n"),
-        project = js_string(project_name),
-        resources = idents.join(", "),
-    )
+    let mut graph = graph.clone();
+    if named_partial {
+        if let Some(service) = services.first() {
+            let name = service.name.clone();
+            graph
+                .resources
+                .retain(|resource| resource.r#type == "service" && resource.name == name);
+            for resource in &mut graph.resources {
+                resource.group_id = None;
+                resource.volume_attachments = None;
+            }
+        }
+    }
+
+    let mut bare_replicas = Vec::new();
+    for service in services {
+        if let Some(count) = overlay_cac_service(&mut graph, service) {
+            bare_replicas.push((service.name.clone(), count));
+        }
+    }
+
+    let mut rendered = render_graph_as_railway(&graph, true, lang);
+    rendered = inject_cac_lines(&rendered, services, &bare_replicas, lang);
+    if let Some(service) = named_partial.then(|| services.first()).flatten() {
+        rendered = insert_partial(&rendered, lang, &service.name);
+    }
+    rendered
 }
 
-fn emit_railway_go(project_name: &str, services: &[CacService], named_partial: bool) -> String {
-    let mut stmts = Vec::new();
-    let mut idents = Vec::new();
-    for service in services {
-        let ident = service_ident(&service.name, &idents);
-        let mut fields = Vec::new();
-        if let Some(cmd) = &service.cac.build.build_command {
-            fields.push(format!("\t\t\"build\": {},", js_string(cmd)));
-        }
-        if let Some(cmd) = &service.cac.deploy.start_command {
-            fields.push(format!("\t\t\"start\": {},", js_string(cmd)));
-        }
-        if let Some(path) = &service.cac.deploy.healthcheck_path {
-            fields.push(format!("\t\t\"healthcheck\": {},", js_string(path)));
-        }
-        let config_block = if fields.is_empty() {
-            "nil".to_string()
-        } else {
-            format!("railway.ServiceConfig{{\n{}\n\t}}", fields.join("\n"))
-        };
-        stmts.push(format!(
-            "\t{ident} := railway.ServiceNamed({}, {config_block})",
-            js_string(&service.name)
-        ));
-        idents.push(ident);
+fn new_service(name: &str) -> runner::DesiredResource {
+    runner::DesiredResource {
+        address: Some(format!("service.{name}")),
+        r#type: "service".into(),
+        name: name.to_string(),
+        engine: None,
+        variables: None,
+        source: None,
+        build: None,
+        deploy: None,
+        networking: None,
+        volume_attachments: None,
+        config: None,
+        group_id: None,
+        tracing: None,
     }
-    let partial = if named_partial {
-        format!(
-            "\n// This repository manages only its own resources in the environment. Other\n// repositories export their own partial name.\n// See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nconst Partial = {}\n",
-            js_string(&services[0].name)
-        )
-    } else {
-        String::new()
-    };
-    let resources = idents.join(", ");
-    format!(
-        r#"package main
-
-import "github.com/railwayapp/railway-go-sdk"
-{partial}
-func Railway(ctx railway.Context) railway.Project {{
-	ctx = railway.NewContext(ctx)
-{stmts}
-	return railway.ProjectNamed({project}, []any{{{resources}}})
-}}
-"#,
-        stmts = stmts.join("\n"),
-        project = js_string(project_name),
-    )
 }
 
-fn emit_service_fields(cac: &CacFile) -> Vec<String> {
-    let mut fields: Vec<String> = Vec::new();
+/// Returns a bare replica count the pull renderer cannot emit (`replicas: N`
+/// with no region). Region placement is written onto the graph instead.
+fn overlay_cac_service(graph: &mut runner::DesiredGraph, service: &CacService) -> Option<i64> {
+    let mut matched = false;
+    let mut bare_replicas = None;
+    for resource in graph
+        .resources
+        .iter_mut()
+        .filter(|resource| resource.r#type == "service" && resource.name == service.name)
+    {
+        matched = true;
+        bare_replicas = apply_cac_fields(resource, &service.cac);
+    }
+    if !matched {
+        let mut resource = new_service(&service.name);
+        bare_replicas = apply_cac_fields(&mut resource, &service.cac);
+        graph.resources.push(resource);
+    }
+    bare_replicas
+}
+
+fn apply_cac_fields(resource: &mut runner::DesiredResource, cac: &CacFile) -> Option<i64> {
     if let Some(cmd) = &cac.build.build_command {
-        fields.push(format!("    build: {},", js_string(cmd)));
+        object_mut(&mut resource.build).insert("buildCommand".into(), json!(cmd));
     }
+    if !cac_has_deploy_fields(&cac.deploy) {
+        return None;
+    }
+    let deploy = object_mut(&mut resource.deploy);
     if let Some(cmd) = &cac.deploy.start_command {
-        fields.push(format!("    start: {},", js_string(cmd)));
+        deploy.insert("startCommand".into(), json!(cmd));
     }
     if let Some(path) = &cac.deploy.healthcheck_path {
-        fields.push(format!("    healthcheck: {},", js_string(path)));
+        deploy.insert("healthcheckPath".into(), json!(path));
     }
     if let Some(timeout) = cac.deploy.healthcheck_timeout {
-        fields.push(format!("    healthcheckTimeout: {timeout},"));
-    }
-    if let Some(replicas) = cac.deploy.num_replicas {
-        fields.push(format!("    replicas: {replicas},"));
-    }
-    if let Some(regions) = &cac.deploy.multi_region_config {
-        fields.push(format!("    replicas: {},", json_to_ts(regions)));
-    } else if let Some(region) = &cac.deploy.region {
-        fields.push(format!("    replicas: {{ {}: 1 }},", js_string(region)));
+        deploy.insert("healthcheckTimeout".into(), json!(timeout));
     }
     if let Some(pre) = &cac.deploy.pre_deploy_command {
-        let rendered = match pre {
-            JsonValue::Array(items) if items.len() == 1 && items[0].is_string() => {
-                js_string(items[0].as_str().unwrap_or_default())
-            }
-            JsonValue::String(cmd) => js_string(cmd),
-            other => json_to_ts(other),
-        };
-        fields.push(format!("    preDeploy: {rendered},"));
+        deploy.insert("preDeployCommand".into(), pre.clone());
     }
     if let Some(timeout) = cac.deploy.pre_deploy_timeout_seconds {
-        fields.push(format!(
-            "    deploy: {{ preDeployTimeoutSeconds: {timeout} }},"
-        ));
+        deploy.insert("preDeployTimeoutSeconds".into(), json!(timeout));
     }
+    apply_replica_fields(deploy, &cac.deploy)
+}
+
+fn cac_has_deploy_fields(deploy: &CacDeploy) -> bool {
+    deploy.start_command.is_some()
+        || deploy.pre_deploy_command.is_some()
+        || deploy.pre_deploy_timeout_seconds.is_some()
+        || deploy.healthcheck_path.is_some()
+        || deploy.healthcheck_timeout.is_some()
+        || deploy.num_replicas.is_some()
+        || deploy.region.is_some()
+        || deploy.multi_region_config.is_some()
+}
+
+fn apply_replica_fields(
+    deploy: &mut serde_json::Map<String, JsonValue>,
+    cac: &CacDeploy,
+) -> Option<i64> {
+    if let Some(regions) = &cac.multi_region_config {
+        deploy.insert("multiRegionConfig".into(), regions.clone());
+        deploy.remove("numReplicas");
+        return None;
+    }
+    if let Some(region) = &cac.region {
+        deploy.insert(
+            "multiRegionConfig".into(),
+            json!({ region: { "numReplicas": 1 } }),
+        );
+        deploy.remove("numReplicas");
+        return None;
+    }
+    let Some(count) = cac.num_replicas else {
+        return None;
+    };
+    if let Some(regions) = deploy
+        .get("multiRegionConfig")
+        .and_then(JsonValue::as_object)
+        .cloned()
+    {
+        let mut regions = regions;
+        for config in regions.values_mut() {
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert("numReplicas".into(), json!(count));
+            }
+        }
+        deploy.insert("multiRegionConfig".into(), JsonValue::Object(regions));
+        deploy.remove("numReplicas");
+        return None;
+    }
+    deploy.remove("numReplicas");
+    Some(count)
+}
+
+fn object_mut(slot: &mut Option<JsonValue>) -> &mut serde_json::Map<String, JsonValue> {
+    if slot.as_ref().and_then(JsonValue::as_object).is_none() {
+        *slot = Some(json!({}));
+    }
+    slot.as_mut().unwrap().as_object_mut().unwrap()
+}
+
+fn cac_extra_lines(cac: &CacFile, replicas: Option<i64>, lang: AuthoringLang) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(count) = replicas {
+        lines.push(lang.config_field("replicas", &count.to_string()));
+    }
+    let comment = |text: String| match lang {
+        AuthoringLang::TypeScript => format!("    // {text}"),
+        AuthoringLang::Python => format!("        # {text}"),
+        AuthoringLang::Go => format!("\t\t// {text}"),
+    };
     if let Some(dockerfile) = &cac.build.dockerfile_path {
-        fields.push(format!(
-            "    // dockerfilePath from CaC: {}",
+        lines.push(comment(format!(
+            "dockerfilePath from CaC: {}",
             js_string(dockerfile)
-        ));
+        )));
     }
     if let Some(builder) = &cac.build.builder {
-        fields.push(format!("    // builder from CaC: {}", js_string(builder)));
+        lines.push(comment(format!("builder from CaC: {}", js_string(builder))));
     }
     if let Some(cron) = &cac.deploy.cron_schedule {
-        fields.push(format!("    // cronSchedule from CaC: {}", js_string(cron)));
+        lines.push(comment(format!(
+            "cronSchedule from CaC: {}",
+            js_string(cron)
+        )));
     }
     if let Some(watch) = &cac.build.watch_patterns {
         let arr = watch
             .iter()
-            .map(|p| js_string(p))
+            .map(|pattern| js_string(pattern))
             .collect::<Vec<_>>()
             .join(", ");
-        fields.push(format!("    // watchPatterns from CaC: [{arr}]"));
+        lines.push(comment(format!("watchPatterns from CaC: [{arr}]")));
     }
-    fields
+    lines
 }
 
-fn emit_railway_ts(project_name: &str, services: &[CacService], named_partial: bool) -> String {
-    let mut stmts = Vec::new();
-    let mut idents = Vec::new();
+fn inject_cac_lines(
+    rendered: &str,
+    services: &[CacService],
+    bare_replicas: &[(String, i64)],
+    lang: AuthoringLang,
+) -> String {
+    let mut out = rendered.to_string();
     for service in services {
-        let ident = service_ident(&service.name, &idents);
-        let fields = emit_service_fields(&service.cac);
-        stmts.push(if fields.is_empty() {
-            format!("  const {ident} = service({});", js_string(&service.name))
-        } else {
-            format!(
-                "  const {ident} = service({}, {{\n{}\n  }});",
-                js_string(&service.name),
-                fields.join("\n")
-            )
-        });
-        idents.push(ident);
+        let replicas = bare_replicas
+            .iter()
+            .find(|(name, _)| name == &service.name)
+            .map(|(_, count)| *count);
+        let lines = cac_extra_lines(&service.cac, replicas, lang);
+        if lines.is_empty() {
+            continue;
+        }
+        out = insert_service_lines(&out, &js_string(&service.name), &lines, lang);
     }
-    let partial = if named_partial {
-        format!(
-            "\n// This repository manages only its own resources in the environment. Other\n// repositories export their own partial name.\n// See https://docs.railway.com/infrastructure-as-code#multi-repo-projects\nexport const partial = {};\n",
-            js_string(&services[0].name)
-        )
-    } else {
-        String::new()
-    };
+    out
+}
+
+fn insert_service_lines(
+    rendered: &str,
+    lit: &str,
+    lines: &[String],
+    lang: AuthoringLang,
+) -> String {
+    let block = lines.join("\n");
+    match lang {
+        AuthoringLang::TypeScript => {
+            let with_body = format!("service({lit}, {{");
+            if let Some(idx) = rendered.find(&with_body) {
+                return insert_after(rendered, idx + with_body.len(), &block);
+            }
+            let bare = format!("service({lit})");
+            rendered.replacen(&bare, &format!("service({lit}, {{\n{block}\n  }})"), 1)
+        }
+        AuthoringLang::Python => {
+            let with_body = format!("service(\n        {lit},");
+            if let Some(idx) = rendered.find(&with_body) {
+                return insert_after(rendered, idx + with_body.len(), &block);
+            }
+            let bare = format!("service({lit})");
+            rendered.replacen(
+                &bare,
+                &format!("service(\n        {lit},\n{block}\n    )"),
+                1,
+            )
+        }
+        AuthoringLang::Go => {
+            let with_body = format!("railway.ServiceNamed({lit}, railway.ServiceConfig{{");
+            if let Some(idx) = rendered.find(&with_body) {
+                return insert_after(rendered, idx + with_body.len(), &block);
+            }
+            let bare = format!("railway.ServiceNamed({lit}, nil)");
+            rendered.replacen(
+                &bare,
+                &format!("railway.ServiceNamed({lit}, railway.ServiceConfig{{\n{block}\n  }})"),
+                1,
+            )
+        }
+    }
+}
+
+fn insert_after(rendered: &str, at: usize, block: &str) -> String {
+    let mut out = String::with_capacity(rendered.len() + block.len() + 1);
+    out.push_str(&rendered[..at]);
+    out.push('\n');
+    out.push_str(block);
+    out.push_str(&rendered[at..]);
+    out
+}
+
+fn partial_note(prefix: &str) -> String {
     format!(
-        r#"import {{ defineRailway, project, service }} from "railway/iac";
-{partial}
-export default defineRailway(() => {{
-{body}
-  return project({project}, {{
-    resources: [{resources}],
-  }});
-}});
-"#,
-        body = stmts.join("\n"),
-        project = js_string(project_name),
-        resources = idents.join(", "),
+        "{prefix} This repository manages only its own resources in the environment. Other\n{prefix} repositories export their own partial name.\n{prefix} See https://docs.railway.com/infrastructure-as-code#multi-repo-projects"
     )
 }
 
-fn service_ident(name: &str, taken: &[String]) -> String {
-    let mut ident: String = name
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    if ident.is_empty() || ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        ident = format!("service_{ident}");
+fn insert_partial(rendered: &str, lang: AuthoringLang, name: &str) -> String {
+    let partial = js_string(name);
+    match lang {
+        AuthoringLang::TypeScript => {
+            let block = format!(
+                "\n{}\nexport const partial = {partial};\n",
+                partial_note("//")
+            );
+            rendered.replacen(
+                "\n\nexport default defineRailway",
+                &format!("{block}export default defineRailway"),
+                1,
+            )
+        }
+        AuthoringLang::Python => {
+            let block = format!("\n{}\nPARTIAL = {partial}\n", partial_note("#"));
+            rendered.replacen(
+                "\n\n\n@define_railway",
+                &format!("{block}@define_railway"),
+                1,
+            )
+        }
+        AuthoringLang::Go => {
+            let block = format!("\n{}\nconst Partial = {partial}\n", partial_note("//"));
+            rendered.replacen("\n\nfunc Railway", &format!("{block}func Railway"), 1)
+        }
     }
-    if matches!(
-        ident.as_str(),
-        "service" | "project" | "default" | "package" | "func" | "main"
-    ) {
-        ident = format!("{ident}_service");
-    }
-    let base = ident.clone();
-    let mut n = 2;
-    while taken.contains(&ident) {
-        ident = format!("{base}_{n}");
-        n += 1;
-    }
-    ident
 }
 
 fn js_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("{:?}", value))
-}
-
-fn json_to_ts(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Object(map) => {
-            let fields = map
-                .iter()
-                .map(|(k, v)| format!("{}: {}", js_string(k), json_to_ts(v)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{ {fields} }}")
-        }
-        JsonValue::Array(items) => {
-            let inner = items.iter().map(json_to_ts).collect::<Vec<_>>().join(", ");
-            format!("[{inner}]")
-        }
-        JsonValue::String(s) => js_string(s),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Null => "null".to_string(),
-    }
 }
 
 // ===== Cutover / undo / status =====
@@ -1507,6 +1587,25 @@ mod tests {
         }
     }
 
+    fn emit(
+        project: &str,
+        services: &[CacService],
+        lang: AuthoringLang,
+        named_partial: bool,
+    ) -> String {
+        render_migrated(
+            &runner::DesiredGraph {
+                project: Some(runner::DesiredProject {
+                    name: project.to_string(),
+                }),
+                resources: Vec::new(),
+            },
+            services,
+            lang,
+            named_partial,
+        )
+    }
+
     #[test]
     fn normalizes_config_file_paths_relative_to_root() {
         let root = Path::new("/repo");
@@ -1551,16 +1650,16 @@ mod tests {
             },
         };
         let services = [svc("api", cac)];
-        let out = emit_railway_ts("api", &services, true);
+        let out = emit("api", &services, AuthoringLang::TypeScript, true);
         assert!(out.contains("build: \"pnpm build\""));
         assert!(out.contains("start: \"pnpm start\""));
         assert!(out.contains("healthcheck: \"/health\""));
         assert!(out.contains("service(\"api\""));
         assert!(out.contains("export const partial = \"api\""));
-        let py = emit_railway_py("api", &services, true);
+        let py = emit("api", &services, AuthoringLang::Python, true);
         assert!(py.contains("from railway_sdk import"));
         assert!(py.contains("PARTIAL = \"api\""));
-        let go = emit_railway_go("api", &services, true);
+        let go = emit("api", &services, AuthoringLang::Go, true);
         assert!(go.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(go.contains("railway.ServiceNamed"));
         assert!(go.contains("const Partial = \"api\""));
@@ -1577,7 +1676,7 @@ mod tests {
             ..Default::default()
         };
         let services = [svc("api", cac)];
-        let out = emit_railway_ts("api", &services, true);
+        let out = emit("api", &services, AuthoringLang::TypeScript, true);
         assert!(out.contains("preDeploy: \"npx prisma migrate deploy\""));
         assert!(!out.contains("// preDeployCommand from CaC"));
     }
@@ -1593,7 +1692,7 @@ mod tests {
             ..Default::default()
         };
         let services = [svc("api", cac)];
-        let out = emit_railway_ts("api", &services, true);
+        let out = emit("api", &services, AuthoringLang::TypeScript, true);
         assert!(out.contains("deploy: { preDeployTimeoutSeconds: 600 }"));
     }
 
@@ -1619,7 +1718,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = emit_railway_ts("acme", &[web, api], false);
+        let out = emit("acme", &[web, api], AuthoringLang::TypeScript, false);
         assert!(out.contains("service(\"web\""));
         assert!(out.contains("service(\"api\""));
         assert!(out.contains("project(\"acme\""));
@@ -1712,5 +1811,192 @@ healthcheckPath = "/"
         fs::create_dir_all(&railway).unwrap();
         fs::write(railway.join("railway.ts"), "export default {}").unwrap();
         assert_eq!(find_authoring_file(cwd), Some(railway.join("railway.ts")));
+    }
+
+    fn preserve(keys: &[&str]) -> Option<serde_json::Map<String, JsonValue>> {
+        Some(
+            keys.iter()
+                .map(|key| (key.to_string(), json!({"type": "preserve"})))
+                .collect(),
+        )
+    }
+
+    fn graph_resource(
+        kind: &str,
+        name: &str,
+        engine: Option<&str>,
+        source: Option<JsonValue>,
+        variables: Option<serde_json::Map<String, JsonValue>>,
+    ) -> runner::DesiredResource {
+        runner::DesiredResource {
+            address: Some(format!("{kind}.{name}")),
+            r#type: kind.to_string(),
+            name: name.to_string(),
+            engine: engine.map(str::to_string),
+            variables,
+            source,
+            build: None,
+            deploy: None,
+            networking: None,
+            volume_attachments: None,
+            config: None,
+            group_id: None,
+            tracing: None,
+        }
+    }
+
+    fn pulled_graph() -> runner::DesiredGraph {
+        runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "acme".into(),
+            }),
+            resources: vec![
+                graph_resource("database", "postgres", Some("postgres"), None, None),
+                graph_resource(
+                    "service",
+                    "metabase",
+                    None,
+                    Some(json!({"image": "metabase/metabase"})),
+                    None,
+                ),
+                graph_resource(
+                    "service",
+                    "api",
+                    None,
+                    Some(json!({"repo": "acme/api"})),
+                    preserve(&["API_KEY", "DATABASE_URL"]),
+                ),
+            ],
+        }
+    }
+
+    fn api_cac() -> CacService {
+        svc(
+            "api",
+            CacFile {
+                build: CacBuild {
+                    build_command: Some("pnpm build".into()),
+                    dockerfile_path: Some("Dockerfile.api".into()),
+                    ..Default::default()
+                },
+                deploy: CacDeploy {
+                    start_command: Some("pnpm start".into()),
+                    healthcheck_path: Some("/health".into()),
+                    ..Default::default()
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn overlays_cac_onto_the_pulled_graph_without_a_partial() {
+        let out = render_migrated(
+            &pulled_graph(),
+            &[api_cac()],
+            AuthoringLang::TypeScript,
+            false,
+        );
+        assert!(out.contains("postgres(\"postgres\")"), "{out}");
+        assert!(out.contains("image(\"metabase/metabase\")"), "{out}");
+        assert!(out.contains("service(\"api\""), "{out}");
+        let api = &out[out.find("service(\"api\"").unwrap()..];
+        assert!(api.contains("build: \"pnpm build\""), "{api}");
+        assert!(api.contains("start: \"pnpm start\""), "{api}");
+        assert!(api.contains("healthcheck: \"/health\""), "{api}");
+        assert!(api.contains("API_KEY: preserve()"), "{api}");
+        assert!(api.contains("DATABASE_URL: preserve()"), "{api}");
+        assert!(
+            api.contains("dockerfilePath from CaC: \"Dockerfile.api\""),
+            "{api}"
+        );
+        assert_eq!(out.matches("preserve()").count(), 2, "{out}");
+        assert!(!out.contains("export const partial"), "{out}");
+        assert!(!out[..out.find("service(\"api\"").unwrap()].contains("pnpm build"));
+    }
+
+    #[test]
+    fn overlays_cac_in_python_and_go() {
+        let graph = pulled_graph();
+        let services = [api_cac()];
+        let py = render_migrated(&graph, &services, AuthoringLang::Python, false);
+        assert!(py.contains("from railway_sdk import"), "{py}");
+        assert!(py.contains("def main(ctx=None):"), "{py}");
+        assert!(py.contains("postgres(\"postgres\")"), "{py}");
+        assert!(py.contains("image(\"metabase/metabase\")"), "{py}");
+        assert!(py.contains("build=\"pnpm build\""), "{py}");
+        assert!(py.contains("\"API_KEY\": preserve()"), "{py}");
+        assert!(py.contains("\"DATABASE_URL\": preserve()"), "{py}");
+        assert!(py.contains("dockerfilePath from CaC"), "{py}");
+        assert!(!py.contains("PARTIAL"), "{py}");
+
+        let go = render_migrated(&graph, &services, AuthoringLang::Go, false);
+        assert!(go.contains("package main"), "{go}");
+        assert!(go.contains("func Railway(ctx railway.Context)"), "{go}");
+        assert!(go.contains("railway.Postgres(\"postgres\")"), "{go}");
+        assert!(go.contains("railway.Image(\"metabase/metabase\")"), "{go}");
+        assert!(go.contains("railway.ServiceNamed"), "{go}");
+        assert!(go.contains("\"build\": \"pnpm build\""), "{go}");
+        assert!(go.contains("railway.Preserve()"), "{go}");
+        assert_eq!(go.matches("railway.Preserve()").count(), 2, "{go}");
+        assert!(go.contains("dockerfilePath from CaC"), "{go}");
+        assert!(!go.contains("const Partial"), "{go}");
+    }
+
+    #[test]
+    fn single_service_migrate_keeps_the_partial_and_only_that_service() {
+        let out = render_migrated(
+            &pulled_graph(),
+            &[api_cac()],
+            AuthoringLang::TypeScript,
+            true,
+        );
+        assert!(out.contains("export const partial = \"api\""), "{out}");
+        assert!(out.contains("service(\"api\""), "{out}");
+        assert!(out.contains("build: \"pnpm build\""), "{out}");
+        assert!(out.contains("API_KEY: preserve()"), "{out}");
+        assert!(!out.contains("postgres("), "{out}");
+        assert!(!out.contains("metabase"), "{out}");
+
+        let py = render_migrated(&pulled_graph(), &[api_cac()], AuthoringLang::Python, true);
+        assert!(py.contains("PARTIAL = \"api\""), "{py}");
+        assert!(!py.contains("postgres("), "{py}");
+        let go = render_migrated(&pulled_graph(), &[api_cac()], AuthoringLang::Go, true);
+        assert!(go.contains("const Partial = \"api\""), "{go}");
+        assert!(!go.contains("Postgres"), "{go}");
+    }
+
+    #[test]
+    fn adds_a_cac_service_missing_from_railway() {
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "acme".into(),
+            }),
+            resources: vec![graph_resource(
+                "database",
+                "postgres",
+                Some("postgres"),
+                None,
+                None,
+            )],
+        };
+        let out = render_migrated(
+            &graph,
+            &[svc(
+                "worker",
+                CacFile {
+                    deploy: CacDeploy {
+                        start_command: Some("node worker.js".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )],
+            AuthoringLang::TypeScript,
+            false,
+        );
+        assert!(out.contains("postgres(\"postgres\")"), "{out}");
+        assert!(out.contains("service(\"worker\""), "{out}");
+        assert!(out.contains("start: \"node worker.js\""), "{out}");
+        assert!(!out.contains("export const partial"), "{out}");
     }
 }

@@ -145,35 +145,35 @@ struct ChangeOperationResult {
     outputs: Option<Value>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DesiredGraph {
-    pub(super) project: Option<DesiredProject>,
-    pub(super) resources: Vec<DesiredResource>,
+pub(in crate::commands::config) struct DesiredGraph {
+    pub project: Option<DesiredProject>,
+    pub resources: Vec<DesiredResource>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DesiredProject {
-    pub(super) name: String,
+pub(in crate::commands::config) struct DesiredProject {
+    pub name: String,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct DesiredResource {
-    pub(super) address: Option<String>,
-    pub(super) r#type: String,
-    pub(super) name: String,
-    pub(super) engine: Option<String>,
-    pub(super) variables: Option<serde_json::Map<String, Value>>,
-    pub(super) source: Option<Value>,
-    pub(super) build: Option<Value>,
-    pub(super) deploy: Option<Value>,
-    pub(super) networking: Option<Value>,
-    pub(super) volume_attachments: Option<serde_json::Map<String, Value>>,
-    pub(super) config: Option<Value>,
-    pub(super) group_id: Option<String>,
-    pub(super) tracing: Option<Value>,
+pub(in crate::commands::config) struct DesiredResource {
+    pub address: Option<String>,
+    pub r#type: String,
+    pub name: String,
+    pub engine: Option<String>,
+    pub variables: Option<serde_json::Map<String, Value>>,
+    pub source: Option<Value>,
+    pub build: Option<Value>,
+    pub deploy: Option<Value>,
+    pub networking: Option<Value>,
+    pub volume_attachments: Option<serde_json::Map<String, Value>>,
+    pub config: Option<Value>,
+    pub group_id: Option<String>,
+    pub tracing: Option<Value>,
 }
 
 #[derive(Deserialize, serde::Serialize)]

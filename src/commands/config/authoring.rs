@@ -5,7 +5,7 @@ use std::path::Path;
 /// Never inferred from the application repo (`package.json`, `go.mod`, …).
 /// Once one of those files exists, every command that writes config must use it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AuthoringLang {
+pub(in crate::commands::config) enum AuthoringLang {
     TypeScript,
     Python,
     Go,
@@ -42,7 +42,7 @@ impl AuthoringLang {
         }
     }
 
-    pub(super) fn config_field(self, key: &str, value: &str) -> String {
+    pub(in crate::commands::config) fn config_field(self, key: &str, value: &str) -> String {
         match self {
             Self::TypeScript => format!("    {key}: {value},"),
             Self::Python => format!("        {key}={value},"),
