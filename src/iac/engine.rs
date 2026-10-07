@@ -169,10 +169,22 @@ pub async fn run(
         &file,
         &EvalContext::from_linked_project(linked_project, command),
     )?;
-    let diagnostics: Vec<Value> = validate_graph(&evaluated.graph)
-        .into_iter()
-        .map(|message| json!({ "severity": "error", "path": "graph", "message": message }))
+    let mut diagnostics: Vec<Value> = evaluated
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "severity": diagnostic.severity,
+                "path": diagnostic.path,
+                "message": diagnostic.message,
+            })
+        })
         .collect();
+    diagnostics.extend(
+        validate_graph(&evaluated.graph)
+            .into_iter()
+            .map(|message| json!({ "severity": "error", "path": "graph", "message": message })),
+    );
 
     let client = GQLClient::new_authorized(configs)?;
     let endpoint = configs.get_backboard();
