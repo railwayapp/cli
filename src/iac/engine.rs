@@ -10,10 +10,12 @@ use crate::{
     config::{Configs, LinkedProject},
 };
 
-use super::change_set::{ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set};
+use super::change_set::{
+    ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set, variable_policy_report,
+};
 use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
 use super::eval::{EvalContext, evaluate_file_with_context};
-use super::graph::validate_graph;
+use super::graph::{VariablePolicyReport, validate_graph};
 use super::partial::needs_partial_claim_apply;
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +264,7 @@ pub async fn run(
         apply_result = Some(result);
     }
 
+    let variable_policy = variable_policy_report(&current_graph, &evaluated.graph);
     let serialized = serde_json::to_value(RunnerWire {
         ok,
         command: command.to_string(),
@@ -281,6 +284,7 @@ pub async fn run(
         apply_result,
         claim,
         preview,
+        variable_policy: Some(variable_policy),
     })?;
     Ok(serialized)
 }
@@ -344,6 +348,7 @@ async fn import_current_environment(
         apply_result: None,
         claim: false,
         preview: None,
+        variable_policy: None,
     })?)
 }
 
@@ -412,6 +417,8 @@ struct RunnerWire {
     claim: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     preview: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variable_policy: Option<VariablePolicyReport>,
 }
 
 async fn fetch_current_environment(
@@ -713,6 +720,7 @@ mod tests {
             apply_result: Some(apply_result),
             claim: false,
             preview: None,
+            variable_policy: None,
         })
         .unwrap()
     }

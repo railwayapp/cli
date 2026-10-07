@@ -1112,6 +1112,398 @@ fn preserve_variable_never_plans() {
     );
 }
 
+fn graph_with_policy(resources: Vec<Value>, policy: Value) -> super::graph::RailwayGraph {
+    project_definition_to_graph(&json!({
+        "name": "app",
+        "variables": policy,
+        "resources": resources,
+    }))
+}
+
+fn variable_ops(change_set: &super::change_set::ChangeSet) -> Vec<String> {
+    change_set
+        .changes
+        .iter()
+        .filter(|change| {
+            change["kind"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("variable")
+        })
+        .map(|change| {
+            format!(
+                "{} {}:{}",
+                change["kind"].as_str().unwrap_or(""),
+                change["address"].as_str().unwrap_or(""),
+                change["variable"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ignore_patterns_are_removed_from_both_sides_before_diff() {
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_TOKEN": { "value": "a" },
+                "doppler_token": { "value": "case" },
+                "NOT_DOPPLER_TOKEN": { "value": "full" },
+                "ONLY_API": { "value": "web" },
+                "KEEP": { "value": "1" }
+            }},
+            "api": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_TOKEN": { "value": "b" },
+                "ONLY_API": { "value": "api" }
+            }}
+        }
+    }));
+    let desired = project_definition_to_graph(&super::eval::normalize_project(json!({
+        "name": "app",
+        "variables": { "managed": true, "ignore": ["DOPPLER_*", "api/ONLY_*"] },
+        "resources": [
+            service("web", json!({
+                "source": github("r"),
+                "env": {
+                    "KEEP": { "type": "literal", "value": "1" },
+                    "DOPPLER_NEW": { "type": "literal", "value": "nope" },
+                    "PUBLIC": "on"
+                }
+            })),
+            service("api", json!({ "source": github("r"), "variables": {} })),
+        ]
+    })));
+    assert!(!desired.variables.default);
+    assert_eq!(
+        desired.variables.ignore,
+        vec!["DOPPLER_*".to_string(), "api/ONLY_*".to_string()]
+    );
+    let ops = variable_ops(&diff(&current, &desired));
+    assert!(
+        !ops.iter()
+            .any(|op| { op.ends_with(":DOPPLER_TOKEN") || op.ends_with(":DOPPLER_NEW") })
+    );
+    assert!(
+        !ops.iter()
+            .any(|op| op == "variable.delete service.api:ONLY_API")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:ONLY_API")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:doppler_token")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:NOT_DOPPLER_TOKEN")
+    );
+    assert!(ops.iter().any(|op| op == "variable.set service.web:PUBLIC"));
+    assert!(!ops.iter().any(|op| op.contains("KEEP")));
+}
+
+#[test]
+fn unmanaged_variables_plan_no_sets_or_deletes() {
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": { "A": { "value": "1" }, "B": { "value": "2" } } },
+            "quiet": { "source": { "repo": "r" }, "variables": { "C": { "value": "3" } } }
+        }
+    }));
+    let desired = graph_with_policy(
+        vec![
+            service(
+                "web",
+                json!({
+                    "source": github("r"),
+                    "variables": {
+                        "A": { "type": "literal", "value": "changed" },
+                        "NEW": { "type": "literal", "value": "x" }
+                    }
+                }),
+            ),
+            service("quiet", json!({ "source": github("r") })),
+        ],
+        json!({ "managed": false, "ignore": [] }),
+    );
+    let result = diff(&current, &desired);
+    assert!(variable_ops(&result).is_empty());
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].path, "resources.service.web.variables");
+    assert_eq!(
+        errors[0].message,
+        "Variables are unmanaged (project variables.managed is false). Remove env from web or set managed: true."
+    );
+}
+
+#[test]
+fn omitted_env_errors_instead_of_deleting_explicit_empty_stays_authoritative() {
+    let current = managed_db_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": { "B": { "value": "2" }, "A": { "value": "1" } } },
+            "api": { "source": { "repo": "r" }, "variables": { "OLD": { "value": "1" }, "KEEP": { "value": "1" } } },
+            "quiet": { "source": { "repo": "r" }, "variables": { "DOPPLER_TOKEN": { "value": "x" } } },
+            "pg": {
+                "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:18" },
+                "variables": { "POSTGRES_PASSWORD": { "value": "s" }, "CUSTOM": { "value": "x" } }
+            }
+        }
+    }));
+    let pg = current
+        .resources
+        .iter()
+        .find(|resource| resource["name"] == "pg")
+        .unwrap();
+    assert!(pg.get("variables").is_none());
+    let desired = graph_with_policy(
+        vec![
+            service("web", json!({ "source": github("r") })),
+            service("api", json!({ "source": github("r"), "env": {} })),
+            service("quiet", json!({ "source": github("r") })),
+            postgres("pg", None),
+        ],
+        json!({ "managed": true, "ignore": ["DOPPLER_*"] }),
+    );
+    let result = diff(&current, &desired);
+    let ops = variable_ops(&result);
+    assert!(ops.iter().any(|op| op == "variable.delete service.api:OLD"));
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.api:KEEP")
+    );
+    assert!(ops.iter().all(|op| !op.contains("service.web")));
+    assert!(ops.iter().all(|op| !op.contains("service.quiet")));
+    assert!(ops.iter().all(|op| !op.contains("pg")));
+    let web = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.path == "resources.service.web.variables")
+        .unwrap();
+    assert_eq!(web.severity, "error");
+    assert_eq!(
+        web.message,
+        "web declares no env but Railway has 2 variables (A, B). Declare them, mark them preserve(), or add them to variables.ignore."
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.path != "resources.service.quiet.variables")
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.path.contains("database.pg"))
+    );
+}
+
+#[test]
+fn declared_ignored_key_is_an_error_and_not_set() {
+    let current = env_config(json!({ "services": { "web": { "source": { "repo": "r" } } } }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({
+                "source": github("r"),
+                "variables": {
+                    "DOPPLER_TOKEN": { "type": "literal", "value": "x" },
+                    "SECRET": { "type": "literal", "value": "y" },
+                    "OK": { "type": "literal", "value": "z" }
+                }
+            }),
+        )],
+        json!({ "managed": true, "ignore": ["DOPPLER_*", "web/SECRET"] }),
+    );
+    let result = diff(&current, &desired);
+    let ops = variable_ops(&result);
+    assert!(
+        ops.iter()
+            .all(|op| !op.contains("DOPPLER") && !op.contains("SECRET"))
+    );
+    assert!(ops.iter().any(|op| op == "variable.set service.web:OK"));
+    let messages: Vec<_> = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert!(messages.contains(&"web.DOPPLER_TOKEN is declared and also ignored by \"DOPPLER_*\"."));
+    assert!(messages.contains(&"web.SECRET is declared and also ignored by \"web/SECRET\"."));
+}
+
+#[test]
+fn malformed_ignore_patterns_error() {
+    let current = env_config(json!({ "services": { "web": { "source": { "repo": "r" } } } }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({ "source": github("r"), "variables": {} }),
+        )],
+        json!({ "managed": true, "ignore": ["", "a/b/c", "web/", "ghost/*"] }),
+    );
+    let errors: Vec<_> = diff(&current, &desired)
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| diagnostic.message)
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|message| message == "variables.ignore contains an empty pattern.")
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("a/b/c") && message.contains("more than one"))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("web/") && message.contains("empty key"))
+    );
+    assert!(errors.iter().any(|message| {
+        message.contains("ghost") && message.contains("neither in the file nor on Railway")
+    }));
+}
+
+#[test]
+fn unused_ignore_pattern_warns() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "repo": "r" }, "variables": {
+            "KEEP": { "value": "1" },
+            "OTHER": { "value": "1" }
+        } } }
+    }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({
+                "source": github("r"),
+                "variables": { "OTHER": { "type": "preserve" } }
+            }),
+        )],
+        json!({ "managed": true, "ignore": ["UNUSED_*", "KEEP"] }),
+    );
+    let result = diff(&current, &desired);
+    let warnings: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "warning")
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].message,
+        "variables.ignore pattern \"UNUSED_*\" matches no variable."
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != "error")
+    );
+    assert!(variable_ops(&result).is_empty());
+}
+
+#[test]
+fn variable_policy_report_and_header_line() {
+    let bare = graph_from(vec![service("web", json!({}))]);
+    assert!(bare.variables.default && bare.variables.managed && bare.variables.ignore.is_empty());
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_A": { "value": "1" },
+                "DOPPLER_B": { "value": "2" },
+                "OTHER": { "value": "3" }
+            }},
+            "metabase": { "source": { "repo": "r" }, "variables": {
+                "MB_DB": { "value": "1" },
+                "SITE": { "value": "1" }
+            }}
+        }
+    }));
+    let default_report = super::change_set::variable_policy_report(&current, &bare);
+    assert_eq!(
+        super::graph::format_variable_policy_line(&default_report, 5),
+        "variables: managed (default)"
+    );
+
+    let desired = graph_with_policy(
+        vec![
+            service(
+                "web",
+                json!({
+                    "source": github("r"),
+                    "variables": { "OTHER": { "type": "preserve" } }
+                }),
+            ),
+            service(
+                "metabase",
+                json!({
+                    "source": github("r"),
+                    "variables": {
+                        "MB_DB": { "type": "preserve" },
+                        "SITE": { "type": "preserve" }
+                    }
+                }),
+            ),
+        ],
+        json!({ "managed": true, "ignore": ["DOPPLER_*", "metabase/*"] }),
+    );
+    let report = super::change_set::variable_policy_report(&current, &desired);
+    assert!(!report.default);
+    assert_eq!(report.ignored_count, 4);
+    assert_eq!(report.by_pattern["DOPPLER_*"], 2);
+    assert_eq!(report.by_pattern["metabase/*"], 2);
+    assert_eq!(
+        super::graph::format_variable_policy_line(&report, 5),
+        "variables: managed \u{00b7} 4 ignored on Railway (DOPPLER_* 2, metabase/* 2)"
+    );
+    let value = serde_json::to_value(&report).unwrap();
+    let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "byPattern".to_string(),
+            "default".to_string(),
+            "ignore".to_string(),
+            "ignoredCount".to_string(),
+            "managed".to_string(),
+        ]
+    );
+
+    let explicit = graph_with_policy(
+        vec![service("web", json!({ "source": github("r") }))],
+        json!({ "managed": true, "ignore": [] }),
+    );
+    assert_eq!(
+        super::graph::format_variable_policy_line(
+            &super::change_set::variable_policy_report(&current, &explicit),
+            5
+        ),
+        "variables: managed"
+    );
+
+    let unmanaged = graph_with_policy(
+        vec![service("web", json!({ "source": github("r") }))],
+        json!({ "managed": false }),
+    );
+    assert_eq!(
+        super::graph::format_variable_policy_line(
+            &super::change_set::variable_policy_report(&current, &unmanaged),
+            5
+        ),
+        "variables: unmanaged \u{00b7} 5 on Railway not managed"
+    );
+}
+
 #[test]
 fn redacts_variable_values_in_plan_output() {
     let secret = "sk-super-secret-value-123";
