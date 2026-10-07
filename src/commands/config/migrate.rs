@@ -153,7 +153,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let services = discover_cac_services(&cwd, args.service.as_deref()).await?;
     // Same import pull uses: no decryption, so variables render as preserve().
-    let mut graph = load_current_graph(None, false).await?;
+    let mut graph = super::load_current_graph(None, false).await?;
     if graph
         .project
         .as_ref()
@@ -796,7 +796,7 @@ fn render_migrated(
         }
     }
 
-    let mut rendered = render_graph_as_railway(&graph, true, lang);
+    let mut rendered = super::render_graph_as_railway(&graph, true, lang);
     rendered = inject_cac_lines(&rendered, services, &bare_replicas, lang);
     if let Some(service) = named_partial.then(|| services.first()).flatten() {
         rendered = insert_partial(&rendered, lang, &service.name);

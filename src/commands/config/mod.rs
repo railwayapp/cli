@@ -516,7 +516,7 @@ async fn write_pulled_config(
     )
 }
 
-pub(in crate::commands::config) async fn load_current_graph(
+async fn load_current_graph(
     runner: Option<String>,
     decrypt_variables: bool,
 ) -> Result<runner::DesiredGraph> {
@@ -593,7 +593,7 @@ fn write_pull_stub() -> Result<tempfile::TempDir> {
     Ok(temp_dir)
 }
 
-pub(in crate::commands::config) fn render_graph_as_railway(
+fn render_graph_as_railway(
     graph: &runner::DesiredGraph,
     preserve_variables: bool,
     lang: AuthoringLang,
