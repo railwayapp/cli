@@ -508,6 +508,19 @@ mod tests {
                     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
                         .unwrap();
                 }
+                // The script resolves python3 before it rewrites PATH. Images
+                // without /usr/bin/python3 still have one on the host PATH.
+                if let Some(python3) = std::env::var_os("PATH").and_then(|path| {
+                    std::env::split_paths(&path).find_map(|dir| {
+                        let candidate = dir.join("python3");
+                        candidate.is_file().then_some(candidate)
+                    })
+                }) {
+                    let _ = std::os::unix::fs::symlink(
+                        python3,
+                        vm.home.path().join(".local/bin/python3"),
+                    );
+                }
                 vm
             }
 
