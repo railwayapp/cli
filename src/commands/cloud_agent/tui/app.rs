@@ -8520,6 +8520,8 @@ mod tests {
 
     /// The pane owns the mouse, so the terminal's own link handling never sees
     /// the click — opening it ourselves is what puts it back.
+    /// Unix only: the fixture pty does not echo under Windows ConPTY.
+    #[cfg(unix)]
     #[test]
     fn clicking_a_link_in_a_session_opens_it() {
         let mut a = loaded_app();
