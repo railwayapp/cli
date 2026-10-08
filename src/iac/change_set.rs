@@ -1,18 +1,18 @@
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::controllers::regions::BucketRegion;
 
 use super::graph::{
-    resource_addr, resource_address, resource_name, resource_type, RailwayGraph,
-    VariablePolicyReport,
+    RailwayGraph, VariablePolicyReport, resource_addr, resource_address, resource_name,
+    resource_type,
 };
 use super::json::{field, field_str, stable_stringify};
 use super::partial::{
-    effective_partial, foreign_resource_message, has_named_partials, nameless_file_message,
-    owner_of, IacPartials,
+    IacPartials, effective_partial, foreign_resource_message, has_named_partials,
+    nameless_file_message, owner_of,
 };
 
 pub const RAILWAY_CHANGE_SET_VERSION: u32 = 1;
@@ -1106,11 +1106,7 @@ fn github_repo(source: &Value) -> Option<&str> {
         return None;
     }
     let repo = obj.get("repo").and_then(Value::as_str)?;
-    if repo.is_empty() {
-        None
-    } else {
-        Some(repo)
-    }
+    if repo.is_empty() { None } else { Some(repo) }
 }
 
 fn pinned_branch(source: &Value) -> Option<&str> {

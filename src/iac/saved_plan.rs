@@ -12,7 +12,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -99,11 +99,7 @@ fn git_railway_tree(cwd: &Path) -> Option<String> {
         return None;
     }
     let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if tree.is_empty() {
-        None
-    } else {
-        Some(tree)
-    }
+    if tree.is_empty() { None } else { Some(tree) }
 }
 
 fn hash_railway_dir(dir: &Path) -> Result<String> {
@@ -356,10 +352,12 @@ mod tests {
         .unwrap();
         plan.change_set_hash = "sha256:deadbeef".into();
         write_plan(&path, &plan).unwrap();
-        assert!(read_plan(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("corrupt"));
+        assert!(
+            read_plan(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("corrupt")
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

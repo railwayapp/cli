@@ -16,19 +16,19 @@ mod partial;
 pub mod saved_plan;
 
 #[allow(dead_code)]
-pub use change_set::{diff_graphs, render_change_set, ChangeSet, RAILWAY_CHANGE_SET_VERSION};
+pub use change_set::{ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
 #[allow(dead_code)]
 pub use compiler::{
-    environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
-    CompileOptions, EnvironmentConfigToGraphOptions,
+    CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
+    graph_to_environment_config, project_definition_to_graph,
 };
-pub use engine::{run as run_native, NativeRun};
+pub use engine::{NativeRun, run as run_native};
 #[allow(dead_code)]
-pub use eval::{evaluate_file, evaluate_file_with_context, EvalContext, EvaluatedFile};
+pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
 #[allow(dead_code)]
 pub use graph::{
-    format_variable_policy_line, resource_address, validate_graph, RailwayGraph,
-    VariablePolicyReport, RAILWAY_GRAPH_VERSION,
+    RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicyReport, format_variable_policy_line,
+    resource_address, validate_graph,
 };
 #[allow(dead_code)]
 pub use partial::{needs_partial_claim_apply, parse_partial_name};

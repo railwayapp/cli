@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::change_set::{ChangeSet, Diagnostic};
 use super::eval::EvalContext;
-use super::graph::{resource_addr, resource_name, resource_type, RailwayGraph};
+use super::graph::{RailwayGraph, resource_addr, resource_name, resource_type};
 
 /// A persistent project environment the file is evaluated against.
 #[derive(Clone, Debug)]

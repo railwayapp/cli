@@ -7,7 +7,7 @@ use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
 use crate::{
-    client::{post_graphql, GQLClient},
+    client::{GQLClient, post_graphql},
     gql::queries,
     util::{
         progress::{create_spinner_if, fail_spinner, success_spinner},

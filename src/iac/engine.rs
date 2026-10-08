@@ -1,22 +1,23 @@
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::{
-    client::{post_graphql_raw, GQLClient},
+    client::{GQLClient, post_graphql_raw},
     config::{Configs, LinkedProject},
 };
 
 use super::change_set::{
-    diff_graphs_following, needs_default_branch_lookup, preserve_resolved_create_branches,
-    render_change_set, variable_policy_report, BranchFollow, ChangeSetTelemetry, DiffOptions,
+    BranchFollow, ChangeSetTelemetry, DiffOptions, diff_graphs_following,
+    needs_default_branch_lookup, preserve_resolved_create_branches, render_change_set,
+    variable_policy_report,
 };
-use super::compiler::{environment_config_to_graph, EnvironmentConfigToGraphOptions};
-use super::eval::{evaluate_file_with_context, EvalContext, PrContext};
-use super::graph::{validate_graph, VariablePolicyReport};
+use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
+use super::eval::{EvalContext, PrContext, evaluate_file_with_context};
+use super::graph::{VariablePolicyReport, validate_graph};
 use super::partial::needs_partial_claim_apply;
 
 #[derive(Debug, Deserialize)]
@@ -958,11 +959,7 @@ fn parse_owners(value: Option<&Value>) -> Option<super::partial::IacPartials> {
             out.insert(key.clone(), owner.to_string());
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 async fn preview_change_set(
@@ -1125,9 +1122,11 @@ mod tests {
             "isEphemeral": false,
             "config": {}
         }));
-        assert!(current_environment_value(&production, None)
-            .get("pr")
-            .is_none());
+        assert!(
+            current_environment_value(&production, None)
+                .get("pr")
+                .is_none()
+        );
     }
 
     #[test]

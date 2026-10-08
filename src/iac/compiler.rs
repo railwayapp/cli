@@ -1,11 +1,11 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::controllers::database_engines::parse_image_ref;
 
 use super::change_set::Diagnostic;
 use super::graph::{
-    resource_addr, resource_address, resource_name, resource_type, Edge, EnvironmentNode,
-    ProjectNode, RailwayGraph, VariablePolicy, RAILWAY_GRAPH_VERSION,
+    Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicy,
+    resource_addr, resource_address, resource_name, resource_type,
 };
 use super::json::{field, field_str, prune_empty};
 
@@ -859,10 +859,12 @@ pub fn environment_config_to_graph(
                     node["networking"] = networking;
                 }
                 if let Some(group_id) = field_str(service, "groupId") {
-                    node["groupId"] = json!(group_names_by_id
-                        .get(group_id)
-                        .and_then(Value::as_str)
-                        .unwrap_or(group_id));
+                    node["groupId"] = json!(
+                        group_names_by_id
+                            .get(group_id)
+                            .and_then(Value::as_str)
+                            .unwrap_or(group_id)
+                    );
                 }
                 resources.push(node);
                 continue;
@@ -931,10 +933,12 @@ pub fn environment_config_to_graph(
                 node["tracing"] = tracing.clone();
             }
             if let Some(group_id) = field_str(service, "groupId") {
-                node["groupId"] = json!(group_names_by_id
-                    .get(group_id)
-                    .and_then(Value::as_str)
-                    .unwrap_or(group_id));
+                node["groupId"] = json!(
+                    group_names_by_id
+                        .get(group_id)
+                        .and_then(Value::as_str)
+                        .unwrap_or(group_id)
+                );
             }
             resources.push(node);
         }
@@ -961,10 +965,12 @@ pub fn environment_config_to_graph(
                 .get(volume_id)
                 .and_then(Value::as_str)
             {
-                node["groupId"] = json!(group_names_by_id
-                    .get(group_id)
-                    .and_then(Value::as_str)
-                    .unwrap_or(group_id));
+                node["groupId"] = json!(
+                    group_names_by_id
+                        .get(group_id)
+                        .and_then(Value::as_str)
+                        .unwrap_or(group_id)
+                );
             }
             resources.push(node);
         }
@@ -992,10 +998,12 @@ pub fn environment_config_to_graph(
                 .and_then(Value::as_str)
                 .or_else(|| field_str(bucket, "groupId"));
             if let Some(group_id) = group_id {
-                node["groupId"] = json!(group_names_by_id
-                    .get(group_id)
-                    .and_then(Value::as_str)
-                    .unwrap_or(group_id));
+                node["groupId"] = json!(
+                    group_names_by_id
+                        .get(group_id)
+                        .and_then(Value::as_str)
+                        .unwrap_or(group_id)
+                );
             }
             resources.push(node);
         }
