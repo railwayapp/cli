@@ -2,11 +2,57 @@ use serde_json::{Map, Value, json};
 
 use crate::controllers::database_engines::parse_image_ref;
 
+use super::change_set::Diagnostic;
 use super::graph::{
     Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicy,
     resource_addr, resource_address, resource_name, resource_type,
 };
 use super::json::{field, field_str, prune_empty};
+
+/// Top-level project keys `project_definition_to_graph` reads, plus `variables`.
+pub const IAC_PROJECT_FIELDS: &[&str] = &[
+    "name",
+    "resources",
+    "services",
+    "Resources",
+    "environments",
+    "variables",
+];
+
+/// Top-level resource keys the compiler reads, plus `environments`.
+/// `kind` and `start` are read while normalizing; `output` is written onto
+/// database nodes and emitted by the SDKs.
+pub const IAC_RESOURCE_FIELDS: &[&str] = &[
+    "address",
+    "type",
+    "name",
+    "kind",
+    "start",
+    "source",
+    "build",
+    "deploy",
+    "networking",
+    "variables",
+    "volumeAttachments",
+    "volumeMounts",
+    "config",
+    "configFile",
+    "parentServiceId",
+    "groupId",
+    "clusterRole",
+    "replicaConfig",
+    "clusterDisplay",
+    "tracing",
+    "engine",
+    "image",
+    "env",
+    "output",
+    "defaultMountPath",
+    "color",
+    "icon",
+    "isCollapsed",
+    "environments",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
@@ -233,6 +279,50 @@ fn variable_policy(definition: &Value) -> VariablePolicy {
         ignore,
         default: false,
         error: None,
+    }
+}
+
+pub fn unknown_field_diagnostics(definition: &Value) -> Vec<Diagnostic> {
+    let Some(project) = definition.as_object() else {
+        return Vec::new();
+    };
+    let mut diagnostics = Vec::new();
+    for key in project.keys() {
+        if !IAC_PROJECT_FIELDS.contains(&key.as_str()) {
+            diagnostics.push(unknown_field(key, "project"));
+        }
+    }
+    let resources = definition
+        .get("resources")
+        .or_else(|| definition.get("Resources"))
+        .or_else(|| definition.get("services"));
+    for resource in flatten_resources(resources) {
+        let Some(object) = resource.as_object() else {
+            continue;
+        };
+        let address = resource_addr(&resource);
+        for key in object.keys() {
+            if !IAC_RESOURCE_FIELDS.contains(&key.as_str()) {
+                diagnostics.push(unknown_field(key, &address));
+            }
+        }
+    }
+    diagnostics
+}
+
+fn unknown_field(key: &str, address: &str) -> Diagnostic {
+    let path = if address == "project" {
+        format!("project.{key}")
+    } else {
+        format!("resources.{address}.{key}")
+    };
+    Diagnostic {
+        severity: "error".into(),
+        path,
+        message: format!(
+            "Unknown field \"{key}\" on {address}. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 

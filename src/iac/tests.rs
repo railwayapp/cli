@@ -2,10 +2,11 @@ use serde_json::{Value, json};
 
 use super::change_set::{DiffOptions, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
 use super::compiler::{
-    CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
-    graph_to_environment_config, project_definition_to_graph,
+    CompileOptions, EnvironmentConfigToGraphOptions, IAC_PROJECT_FIELDS, IAC_RESOURCE_FIELDS,
+    environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
+    unknown_field_diagnostics,
 };
-use super::eval::{EvalContext, evaluate_file, evaluate_file_with_context};
+use super::eval::{EvalContext, IAC_FEATURES, evaluate_file, evaluate_file_with_context};
 use super::graph::RAILWAY_GRAPH_VERSION;
 use super::partial::IacPartials;
 
@@ -2072,6 +2073,115 @@ func Railway(ctx evalCtx) graph {
             .iter()
             .any(|r| r["name"] == "prod-api")
     );
+}
+
+#[test]
+fn eval_context_advertises_iac_features() {
+    let value = eval_context_production().to_json();
+    assert_eq!(value["features"], json!(IAC_FEATURES));
+    assert_eq!(
+        value["features"],
+        json!([
+            "variables-policy",
+            "environments",
+            "pr-context",
+            "environment-owned-branch"
+        ])
+    );
+}
+
+#[test]
+fn unknown_project_key_is_an_error() {
+    let diagnostics = unknown_field_diagnostics(&json!({
+        "name": "app",
+        "notAField": true,
+        "resources": []
+    }));
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, "error");
+    assert_eq!(diagnostics[0].path, "project.notAField");
+    assert_eq!(
+        diagnostics[0].message,
+        format!(
+            "Unknown field \"notAField\" on project. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
+fn unknown_resource_key_is_an_error() {
+    let diagnostics = unknown_field_diagnostics(&json!({
+        "name": "app",
+        "resources": [{
+            "address": "service.web",
+            "type": "service",
+            "name": "web",
+            "notAField": true
+        }]
+    }));
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, "error");
+    assert_eq!(diagnostics[0].path, "resources.service.web.notAField");
+    assert_eq!(
+        diagnostics[0].message,
+        format!(
+            "Unknown field \"notAField\" on service.web. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
+fn accepts_every_known_project_and_resource_key() {
+    let mut project = serde_json::Map::new();
+    for key in IAC_PROJECT_FIELDS {
+        project.insert((*key).to_string(), json!({}));
+    }
+    let mut resource = serde_json::Map::new();
+    for key in IAC_RESOURCE_FIELDS {
+        resource.insert((*key).to_string(), json!({}));
+    }
+    resource.insert("address".into(), json!("service.web"));
+    resource.insert("type".into(), json!("service"));
+    resource.insert("name".into(), json!("web"));
+    project.insert("resources".into(), json!([Value::Object(resource)]));
+    let diagnostics = unknown_field_diagnostics(&Value::Object(project));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let fixtures = json!({
+        "name": "app",
+        "environments": ["production"],
+        "variables": { "managed": false },
+        "resources": [
+            service("web", json!({
+                "source": github("acme/web"),
+                "start": "npm start",
+                "build": "npm run build",
+                "variables": { "PORT": { "type": "literal", "value": "8080" } },
+                "volumeAttachments": {
+                    "data": {
+                        "volume": "volume.data",
+                        "mountPath": "/data",
+                        "volumeConfig": { "sizeMB": 1024 }
+                    }
+                }
+            })),
+            postgres("db", Some("us-west2")),
+            volume("data", json!({ "sizeMB": 1024, "region": "us-west2" })),
+            bucket("assets", "sjc"),
+            {
+                "address": "group.api",
+                "type": "group",
+                "name": "api",
+                "color": "blue",
+                "icon": "box",
+                "isCollapsed": false
+            }
+        ]
+    });
+    let diagnostics = unknown_field_diagnostics(&fixtures);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 }
 
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
