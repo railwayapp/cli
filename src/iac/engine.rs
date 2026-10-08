@@ -14,7 +14,7 @@ use super::change_set::{
     ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set, variable_policy_report,
 };
 use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
-use super::eval::{EvalContext, evaluate_file_with_context};
+use super::eval::{EvalContext, PrContext, evaluate_file_with_context};
 use super::graph::{VariablePolicyReport, validate_graph};
 use super::partial::needs_partial_claim_apply;
 
@@ -33,6 +33,41 @@ struct EnvNode {
     config_etag: Option<String>,
     canvas_group_refs: Option<Value>,
     iac_partials: Option<Value>,
+    #[serde(default)]
+    is_ephemeral: bool,
+    #[serde(default)]
+    meta: Option<EnvMeta>,
+    #[serde(default)]
+    source_environment: Option<SourceEnvironment>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EnvMeta {
+    branch: Option<String>,
+    pr_number: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SourceEnvironment {
+    name: Option<String>,
+}
+
+impl EnvNode {
+    fn pr_context(&self) -> Option<PrContext> {
+        if !self.is_ephemeral {
+            return None;
+        }
+        let number = self.meta.as_ref().and_then(|meta| meta.pr_number)?;
+        Some(PrContext {
+            number,
+            branch: self.meta.as_ref().and_then(|meta| meta.branch.clone()),
+            base: self
+                .source_environment
+                .as_ref()
+                .and_then(|source| source.name.clone()),
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,10 +200,15 @@ pub async fn run(
         .clone()
         .or_else(|| find_authoring_file(&cwd))
         .context("Could not find .railway/railway.ts, railway.py, or railway.go")?;
-    let evaluated = evaluate_file_with_context(
-        &file,
-        &EvalContext::from_linked_project(linked_project, command),
-    )?;
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let environment_id = linked_project.environment_id()?;
+    let current =
+        fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
+            .await?;
+    let mut ctx = EvalContext::from_linked_project(linked_project, command);
+    ctx.pr = current.pr_context();
+    let evaluated = evaluate_file_with_context(&file, &ctx)?;
     let mut diagnostics: Vec<Value> = evaluated
         .diagnostics
         .iter()
@@ -186,12 +226,6 @@ pub async fn run(
             .map(|message| json!({ "severity": "error", "path": "graph", "message": message })),
     );
 
-    let client = GQLClient::new_authorized(configs)?;
-    let endpoint = configs.get_backboard();
-    let environment_id = linked_project.environment_id()?;
-    let current =
-        fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
-            .await?;
     let mut options = EnvironmentConfigToGraphOptions {
         project_name: linked_project
             .name
@@ -442,7 +476,7 @@ async fn fetch_current_environment(
     let query_with_partials = r#"
       query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
         environment(id: $environmentId) {
-          id name projectId config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
+          id name projectId isEphemeral meta { branch prNumber } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
         }
       }
     "#;
@@ -454,7 +488,7 @@ async fn fetch_current_environment(
             let query = r#"
               query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
                 environment(id: $environmentId) {
-                  id name projectId config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
+                  id name projectId isEphemeral meta { branch prNumber } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
                 }
               }
             "#;
@@ -711,6 +745,45 @@ async fn wait_for_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env_node(value: Value) -> EnvNode {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn pr_context_from_pull_request_environment() {
+        let node = env_node(json!({
+            "id": "env",
+            "name": "railway-cli-pr-123",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/x", "prNumber": 123 },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        let pr = node.pr_context().unwrap();
+        assert_eq!(pr.number, 123);
+        assert_eq!(pr.branch.as_deref(), Some("feat/x"));
+        assert_eq!(pr.base.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn pr_context_is_null_without_a_pr_number() {
+        let ephemeral = env_node(json!({
+            "id": "env",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/x" },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        assert!(ephemeral.pr_context().is_none());
+
+        let production = env_node(json!({
+            "id": "env",
+            "isEphemeral": false,
+            "config": {}
+        }));
+        assert!(production.pr_context().is_none());
+    }
 
     fn wire_after_apply(ok_before: bool, apply_result: Value) -> Value {
         let mut diagnostics = if ok_before {
