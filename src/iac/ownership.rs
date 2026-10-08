@@ -1,13 +1,13 @@
 //! Ownership-only operations use the same Environment.configEtag as config
 //! plans. They never evaluate authoring files or submit resource ChangeSets.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::client::post_graphql_raw;
 
-use super::partial::{IacPartials, has_named_partials, parse_partial_name};
+use super::partial::{has_named_partials, parse_partial_name, IacPartials};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,12 +265,10 @@ mod tests {
         ] {
             assert!(preview(snapshot(), "legacy-ops", None, Some(&selected), None).is_err());
         }
-        assert!(
-            preview(snapshot(), "missing", None, None, None)
-                .unwrap_err()
-                .to_string()
-                .contains("No resources")
-        );
+        assert!(preview(snapshot(), "missing", None, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("No resources"));
     }
 
     #[test]
@@ -286,12 +284,10 @@ mod tests {
 
     #[test]
     fn stale_or_missing_etag_cannot_be_previewed_for_execution() {
-        assert!(
-            preview(snapshot(), "legacy-ops", None, None, Some("older"))
-                .unwrap_err()
-                .to_string()
-                .contains("changed since")
-        );
+        assert!(preview(snapshot(), "legacy-ops", None, None, Some("older"))
+            .unwrap_err()
+            .to_string()
+            .contains("changed since"));
         let mut missing = snapshot();
         missing.config_etag.clear();
         assert!(preview(missing, "legacy-ops", None, None, None).is_err());

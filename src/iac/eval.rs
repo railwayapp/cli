@@ -4,8 +4,8 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
 
 use crate::config::LinkedProject;
 

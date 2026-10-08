@@ -1,13 +1,13 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use super::change_set::{DiffOptions, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
+use super::change_set::{diff_graphs, render_change_set, DiffOptions, RAILWAY_CHANGE_SET_VERSION};
 use super::compiler::{
-    CompileOptions, EnvironmentConfigToGraphOptions, IAC_PROJECT_FIELDS, IAC_RESOURCE_FIELDS,
     environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
-    unknown_field_diagnostics,
+    unknown_field_diagnostics, CompileOptions, EnvironmentConfigToGraphOptions, IAC_PROJECT_FIELDS,
+    IAC_RESOURCE_FIELDS,
 };
 use super::eval::{
-    EvalContext, IAC_FEATURES, PrContext, evaluate_file, evaluate_file_with_context,
+    evaluate_file, evaluate_file_with_context, EvalContext, PrContext, IAC_FEATURES,
 };
 use super::graph::RAILWAY_GRAPH_VERSION;
 use super::partial::IacPartials;
@@ -310,12 +310,10 @@ fn custom_domain_registration_is_diagnosed() {
     )]);
     let result = diff(&current, &desired);
     assert!(!result.changes.iter().any(|c| c["kind"] == "domain.create"));
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("not supported"))
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("not supported")));
 }
 
 #[test]
@@ -576,11 +574,9 @@ fn service_tcp_empty_warns_about_a_proxy_it_cannot_remove() {
     let change_set = diff(&current, &desired);
     assert!(change_set.changes.is_empty());
     assert_eq!(change_set.diagnostics[0].severity, "warning");
-    assert!(
-        change_set.diagnostics[0]
-            .message
-            .contains(r#"{ "8080": null }"#)
-    );
+    assert!(change_set.diagnostics[0]
+        .message
+        .contains(r#"{ "8080": null }"#));
 }
 
 #[test]
@@ -774,11 +770,9 @@ fn inline_volume_config_is_hoisted() {
         vol["config"],
         json!({ "sizeMB": 4096, "region": "europe-west4" })
     );
-    assert!(
-        !serde_json::to_string(&graph)
-            .unwrap()
-            .contains("volumeConfig")
-    );
+    assert!(!serde_json::to_string(&graph)
+        .unwrap()
+        .contains("volumeConfig"));
 }
 
 #[test]
@@ -884,12 +878,10 @@ fn warns_instead_of_deleting_mounted_volume() {
     )]);
     let result = diff(&current, &desired);
     assert!(!kinds(&result).contains(&"resource.delete".to_string()));
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("never deleted"))
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("never deleted")));
 }
 
 #[test]
@@ -957,12 +949,10 @@ fn errors_when_partial_declares_foreign_resource() {
         owners: Some(&owners),
     });
     assert!(result.changes.is_empty());
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("already managed by partial \"api\""))
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("already managed by partial \"api\"")));
 }
 
 #[test]
@@ -1007,12 +997,10 @@ fn whole_project_owner_still_deletes() {
         partial: None,
         owners: Some(&owners),
     });
-    assert!(
-        result
-            .changes
-            .iter()
-            .any(|c| c["address"] == "service.api" && c["kind"] == "resource.delete")
-    );
+    assert!(result
+        .changes
+        .iter()
+        .any(|c| c["address"] == "service.api" && c["kind"] == "resource.delete"));
 }
 
 #[test]
@@ -1037,12 +1025,10 @@ fn deletes_a_partials_own_omitted_service() {
         partial: Some("api"),
         owners: Some(&owners),
     });
-    assert!(
-        result
-            .changes
-            .iter()
-            .any(|c| c["address"] == "service.extra" && c["kind"] == "resource.delete")
-    );
+    assert!(result
+        .changes
+        .iter()
+        .any(|c| c["address"] == "service.extra" && c["kind"] == "resource.delete"));
 }
 
 #[test]
@@ -1061,11 +1047,9 @@ fn variable_removal_is_destructive() {
     assert!(changes.iter().any(|c| c["kind"] == "variable.delete"
         && c["variable"] == "OLD"
         && c["severity"] == "destructive"));
-    assert!(
-        changes.iter().any(|c| c["kind"] == "variable.set"
-            && c["variable"] == "NEW"
-            && c["severity"] == "safe")
-    );
+    assert!(changes
+        .iter()
+        .any(|c| c["kind"] == "variable.set" && c["variable"] == "NEW" && c["severity"] == "safe"));
 }
 
 #[test]
@@ -1107,12 +1091,10 @@ fn preserve_variable_never_plans() {
             "variables": { "SECRET": { "type": "preserve" } }
         }),
     )]);
-    assert!(
-        diff(&current, &desired)
-            .changes
-            .iter()
-            .all(|c| { !c["kind"].as_str().unwrap_or("").starts_with("variable") })
-    );
+    assert!(diff(&current, &desired)
+        .changes
+        .iter()
+        .all(|c| { !c["kind"].as_str().unwrap_or("").starts_with("variable") }));
 }
 
 fn graph_with_policy(resources: Vec<Value>, policy: Value) -> super::graph::RailwayGraph {
@@ -1182,26 +1164,21 @@ fn ignore_patterns_are_removed_from_both_sides_before_diff() {
         vec!["DOPPLER_*".to_string(), "api/ONLY_*".to_string()]
     );
     let ops = variable_ops(&diff(&current, &desired));
-    assert!(
-        !ops.iter()
-            .any(|op| { op.ends_with(":DOPPLER_TOKEN") || op.ends_with(":DOPPLER_NEW") })
-    );
-    assert!(
-        !ops.iter()
-            .any(|op| op == "variable.delete service.api:ONLY_API")
-    );
-    assert!(
-        ops.iter()
-            .any(|op| op == "variable.delete service.web:ONLY_API")
-    );
-    assert!(
-        ops.iter()
-            .any(|op| op == "variable.delete service.web:doppler_token")
-    );
-    assert!(
-        ops.iter()
-            .any(|op| op == "variable.delete service.web:NOT_DOPPLER_TOKEN")
-    );
+    assert!(!ops
+        .iter()
+        .any(|op| { op.ends_with(":DOPPLER_TOKEN") || op.ends_with(":DOPPLER_NEW") }));
+    assert!(!ops
+        .iter()
+        .any(|op| op == "variable.delete service.api:ONLY_API"));
+    assert!(ops
+        .iter()
+        .any(|op| op == "variable.delete service.web:ONLY_API"));
+    assert!(ops
+        .iter()
+        .any(|op| op == "variable.delete service.web:doppler_token"));
+    assert!(ops
+        .iter()
+        .any(|op| op == "variable.delete service.web:NOT_DOPPLER_TOKEN"));
     assert!(ops.iter().any(|op| op == "variable.set service.web:PUBLIC"));
     assert!(!ops.iter().any(|op| op.contains("KEEP")));
 }
@@ -1276,10 +1253,9 @@ fn omitted_env_errors_instead_of_deleting_explicit_empty_stays_authoritative() {
     let result = diff(&current, &desired);
     let ops = variable_ops(&result);
     assert!(ops.iter().any(|op| op == "variable.delete service.api:OLD"));
-    assert!(
-        ops.iter()
-            .any(|op| op == "variable.delete service.api:KEEP")
-    );
+    assert!(ops
+        .iter()
+        .any(|op| op == "variable.delete service.api:KEEP"));
     assert!(ops.iter().all(|op| !op.contains("service.web")));
     assert!(ops.iter().all(|op| !op.contains("service.quiet")));
     assert!(ops.iter().all(|op| !op.contains("pg")));
@@ -1293,18 +1269,14 @@ fn omitted_env_errors_instead_of_deleting_explicit_empty_stays_authoritative() {
         web.message,
         "web declares no env but Railway has 2 variables (A, B). Declare them, mark them preserve(), or add them to variables.ignore."
     );
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.path != "resources.service.quiet.variables")
-    );
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| !diagnostic.path.contains("database.pg"))
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.path != "resources.service.quiet.variables"));
+    assert!(result
+        .diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.path.contains("database.pg")));
 }
 
 #[test]
@@ -1326,10 +1298,9 @@ fn declared_ignored_key_is_an_error_and_not_set() {
     );
     let result = diff(&current, &desired);
     let ops = variable_ops(&result);
-    assert!(
-        ops.iter()
-            .all(|op| !op.contains("DOPPLER") && !op.contains("SECRET"))
-    );
+    assert!(ops
+        .iter()
+        .all(|op| !op.contains("DOPPLER") && !op.contains("SECRET")));
     assert!(ops.iter().any(|op| op == "variable.set service.web:OK"));
     let messages: Vec<_> = result
         .diagnostics
@@ -1356,21 +1327,15 @@ fn malformed_ignore_patterns_error() {
         .filter(|diagnostic| diagnostic.severity == "error")
         .map(|diagnostic| diagnostic.message)
         .collect();
-    assert!(
-        errors
-            .iter()
-            .any(|message| message == "variables.ignore contains an empty pattern.")
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("a/b/c") && message.contains("more than one"))
-    );
-    assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("web/") && message.contains("empty key"))
-    );
+    assert!(errors
+        .iter()
+        .any(|message| message == "variables.ignore contains an empty pattern."));
+    assert!(errors
+        .iter()
+        .any(|message| message.contains("a/b/c") && message.contains("more than one")));
+    assert!(errors
+        .iter()
+        .any(|message| message.contains("web/") && message.contains("empty key")));
     assert!(errors.iter().any(|message| {
         message.contains("ghost") && message.contains("neither in the file nor on Railway")
     }));
@@ -1405,12 +1370,10 @@ fn unused_ignore_pattern_warns() {
         warnings[0].message,
         "variables.ignore pattern \"UNUSED_*\" matches no variable."
     );
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.severity != "error")
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.severity != "error"));
     assert!(variable_ops(&result).is_empty());
 }
 
@@ -1715,12 +1678,10 @@ fn refuses_repo_config_owned_service() {
     let desired = graph_from(vec![service("web", json!({ "source": github("r") }))]);
     let result = diff(&current, &desired);
     assert!(result.changes.is_empty());
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("railway.json"))
-    );
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("railway.json")));
 }
 
 #[test]
@@ -1737,12 +1698,10 @@ fn restores_volume_group_membership() {
             ..Default::default()
         },
     );
-    assert!(
-        graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "volume.data" && r["groupId"] == "Storage")
-    );
+    assert!(graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "volume.data" && r["groupId"] == "Storage"));
 }
 
 #[test]
@@ -1754,18 +1713,14 @@ fn omits_unreferenced_canvas_groups() {
         },
         "services": { "web": { "source": { "image": "nginx:latest" }, "groupId": "production" } }
     }));
-    assert!(
-        graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "group.Production")
-    );
-    assert!(
-        !graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "group.Test-only Sandbox")
-    );
+    assert!(graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "group.Production"));
+    assert!(!graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "group.Test-only Sandbox"));
 }
 
 #[test]
@@ -1860,12 +1815,10 @@ fn bucket_existing_unchanged_region_does_not_need_create_validation() {
 fn bucket_region_change_is_an_error() {
     let current = env_config(json!({ "buckets": { "assets": { "region": "sjc" } } }));
     let desired = graph_from(vec![bucket("assets", "ams")]);
-    assert!(
-        diff(&current, &desired)
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("region"))
-    );
+    assert!(diff(&current, &desired)
+        .diagnostics
+        .iter()
+        .any(|d| d.message.contains("region")));
 }
 
 #[test]
@@ -1885,13 +1838,11 @@ export default () => ({
     .unwrap();
     let evaluated = evaluate_file(&file).expect("node should evaluate railway.ts");
     assert_eq!(evaluated.partial.as_deref(), Some("api"));
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "service.api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "service.api"));
 }
 
 #[test]
@@ -1912,13 +1863,11 @@ def main(ctx=None):
     .unwrap();
     let evaluated = evaluate_file(&file).expect("python3 should evaluate railway.py");
     assert_eq!(evaluated.partial.as_deref(), Some("api"));
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "service.api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "service.api"));
 }
 
 #[test]
@@ -1953,13 +1902,11 @@ func Railway() graph {
     .unwrap();
     let evaluated = evaluate_file(&file).expect("go should evaluate railway.go");
     assert_eq!(evaluated.partial.as_deref(), Some("api"));
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["address"] == "service.api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["address"] == "service.api"));
 }
 
 fn eval_context_production() -> EvalContext {
@@ -2007,13 +1954,11 @@ export default (ctx) => ({
     .unwrap();
     let evaluated = evaluate_file_with_context(&file, &eval_context_production())
         .expect("node should evaluate railway.ts with context");
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["name"] == "prod-api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["name"] == "prod-api"));
 }
 
 #[test]
@@ -2034,13 +1979,11 @@ def main(ctx=None):
     .unwrap();
     let evaluated = evaluate_file_with_context(&file, &eval_context_production())
         .expect("python3 should evaluate railway.py with context");
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["name"] == "prod-api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["name"] == "prod-api"));
 }
 
 #[test]
@@ -2082,13 +2025,11 @@ func Railway(ctx evalCtx) graph {
     .unwrap();
     let evaluated = evaluate_file_with_context(&file, &eval_context_production())
         .expect("go should evaluate railway.go with context");
-    assert!(
-        evaluated
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["name"] == "prod-api")
-    );
+    assert!(evaluated
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["name"] == "prod-api"));
 }
 
 #[test]
@@ -2134,22 +2075,18 @@ export default (ctx) => ({
     .unwrap();
     let with_pr = evaluate_file_with_context(&file, &eval_context_pr())
         .expect("node should evaluate railway.ts with ctx.pr");
-    assert!(
-        with_pr
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["name"] == "dev:123:feat/x")
-    );
+    assert!(with_pr
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["name"] == "dev:123:feat/x"));
     let without_pr = evaluate_file_with_context(&file, &eval_context_production())
         .expect("node should evaluate railway.ts without ctx.pr");
-    assert!(
-        without_pr
-            .graph
-            .resources
-            .iter()
-            .any(|r| r["name"] == "no-pr")
-    );
+    assert!(without_pr
+        .graph
+        .resources
+        .iter()
+        .any(|r| r["name"] == "no-pr"));
 }
 
 #[test]
@@ -2459,12 +2396,10 @@ fn pr_environment_allows_another_repo_to_change_branch() {
     )]);
     let change_set = diff_following(&current, &desired, &follow);
     assert!(change_set.diagnostics.is_empty());
-    assert!(
-        change_set
-            .changes
-            .iter()
-            .any(|change| change["field"] == "source")
-    );
+    assert!(change_set
+        .changes
+        .iter()
+        .any(|change| change["field"] == "source"));
 }
 
 #[test]
@@ -2482,4 +2417,440 @@ fn pr_environment_allows_a_pin_matching_the_deployed_branch() {
     let change_set = diff_following(&current, &desired, &follow);
     assert!(change_set.diagnostics.is_empty());
     assert!(change_set.changes.is_empty());
+}
+
+fn env_eval(
+    name: &str,
+    resources: Vec<Value>,
+    is_target: bool,
+) -> super::environments::EnvironmentEvaluation {
+    super::environments::EnvironmentEvaluation {
+        name: name.to_string(),
+        resources,
+        is_target,
+    }
+}
+
+fn project_envs(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
+fn scope_plan(
+    evaluations: &[super::environments::EnvironmentEvaluation],
+    envs: &[&str],
+    match_name: &str,
+) -> super::environments::ScopePlan {
+    super::environments::plan_scope(evaluations, &project_envs(envs), match_name, true)
+}
+
+fn scoped_change_set(
+    evaluations: &[super::environments::EnvironmentEvaluation],
+    envs: &[&str],
+    match_name: &str,
+    target_name: &str,
+    current: &super::graph::RailwayGraph,
+    last: &[(&str, bool)],
+) -> super::change_set::ChangeSet {
+    let scope = scope_plan(evaluations, envs, match_name);
+    if scope
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "error")
+    {
+        return super::change_set::ChangeSet {
+            version: RAILWAY_CHANGE_SET_VERSION,
+            diagnostics: scope.diagnostics,
+            ..Default::default()
+        };
+    }
+    let target = evaluations
+        .iter()
+        .find(|evaluation| evaluation.is_target)
+        .unwrap();
+    let desired = super::environments::graph_with_resources(
+        &graph_from(target.resources.clone()),
+        scope.resources,
+    );
+    let mut change_set = diff(current, &desired);
+    let last = last
+        .iter()
+        .map(|(address, is_last)| ((*address).to_string(), *is_last))
+        .collect();
+    super::environments::apply_exclusions(
+        &mut change_set,
+        current,
+        &scope.exclusions,
+        target_name,
+        &last,
+    );
+    change_set
+}
+
+#[test]
+fn evaluates_each_persistent_environment_and_the_target() {
+    let persistent = vec![
+        super::environments::PersistentEnvironment {
+            id: "env_prod".into(),
+            name: "production".into(),
+        },
+        super::environments::PersistentEnvironment {
+            id: "env_dev".into(),
+            name: "dev".into(),
+        },
+    ];
+    let target = eval_context_pr();
+    let contexts = super::environments::evaluation_contexts(&target, &persistent);
+    assert_eq!(contexts.len(), 3);
+    assert_eq!(
+        contexts[0].environment.as_deref(),
+        Some("railway-cli-pr-123")
+    );
+    assert_eq!(contexts[0].pr.as_ref().map(|pr| pr.number), Some(123));
+    assert!(contexts[1].pr.is_none());
+    assert_eq!(contexts[1].environment.as_deref(), Some("production"));
+    assert_eq!(contexts[1].environment_id.as_deref(), Some("env_prod"));
+    assert!(contexts[2].pr.is_none());
+    assert_eq!(contexts[2].environment.as_deref(), Some("dev"));
+
+    let mut production = eval_context_production();
+    production.environment_id = Some("env_prod".into());
+    let again = super::environments::evaluation_contexts(&production, &persistent);
+    assert_eq!(again.len(), 2);
+    assert!(again.iter().all(|ctx| ctx.pr.is_none()));
+    assert_eq!(again[0].environment.as_deref(), Some("production"));
+    assert_eq!(again[1].environment.as_deref(), Some("dev"));
+
+    let dir = tempfile_dir("railway-iac-env-eval-");
+    let file = dir.join("railway.ts");
+    std::fs::write(
+        &file,
+        r#"
+export default (ctx) => ({
+  name: "app",
+  resources: [{
+    address: "service.web",
+    type: "service",
+    name: "web",
+    variables: {
+      WHERE: {
+        type: "literal",
+        value: `${ctx.environment}:${ctx.pr ? ctx.pr.number : "persistent"}`
+      }
+    }
+  }]
+});
+"#,
+    )
+    .unwrap();
+    let mut values = Vec::new();
+    for ctx in &contexts {
+        let evaluated = evaluate_file_with_context(&file, ctx).expect("node evaluates locally");
+        values.push(evaluated.graph.resources[0]["variables"]["WHERE"]["value"].clone());
+    }
+    assert_eq!(
+        values,
+        vec![
+            json!("railway-cli-pr-123:123"),
+            json!("production:persistent"),
+            json!("dev:persistent")
+        ]
+    );
+}
+
+#[test]
+fn existence_conditional_is_an_error() {
+    let evaluations = [
+        env_eval(
+            "production",
+            vec![service("web", json!({})), service("metabase", json!({}))],
+            false,
+        ),
+        env_eval("dev", vec![service("web", json!({}))], true),
+    ];
+    let scope = scope_plan(&evaluations, &["production", "dev"], "dev");
+    assert_eq!(
+        scope.diagnostics[0].message,
+        "metabase is declared when evaluating production but not dev. Use environments: [\"production\"] instead of a conditional."
+    );
+    assert!(scope.resources.is_empty());
+}
+
+#[test]
+fn differing_environments_values_are_an_error() {
+    let evaluations = [
+        env_eval(
+            "production",
+            vec![service(
+                "metabase",
+                json!({ "environments": ["production"] }),
+            )],
+            false,
+        ),
+        env_eval(
+            "dev",
+            vec![service("metabase", json!({ "environments": ["dev"] }))],
+            true,
+        ),
+    ];
+    let scope = scope_plan(&evaluations, &["production", "dev"], "dev");
+    assert_eq!(
+        scope.diagnostics[0].message,
+        "metabase environments differ across evaluations: production [\"production\"], dev [\"dev\"]."
+    );
+}
+
+#[test]
+fn unknown_environment_lists_project_environments() {
+    let evaluations = [
+        env_eval(
+            "production",
+            vec![service("metabase", json!({ "environments": ["staging"] }))],
+            true,
+        ),
+        env_eval(
+            "dev",
+            vec![service("metabase", json!({ "environments": ["staging"] }))],
+            false,
+        ),
+    ];
+    let scope = scope_plan(&evaluations, &["production", "dev"], "production");
+    assert_eq!(
+        scope.diagnostics[0].message,
+        "Unknown environment \"staging\" on metabase. Project environments: dev, production."
+    );
+    let invalid = scope_plan(
+        &[env_eval(
+            "dev",
+            vec![service("metabase", json!({ "environments": "production" }))],
+            true,
+        )],
+        &["dev"],
+        "dev",
+    );
+    assert_eq!(
+        invalid.diagnostics[0].message,
+        "environments on metabase must be an array of environment names."
+    );
+}
+
+#[test]
+fn environments_field_removes_or_skips_per_resource_type() {
+    for (kind, name) in [
+        ("service", "metabase"),
+        ("database", "metabase"),
+        ("bucket", "assets"),
+        ("volume", "data"),
+        ("group", "api"),
+    ] {
+        let resource = json!({
+            "address": format!("{kind}.{name}"),
+            "type": kind,
+            "name": name,
+            "environments": ["production"]
+        });
+        let evaluations = [
+            env_eval("production", vec![resource.clone()], false),
+            env_eval("dev", vec![resource.clone()], true),
+        ];
+        let current = graph_from(vec![resource]);
+        let change_set = scoped_change_set(
+            &evaluations,
+            &["production", "dev"],
+            "dev",
+            "dev",
+            &current,
+            &[],
+        );
+        assert!(change_set.diagnostics.is_empty(), "{kind} {change_set:?}");
+        let delete = change_set
+            .changes
+            .iter()
+            .find(|change| change["kind"] == "resource.delete")
+            .unwrap_or_else(|| panic!("{kind} should remove the live instance"));
+        assert_eq!(delete["severity"], "destructive");
+        assert_eq!(delete["previous"]["type"], kind);
+        assert_eq!(
+            delete["summary"],
+            format!("Remove {kind} {name} from dev (environments: production)")
+        );
+        assert!(delete
+            .get("resource")
+            .and_then(|resource| resource.get("environments"))
+            .is_none());
+    }
+}
+
+#[test]
+fn excluded_absent_resource_is_an_info_line_not_a_change() {
+    let resource = service("metabase", json!({ "environments": ["production"] }));
+    let evaluations = [
+        env_eval("production", vec![resource.clone()], false),
+        env_eval("dev", vec![resource], true),
+    ];
+    let current = graph_from(vec![service("web", json!({}))]);
+    let change_set = scoped_change_set(
+        &evaluations,
+        &["production", "dev"],
+        "dev",
+        "dev",
+        &current,
+        &[],
+    );
+    assert!(!kinds(&change_set).contains(&"resource.create".to_string()));
+    assert!(!kinds(&change_set)
+        .iter()
+        .any(|kind| kind == "resource.delete"
+            && change_set
+                .changes
+                .iter()
+                .any(|change| change["address"] == "service.metabase")));
+    assert_eq!(
+        change_set.info,
+        vec!["metabase · not in dev (environments: production)".to_string()]
+    );
+    assert_eq!(
+        render_change_set(&change_set),
+        "- Delete service web\nmetabase · not in dev (environments: production)"
+    );
+}
+
+#[test]
+fn pr_environment_matches_its_base_environment() {
+    let resource = service("metabase", json!({ "environments": ["production"] }));
+    let evaluations = [
+        env_eval("railway-cli-pr-123", vec![resource.clone()], true),
+        env_eval("production", vec![resource.clone()], false),
+        env_eval("dev", vec![resource], false),
+    ];
+    let included = scoped_change_set(
+        &evaluations,
+        &["production", "dev"],
+        "production",
+        "railway-cli-pr-123",
+        &graph_from(vec![]),
+        &[],
+    );
+    assert!(included.info.is_empty());
+    assert_eq!(included.changes[0]["kind"], "resource.create");
+    assert!(included.changes[0]["resource"]
+        .get("environments")
+        .is_none());
+
+    let excluded = scoped_change_set(
+        &evaluations,
+        &["production", "dev"],
+        "dev",
+        "railway-cli-pr-123",
+        &graph_from(vec![]),
+        &[],
+    );
+    assert!(excluded.changes.is_empty());
+    assert_eq!(
+        excluded.info,
+        vec!["metabase · not in railway-cli-pr-123 (environments: production)".to_string()]
+    );
+}
+
+#[test]
+fn resource_absent_from_every_evaluation_is_an_ordinary_delete() {
+    let evaluations = [
+        env_eval("production", vec![service("web", json!({}))], true),
+        env_eval("dev", vec![service("web", json!({}))], false),
+    ];
+    let current = graph_from(vec![service("web", json!({})), service("old", json!({}))]);
+    let change_set = scoped_change_set(
+        &evaluations,
+        &["production", "dev"],
+        "production",
+        "production",
+        &current,
+        &[],
+    );
+    let delete = change_set
+        .changes
+        .iter()
+        .find(|change| change["address"] == "service.old")
+        .unwrap();
+    assert_eq!(delete["kind"], "resource.delete");
+    assert_eq!(delete["summary"], "Delete service old");
+}
+
+#[test]
+fn last_remaining_instance_is_a_project_wide_delete() {
+    let resource = service("metabase", json!({ "environments": ["production"] }));
+    let evaluations = [
+        env_eval("production", vec![resource.clone()], false),
+        env_eval("dev", vec![resource.clone()], true),
+    ];
+    let current = graph_from(vec![resource]);
+    let change_set = scoped_change_set(
+        &evaluations,
+        &["production", "dev"],
+        "dev",
+        "dev",
+        &current,
+        &[("service.metabase", true)],
+    );
+    assert_eq!(
+        change_set.changes[0]["summary"],
+        "Remove service metabase from dev (environments: production); this deletes it from the project"
+    );
+    let addresses = std::collections::HashSet::from(["service.metabase".to_string()]);
+    let instances = std::collections::BTreeMap::from([(
+        "metabase".to_string(),
+        vec!["env_dev".to_string(), "env_prod".to_string()],
+    )]);
+    let exclusions = scope_plan(&evaluations, &["production", "dev"], "dev").exclusions;
+    assert!(
+        super::environments::last_instances(&exclusions, &addresses, &instances, "env_dev")
+            .is_empty()
+    );
+    let only_here =
+        std::collections::BTreeMap::from([("metabase".to_string(), vec!["env_dev".to_string()])]);
+    assert_eq!(
+        super::environments::last_instances(&exclusions, &addresses, &only_here, "env_dev")
+            .get("service.metabase"),
+        Some(&true)
+    );
+}
+
+#[test]
+fn environments_is_stripped_and_stays_allowlisted() {
+    assert!(IAC_RESOURCE_FIELDS.contains(&"environments"));
+    let resource = service(
+        "web",
+        json!({ "environments": ["production"], "source": github("acme/web") }),
+    );
+    let graph = graph_from(vec![resource]);
+    let created = diff(&graph_from(vec![]), &graph).changes;
+    assert!(created[0]["resource"].get("environments").is_none());
+    let config = graph_to_environment_config(&graph, &CompileOptions::default());
+    assert!(config["services"]["web"].get("environments").is_none());
+    assert!(!config.to_string().contains("environments"));
+}
+
+#[test]
+fn target_evaluation_supplies_values_for_an_included_resource() {
+    let evaluations = [
+        env_eval(
+            "dev",
+            vec![service(
+                "web",
+                json!({ "variables": { "FROM": { "type": "literal", "value": "dev" } } }),
+            )],
+            true,
+        ),
+        env_eval(
+            "production",
+            vec![service(
+                "web",
+                json!({ "variables": { "FROM": { "type": "literal", "value": "production" } } }),
+            )],
+            false,
+        ),
+    ];
+    let scope = scope_plan(&evaluations, &["production", "dev"], "dev");
+    assert!(scope.diagnostics.is_empty());
+    assert_eq!(scope.resources[0]["variables"]["FROM"]["value"], "dev");
+    assert!(scope.resources[0].get("environments").is_none());
 }

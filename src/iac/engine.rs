@@ -1,23 +1,22 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::{
-    client::{GQLClient, post_graphql_raw},
+    client::{post_graphql_raw, GQLClient},
     config::{Configs, LinkedProject},
 };
 
 use super::change_set::{
-    BranchFollow, ChangeSetTelemetry, DiffOptions, diff_graphs_following,
-    needs_default_branch_lookup, preserve_resolved_create_branches, render_change_set,
-    variable_policy_report,
+    diff_graphs_following, needs_default_branch_lookup, preserve_resolved_create_branches,
+    render_change_set, variable_policy_report, BranchFollow, ChangeSetTelemetry, DiffOptions,
 };
-use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
-use super::eval::{EvalContext, PrContext, evaluate_file_with_context};
-use super::graph::{VariablePolicyReport, validate_graph};
+use super::compiler::{environment_config_to_graph, EnvironmentConfigToGraphOptions};
+use super::eval::{evaluate_file_with_context, EvalContext, PrContext};
+use super::graph::{validate_graph, VariablePolicyReport};
 use super::partial::needs_partial_claim_apply;
 
 #[derive(Debug, Deserialize)]
@@ -212,23 +211,96 @@ pub async fn run(
             .await?;
     let mut ctx = EvalContext::from_linked_project(linked_project, command);
     ctx.pr = current.pr_context();
-    let evaluated = evaluate_file_with_context(&file, &ctx)?;
-    let mut diagnostics: Vec<Value> = evaluated
-        .diagnostics
+    if let Some(name) = current.name.clone().filter(|name| !name.is_empty()) {
+        ctx.environment = Some(name.clone());
+        ctx.environment_name = Some(name);
+    }
+    let project_id = current
+        .project_id
+        .clone()
+        .unwrap_or_else(|| linked_project.project.clone());
+    let project_environments = fetch_project_environments(&client, &endpoint, &project_id).await?;
+    let persistent: Vec<super::environments::PersistentEnvironment> = project_environments
         .iter()
-        .map(|diagnostic| {
-            json!({
-                "severity": diagnostic.severity,
-                "path": diagnostic.path,
-                "message": diagnostic.message,
-            })
+        .filter(|environment| !environment.is_ephemeral)
+        .map(|environment| super::environments::PersistentEnvironment {
+            id: environment.id.clone(),
+            name: environment.name.clone(),
         })
         .collect();
+    // A project token only receives its own environment from the list query.
+    let see_all_environments = crate::config::Configs::get_railway_token().is_none();
+    let contexts = super::environments::evaluation_contexts(&ctx, &persistent);
+    let mut evaluated = None;
+    let mut evaluations = Vec::new();
+    let mut diagnostics: Vec<Value> = Vec::new();
+    for eval_ctx in &contexts {
+        let result = evaluate_file_with_context(&file, eval_ctx)?;
+        for diagnostic in &result.diagnostics {
+            push_diagnostic(
+                &mut diagnostics,
+                &diagnostic.severity,
+                &diagnostic.path,
+                &diagnostic.message,
+            );
+        }
+        let is_target = evaluated.is_none();
+        let name = if is_target {
+            ctx.environment.clone().unwrap_or_default()
+        } else {
+            eval_ctx.environment.clone().unwrap_or_default()
+        };
+        evaluations.push(super::environments::EnvironmentEvaluation {
+            name,
+            resources: result.graph.resources.clone(),
+            is_target,
+        });
+        if is_target {
+            evaluated = Some(result);
+        }
+    }
+    let mut evaluated = evaluated.context("IaC file produced no evaluation")?;
     diagnostics.extend(
         validate_graph(&evaluated.graph)
             .into_iter()
             .map(|message| json!({ "severity": "error", "path": "graph", "message": message })),
     );
+    let target_name = evaluations
+        .iter()
+        .find(|evaluation| evaluation.is_target)
+        .map(|evaluation| evaluation.name.clone())
+        .unwrap_or_default();
+    let match_name = ctx
+        .pr
+        .as_ref()
+        .and_then(|pr| pr.base.clone())
+        .unwrap_or_else(|| target_name.clone());
+    let persistent_names: Vec<String> = persistent
+        .iter()
+        .map(|environment| environment.name.clone())
+        .collect();
+    let scope = super::environments::plan_scope(
+        &evaluations,
+        &persistent_names,
+        &match_name,
+        see_all_environments,
+    );
+    for diagnostic in &scope.diagnostics {
+        push_diagnostic(
+            &mut diagnostics,
+            &diagnostic.severity,
+            &diagnostic.path,
+            &diagnostic.message,
+        );
+    }
+    let scope_failed = scope
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "error");
+    if !scope_failed {
+        evaluated.graph =
+            super::environments::graph_with_resources(&evaluated.graph, scope.resources.clone());
+    }
 
     let mut options = EnvironmentConfigToGraphOptions {
         project_name: linked_project
@@ -279,16 +351,49 @@ pub async fn run(
         pr_repo: pr_repo.as_deref(),
         default_branches: &default_branches,
     };
-    let mut change_set = diff_graphs_following(
-        DiffOptions {
-            current: &current_graph,
-            desired: &evaluated.graph,
-            reveal_values: args.show_values,
-            partial: evaluated.partial.as_deref(),
-            owners: owners.as_ref(),
-        },
-        Some(&follow),
+    let service_instances = if !scope_failed && see_all_environments && !scope.exclusions.is_empty()
+    {
+        fetch_service_instances(&client, &endpoint, &project_id).await
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let current_addresses: std::collections::HashSet<String> = current_graph
+        .resources
+        .iter()
+        .map(super::graph::resource_addr)
+        .collect();
+    let last_instance = super::environments::last_instances(
+        &scope.exclusions,
+        &current_addresses,
+        &service_instances,
+        &current.id,
     );
+    let mut change_set = if scope_failed {
+        super::change_set::ChangeSet {
+            version: super::change_set::RAILWAY_CHANGE_SET_VERSION,
+            ..Default::default()
+        }
+    } else {
+        diff_graphs_following(
+            DiffOptions {
+                current: &current_graph,
+                desired: &evaluated.graph,
+                reveal_values: args.show_values,
+                partial: evaluated.partial.as_deref(),
+                owners: owners.as_ref(),
+            },
+            Some(&follow),
+        )
+    };
+    if !scope_failed {
+        super::environments::apply_exclusions(
+            &mut change_set,
+            &current_graph,
+            &scope.exclusions,
+            &target_name,
+            &last_instance,
+        );
+    }
     change_set.telemetry = Some(ChangeSetTelemetry {
         language: authoring_language(&evaluated.file).to_string(),
     });
@@ -320,6 +425,15 @@ pub async fn run(
             let mut changes = changes.clone();
             preserve_resolved_create_branches(&change_set.changes, &mut changes);
             change_set.changes = changes;
+        }
+        if !scope_failed {
+            super::environments::apply_exclusions(
+                &mut change_set,
+                &current_graph,
+                &scope.exclusions,
+                &target_name,
+                &last_instance,
+            );
         }
         preview = Some(previewed);
     }
@@ -528,6 +642,168 @@ async fn github_default_branches(
         .collect())
 }
 
+fn push_diagnostic(diagnostics: &mut Vec<Value>, severity: &str, path: &str, message: &str) {
+    if diagnostics.iter().any(|diagnostic| {
+        diagnostic.get("path").and_then(Value::as_str) == Some(path)
+            && diagnostic.get("message").and_then(Value::as_str) == Some(message)
+    }) {
+        return;
+    }
+    diagnostics.push(json!({
+        "severity": severity,
+        "path": path,
+        "message": message,
+    }));
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectEnvironmentsQuery {
+    environments: EnvironmentConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct EnvironmentConnection {
+    edges: Vec<Edge<EnvironmentListNode>>,
+    #[serde(rename = "pageInfo")]
+    page_info: EnvironmentPageInfo,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentListNode {
+    id: String,
+    name: String,
+    #[serde(default)]
+    is_ephemeral: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+struct ListedEnvironment {
+    id: String,
+    name: String,
+    is_ephemeral: bool,
+}
+
+async fn fetch_project_environments(
+    client: &reqwest::Client,
+    endpoint: &str,
+    project_id: &str,
+) -> Result<Vec<ListedEnvironment>> {
+    let query = r#"
+      query IacProjectEnvironments($projectId: String!, $after: String) {
+        environments(projectId: $projectId, first: 100, after: $after) {
+          edges { node { id name isEphemeral } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    "#;
+    let mut after: Option<String> = None;
+    let mut environments = Vec::new();
+    loop {
+        let data = post_graphql_raw::<ProjectEnvironmentsQuery, _>(
+            client,
+            endpoint,
+            query,
+            json!({ "projectId": project_id, "after": after }),
+        )
+        .await
+        .context("Failed to load project environments for IaC")?;
+        for edge in data.environments.edges {
+            environments.push(ListedEnvironment {
+                id: edge.node.id,
+                name: edge.node.name,
+                is_ephemeral: edge.node.is_ephemeral,
+            });
+        }
+        if !data.environments.page_info.has_next_page {
+            break;
+        }
+        match data.environments.page_info.end_cursor {
+            Some(cursor) if Some(&cursor) != after.as_ref() => after = Some(cursor),
+            _ => break,
+        }
+    }
+    Ok(environments)
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceInstancesQuery {
+    project: Option<ServiceInstancesProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceInstancesProject {
+    #[serde(default)]
+    services: Connection<ServiceWithInstances>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceWithInstances {
+    name: Option<String>,
+    #[serde(default, rename = "serviceInstances")]
+    service_instances: Connection<InstanceEnvironment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InstanceEnvironment {
+    #[serde(rename = "environmentId")]
+    environment_id: String,
+}
+
+async fn fetch_service_instances(
+    client: &reqwest::Client,
+    endpoint: &str,
+    project_id: &str,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let query = r#"
+      query IacServiceInstances($projectId: String!) {
+        project(id: $projectId) {
+          services(first: 1000) {
+            edges { node { name serviceInstances(first: 200) { edges { node { environmentId } } } } }
+          }
+        }
+      }
+    "#;
+    let Ok(data) = post_graphql_raw::<ServiceInstancesQuery, _>(
+        client,
+        endpoint,
+        query,
+        json!({ "projectId": project_id }),
+    )
+    .await
+    else {
+        return std::collections::BTreeMap::new();
+    };
+    let mut instances = std::collections::BTreeMap::new();
+    for edge in data
+        .project
+        .unwrap_or(ServiceInstancesProject {
+            services: Connection::default(),
+        })
+        .services
+        .edges
+    {
+        let Some(name) = edge.node.name else {
+            continue;
+        };
+        let ids = edge
+            .node
+            .service_instances
+            .edges
+            .into_iter()
+            .map(|edge| edge.node.environment_id)
+            .collect();
+        instances.insert(name, ids);
+    }
+    instances
+}
+
 async fn fetch_current_environment(
     client: &reqwest::Client,
     endpoint: &str,
@@ -682,7 +958,11 @@ fn parse_owners(value: Option<&Value>) -> Option<super::partial::IacPartials> {
             out.insert(key.clone(), owner.to_string());
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 async fn preview_change_set(
@@ -845,11 +1125,9 @@ mod tests {
             "isEphemeral": false,
             "config": {}
         }));
-        assert!(
-            current_environment_value(&production, None)
-                .get("pr")
-                .is_none()
-        );
+        assert!(current_environment_value(&production, None)
+            .get("pr")
+            .is_none());
     }
 
     #[test]

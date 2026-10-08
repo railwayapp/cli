@@ -1,18 +1,18 @@
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::controllers::regions::BucketRegion;
 
 use super::graph::{
-    RailwayGraph, VariablePolicyReport, resource_addr, resource_address, resource_name,
-    resource_type,
+    resource_addr, resource_address, resource_name, resource_type, RailwayGraph,
+    VariablePolicyReport,
 };
 use super::json::{field, field_str, stable_stringify};
 use super::partial::{
-    IacPartials, effective_partial, foreign_resource_message, has_named_partials,
-    nameless_file_message, owner_of,
+    effective_partial, foreign_resource_message, has_named_partials, nameless_file_message,
+    owner_of, IacPartials,
 };
 
 pub const RAILWAY_CHANGE_SET_VERSION: u32 = 1;
@@ -30,6 +30,8 @@ pub struct ChangeSet {
     pub declared: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<ChangeSetTelemetry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub info: Vec<String>,
 }
 
 /// Authoring language is the only adoption dimension the server cannot observe
@@ -77,9 +79,13 @@ pub fn diff_graphs_following(
 ) -> ChangeSet {
     let mut changes = Vec::new();
     let mut diagnostics = Vec::new();
-    let desired_by: Map<String, Value> = options
+    let desired_resources: Vec<Value> = options
         .desired
         .resources
+        .iter()
+        .map(super::environments::without_environments)
+        .collect();
+    let desired_by: Map<String, Value> = desired_resources
         .iter()
         .map(|resource| (resource_addr(resource), resource.clone()))
         .collect();
@@ -90,12 +96,7 @@ pub fn diff_graphs_following(
         .map(|resource| (paired_address(resource, &desired_by), resource.clone()))
         .collect();
     let p = effective_partial(options.partial).to_string();
-    let declared: Vec<String> = options
-        .desired
-        .resources
-        .iter()
-        .map(resource_addr)
-        .collect();
+    let declared: Vec<String> = desired_resources.iter().map(resource_addr).collect();
 
     if p == super::partial::PROJECT_PARTIAL && has_named_partials(options.owners) {
         diagnostics.push(Diagnostic {
@@ -109,7 +110,7 @@ pub fn diff_graphs_following(
     let mut compiled = compile_variable_policy(options.current, options.desired);
     diagnostics.append(&mut compiled.diagnostics);
 
-    for resource in &options.desired.resources {
+    for resource in &desired_resources {
         let address = resource_addr(resource);
         let previous = current_by.get(&address);
         if let Some(owner) = owner_of(options.owners, &address) {
@@ -364,17 +365,16 @@ fn change_set_result(
         partial: partial.map(str::to_string),
         declared,
         telemetry: None,
+        info: Vec::new(),
     }
 }
 
 pub fn render_change_set(change_set: &ChangeSet) -> String {
+    let mut lines = Vec::new();
     if change_set.changes.is_empty() {
-        return "No changes.".to_string();
-    }
-    change_set
-        .changes
-        .iter()
-        .map(|change| {
+        lines.push("No changes.".to_string());
+    } else {
+        lines.extend(change_set.changes.iter().map(|change| {
             let marker = match field_str(change, "kind") {
                 Some("resource.create") | Some("domain.create") => "+",
                 Some("resource.delete") => "-",
@@ -384,9 +384,10 @@ pub fn render_change_set(change_set: &ChangeSet) -> String {
                 "{marker} {}",
                 field_str(change, "summary").unwrap_or("change")
             )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        }));
+    }
+    lines.extend(change_set.info.iter().cloned());
+    lines.join("\n")
 }
 
 struct ParsedPattern {
@@ -1105,7 +1106,11 @@ fn github_repo(source: &Value) -> Option<&str> {
         return None;
     }
     let repo = obj.get("repo").and_then(Value::as_str)?;
-    if repo.is_empty() { None } else { Some(repo) }
+    if repo.is_empty() {
+        None
+    } else {
+        Some(repo)
+    }
 }
 
 fn pinned_branch(source: &Value) -> Option<&str> {

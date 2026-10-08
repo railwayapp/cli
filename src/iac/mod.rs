@@ -7,6 +7,7 @@
 mod change_set;
 mod compiler;
 mod engine;
+mod environments;
 mod eval;
 mod graph;
 mod json;
@@ -15,19 +16,19 @@ mod partial;
 pub mod saved_plan;
 
 #[allow(dead_code)]
-pub use change_set::{ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
+pub use change_set::{diff_graphs, render_change_set, ChangeSet, RAILWAY_CHANGE_SET_VERSION};
 #[allow(dead_code)]
 pub use compiler::{
-    CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
-    graph_to_environment_config, project_definition_to_graph,
+    environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
+    CompileOptions, EnvironmentConfigToGraphOptions,
 };
-pub use engine::{NativeRun, run as run_native};
+pub use engine::{run as run_native, NativeRun};
 #[allow(dead_code)]
-pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
+pub use eval::{evaluate_file, evaluate_file_with_context, EvalContext, EvaluatedFile};
 #[allow(dead_code)]
 pub use graph::{
-    RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicyReport, format_variable_policy_line,
-    resource_address, validate_graph,
+    format_variable_policy_line, resource_address, validate_graph, RailwayGraph,
+    VariablePolicyReport, RAILWAY_GRAPH_VERSION,
 };
 #[allow(dead_code)]
 pub use partial::{needs_partial_claim_apply, parse_partial_name};
