@@ -221,8 +221,8 @@ pub fn diff_graphs_following(
             previous["address"] = json!(address);
         }
         let previous = &previous;
-        if follow.is_some_and(|follow| follow.in_pr_environment) {
-            if let Some(message) = pr_branch_pin_error(previous, resource) {
+        if let Some(follow) = follow.filter(|follow| follow.in_pr_environment) {
+            if let Some(message) = pr_branch_pin_error(previous, resource, follow.pr_repo) {
                 diagnostics.push(Diagnostic {
                     severity: "error".into(),
                     path: format!("resources.{address}.source.branch"),
@@ -1073,10 +1073,16 @@ fn missing_branch_message(resource: &Value) -> String {
     )
 }
 
-fn pr_branch_pin_error(previous: &Value, resource: &Value) -> Option<String> {
+fn pr_branch_pin_error(
+    previous: &Value,
+    resource: &Value,
+    pr_repo: Option<&str>,
+) -> Option<String> {
     let desired = resource.get("source")?;
     let pinned = pinned_branch(desired)?;
-    if github_repo(desired).is_none() {
+    let repo = github_repo(desired)?;
+    // Only the PR's repo is rewritten to the PR branch. Other services keep their own.
+    if !pr_repo.is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo)) {
         return None;
     }
     let current = previous.get("source").and_then(pinned_branch)?;

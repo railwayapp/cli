@@ -2446,6 +2446,28 @@ fn pr_environment_rejects_a_pin_that_differs_from_the_deployed_branch() {
 }
 
 #[test]
+fn pr_environment_allows_another_repo_to_change_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("main"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("develop"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    assert!(
+        change_set
+            .changes
+            .iter()
+            .any(|change| change["field"] == "source")
+    );
+}
+
+#[test]
 fn pr_environment_allows_a_pin_matching_the_deployed_branch() {
     let defaults = std::collections::BTreeMap::new();
     let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
