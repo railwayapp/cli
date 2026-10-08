@@ -615,13 +615,24 @@ async fn write_pulled_config(
     environment: Option<String>,
     variables_managed: bool,
 ) -> Result<()> {
-    let graph = load_current_graph(runner, include_variables, environment).await?;
+    let imported = load_current_import(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
-        &render_graph_as_railway(&graph, preserve_variables, lang, variables_managed),
+        &render_graph_as_railway_following(
+            &imported.graph,
+            preserve_variables,
+            lang,
+            variables_managed,
+            imported.pr_repo.as_deref(),
+        ),
         force,
     )
+}
+
+struct CurrentImport {
+    graph: runner::DesiredGraph,
+    pr_repo: Option<String>,
 }
 
 async fn load_current_graph(
@@ -629,6 +640,16 @@ async fn load_current_graph(
     decrypt_variables: bool,
     environment: Option<String>,
 ) -> Result<runner::DesiredGraph> {
+    Ok(load_current_import(runner, decrypt_variables, environment)
+        .await?
+        .graph)
+}
+
+async fn load_current_import(
+    runner: Option<String>,
+    decrypt_variables: bool,
+    environment: Option<String>,
+) -> Result<CurrentImport> {
     // The native engine's `current` command reads live state and does not
     // evaluate an authoring file. The legacy TypeScript runner still requires
     // a file on disk, so keep a throwaway stub only on that path.
@@ -679,9 +700,13 @@ async fn load_current_graph(
         bail!("Could not import Railway configuration:\n{diagnostics}");
     }
 
-    response
-        .current_graph
-        .context("Railway did not return current project state")
+    let pr_repo = response.pull_pr_repo().map(str::to_string);
+    Ok(CurrentImport {
+        graph: response
+            .current_graph
+            .context("Railway did not return current project state")?,
+        pr_repo,
+    })
 }
 
 fn write_pull_stub() -> Result<tempfile::TempDir> {
@@ -708,6 +733,16 @@ fn render_graph_as_railway(
     preserve_variables: bool,
     lang: AuthoringLang,
     variables_managed: bool,
+) -> String {
+    render_graph_as_railway_following(graph, preserve_variables, lang, variables_managed, None)
+}
+
+fn render_graph_as_railway_following(
+    graph: &runner::DesiredGraph,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+    variables_managed: bool,
+    pr_repo: Option<&str>,
 ) -> String {
     let stripped;
     let graph = if variables_managed {
@@ -792,7 +827,11 @@ fn render_graph_as_railway(
 
     let source_aliases = shared_github_sources(graph);
     for (alias, source) in &source_aliases {
-        out.push_str(&assign_stmt(lang, alias, &render_source(source, lang)));
+        out.push_str(&assign_stmt(
+            lang,
+            alias,
+            &render_source_following(source, lang, omit_pulled_branch(source, pr_repo)),
+        ));
     }
     if !source_aliases.is_empty() {
         out.push('\n');
@@ -882,12 +921,13 @@ fn render_graph_as_railway(
                 }
             }
             "service" => {
-                let body = render_service_body(
+                let body = render_service_body_following(
                     resource,
                     &source_aliases,
                     &resource_names,
                     preserve_variables,
                     lang,
+                    pr_repo,
                 );
                 out.push_str(&assign_stmt(
                     lang,
@@ -1153,6 +1193,24 @@ fn render_service_body(
     preserve_variables: bool,
     lang: AuthoringLang,
 ) -> String {
+    render_service_body_following(
+        resource,
+        source_aliases,
+        resource_names,
+        preserve_variables,
+        lang,
+        None,
+    )
+}
+
+fn render_service_body_following(
+    resource: &runner::DesiredResource,
+    source_aliases: &std::collections::BTreeMap<String, serde_json::Value>,
+    resource_names: &std::collections::HashMap<String, String>,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+    pr_repo: Option<&str>,
+) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
         if source
@@ -1163,16 +1221,16 @@ fn render_service_body(
             let alias = source_aliases
                 .iter()
                 .find_map(|(alias, shared_source)| (shared_source == source).then_some(alias));
-            let value = alias
-                .cloned()
-                .unwrap_or_else(|| render_source(source, lang));
+            let value = alias.cloned().unwrap_or_else(|| {
+                render_source_following(source, lang, omit_pulled_branch(source, pr_repo))
+            });
             lines.push(lang.config_field("source", &value));
         } else if source
             .get("image")
             .and_then(|value| value.as_str())
             .is_some()
         {
-            lines.push(lang.config_field("source", &render_source(source, lang)));
+            lines.push(lang.config_field("source", &render_source_following(source, lang, false)));
         }
     }
     render_build(resource.build.as_ref(), lang, &mut lines);
@@ -1207,6 +1265,24 @@ fn render_service_body(
 }
 
 fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
+    render_source_following(source, lang, false)
+}
+
+fn omit_pulled_branch(source: &serde_json::Value, pr_repo: Option<&str>) -> bool {
+    let Some(pr_repo) = pr_repo else {
+        return false;
+    };
+    source
+        .get("repo")
+        .and_then(|value| value.as_str())
+        .is_some_and(|repo| repo.eq_ignore_ascii_case(pr_repo))
+}
+
+fn render_source_following(
+    source: &serde_json::Value,
+    lang: AuthoringLang,
+    omit_branch: bool,
+) -> String {
     let (helper, identifier) =
         if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
             ("github", repo)
@@ -1223,7 +1299,7 @@ fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
     if helper != "image" || !supports_image_auto_updates(identifier) {
         options.remove("autoUpdates");
     }
-    if options.get("branch").and_then(|value| value.as_str()) == Some("main") {
+    if omit_branch {
         options.remove("branch");
     }
     if options
@@ -2494,10 +2570,41 @@ mod tests {
         assert!(rendered_image.contains("schedule"));
         let rendered_github = render_source(&github_source, AuthoringLang::TypeScript);
         assert!(rendered_github.contains("branch: \"feature\""));
+        let rendered_main = render_source(
+            &json!({ "repo": "railwayapp/nixpacks", "branch": "main" }),
+            AuthoringLang::TypeScript,
+        );
+        assert!(rendered_main.contains("branch: \"main\""));
         assert!(!rendered_github.contains("autoUpdates"));
         assert!(
             !render_source(&unsupported_source, AuthoringLang::TypeScript).contains("autoUpdates")
         );
+    }
+
+    #[test]
+    fn pull_renderer_omits_branch_only_for_the_pr_repo() {
+        let pr = service_resource(
+            json!({ "repo": "Acme/API", "branch": "feat/login" }),
+            json!({}),
+        );
+        let mut other =
+            service_resource(json!({ "repo": "other/lib", "branch": "main" }), json!({}));
+        other.address = Some("service.lib".into());
+        other.name = "lib".into();
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources: vec![pr, other],
+        };
+        let rendered = render_graph_as_railway_following(
+            &graph,
+            true,
+            AuthoringLang::TypeScript,
+            true,
+            Some("acme/api"),
+        );
+        assert!(rendered.contains("github(\"Acme/API\")"));
+        assert!(!rendered.contains("feat/login"));
+        assert!(rendered.contains("branch: \"main\""));
     }
 
     #[test]
