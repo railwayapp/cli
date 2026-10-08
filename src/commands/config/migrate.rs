@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
-use is_terminal::IsTerminal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -59,6 +58,10 @@ pub struct MigrateArgs {
     /// Authoring language to emit: `ts` (default), `py`, or `go`.
     #[clap(long, default_value = "ts")]
     lang: String,
+
+    /// Who owns service variables: `managed` or `unmanaged`.
+    #[clap(long, value_enum, value_name = "managed|unmanaged")]
+    variables: Option<super::VariablesMode>,
 }
 
 #[derive(Parser)]
@@ -149,6 +152,8 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     if args.delete_files && !args.apply {
         bail!("--delete-files requires --apply.");
     }
+    let interactive = super::session_is_interactive();
+    let variables = super::resolve_variables_mode(args.variables, interactive)?;
 
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let services = discover_cac_services(&cwd, args.service.as_deref()).await?;
@@ -182,7 +187,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         _ => "ts",
     };
     let railway_file = railway_dir.join(format!("railway.{ext}"));
-    let emitted = render_migrated(&graph, &services, lang, named_partial);
+    let emitted = render_migrated(&graph, &services, lang, named_partial, variables.managed());
 
     // `--show` prints just the file so `migrate --show > out.ts` works.
     if args.show && !args.apply {
@@ -192,8 +197,6 @@ async fn generate(args: MigrateArgs) -> Result<()> {
 
     let environment = linked_environment_name().await;
     print_migration_preview(&cwd, &services, &project_name, environment.as_deref(), ext);
-
-    let interactive = std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
 
     // --apply writes unconditionally. Bare `migrate` in a terminal asks;
     // piped/non-interactive stays a pure dry run.
@@ -243,6 +246,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         "Wrote".green().bold(),
         display_rel(&cwd, &railway_file).cyan()
     );
+    eprintln!("  {}", super::variables_policy_written(variables));
     match args.lang.as_str() {
         "go" => {
             let gomod = railway_dir.join("go.mod");
@@ -769,6 +773,7 @@ fn render_migrated(
     services: &[CacService],
     lang: AuthoringLang,
     named_partial: bool,
+    variables_managed: bool,
 ) -> String {
     let services = if named_partial {
         &services[..services.len().min(1)]
@@ -796,7 +801,7 @@ fn render_migrated(
         }
     }
 
-    let mut rendered = super::render_graph_as_railway(&graph, true, lang);
+    let mut rendered = super::render_graph_as_railway(&graph, true, lang, variables_managed);
     rendered = inject_cac_lines(&rendered, services, &bare_replicas, lang);
     if let Some(service) = named_partial.then(|| services.first()).flatten() {
         rendered = insert_partial(&rendered, lang, &service.name);
@@ -1603,6 +1608,7 @@ mod tests {
             services,
             lang,
             named_partial,
+            true,
         )
     }
 
@@ -1895,6 +1901,7 @@ healthcheckPath = "/"
             &[api_cac()],
             AuthoringLang::TypeScript,
             false,
+            true,
         );
         assert!(out.contains("postgres(\"postgres\")"), "{out}");
         assert!(out.contains("image(\"metabase/metabase\")"), "{out}");
@@ -1918,7 +1925,7 @@ healthcheckPath = "/"
     fn overlays_cac_in_python_and_go() {
         let graph = pulled_graph();
         let services = [api_cac()];
-        let py = render_migrated(&graph, &services, AuthoringLang::Python, false);
+        let py = render_migrated(&graph, &services, AuthoringLang::Python, false, true);
         assert!(py.contains("from railway_sdk import"), "{py}");
         assert!(py.contains("def main(ctx=None):"), "{py}");
         assert!(py.contains("postgres(\"postgres\")"), "{py}");
@@ -1929,7 +1936,7 @@ healthcheckPath = "/"
         assert!(py.contains("dockerfilePath from CaC"), "{py}");
         assert!(!py.contains("PARTIAL"), "{py}");
 
-        let go = render_migrated(&graph, &services, AuthoringLang::Go, false);
+        let go = render_migrated(&graph, &services, AuthoringLang::Go, false, true);
         assert!(go.contains("package main"), "{go}");
         assert!(go.contains("func Railway(ctx railway.Context)"), "{go}");
         assert!(go.contains("railway.Postgres(\"postgres\")"), "{go}");
@@ -1949,6 +1956,7 @@ healthcheckPath = "/"
             &[api_cac()],
             AuthoringLang::TypeScript,
             true,
+            true,
         );
         assert!(out.contains("export const partial = \"api\""), "{out}");
         assert!(out.contains("service(\"api\""), "{out}");
@@ -1957,10 +1965,16 @@ healthcheckPath = "/"
         assert!(!out.contains("postgres("), "{out}");
         assert!(!out.contains("metabase"), "{out}");
 
-        let py = render_migrated(&pulled_graph(), &[api_cac()], AuthoringLang::Python, true);
+        let py = render_migrated(
+            &pulled_graph(),
+            &[api_cac()],
+            AuthoringLang::Python,
+            true,
+            true,
+        );
         assert!(py.contains("PARTIAL = \"api\""), "{py}");
         assert!(!py.contains("postgres("), "{py}");
-        let go = render_migrated(&pulled_graph(), &[api_cac()], AuthoringLang::Go, true);
+        let go = render_migrated(&pulled_graph(), &[api_cac()], AuthoringLang::Go, true, true);
         assert!(go.contains("const Partial = \"api\""), "{go}");
         assert!(!go.contains("Postgres"), "{go}");
     }
@@ -1993,6 +2007,7 @@ healthcheckPath = "/"
             )],
             AuthoringLang::TypeScript,
             false,
+            true,
         );
         assert!(out.contains("postgres(\"postgres\")"), "{out}");
         assert!(out.contains("service(\"worker\""), "{out}");

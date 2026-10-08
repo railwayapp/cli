@@ -132,11 +132,73 @@ impl std::fmt::Display for InitMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum VariablesMode {
+    Managed,
+    Unmanaged,
+}
+
+impl VariablesMode {
+    fn managed(self) -> bool {
+        matches!(self, Self::Managed)
+    }
+}
+
+impl std::fmt::Display for VariablesMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Managed => "managed — this file owns every variable on these services",
+            Self::Unmanaged => {
+                "unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)"
+            }
+        })
+    }
+}
+
+fn session_is_interactive() -> bool {
+    std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
+}
+
+fn resolve_variables_mode(flag: Option<VariablesMode>, interactive: bool) -> Result<VariablesMode> {
+    if let Some(mode) = flag {
+        return Ok(mode);
+    }
+    if !interactive {
+        bail!("Pass --variables=managed or --variables=unmanaged.");
+    }
+    prompt_select(
+        "How should this file treat variables?",
+        vec![VariablesMode::Managed, VariablesMode::Unmanaged],
+    )
+}
+
+fn reject_unmanaged_include(mode: VariablesMode, include_variables: bool) -> Result<()> {
+    if include_variables && !mode.managed() {
+        bail!("--include-variables cannot be used with --variables=unmanaged.");
+    }
+    Ok(())
+}
+
+fn variables_policy_written(mode: VariablesMode) -> &'static str {
+    match mode {
+        VariablesMode::Managed => {
+            "Variables are managed — this file owns every variable on these services."
+        }
+        VariablesMode::Unmanaged => {
+            "Variables are unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)."
+        }
+    }
+}
+
 #[derive(Parser)]
 struct InitArgs {
     /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
+
+    /// Who owns service variables when importing: `managed` or `unmanaged`.
+    #[clap(long, value_enum, value_name = "managed|unmanaged")]
+    variables: Option<VariablesMode>,
 }
 
 #[derive(Parser)]
@@ -168,6 +230,10 @@ struct PullArgs {
     /// Ask an agent to turn imported state into idiomatic authoring code.
     #[clap(long)]
     agent: bool,
+
+    /// Who owns service variables: `managed` or `unmanaged`.
+    #[clap(long, value_enum, value_name = "managed|unmanaged")]
+    variables: Option<VariablesMode>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -338,6 +404,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
         )?
     };
 
+    let mut imported_variables = None;
     match init_mode {
         InitMode::GenerateFromRepo => write_new(
             &railway_file,
@@ -345,7 +412,18 @@ async fn init_config(args: InitArgs) -> Result<()> {
             args.force,
         )?,
         InitMode::ImportFromRailway => {
-            write_pulled_config(&railway_file, args.force, None, true, false, None).await?
+            let mode = resolve_variables_mode(args.variables, session_is_interactive())?;
+            write_pulled_config(
+                &railway_file,
+                args.force,
+                None,
+                true,
+                false,
+                None,
+                mode.managed(),
+            )
+            .await?;
+            imported_variables = Some(mode);
         }
         InitMode::MinimalFile => write_new(
             &railway_file,
@@ -373,6 +451,9 @@ async fn init_config(args: InitArgs) -> Result<()> {
     );
     println!();
     println!("{}", "Next steps".bold());
+    if let Some(mode) = imported_variables {
+        println!("  {} {}", "•".cyan(), variables_policy_written(mode));
+    }
     println!(
         "  {} Edit {} to describe your Railway project.",
         "•".cyan(),
@@ -449,6 +530,17 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     let relative_file = format!(".railway/{}", lang.file_name());
     let readme_file = cwd.join(".railway").join("README.md");
 
+    let mode = if args.json {
+        args.variables
+    } else {
+        Some(resolve_variables_mode(
+            args.variables,
+            session_is_interactive(),
+        )?)
+    };
+    if let Some(mode) = mode {
+        reject_unmanaged_include(mode, args.include_variables)?;
+    }
     if args.include_variables {
         eprintln!(
             "{} non-sealed variables, including secrets, will be decrypted and included in the spec",
@@ -462,6 +554,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&graph)?);
         return Ok(());
     }
+    let mode = mode.expect("variables policy is resolved when writing a file");
 
     create_parent(&railway_file)?;
     write_pulled_config(
@@ -471,6 +564,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         !args.omit_preserved_variables,
         args.include_variables,
         args.environment,
+        mode.managed(),
     )
     .await?;
     let wrote_readme = write_asset_if_missing(&readme_file, &iac_readme(lang))?;
@@ -491,6 +585,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
     println!();
     println!("{}", "Next steps".bold());
+    println!("  {} {}", "•".cyan(), variables_policy_written(mode));
     println!(
         "  {} Review {} and remove anything you do not want managed from code.",
         "•".cyan(),
@@ -518,12 +613,13 @@ async fn write_pulled_config(
     preserve_variables: bool,
     include_variables: bool,
     environment: Option<String>,
+    variables_managed: bool,
 ) -> Result<()> {
     let graph = load_current_graph(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
-        &render_graph_as_railway(&graph, preserve_variables, lang),
+        &render_graph_as_railway(&graph, preserve_variables, lang, variables_managed),
         force,
     )
 }
@@ -611,7 +707,20 @@ fn render_graph_as_railway(
     graph: &runner::DesiredGraph,
     preserve_variables: bool,
     lang: AuthoringLang,
+    variables_managed: bool,
 ) -> String {
+    let stripped;
+    let graph = if variables_managed {
+        graph
+    } else {
+        let mut copy = graph.clone();
+        for resource in &mut copy.resources {
+            resource.variables = None;
+        }
+        stripped = copy;
+        &stripped
+    };
+    let preserve_variables = preserve_variables && variables_managed;
     let mut imports = vec!["defineRailway", "project", "service"];
     if graph
         .resources
@@ -864,7 +973,12 @@ fn render_graph_as_railway(
         .as_ref()
         .map(|project| project.name.as_str())
         .unwrap_or("imported-project");
-    out.push_str(&render_project_return(lang, project_name, &top_level_names));
+    out.push_str(&render_project_return(
+        lang,
+        project_name,
+        &top_level_names,
+        Some(variables_managed),
+    ));
     out
 }
 
@@ -936,15 +1050,39 @@ fn service_call(lang: AuthoringLang, name: &str, body: &str) -> String {
     }
 }
 
-fn render_project_return(lang: AuthoringLang, project_name: &str, resources: &[String]) -> String {
+fn render_project_return(
+    lang: AuthoringLang,
+    project_name: &str,
+    resources: &[String],
+    variables_managed: Option<bool>,
+) -> String {
     let name = ts_string(project_name);
     let list = list_literal(lang, resources);
+    let Some(managed) = variables_managed else {
+        return match lang {
+            AuthoringLang::TypeScript => {
+                format!("\n  return project({name}, {{\n    resources: {list},\n  }});\n}});\n")
+            }
+            AuthoringLang::Python => format!("    return project({name}, resources={list})\n"),
+            AuthoringLang::Go => {
+                format!("  return {}({name}, {list})\n}}\n", lang.helper("project"))
+            }
+        };
+    };
+    let ts_bool = if managed { "true" } else { "false" };
+    let py_bool = if managed { "True" } else { "False" };
+    let go_bool = if managed { "true" } else { "false" };
     match lang {
-        AuthoringLang::TypeScript => {
-            format!("\n  return project({name}, {{\n    resources: {list},\n  }});\n}});\n")
-        }
-        AuthoringLang::Python => format!("    return project({name}, resources={list})\n"),
-        AuthoringLang::Go => format!("  return {}({name}, {list})\n}}\n", lang.helper("project")),
+        AuthoringLang::TypeScript => format!(
+            "\n  return project({name}, {{\n    variables: {{ managed: {ts_bool} }},\n    resources: {list},\n  }});\n}});\n"
+        ),
+        AuthoringLang::Python => format!(
+            "    return project({name}, variables={{\"managed\": {py_bool}}}, resources={list})\n"
+        ),
+        AuthoringLang::Go => format!(
+            "  return {}({name}, {list}, railway.ProjectConfig{{\n    Variables: &railway.VariablesPolicy{{Managed: {go_bool}}},\n  }})\n}}\n",
+            lang.helper("project")
+        ),
     }
 }
 
@@ -1822,7 +1960,7 @@ fn railway_stub_with_service(
     };
     let web = service_call(lang, "\"web\"", &body);
     let web_stmt = assign_stmt(lang, "web", &web);
-    let return_stmt = render_project_return(lang, project_name, &["web".to_string()]);
+    let return_stmt = render_project_return(lang, project_name, &["web".to_string()], None);
     let imports = if github_source.is_some() {
         vec!["defineRailway", "github", "project", "service"]
     } else {
@@ -1951,7 +2089,11 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
         bail!("Run `railway config init` to create .railway/railway.ts, then try again.");
     }
 
-    init_config(InitArgs { force: false }).await?;
+    init_config(InitArgs {
+        force: false,
+        variables: None,
+    })
+    .await?;
     println!();
     Ok(())
 }
@@ -2163,7 +2305,7 @@ mod tests {
             project: Some(runner::DesiredProject { name: "app".into() }),
             resources: vec![database_resource("postgres", "postgres", networking)],
         };
-        render_graph_as_railway(&graph, true, AuthoringLang::TypeScript)
+        render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true)
     }
 
     #[test]
@@ -2241,7 +2383,7 @@ mod tests {
             resources: vec![frontend, worker],
         };
 
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
 
         assert_eq!(rendered.matches("const frontend =").count(), 1);
         assert!(rendered.contains("const frontend = github(\"org/frontend\")"));
@@ -2432,7 +2574,7 @@ mod tests {
                 json!({ "startCommand": "./app" }),
             )],
         };
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Python);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
         assert!(rendered.contains("from railway_sdk import"));
         assert!(rendered.contains("def main(ctx=None):"));
         assert!(rendered.contains("source=github(\"org/app\")"));
@@ -2452,11 +2594,95 @@ mod tests {
                 json!({ "startCommand": "./app" }),
             )],
         };
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
         assert!(rendered.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(rendered.contains("func Railway(ctx railway.Context)"));
         assert!(rendered.contains("railway.Github(\"org/app\")"));
         assert!(rendered.contains("\"start\": \"./app\""));
         assert!(rendered.contains("railway.ServiceNamed"));
+    }
+
+    #[test]
+    fn variables_mode_requires_a_flag_when_not_interactive() {
+        let error = resolve_variables_mode(None, false).unwrap_err().to_string();
+        assert_eq!(error, "Pass --variables=managed or --variables=unmanaged.");
+        assert_eq!(
+            resolve_variables_mode(Some(VariablesMode::Unmanaged), false).unwrap(),
+            VariablesMode::Unmanaged
+        );
+    }
+
+    #[test]
+    fn include_variables_conflicts_with_unmanaged() {
+        let error = reject_unmanaged_include(VariablesMode::Unmanaged, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "--include-variables cannot be used with --variables=unmanaged."
+        );
+        assert!(reject_unmanaged_include(VariablesMode::Managed, true).is_ok());
+        assert!(reject_unmanaged_include(VariablesMode::Unmanaged, false).is_ok());
+    }
+
+    #[test]
+    fn variables_prompt_options_are_the_two_policy_lines() {
+        assert_eq!(
+            VariablesMode::Managed.to_string(),
+            "managed — this file owns every variable on these services"
+        );
+        assert_eq!(
+            VariablesMode::Unmanaged.to_string(),
+            "unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)"
+        );
+    }
+
+    #[test]
+    fn pull_renderer_writes_variables_policy_for_both_modes() {
+        let mut resource = service_resource(json!({ "image": "nginx" }), json!({}));
+        resource.variables = Some(
+            json!({
+                "SECRET": { "type": "preserve" },
+                "NODE_ENV": { "type": "literal", "value": "production" }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "demo".into(),
+            }),
+            resources: vec![resource],
+        };
+
+        let ts_managed = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        let ts_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, false);
+        assert!(ts_managed.contains("variables: { managed: true }"));
+        assert!(ts_managed.find("variables:").unwrap() < ts_managed.find("resources:").unwrap());
+        assert!(ts_managed.contains("SECRET: preserve()"));
+        assert!(ts_managed.contains("NODE_ENV: \"production\""));
+        assert!(ts_unmanaged.contains("variables: { managed: false }"));
+        assert!(!ts_unmanaged.contains("env:"));
+        assert!(!ts_unmanaged.contains("preserve()"));
+        assert!(!ts_unmanaged.contains("NODE_ENV"));
+
+        let py_managed = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        let py_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::Python, false);
+        assert!(py_managed.contains("variables={\"managed\": True}"));
+        assert!(py_managed.find("variables=").unwrap() < py_managed.find("resources=").unwrap());
+        assert!(py_managed.contains("preserve()"));
+        assert!(py_unmanaged.contains("variables={\"managed\": False}"));
+        assert!(!py_unmanaged.contains("env="));
+        assert!(!py_unmanaged.contains("preserve()"));
+
+        let go_managed = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
+        let go_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::Go, false);
+        assert!(go_managed.contains("railway.ProjectConfig{"));
+        assert!(go_managed.contains("Variables: &railway.VariablesPolicy{Managed: true}"));
+        assert!(go_managed.contains("railway.Preserve()"));
+        assert!(go_unmanaged.contains("Variables: &railway.VariablesPolicy{Managed: false}"));
+        assert!(!go_unmanaged.contains("\"env\""));
+        assert!(!go_unmanaged.contains("Preserve"));
     }
 }
