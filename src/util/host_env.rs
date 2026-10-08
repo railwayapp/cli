@@ -75,10 +75,6 @@ const UNSAFE_NAMES: &[&str] = &[
     "PHPRC",
     "PHP_INI_SCAN_DIR",
     "JAVA_HOME",
-    "JAVA_OPTS",
-    "GRADLE_OPTS",
-    "MAVEN_OPTS",
-    "SBT_OPTS",
     // Build tools: which compiler or wrapper runs, and where packages and
     // toolchains are fetched from.
     "MAKEFLAGS",
@@ -95,10 +91,6 @@ const UNSAFE_NAMES: &[&str] = &[
     "GOINSECURE",
     "GOPRIVATE",
     "GOTOOLCHAIN",
-    "GOROOT",
-    "GOPATH",
-    "GOBIN",
-    "GOENV",
     // The CLI's own environment switch; a nested `railway` should keep the
     // local machine's setting.
     "RAILWAY_ENV",
