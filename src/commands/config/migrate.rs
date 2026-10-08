@@ -153,7 +153,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("Unable to get current directory")?;
     let services = discover_cac_services(&cwd, args.service.as_deref()).await?;
     // Same import pull uses: no decryption, so variables render as preserve().
-    let mut graph = super::load_current_graph(None, false).await?;
+    let mut graph = super::load_current_graph(None, false, None).await?;
     if graph
         .project
         .as_ref()
