@@ -6,7 +6,9 @@ use super::compiler::{
     environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
     unknown_field_diagnostics,
 };
-use super::eval::{EvalContext, IAC_FEATURES, evaluate_file, evaluate_file_with_context};
+use super::eval::{
+    EvalContext, IAC_FEATURES, PrContext, evaluate_file, evaluate_file_with_context,
+};
 use super::graph::RAILWAY_GRAPH_VERSION;
 use super::partial::IacPartials;
 
@@ -1968,6 +1970,20 @@ fn eval_context_production() -> EvalContext {
         environment_id: Some("env_123".into()),
         environment: Some("production".into()),
         environment_name: Some("production".into()),
+        pr: None,
+    }
+}
+
+fn eval_context_pr() -> EvalContext {
+    EvalContext {
+        environment: Some("railway-cli-pr-123".into()),
+        environment_name: Some("railway-cli-pr-123".into()),
+        pr: Some(PrContext {
+            number: 123,
+            branch: Some("feat/x".into()),
+            base: Some("dev".into()),
+        }),
+        ..eval_context_production()
     }
 }
 
@@ -2072,6 +2088,67 @@ func Railway(ctx evalCtx) graph {
             .resources
             .iter()
             .any(|r| r["name"] == "prod-api")
+    );
+}
+
+#[test]
+fn eval_context_pr_environment_json() {
+    let value = eval_context_pr().to_json();
+    assert_eq!(
+        value["pr"],
+        json!({
+            "number": 123,
+            "branch": "feat/x",
+            "base": "dev"
+        })
+    );
+    assert!(value.get("ephemeral").is_none());
+    assert!(value.get("baseEnvironment").is_none());
+}
+
+#[test]
+fn eval_context_non_pr_environment_json() {
+    let value = eval_context_production().to_json();
+    assert!(value["pr"].is_null());
+    assert!(value.get("ephemeral").is_none());
+    assert!(value.get("baseEnvironment").is_none());
+}
+
+#[test]
+fn evaluates_typescript_branching_on_pr_context() {
+    let dir = tempfile_dir("railway-iac-ts-pr-");
+    let file = dir.join("railway.ts");
+    std::fs::write(
+        &file,
+        r#"
+export default (ctx) => ({
+  name: "app",
+  resources: [{
+    address: "service.api",
+    type: "service",
+    name: ctx.pr ? `${ctx.pr.base}:${ctx.pr.number}:${ctx.pr.branch}` : "no-pr",
+  }],
+});
+"#,
+    )
+    .unwrap();
+    let with_pr = evaluate_file_with_context(&file, &eval_context_pr())
+        .expect("node should evaluate railway.ts with ctx.pr");
+    assert!(
+        with_pr
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["name"] == "dev:123:feat/x")
+    );
+    let without_pr = evaluate_file_with_context(&file, &eval_context_production())
+        .expect("node should evaluate railway.ts without ctx.pr");
+    assert!(
+        without_pr
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["name"] == "no-pr")
     );
 }
 

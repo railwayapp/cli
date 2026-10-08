@@ -40,6 +40,14 @@ pub struct EvalContext {
     pub environment_id: Option<String>,
     pub environment: Option<String>,
     pub environment_name: Option<String>,
+    pub pr: Option<PrContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrContext {
+    pub number: i64,
+    pub branch: Option<String>,
+    pub base: Option<String>,
 }
 
 impl EvalContext {
@@ -52,6 +60,7 @@ impl EvalContext {
             environment_id: linked.environment.clone(),
             environment: environment.clone(),
             environment_name: environment,
+            pr: None,
         }
     }
 
@@ -63,6 +72,11 @@ impl EvalContext {
             "environmentId": self.environment_id,
             "environment": self.environment,
             "environmentName": self.environment_name,
+            "pr": self.pr.as_ref().map(|pr| json!({
+                "number": pr.number,
+                "branch": pr.branch,
+                "base": pr.base,
+            })),
             "features": IAC_FEATURES,
         })
     }
