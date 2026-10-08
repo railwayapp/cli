@@ -113,6 +113,27 @@ struct CurrentEnvironment {
     environment_id: String,
     environment_name: Option<String>,
     config_etag: Option<String>,
+    #[serde(default)]
+    pr: Option<EnvironmentPr>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentPr {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+impl RunnerResponse {
+    pub(super) fn pull_pr_repo(&self) -> Option<&str> {
+        self.current_environment
+            .as_ref()?
+            .pr
+            .as_ref()?
+            .repo
+            .as_deref()
+            .filter(|repo| !repo.is_empty())
+    }
 }
 
 #[derive(Deserialize, serde::Serialize)]

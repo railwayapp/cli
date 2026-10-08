@@ -11,7 +11,9 @@ use crate::{
 };
 
 use super::change_set::{
-    ChangeSetTelemetry, DiffOptions, diff_graphs, render_change_set, variable_policy_report,
+    BranchFollow, ChangeSetTelemetry, DiffOptions, diff_graphs_following,
+    needs_default_branch_lookup, preserve_resolved_create_branches, render_change_set,
+    variable_policy_report,
 };
 use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
 use super::eval::{EvalContext, PrContext, evaluate_file_with_context};
@@ -46,6 +48,8 @@ struct EnvNode {
 struct EnvMeta {
     branch: Option<String>,
     pr_number: Option<i64>,
+    #[serde(default)]
+    pr_repo: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -250,13 +254,41 @@ pub async fn run(
     }
     let current_graph = environment_config_to_graph(&current.config, &options);
     let owners = parse_owners(current.iac_partials.as_ref());
-    let mut change_set = diff_graphs(DiffOptions {
-        current: &current_graph,
-        desired: &evaluated.graph,
-        reveal_values: args.show_values,
-        partial: evaluated.partial.as_deref(),
-        owners: owners.as_ref(),
-    });
+    let pr_branch = current
+        .pr_context()
+        .as_ref()
+        .and_then(|pr| pr.branch.clone());
+    let pr_repo = current.meta.as_ref().and_then(|meta| meta.pr_repo.clone());
+    let in_pr_environment = current.pr_context().is_some();
+    let default_branches = if needs_default_branch_lookup(
+        &current_graph,
+        &evaluated.graph,
+        in_pr_environment,
+        pr_branch.as_deref(),
+        pr_repo.as_deref(),
+    ) {
+        github_default_branches(&client, &endpoint)
+            .await
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let follow = BranchFollow {
+        in_pr_environment,
+        pr_branch: pr_branch.as_deref(),
+        pr_repo: pr_repo.as_deref(),
+        default_branches: &default_branches,
+    };
+    let mut change_set = diff_graphs_following(
+        DiffOptions {
+            current: &current_graph,
+            desired: &evaluated.graph,
+            reveal_values: args.show_values,
+            partial: evaluated.partial.as_deref(),
+            owners: owners.as_ref(),
+        },
+        Some(&follow),
+    );
     change_set.telemetry = Some(ChangeSetTelemetry {
         language: authoring_language(&evaluated.file).to_string(),
     });
@@ -285,7 +317,9 @@ pub async fn run(
             .and_then(|set| set.get("changes"))
             .and_then(Value::as_array)
         {
-            change_set.changes = changes.clone();
+            let mut changes = changes.clone();
+            preserve_resolved_create_branches(&change_set.changes, &mut changes);
+            change_set.changes = changes;
         }
         preview = Some(previewed);
     }
@@ -315,13 +349,10 @@ pub async fn run(
         ok,
         command: command.to_string(),
         file: evaluated.file.to_string_lossy().to_string(),
-        current_environment: Some(json!({
-            "projectId": current.project_id,
-            "projectName": options.project_name,
-            "environmentId": current.id,
-            "environmentName": current.name,
-            "configEtag": current.config_etag,
-        })),
+        current_environment: Some(current_environment_value(
+            &current,
+            options.project_name.as_deref(),
+        )),
         change_set: Some(change_set.clone()),
         diff: Some(render_change_set(&change_set)),
         diagnostics: all_diagnostics,
@@ -379,13 +410,10 @@ async fn import_current_environment(
             .as_ref()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default(),
-        current_environment: Some(json!({
-            "projectId": current.project_id,
-            "projectName": options.project_name,
-            "environmentId": current.id,
-            "environmentName": current.name,
-            "configEtag": current.config_etag,
-        })),
+        current_environment: Some(current_environment_value(
+            &current,
+            options.project_name.as_deref(),
+        )),
         change_set: None,
         diff: None,
         diagnostics: Vec::new(),
@@ -467,6 +495,39 @@ struct RunnerWire {
     variable_policy: Option<VariablePolicyReport>,
 }
 
+fn current_environment_value(current: &EnvNode, project_name: Option<&str>) -> Value {
+    let mut value = json!({
+        "projectId": current.project_id,
+        "projectName": project_name,
+        "environmentId": current.id,
+        "environmentName": current.name,
+        "configEtag": current.config_etag,
+    });
+    if current.pr_context().is_some() {
+        value["pr"] = json!({
+            "repo": current.meta.as_ref().and_then(|meta| meta.pr_repo.clone()),
+        });
+    }
+    value
+}
+
+async fn github_default_branches(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let repos = crate::client::post_graphql::<crate::gql::queries::GitHubRepos, _>(
+        client,
+        endpoint,
+        crate::gql::queries::git_hub_repos::Variables {},
+    )
+    .await?
+    .github_repos;
+    Ok(repos
+        .into_iter()
+        .map(|repo| (repo.full_name.to_ascii_lowercase(), repo.default_branch))
+        .collect())
+}
+
 async fn fetch_current_environment(
     client: &reqwest::Client,
     endpoint: &str,
@@ -476,7 +537,7 @@ async fn fetch_current_environment(
     let query_with_partials = r#"
       query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
         environment(id: $environmentId) {
-          id name projectId isEphemeral meta { branch prNumber } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
+          id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
         }
       }
     "#;
@@ -488,7 +549,7 @@ async fn fetch_current_environment(
             let query = r#"
               query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
                 environment(id: $environmentId) {
-                  id name projectId isEphemeral meta { branch prNumber } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
+                  id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
                 }
               }
             "#;
@@ -764,6 +825,31 @@ mod tests {
         assert_eq!(pr.number, 123);
         assert_eq!(pr.branch.as_deref(), Some("feat/x"));
         assert_eq!(pr.base.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn current_environment_includes_pr_repo_for_pull() {
+        let node = env_node(json!({
+            "id": "env",
+            "name": "pr",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/login", "prNumber": 7, "prRepo": "acme/api" },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        let value = current_environment_value(&node, Some("app"));
+        assert_eq!(value["pr"]["repo"], "acme/api");
+
+        let production = env_node(json!({
+            "id": "env",
+            "isEphemeral": false,
+            "config": {}
+        }));
+        assert!(
+            current_environment_value(&production, None)
+                .get("pr")
+                .is_none()
+        );
     }
 
     #[test]

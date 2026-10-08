@@ -2272,3 +2272,214 @@ fn legacy_runner_only_when_explicitly_requested() {
     assert!(!super::use_legacy_ts_runner(None));
     assert!(super::use_legacy_ts_runner(Some("railway-iac-ts")));
 }
+
+fn github_source(repo: &str, branch: Option<&str>, root: Option<&str>) -> Value {
+    let mut source = json!({ "type": "github", "repo": repo });
+    if let Some(branch) = branch {
+        source["branch"] = json!(branch);
+    }
+    if let Some(root) = root {
+        source["rootDirectory"] = json!(root);
+    }
+    source
+}
+
+fn follow_with<'a>(
+    in_pr_environment: bool,
+    pr_branch: Option<&'a str>,
+    pr_repo: Option<&'a str>,
+    defaults: &'a std::collections::BTreeMap<String, String>,
+) -> super::change_set::BranchFollow<'a> {
+    super::change_set::BranchFollow {
+        in_pr_environment,
+        pr_branch,
+        pr_repo,
+        default_branches: defaults,
+    }
+}
+
+fn diff_following(
+    current: &super::graph::RailwayGraph,
+    desired: &super::graph::RailwayGraph,
+    follow: &super::change_set::BranchFollow<'_>,
+) -> super::change_set::ChangeSet {
+    super::change_set::diff_graphs_following(
+        DiffOptions {
+            current,
+            desired,
+            reveal_values: false,
+            partial: None,
+            owners: None,
+        },
+        Some(follow),
+    )
+}
+
+#[test]
+fn branchless_desired_source_does_not_change_a_remote_branch() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("develop"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn branchless_source_change_omits_the_branch_key() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("develop"), Some("web")) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, Some("api")) }),
+    )]);
+    let change = diff(&current, &desired)
+        .changes
+        .into_iter()
+        .find(|change| change["field"] == "source")
+        .unwrap();
+    assert!(change["after"].get("branch").is_none());
+    assert!(!change["after"].to_string().contains("branch"));
+    assert_eq!(change["after"]["rootDirectory"], "api");
+}
+
+#[test]
+fn new_branchless_service_plans_the_repo_default_branch() {
+    let defaults = std::collections::BTreeMap::from([("acme/api".into(), "main".into())]);
+    let follow = follow_with(false, None, None, &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    let create = &change_set.changes[0];
+    assert_eq!(create["kind"], "resource.create");
+    assert_eq!(create["resource"]["source"]["branch"], "main");
+    assert_eq!(create["details"][0], "branch: main (repo default)");
+    assert_eq!(
+        create["summary"],
+        "Create service web (branch: main (repo default))"
+    );
+}
+
+#[test]
+fn new_branchless_service_in_a_pr_environment_uses_the_pr_branch() {
+    let defaults = std::collections::BTreeMap::from([
+        ("acme/api".into(), "main".into()),
+        ("other/lib".into(), "trunk".into()),
+    ]);
+    let follow = follow_with(true, Some("feat/login"), Some("Acme/API"), &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![
+        service(
+            "web",
+            json!({ "source": github_source("acme/api", None, None) }),
+        ),
+        service(
+            "lib",
+            json!({ "source": github_source("other/lib", None, None) }),
+        ),
+    ]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    let web = change_set
+        .changes
+        .iter()
+        .find(|change| change["address"] == "service.web")
+        .unwrap();
+    let lib = change_set
+        .changes
+        .iter()
+        .find(|change| change["address"] == "service.lib")
+        .unwrap();
+    assert_eq!(web["resource"]["source"]["branch"], "feat/login");
+    assert_eq!(web["details"][0], "branch: feat/login (PR branch)");
+    assert_eq!(
+        web["summary"],
+        "Create service web (branch: feat/login (PR branch))"
+    );
+    assert_eq!(lib["resource"]["source"]["branch"], "trunk");
+    assert_eq!(lib["details"][0], "branch: trunk (repo default)");
+}
+
+#[test]
+fn new_branchless_service_errors_when_the_default_branch_is_unknown() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(false, None, None, &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.changes.is_empty());
+    assert_eq!(
+        change_set.diagnostics[0].message,
+        "web is new and its github() source has no branch. Set branch for the first deploy; it can be removed afterwards."
+    );
+}
+
+#[test]
+fn pr_environment_rejects_a_pin_that_differs_from_the_deployed_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("main"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert_eq!(
+        change_set.diagnostics[0].message,
+        "web pins branch \"main\" but this PR environment deploys \"feat/login\". Remove branch to follow the environment."
+    );
+}
+
+#[test]
+fn pr_environment_allows_another_repo_to_change_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("main"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("develop"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    assert!(
+        change_set
+            .changes
+            .iter()
+            .any(|change| change["field"] == "source")
+    );
+}
+
+#[test]
+fn pr_environment_allows_a_pin_matching_the_deployed_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    assert!(change_set.changes.is_empty());
+}

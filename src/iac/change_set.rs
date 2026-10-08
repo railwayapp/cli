@@ -57,7 +57,24 @@ pub struct DiffOptions<'a> {
     pub owners: Option<&'a IacPartials>,
 }
 
+/// PR environment plus repo default branches, used when a branch-less
+/// `github()` source is created. Updates never consult this: an omitted
+/// branch is owned by the environment.
+pub struct BranchFollow<'a> {
+    pub in_pr_environment: bool,
+    pub pr_branch: Option<&'a str>,
+    pub pr_repo: Option<&'a str>,
+    pub default_branches: &'a BTreeMap<String, String>,
+}
+
 pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
+    diff_graphs_following(options, None)
+}
+
+pub fn diff_graphs_following(
+    options: DiffOptions<'_>,
+    follow: Option<&BranchFollow<'_>>,
+) -> ChangeSet {
     let mut changes = Vec::new();
     let mut diagnostics = Vec::new();
     let desired_by: Map<String, Value> = options
@@ -123,15 +140,54 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
         if previous.is_none() {
             diagnose_unsupported_custom_domains(resource, &mut diagnostics, None);
             diagnose_new_bucket_region(resource, &mut diagnostics);
-            changes.push(json!({
+            let mut created = without_ignored_variables(resource, &compiled);
+            let mut branch_line = None;
+            if let Some(follow) = follow {
+                match resolve_create_branch(&created, follow) {
+                    CreateBranch::Keep => {}
+                    CreateBranch::Set { branch, line } => {
+                        if let Some(source) =
+                            created.get_mut("source").and_then(Value::as_object_mut)
+                        {
+                            source.insert("branch".into(), json!(branch));
+                        }
+                        branch_line = Some(line);
+                    }
+                    CreateBranch::Error(message) => {
+                        diagnostics.push(Diagnostic {
+                            severity: "error".into(),
+                            path: format!("resources.{address}.source.branch"),
+                            message,
+                        });
+                        continue;
+                    }
+                }
+            }
+            let summary = match &branch_line {
+                Some(line) => format!(
+                    "Create {} {} ({line})",
+                    resource_type(resource),
+                    resource_name(resource)
+                ),
+                None => format!(
+                    "Create {} {}",
+                    resource_type(resource),
+                    resource_name(resource)
+                ),
+            };
+            let mut change = json!({
                 "kind": "resource.create",
                 "address": address,
-                "resource": without_ignored_variables(resource, &compiled),
+                "resource": created,
                 "path": format!("resources.{address}"),
-                "summary": format!("Create {} {}", resource_type(resource), resource_name(resource)),
+                "summary": summary,
                 "severity": "safe",
                 "deployEffect": if matches!(resource_type(resource), "service" | "database") { "deploy" } else { "none" },
-            }));
+            });
+            if let Some(line) = branch_line {
+                change["details"] = json!([line]);
+            }
+            changes.push(change);
             continue;
         }
         let mut previous = previous.unwrap().clone();
@@ -165,6 +221,15 @@ pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
             previous["address"] = json!(address);
         }
         let previous = &previous;
+        if let Some(follow) = follow.filter(|follow| follow.in_pr_environment) {
+            if let Some(message) = pr_branch_pin_error(previous, resource, follow.pr_repo) {
+                diagnostics.push(Diagnostic {
+                    severity: "error".into(),
+                    path: format!("resources.{address}.source.branch"),
+                    message,
+                });
+            }
+        }
         if field_str(previous, "name") != field_str(resource, "name") {
             changes.push(update(
                 &address,
@@ -958,6 +1023,202 @@ fn diff_volume_attachments(previous: &Value, resource: &Value, changes: &mut Vec
     ));
 }
 
+enum CreateBranch {
+    Keep,
+    Set { branch: String, line: String },
+    Error(String),
+}
+
+fn resolve_create_branch(resource: &Value, follow: &BranchFollow<'_>) -> CreateBranch {
+    let Some(source) = resource.get("source") else {
+        return CreateBranch::Keep;
+    };
+    let Some(repo) = github_repo(source) else {
+        return CreateBranch::Keep;
+    };
+    if pinned_branch(source).is_some() {
+        return CreateBranch::Keep;
+    }
+    if follow.in_pr_environment
+        && follow
+            .pr_repo
+            .is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo))
+    {
+        return match follow.pr_branch.filter(|branch| !branch.is_empty()) {
+            Some(branch) => CreateBranch::Set {
+                branch: branch.to_string(),
+                line: format!("branch: {branch} (PR branch)"),
+            },
+            None => CreateBranch::Error(missing_branch_message(resource)),
+        };
+    }
+    if let Some(branch) = follow
+        .default_branches
+        .get(&repo.to_ascii_lowercase())
+        .cloned()
+        .filter(|branch| !branch.is_empty())
+    {
+        return CreateBranch::Set {
+            line: format!("branch: {branch} (repo default)"),
+            branch,
+        };
+    }
+    CreateBranch::Error(missing_branch_message(resource))
+}
+
+fn missing_branch_message(resource: &Value) -> String {
+    format!(
+        "{} is new and its github() source has no branch. Set branch for the first deploy; it can be removed afterwards.",
+        resource_name(resource)
+    )
+}
+
+fn pr_branch_pin_error(
+    previous: &Value,
+    resource: &Value,
+    pr_repo: Option<&str>,
+) -> Option<String> {
+    let desired = resource.get("source")?;
+    let pinned = pinned_branch(desired)?;
+    let repo = github_repo(desired)?;
+    // Only the PR's repo is rewritten to the PR branch. Other services keep their own.
+    if !pr_repo.is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo)) {
+        return None;
+    }
+    let current = previous.get("source").and_then(pinned_branch)?;
+    if pinned == current {
+        return None;
+    }
+    Some(format!(
+        "{} pins branch \"{pinned}\" but this PR environment deploys \"{current}\". Remove branch to follow the environment.",
+        resource_name(resource)
+    ))
+}
+
+fn github_repo(source: &Value) -> Option<&str> {
+    let obj = source.as_object()?;
+    if let Some(kind) = obj.get("type").and_then(Value::as_str) {
+        if kind != "github" {
+            return None;
+        }
+    } else if obj.get("image").and_then(Value::as_str).is_some() {
+        return None;
+    }
+    let repo = obj.get("repo").and_then(Value::as_str)?;
+    if repo.is_empty() { None } else { Some(repo) }
+}
+
+fn pinned_branch(source: &Value) -> Option<&str> {
+    source
+        .get("branch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+}
+
+fn source_omits_branch(source: &Value) -> bool {
+    github_repo(source).is_some() && pinned_branch(source).is_none()
+}
+
+fn drop_branch_key(value: &mut Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("branch");
+    }
+}
+
+pub fn needs_default_branch_lookup(
+    current: &RailwayGraph,
+    desired: &RailwayGraph,
+    in_pr_environment: bool,
+    pr_branch: Option<&str>,
+    pr_repo: Option<&str>,
+) -> bool {
+    let desired_by: Map<String, Value> = desired
+        .resources
+        .iter()
+        .map(|resource| (resource_addr(resource), resource.clone()))
+        .collect();
+    let current_by: HashSet<String> = current
+        .resources
+        .iter()
+        .map(|resource| paired_address(resource, &desired_by))
+        .collect();
+    desired.resources.iter().any(|resource| {
+        if current_by.contains(&resource_addr(resource)) {
+            return false;
+        }
+        let Some(source) = resource.get("source") else {
+            return false;
+        };
+        let Some(repo) = github_repo(source) else {
+            return false;
+        };
+        if pinned_branch(source).is_some() {
+            return false;
+        }
+        !(in_pr_environment
+            && pr_repo.is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo))
+            && pr_branch.is_some_and(|branch| !branch.is_empty()))
+    })
+}
+
+/// Preview rewrites the change list. Keep the branch chosen for a new service,
+/// and the plan line that records why, so apply still creates a deploy trigger.
+pub fn preserve_resolved_create_branches(local: &[Value], previewed: &mut [Value]) {
+    for change in local {
+        let Some(line) = change
+            .get("details")
+            .and_then(Value::as_array)
+            .and_then(|details| {
+                details.iter().find_map(|detail| {
+                    let text = detail.as_str()?;
+                    text.starts_with("branch: ").then_some(text)
+                })
+            })
+        else {
+            continue;
+        };
+        let Some(address) = field_str(change, "address") else {
+            continue;
+        };
+        let Some(target) = previewed.iter_mut().find(|item| {
+            field_str(item, "address") == Some(address)
+                && field_str(item, "kind") == Some("resource.create")
+        }) else {
+            continue;
+        };
+        if let Some(branch) = change
+            .get("resource")
+            .and_then(|resource| resource.get("source"))
+            .and_then(|source| source.get("branch"))
+            .filter(|branch| branch.as_str().is_some())
+        {
+            if let Some(source) = target
+                .get_mut("resource")
+                .and_then(|resource| resource.get_mut("source"))
+                .and_then(Value::as_object_mut)
+            {
+                if source.get("branch").and_then(Value::as_str).is_none() {
+                    source.insert("branch".into(), branch.clone());
+                }
+            }
+        }
+        let mut details = target
+            .get("details")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !details.iter().any(|detail| detail.as_str() == Some(line)) {
+            details.insert(0, json!(line));
+            target["details"] = json!(details);
+        }
+        if field_str(target, "summary").is_none_or(|summary| !summary.contains(line)) {
+            if let Some(summary) = field_str(change, "summary") {
+                target["summary"] = json!(summary);
+            }
+        }
+    }
+}
+
 fn diff_top_level_field(
     previous: &Value,
     resource: &Value,
@@ -978,6 +1239,11 @@ fn diff_top_level_field(
     {
         before = without_auto_updates(&before);
         after = without_auto_updates(&after);
+    }
+    // Omit the key. `branch: null` clears the branch and deletes the deploy trigger.
+    if field_name == "source" && source_omits_branch(&after) {
+        drop_branch_key(&mut before);
+        drop_branch_key(&mut after);
     }
     if field_name == "deploy" {
         let stripped = strip_write_only_registry_credentials(&before, &after);
