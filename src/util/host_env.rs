@@ -64,6 +64,36 @@ const UNSAFE_NAMES: &[&str] = &[
     "R_PROFILE",
     "R_PROFILE_USER",
     "PSMODULEPATH",
+    "NODE_PATH",
+    "OPENSSL_CONF",
+    "OPENSSL_MODULES",
+    "OPENSSL_ENGINES",
+    "DOTNET_STARTUP_HOOKS",
+    "DOTNET_ADDITIONAL_DEPS",
+    "GCONV_PATH",
+    "LOCPATH",
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "JAVA_HOME",
+    // Build tools: which compiler or wrapper runs, and where packages and
+    // toolchains are fetched from.
+    "MAKEFLAGS",
+    "MFLAGS",
+    "GNUMAKEFLAGS",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "GOFLAGS",
+    "GOPROXY",
+    "GOSUMDB",
+    "GONOSUMDB",
+    "GONOSUMCHECK",
+    "GOINSECURE",
+    "GOPRIVATE",
+    "GOTOOLCHAIN",
+    // The CLI's own environment switch; a nested `railway` should keep the
+    // local machine's setting.
+    "RAILWAY_ENV",
     // Where executables, libraries and startup files are searched for. These
     // name no command themselves; they decide which one a bare name resolves
     // to, or which startup file gets sourced.
@@ -99,6 +129,12 @@ const UNSAFE_PREFIXES: &[&str] = &[
     // no file involved. The <n> makes the family open-ended, so it needs a
     // prefix; GIT_CONFIG/GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM fall under it too.
     "GIT_CONFIG",
+    // Package manager config read from the environment: registry, index and
+    // script-shell settings all live under these.
+    "NPM_CONFIG_",
+    "YARN_",
+    "PIP_",
+    "LUA_INIT", // LUA_INIT and the versioned LUA_INIT_5_x forms
 ];
 
 fn is_unsafe(name: &str) -> bool {
@@ -243,6 +279,26 @@ mod tests {
     }
 
     #[test]
+    fn strips_package_sources_and_build_tool_settings() {
+        let mut vars = map(&[
+            ("NODE_PATH", "/tmp/modules"),
+            ("npm_config_registry", "http://127.0.0.1:9999/"),
+            ("PIP_INDEX_URL", "http://127.0.0.1:9999/simple"),
+            ("YARN_REGISTRY", "http://127.0.0.1:9999/"),
+            ("MAKEFLAGS", "--eval=$(shell id)"),
+            ("LUA_INIT_5_4", "os.execute('id')"),
+            ("GOFLAGS", "-toolexec=/tmp/x"),
+            ("RAILWAY_ENV", "dev"),
+            ("DATABASE_URL", "postgres://localhost/app"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(dropped.len(), 8);
+        assert_eq!(vars.keys().collect::<Vec<_>>(), vec!["DATABASE_URL"]);
+    }
+
+    #[test]
     fn leaves_ordinary_variables_alone() {
         let mut vars = map(&[
             ("DATABASE_URL", "postgres://localhost/app"),
@@ -254,10 +310,15 @@ mod tests {
             ("SHELL_TIMEOUT", "30"),
             ("GEM_API_KEY", "abc123"),
             ("EDITORIAL_MODE", "on"),
+            ("GOOGLE_CLIENT_ID", "abc"),
+            ("NPM_TOKEN", "abc"),
+            ("PIPELINE_ID", "42"),
+            ("JAVA_VERSION", "21"),
+            ("RAILWAY_ENVIRONMENT", "production"),
         ]);
 
         assert!(strip_unsafe_host_vars(&mut vars).is_empty());
-        assert_eq!(vars.len(), 9);
+        assert_eq!(vars.len(), 14);
     }
 
     #[test]
