@@ -36,7 +36,9 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
         if candidate.is_file() {
             if let Ok(contents) = std::fs::read_to_string(&candidate) {
                 if let Some(path) = contents.strip_prefix("gitdir: ") {
-                    return Some(PathBuf::from(path.trim()));
+                    // The path is relative to the directory holding the
+                    // pointer file when it is not absolute (submodules).
+                    return Some(current.join(path.trim()));
                 }
             }
         }
@@ -46,11 +48,21 @@ fn find_git_dir(start: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The directory that holds `config`. A linked worktree has its own git
+/// directory (with `HEAD`) but shares `config` with the main repository,
+/// which the `commondir` file points at.
+fn common_git_dir(git_dir: &Path) -> PathBuf {
+    match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(contents) if !contents.trim().is_empty() => git_dir.join(contents.trim()),
+        _ => git_dir.to_path_buf(),
+    }
+}
+
 /// Find the first GitHub remote in the repo, preferring `origin`.
 /// Returns None if not in a git repo or no GitHub remote is set.
 pub fn detect_github_remote(cwd: &Path) -> Option<GithubRemote> {
     let git_dir = find_git_dir(cwd)?;
-    let config = std::fs::read_to_string(git_dir.join("config")).ok()?;
+    let config = std::fs::read_to_string(common_git_dir(&git_dir).join("config")).ok()?;
 
     let mut current_remote: Option<String> = None;
     let mut found: Vec<GithubRemote> = Vec::new();
@@ -144,5 +156,68 @@ mod tests {
     #[test]
     fn rejects_non_github() {
         assert_eq!(parse_github_url("https://gitlab.com/foo/bar.git"), None);
+    }
+
+    fn write_config(git_dir: &Path, url: &str) {
+        std::fs::create_dir_all(git_dir).unwrap();
+        std::fs::write(
+            git_dir.join("config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn detects_remote_in_regular_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        write_config(&dir.path().join(".git"), "git@github.com:foo/bar.git");
+
+        let remote = detect_github_remote(dir.path()).unwrap();
+        assert_eq!(remote.full_repo_name(), "foo/bar");
+    }
+
+    #[test]
+    fn detects_remote_in_linked_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        write_config(&main.join(".git"), "git@github.com:foo/bar.git");
+
+        // A linked worktree keeps HEAD in `.git/worktrees/<name>` and points
+        // back at the shared directory with `commondir`.
+        let worktree_git = main.join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&worktree_git).unwrap();
+        std::fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git.display()),
+        )
+        .unwrap();
+
+        let remote = detect_github_remote(&worktree).unwrap();
+        assert_eq!(remote.full_repo_name(), "foo/bar");
+        assert_eq!(detect_current_branch(&worktree).as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn resolves_relative_gitdir_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let module_git = dir
+            .path()
+            .join("super")
+            .join(".git")
+            .join("modules")
+            .join("sub");
+        write_config(&module_git, "https://github.com/foo/sub.git");
+
+        let sub = dir.path().join("super").join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+
+        let remote = detect_github_remote(&sub).unwrap();
+        assert_eq!(remote.full_repo_name(), "foo/sub");
     }
 }
