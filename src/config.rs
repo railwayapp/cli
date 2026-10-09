@@ -420,13 +420,11 @@ impl Configs {
     }
 
     /// SSH relay host and non-default port for the current environment.
-    /// Mirrors backboard's `controllers/ssh` mapping: only the develop relay
-    /// is separate (and listens on 2222); staging falls through to the
-    /// production relay, same as backboard's IS_DEV-only branch.
     pub fn get_ssh_relay() -> (&'static str, Option<u16>) {
         match Self::get_environment_id() {
             Environment::Dev => ("ssh.railway-develop.com", Some(2222)),
-            Environment::Production | Environment::Staging => ("ssh.railway.com", None),
+            Environment::Staging => ("ssh.railway-staging.com", Some(2222)),
+            Environment::Production => ("ssh.railway.com", None),
         }
     }
 
