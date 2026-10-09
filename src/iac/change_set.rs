@@ -1952,6 +1952,9 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
             copy.remove("dockerfilePath");
         }
+        if copy.get("watchPatterns") == Some(&json!([])) {
+            copy.remove("watchPatterns");
+        }
     }
     if field_name == "tracing" {
         // Railway serialises only the switches that are on, so a false or null
@@ -1972,6 +1975,15 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         }
         if copy.get("runtime") == Some(&json!("V2")) {
             copy.remove("runtime");
+        }
+        if copy.get("sleepApplication") == Some(&json!(false)) {
+            copy.remove("sleepApplication");
+        }
+        if copy.get("restartPolicyType") == Some(&json!("ON_FAILURE")) {
+            copy.remove("restartPolicyType");
+        }
+        if copy.get("restartPolicyMaxRetries") == Some(&json!(10)) {
+            copy.remove("restartPolicyMaxRetries");
         }
         if let Some(multi) = copy.remove("multiRegionConfig") {
             let normalized = normalize_multi_region_config(&multi);
