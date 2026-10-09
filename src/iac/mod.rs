@@ -7,6 +7,7 @@
 mod change_set;
 mod compiler;
 mod engine;
+mod environments;
 mod eval;
 mod graph;
 mod json;

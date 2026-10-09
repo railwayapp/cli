@@ -2313,6 +2313,9 @@ assert (size.lines, size.columns) == (30, 100)
 
     /// The whole point: a link on the emulated screen can be found by where it
     /// is on the screen.
+    /// Unix only: Windows CI's ConPTY does not echo this fixture's `cat`, so the
+    /// screen stays empty and these round-trips never start.
+    #[cfg(unix)]
     #[test]
     fn a_link_on_the_screen_is_found_by_position() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2348,6 +2351,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// The case that matters: an OAuth link is longer than the pane is wide, so
     /// it arrives split across rows. Matching within one row finds a fragment
     /// nobody can open.
+    #[cfg(unix)]
     #[test]
     fn a_link_wrapped_across_rows_is_found_whole() {
         let url = "https://accounts.example.com/oauth/authorize?client_id=abcdef123456&redirect_uri=http%3A%2F%2Flocalhost%3A8976%2Fcallback&scope=openid+profile";
@@ -2404,6 +2408,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// Scrolling has to change what the renderer reads out of the emulator —
     /// the pane draws from `with_screen`, so a scroll that only moves a counter
     /// would look like nothing happening.
+    #[cfg(unix)]
     #[test]
     fn scrolling_changes_what_the_screen_shows() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2445,6 +2450,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// emulator could not compose a view deeper than the pane is tall, so a
     /// clamp in `scroll_by` stopped exactly here — this is the regression
     /// test for its removal.
+    #[cfg(unix)]
     #[test]
     fn scrolling_reaches_the_whole_history() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2538,6 +2544,7 @@ assert (size.lines, size.columns) == (30, 100)
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn scrolling_walks_past_one_screenful() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2580,6 +2587,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// A deep offset survives the pane changing shape. Resize used to clamp
     /// the offset to the new height because the old emulator would underflow
     /// past it; now the offset just rides along.
+    #[cfg(unix)]
     #[test]
     fn a_deep_scroll_survives_resize() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2621,6 +2629,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// operations may wedge the offset, wedge each other, or leave the view
     /// unable to render — the wheel arrives whenever it arrives, not when the
     /// pane is conveniently idle.
+    #[cfg(unix)]
     #[test]
     fn scrollback_survives_churn() {
         let mut session = Session::for_test("ca", "test").unwrap();
@@ -2678,6 +2687,7 @@ assert (size.lines, size.columns) == (30, 100)
     /// Past the emulator's retention the offset clamps to what is kept, and
     /// the oldest lines are the ones to go — the view at full depth is the
     /// start of the *retained* history, never garbage.
+    #[cfg(unix)]
     #[test]
     fn scrollback_clamps_at_capacity() {
         let mut session = Session::for_test("ca", "test").unwrap();

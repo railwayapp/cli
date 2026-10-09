@@ -2870,6 +2870,8 @@ mod tests {
         assert_eq!(app.focus, ManageFocus::Session);
     }
 
+    /// Unix only: the fixture pty does not echo under Windows ConPTY.
+    #[cfg(unix)]
     #[test]
     fn wheel_scrolls_the_visible_terminal_after_focus_and_resize_gestures() {
         use crate::commands::cloud_agent::tui::{app::MouseAction, session::Session};
@@ -3469,6 +3471,7 @@ mod tests {
     /// This drives the real draw path — `render_session` → `screen_lines` →
     /// `Screen::cell` — with the view sitting several screens back, which the
     /// old emulator could not compose at all.
+    #[cfg(unix)]
     #[test]
     fn a_deeply_scrolled_pane_draws_old_history() {
         use crate::commands::cloud_agent::tui::session::Session;

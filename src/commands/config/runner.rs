@@ -139,6 +139,8 @@ impl RunnerResponse {
 #[derive(Deserialize, serde::Serialize)]
 pub(super) struct ChangeSet {
     pub(super) changes: Vec<Change>,
+    #[serde(default)]
+    info: Vec<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -985,6 +987,11 @@ pub(super) fn print_response_with_options_and_next(
         return;
     }
 
+    let info = response
+        .change_set
+        .as_ref()
+        .map(|change_set| change_set.info.as_slice())
+        .unwrap_or(&[]);
     if changes.is_empty() {
         println!(
             "{}",
@@ -1008,16 +1015,18 @@ pub(super) fn print_response_with_options_and_next(
                 format!("{destructive} destructive change(s) will remove Railway resources or variables.").red()
             );
         }
-
-        if show_next {
-            println!();
-            println!("{}", "Next".bold());
-            println!(
-                "  {} Run {} to apply these changes.",
-                "•".cyan(),
-                "railway config apply".cyan()
-            );
-        }
+    }
+    for line in info {
+        println!("  {}", line.dimmed());
+    }
+    if !changes.is_empty() && show_next {
+        println!();
+        println!("{}", "Next".bold());
+        println!(
+            "  {} Run {} to apply these changes.",
+            "•".cyan(),
+            "railway config apply".cyan()
+        );
     }
 }
 
