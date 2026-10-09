@@ -101,7 +101,9 @@ pub struct ScaleClusterResult {
 /// up front and rejected outright -- never silently rounded.
 pub fn validate_odd_coordinator_count(target: i64) -> Result<()> {
     if target % 2 == 0 {
-        bail!("--coordinators must be an odd number for consensus quorum (got {target})");
+        bail!(
+            "The coordinators vote when the cluster elects a primary, so the cluster needs an odd number of them. Pass an odd number to --coordinators (you passed {target})."
+        );
     }
     Ok(())
 }
@@ -127,16 +129,12 @@ pub fn validate_data_node_quorum(wiring: &ClusterWiring, replicas_target: i64) -
     let data_nodes = replicas_target + 1;
     if data_nodes < 3 {
         bail!(
-            "This cluster's data nodes carry the failover vote, so it needs at least 3 of them: \
-             use --replicas 2 or more (got {replicas_target}, for {data_nodes} data node(s))."
+            "Every data node votes when the cluster elects a primary, so the cluster needs an odd number of 3 or more. `--replicas` doesn't count the primary, so pass 2 or more (you passed {replicas_target})."
         );
     }
     if data_nodes % 2 == 0 {
         bail!(
-            "This cluster's data nodes carry the failover vote, so their total must be odd -- \
-             an even cluster cannot elect a primary after losing a node. --replicas counts nodes \
-             beside the primary, so pass an even number (got {replicas_target}, for {data_nodes} \
-             data nodes)."
+            "Every data node votes when the cluster elects a primary, so the cluster needs an odd number of 3 or more. `--replicas` doesn't count the primary, so pass an even number (you passed {replicas_target})."
         );
     }
     Ok(())
@@ -207,6 +205,7 @@ pub async fn scale_cluster(
             scale_internal(
                 ctx,
                 &config,
+                engine,
                 root_id,
                 root_name,
                 target,
@@ -266,13 +265,14 @@ impl ScalePatch {
     }
 }
 
+/// The caller surfaces `template_apply::preexisting_staged_changes_note`
+/// before the scale's confirmation prompt: the commit here takes the
+/// environment's whole staged patch with it.
 async fn stage_and_commit(
     ctx: &ServiceContext,
     patch: EnvironmentConfig,
     auto_deploy: bool,
 ) -> Result<bool> {
-    template_apply::warn_if_preexisting_staged_changes(ctx).await;
-
     post_graphql::<mutations::EnvironmentStageChanges, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -314,8 +314,8 @@ async fn scale_replicas(
     }
 
     let wiring = resolve_cluster_wiring(root).with_context(|| {
-        "Could not resolve this cluster's scale wiring -- scaling would leave the connection \
-         routing list stale. The root service declares no `clusterWiring`."
+        "This cluster was converted before scaling was supported, so the CLI can't scale it. \
+         Scale it from the cluster view."
             .to_string()
     })?;
     let routing_edge_id = find_routing_edge_id(config, engine, root_id);
@@ -323,24 +323,26 @@ async fn scale_replicas(
     let summary = if target_count > current_count {
         let Some((source_id, source_name)) = existing.first().cloned() else {
             bail!(
-                "Cannot scale up replicas on {root_name}: there is no existing replica to clone \
-                 from. Re-run `ha convert --replicas {target_count}` to add the first replica."
+                "Can't add replicas to {root_name}: the cluster has no replica to copy from. \
+                 Revert to standalone (`railway {} ha revert`), then convert again with \
+                 `--replicas {target_count}`.",
+                engine.key
             );
         };
         let source = config
             .services
             .get(&source_id)
-            .context("Replica disappeared from environment config mid-scale")?;
+            .context("The replica to copy from disappeared from the environment mid-scale")?;
         source
             .source
             .as_ref()
             .and_then(|s| s.image.as_ref())
-            .context("Replica has no source image to clone")?;
+            .context("The replica to copy from has no image")?;
         let mount_path = source
             .volume_mounts
             .values()
             .find_map(|m| m.mount_path.clone())
-            .context("Replica has no volume mount path to clone")?;
+            .context("The replica to copy from has no volume")?;
 
         let base_name = derive_node_base_name(&source_name, "Replica");
         let existing_names: Vec<String> = existing.iter().map(|(_, name)| name.clone()).collect();
@@ -378,38 +380,8 @@ async fn scale_replicas(
             added_ids,
         )
     } else {
-        let to_remove = current_count - target_count;
-        let base_name = existing
-            .first()
-            .map(|(_, name)| derive_node_base_name(name, "Replica"))
-            .unwrap_or_else(|| "Replica".to_string());
-
-        // Highest-numbered replicas go first -- but never the node currently
-        // ACTING as the primary. The root itself is never in this list
-        // (replicas only), which covers the healthy case; after a failover
-        // the acting primary is one of these replicas, and its number says
-        // nothing about its role.
-        let mut sorted = existing.clone();
-        sorted
-            .sort_by_key(|(_, name)| std::cmp::Reverse(node_number(name, &base_name).unwrap_or(0)));
-        let removable: Vec<(String, String)> = sorted
-            .into_iter()
-            .filter(|(id, _)| Some(id.as_str()) != live_primary_id)
-            .collect();
-        if (removable.len() as i64) < to_remove {
-            let primary_name = existing
-                .iter()
-                .find(|(id, _)| Some(id.as_str()) == live_primary_id)
-                .map(|(_, name)| name.as_str())
-                .unwrap_or("a replica");
-            bail!(
-                "Cannot scale down to {target_count} replica(s): {primary_name} is currently \
-                 acting as the cluster's primary. Run `ha switchover --to {root_name}` first, \
-                 then scale down."
-            );
-        }
-        let to_delete: Vec<(String, String)> =
-            removable.into_iter().take(to_remove as usize).collect();
+        let to_delete =
+            replicas_to_remove(&existing, target_count, root_name, engine, live_primary_id)?;
 
         for (id, _) in &to_delete {
             stage_member_deletion(patch, config, id);
@@ -438,6 +410,57 @@ async fn scale_replicas(
     );
 
     Ok((summary, existing))
+}
+
+/// The replicas a scale-down to `target_count` removes, highest-numbered
+/// first -- but never the node currently ACTING as the primary. The root
+/// itself is never in `existing` (replicas only), which covers the healthy
+/// case; after a failover the acting primary is one of these replicas, and
+/// its number says nothing about its role. Shared with the `ha scale`
+/// prompt, so what the user confirms is exactly what gets removed.
+pub(crate) fn replicas_to_remove(
+    existing: &[(String, String)],
+    target_count: i64,
+    root_name: &str,
+    engine: &DatabaseEngine,
+    live_primary_id: Option<&str>,
+) -> Result<Vec<(String, String)>> {
+    let to_remove = (existing.len() as i64 - target_count).max(0);
+    let base_name = existing
+        .first()
+        .map(|(_, name)| derive_node_base_name(name, "Replica"))
+        .unwrap_or_else(|| "Replica".to_string());
+
+    let mut sorted = existing.to_vec();
+    sorted.sort_by_key(|(_, name)| std::cmp::Reverse(node_number(name, &base_name).unwrap_or(0)));
+    let removable: Vec<(String, String)> = sorted
+        .into_iter()
+        .filter(|(id, _)| Some(id.as_str()) != live_primary_id)
+        .collect();
+    if (removable.len() as i64) < to_remove {
+        let primary_name = existing
+            .iter()
+            .find(|(id, _)| Some(id.as_str()) == live_primary_id)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("a replica");
+        bail!(
+            "Can't scale down to {target_count} replica(s): {primary_name} is currently \
+             acting as the cluster's primary. Run `railway {} ha switchover --to {root_name}` \
+             first, then scale down.",
+            engine.key
+        );
+    }
+    Ok(removable.into_iter().take(to_remove as usize).collect())
+}
+
+/// Live replicas of `root_id`, as `(id, name)` pairs -- the input
+/// [`replicas_to_remove`] plans a scale-down over.
+pub(crate) fn current_replicas(
+    config: &EnvironmentConfig,
+    root_id: &str,
+    names: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    members_of_role(config, root_id, "replica", names)
 }
 
 /// Stages one brand-new cluster member and its volume into the patch. Both
@@ -530,6 +553,7 @@ fn stage_member_deletion(patch: &mut ScalePatch, config: &EnvironmentConfig, id:
 async fn scale_internal(
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
+    engine: &DatabaseEngine,
     root_id: &str,
     root_name: &str,
     target_count: i64,
@@ -549,9 +573,8 @@ async fn scale_internal(
     }
 
     let wiring = resolve_cluster_wiring(root).with_context(|| {
-        "Could not resolve this cluster's scale wiring -- scaling would leave the coordinator \
-         host list stale. The root service is missing both `clusterWiring` and the legacy \
-         `PATRONI_ENABLED` variable."
+        "This cluster was converted before scaling was supported, so the CLI can't scale it. \
+         Scale it from the cluster view."
             .to_string()
     })?;
 
@@ -576,25 +599,26 @@ async fn scale_internal(
     let summary = if target_count > current_count {
         let Some((source_id, source_name)) = existing.first().cloned() else {
             bail!(
-                "Cannot scale up coordinators on {root_name}: there is no existing coordinator \
-                 node to clone from. Re-run `ha convert --coordinators \
-                 {target_count}` to add the first one."
+                "Can't add coordinators to {root_name}: the cluster has no coordinator to copy \
+                 from. Revert to standalone (`railway {} ha revert`), then convert again with \
+                 `--coordinators {target_count}`.",
+                engine.key
             );
         };
         let source = config
             .services
             .get(&source_id)
-            .context("Coordinator node disappeared from environment config mid-scale")?;
+            .context("The coordinator to copy from disappeared from the environment mid-scale")?;
         source
             .source
             .as_ref()
             .and_then(|s| s.image.as_ref())
-            .context("Coordinator node has no source image to clone")?;
+            .context("The coordinator to copy from has no image")?;
         let mount_path = source
             .volume_mounts
             .values()
             .find_map(|m| m.mount_path.clone())
-            .context("Coordinator node has no volume mount path to clone")?;
+            .context("The coordinator to copy from has no volume")?;
 
         let base_name = derive_node_base_name(&source_name, "internal");
         let existing_names: Vec<String> = existing.iter().map(|(_, name)| name.clone()).collect();
@@ -649,7 +673,9 @@ async fn scale_internal(
             .collect();
 
         if (removable.len() as i64) < to_remove {
-            bail!("Cannot remove the primary coordinator node on {root_name}.");
+            bail!(
+                "Can't remove {root_name}'s first coordinator. It stays for as long as the cluster exists."
+            );
         }
         let to_delete: Vec<(String, String)> =
             removable.into_iter().take(to_remove as usize).collect();
@@ -692,16 +718,16 @@ fn scale_edge(
     patch: &mut BTreeMap<String, ServiceInstance>,
 ) -> Result<Option<EdgeScaleSummary>> {
     let edge_id = find_routing_edge_id(config, engine, root_id)
-        .context("Routing edge service (e.g. HAProxy) not found in this cluster")?;
+        .context("This cluster has no reverse proxy service to scale")?;
     let edge = config
         .services
         .get(&edge_id)
-        .context("Edge service disappeared from environment config")?;
+        .context("The reverse proxy service disappeared from the environment")?;
     let mrc = edge
         .deploy
         .as_ref()
         .and_then(|d| d.multi_region_config.as_ref())
-        .context("Edge service has no multi-region config to scale")?;
+        .context("The reverse proxy service has no multi-region config to scale")?;
     let (region, current) = mrc
         .iter()
         .find(|(_, v)| v.is_some())
@@ -711,7 +737,7 @@ fn scale_edge(
                 v.as_ref().and_then(|r| r.num_replicas).unwrap_or(1),
             )
         })
-        .context("Edge service region config not found")?;
+        .context("The reverse proxy service has no region to scale")?;
 
     if current == target_count {
         return Ok(None);
@@ -1089,10 +1115,10 @@ async fn create_clone_service(ctx: &ServiceContext, base_name: &str) -> Result<C
                 build_vars(retried_name),
             )
             .await
-            .context("Failed to create cluster node service (after retrying a duplicate name)")?
+            .context("Failed to create the new node's service (after retrying a duplicate name)")?
         }
         Err(err) => {
-            return Err(err).context("Failed to create cluster node service");
+            return Err(err).context("Failed to create the new node's service");
         }
     };
 
@@ -1140,7 +1166,7 @@ async fn create_clone_volume(
         },
     )
     .await
-    .context("Failed to create volume for new cluster node")?;
+    .context("Failed to create the new node's volume")?;
 
     let volume_id = created.volume_create.id.clone();
     let name_result = post_graphql::<mutations::VolumeNameUpdate, _>(
@@ -1641,7 +1667,7 @@ mod tests {
             &mut patch,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("edge service"));
+        assert!(err.to_string().contains("no reverse proxy service"));
     }
 
     #[test]
@@ -2210,6 +2236,6 @@ mod tests {
         .to_string();
 
         assert!(err.contains("acting as the cluster's primary"));
-        assert!(err.contains("ha switchover --to Postgres"));
+        assert!(err.contains("railway postgres ha switchover --to Postgres"));
     }
 }
