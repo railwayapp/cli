@@ -38,9 +38,10 @@ pub struct PitrState {
     pub bucket_wired: bool,
     /// The service's current image, for messaging and eligibility checks.
     pub image: Option<String>,
-    /// A custom start command overrides the entrypoint that switches
-    /// archiving on -- PITR is silently inert while one is set.
-    pub has_start_command: bool,
+    /// The custom start command, when one is set. It overrides the
+    /// entrypoint that switches archiving on -- PITR is silently inert while
+    /// one is set.
+    pub start_command: Option<String>,
 }
 
 /// A single member of an HA cluster (or a standalone root reported as its own
@@ -95,7 +96,10 @@ pub fn compute_pitr_state(service: &ServiceInstance, pitr: &PitrSpec) -> PitrSta
             .as_deref()
             .is_some_and(|v| !v.trim().is_empty()),
         image: service.source.as_ref().and_then(|s| s.image.clone()),
-        has_start_command: start_command.is_some_and(|c| !c.trim().is_empty()),
+        start_command: start_command
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -356,7 +360,7 @@ mod tests {
         let state = compute_pitr_state(&service, &POSTGRES.pitr.unwrap());
         assert!(!state.enabled);
         assert!(!state.bucket_wired);
-        assert!(!state.has_start_command);
+        assert!(state.start_command.is_none());
     }
 
     #[test]
@@ -366,7 +370,11 @@ mod tests {
             start_command: Some("   ".to_string()),
             ..DeployConfig::default()
         });
-        assert!(!compute_pitr_state(&service, &POSTGRES.pitr.unwrap()).has_start_command);
+        assert!(
+            compute_pitr_state(&service, &POSTGRES.pitr.unwrap())
+                .start_command
+                .is_none()
+        );
     }
 
     fn config_with(services: Vec<(&str, ServiceInstance)>) -> EnvironmentConfig {

@@ -32,27 +32,11 @@ use crate::{
     gql::{mutations, queries},
 };
 
-/// Distinguishes a true cluster conversion (HA) from a config-only overlay
-/// (PITR: env vars + a bucket, no new services) and an additive edge stack
-/// (PgBouncer in front of the database). Only affects whether the
-/// pre-apply/pre-conversion safety backup is taken -- mirrors the frontend's
-/// `kind` parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplyKind {
-    Conversion,
-    Overlay,
-    Stacking,
-}
-
 /// Parameters for [`apply_composable_template`].
 pub struct ApplyTemplateParams {
     pub template_code: String,
     /// The existing service to convert into (or overlay onto) the cluster root.
     pub service_id: String,
-    /// The service's volume instance id, used only for the pre-conversion
-    /// safety backup (`kind == Conversion`). `None` skips the backup (e.g. the
-    /// service has no volume yet).
-    pub volume_instance_id: Option<String>,
     /// Omit (`None`) to leave the template's authored replica count untouched.
     pub replica_count: Option<i64>,
     /// Omit (`None`) to leave the template's authored coordinator/internal
@@ -64,7 +48,6 @@ pub struct ApplyTemplateParams {
     /// Variable overrides stamped onto every `edge`-role service before
     /// deploy (e.g. `POOL_MODE` for PgBouncer).
     pub edge_variables: Option<BTreeMap<String, String>>,
-    pub kind: ApplyKind,
     /// Commit and deploy the resulting staged patch immediately. When
     /// `false`, the patch is still committed (so the topology change lands)
     /// but deploys are skipped -- matches `environmentPatchCommitStaged`'s
@@ -101,12 +84,13 @@ pub(crate) fn staged_patch_is_nonempty(patch: &Value) -> bool {
 
 /// Every mutating managed-database action ends by committing the
 /// environment's WHOLE staged patch (same semantics as the dashboard's
-/// "Apply" button) -- so changes someone staged earlier (dashboard, another
+/// "Deploy" button) -- so changes someone staged earlier (dashboard, another
 /// CLI session) get committed and deployed together with this one. This
-/// best-effort warning makes that visible up front; it never blocks the
-/// command (the backend query only returns STAGED/APPLYING patches, so a
-/// non-empty result is always genuinely pending work).
-pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
+/// best-effort, read-only check makes that visible before the command's own
+/// confirmation prompt; it never blocks the command (the backend query only
+/// returns STAGED/APPLYING patches, so a non-empty result is always genuinely
+/// pending work). `None` when nothing is staged or the check failed.
+pub(crate) async fn preexisting_staged_changes_note(ctx: &ServiceContext) -> Option<String> {
     let response = post_graphql::<queries::EnvironmentStagedChanges, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -114,16 +98,45 @@ pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
             environment_id: ctx.environment_id.clone(),
         },
     )
-    .await;
+    .await
+    .ok()?;
 
-    if let Ok(response) = response
-        && staged_patch_is_nonempty(&response.environment_staged_changes.patch)
-    {
-        eprintln!(
-            "Warning: environment {} already has staged changes; this command commits the environment's full staged patch, so those pre-existing changes will be applied (and deployed) together with this one.",
+    staged_patch_is_nonempty(&response.environment_staged_changes.patch).then(|| {
+        format!(
+            "{} has other staged changes. Deploying this change deploys those too.",
             ctx.environment_name
-        );
+        )
+    })
+}
+
+/// [`preexisting_staged_changes_note`] as a warning, for the commands that
+/// commit a staged patch without asking for confirmation first.
+pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
+    if let Some(note) = preexisting_staged_changes_note(ctx).await {
+        eprintln!("Warning: {note}");
     }
+}
+
+/// The safety backup `ha convert` takes before topology surgery, via the
+/// public backup-create mutation (the dashboard's dedicated
+/// `volumeInstanceBackupCreateForHaConversion` is Internal-subgraph only; a
+/// plain named on-demand backup covers the same "escape hatch" purpose).
+/// `volume_instance_id` is the LIVE volume-instance id, not the config
+/// `volumeMounts` key.
+pub async fn create_pre_conversion_backup(
+    ctx: &ServiceContext,
+    volume_instance_id: String,
+) -> Result<()> {
+    post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_create::Variables {
+            volume_instance_id,
+            name: Some("pre-ha-conversion".to_string()),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// The adoption rules a template declares for taking over an existing service
@@ -189,35 +202,15 @@ pub async fn fetch_companion_image_repositories(
 /// Fetches a template by code, adjusts its `serializedConfig` for the
 /// requested replica/internal/edge counts and edge-variable overrides, then
 /// deploys it onto `params.service_id` as the existing cluster root.
+///
+/// Callers surface [`preexisting_staged_changes_note`] (folded into their
+/// confirmation prompt, or as a warning) before calling this: the commit at
+/// the end takes the environment's whole staged patch with it. A conversion
+/// caller also takes [`create_pre_conversion_backup`] first.
 pub async fn apply_composable_template(
     ctx: &ServiceContext,
     params: ApplyTemplateParams,
 ) -> Result<ApplyTemplateResult> {
-    warn_if_preexisting_staged_changes(ctx).await;
-
-    // Best-effort pre-conversion safety backup via the public backup-create
-    // mutation (the dashboard's dedicated `volumeInstanceBackupCreateForHaConversion`
-    // is Internal-subgraph only; a plain named on-demand backup covers the
-    // same "escape hatch before topology surgery" purpose).
-    if params.kind == ApplyKind::Conversion
-        && let Some(volume_instance_id) = params.volume_instance_id.clone()
-    {
-        if let Err(err) = post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
-            &ctx.client,
-            ctx.configs.get_backboard(),
-            mutations::volume_instance_backup_create::Variables {
-                volume_instance_id,
-                name: Some("pre-ha-conversion".to_string()),
-            },
-        )
-        .await
-        {
-            eprintln!(
-                "Warning: could not create pre-conversion backup: {err:#}. Proceeding with conversion."
-            );
-        }
-    }
-
     let detail = post_graphql::<queries::TemplateDetail, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -279,13 +272,12 @@ pub async fn apply_composable_template(
 
 /// Reverts a cluster/overlay/stack to standalone via `templateRevert`, using
 /// template metadata server-side to derive which variables/services to
-/// remove.
+/// remove. Callers surface [`preexisting_staged_changes_note`] first, as for
+/// [`apply_composable_template`].
 pub async fn revert_template(
     ctx: &ServiceContext,
     params: RevertTemplateParams,
 ) -> Result<ApplyTemplateResult> {
-    warn_if_preexisting_staged_changes(ctx).await;
-
     let response = post_graphql::<mutations::TemplateRevert, _>(
         &ctx.client,
         ctx.configs.get_backboard(),
@@ -328,8 +320,6 @@ pub async fn stage_and_commit_patch(
     patch: EnvironmentConfig,
     auto_deploy: bool,
 ) -> Result<bool> {
-    warn_if_preexisting_staged_changes(ctx).await;
-
     post_graphql::<mutations::EnvironmentStageChanges, _>(
         &ctx.client,
         ctx.configs.get_backboard(),

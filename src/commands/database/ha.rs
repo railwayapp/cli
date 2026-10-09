@@ -26,17 +26,34 @@ use crate::controllers::{
     database_plugins::{self, HaState},
     patroni,
     project::{ServiceContext, resolve_service_context},
-    template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
+    template_apply::{self, ApplyTemplateParams, RevertTemplateParams},
 };
 
 use super::{
-    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label,
+    ResourceRef, confirm_deploy_or_bail, confirm_or_bail, deploy_outcome, on_off, print_field,
+    resolve_root, service_name_map,
 };
+
+/// How a config cluster role reads in copy. The config keys (`root`,
+/// `internal`, `edge`) are the platform's; the words are the user's.
+fn role_label(role: &str) -> &str {
+    match role {
+        "root" => "original",
+        "internal" => "coordinator",
+        "edge" => "proxy",
+        other => other,
+    }
+}
+
+/// How a live role reads in copy: Patroni calls the primary `leader`.
+fn live_role_label(role: &str) -> &str {
+    if role == "leader" { "primary" } else { role }
+}
 
 /// Manage high-availability clustering
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  ha status --service my-database\n  ha convert --service my-database --replicas 2\n  ha convert --service my-database --replicas 2 --coordinators 3 --edge 1\n  ha revert --service my-database --yes\n  ha scale --service my-database --replicas 3\n  ha switchover --service my-database --to my-database-replica-1\n\nAutomation notes:\n  Omitted --replicas/--coordinators/--edge on `convert` leave the template's authored count untouched.\n  Which roles a cluster has, and the counts each accepts, are declared by the engine's HA template -- `convert` reports the allowed values when a count is refused.\n  --coordinators applies only to clusters with a separate coordinator tier, and must be odd (consensus quorum).\n  Where the data nodes themselves carry the failover vote, their total must be odd and at least three, so --replicas must be even."
+    after_help = "Examples:\n\n  ha status --service my-database\n  ha convert --service my-database --replicas 2\n  ha convert --service my-database --replicas 2 --coordinators 3 --proxies 1\n  ha revert --service my-database --yes\n  ha scale --service my-database --replicas 3\n  ha switchover --service my-database --to my-database-replica-1\n\nAutomation notes:\n  Omitted --replicas/--coordinators/--proxies on `convert` leave the template's default count untouched.\n  Which roles a cluster has, and the counts each accepts, are declared by the engine's HA template. `convert` reports the allowed values when a count is refused.\n  --coordinators applies only to clusters with a separate coordinator tier, and must be odd (the coordinators vote).\n  Where the data nodes themselves vote, the cluster needs an odd number of 3 or more, so --replicas must be even.\n  --edge is an alias of --proxies."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -54,10 +71,10 @@ enum Commands {
     /// Revert an HA cluster back to a standalone service
     Revert(RevertArgs),
 
-    /// Scale cluster replicas, coordinators, or edge nodes
+    /// Scale the cluster's replicas, coordinators, or reverse proxies
     Scale(ScaleArgs),
 
-    /// Promote a replica to primary (brief downtime)
+    /// Switch the primary to another data node (a few seconds of downtime)
     #[clap(visible_alias = "promote")]
     Switchover(SwitchoverArgs),
 }
@@ -68,19 +85,19 @@ struct ConvertArgs {
     #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: Option<i64>,
 
-    /// Number of coordinator/consensus nodes (e.g. etcd), for clusters that have a coordinator tier; must be odd
+    /// Number of coordinator nodes (etcd), for clusters that have a coordinator tier; must be odd
     #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
     coordinators: Option<i64>,
 
-    /// Number of edge/load-balancer replicas (e.g. HAProxy); omit to keep the template default
-    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
+    /// Number of reverse proxies (HAProxy) routing to the primary; omit to keep the template default
+    #[clap(long, visible_alias = "proxies", value_parser = clap::value_parser!(i64).range(0..))]
     edge: Option<i64>,
 
     /// Skip the confirmation prompt
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -97,13 +114,13 @@ struct RevertArgs {
     ///
     /// Separate from --yes on purpose: an earlier revert clears the parent
     /// links before it deletes, so nothing on these services still ties them
-    /// to the root you named -- image lineage narrows the match to this
+    /// to the service you named. Image lineage narrows the match to this
     /// engine, but two clusters of the same engine in one environment remain
     /// indistinguishable.
     #[clap(long)]
     remove_orphans: bool,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -120,26 +137,26 @@ struct ScaleArgs {
     #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: Option<i64>,
 
-    /// Target coordinator/consensus node count (must stay odd)
+    /// Target coordinator node count (must stay odd)
     #[clap(long, value_parser = clap::value_parser!(i64).range(1..))]
     coordinators: Option<i64>,
 
-    /// Target edge/load-balancer replica count
-    #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
+    /// Target number of reverse proxies (HAProxy)
+    #[clap(long, visible_alias = "proxies", value_parser = clap::value_parser!(i64).range(0..))]
     edge: Option<i64>,
 
     /// Skip the confirmation prompt
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
 
 #[derive(Parser)]
 struct SwitchoverArgs {
-    /// Service name or ID of the node to promote
+    /// Service name or ID of the data node that becomes the primary
     #[clap(long)]
     to: String,
 
@@ -346,7 +363,7 @@ async fn probe_data_nodes(
                 })
                 .collect(),
             Err(err) => {
-                eprintln!("Warning: could not probe live cluster status: {err:#}");
+                eprintln!("Warning: Railway couldn't read the cluster's live status: {err:#}");
                 BTreeMap::new()
             }
         },
@@ -358,7 +375,9 @@ async fn probe_data_nodes(
             let instance_ids = match patroni::resolve_instance_ids(ctx, &service_ids).await {
                 Ok(ids) => ids,
                 Err(err) => {
-                    eprintln!("Warning: could not resolve live cluster instances: {err:#}");
+                    eprintln!(
+                        "Warning: Railway couldn't find the cluster's running nodes: {err:#}"
+                    );
                     return BTreeMap::new();
                 }
             };
@@ -488,20 +507,28 @@ fn print_ha_status(engine: &DatabaseEngine, output: &HaStatusOutput) {
     print_field("Service:", &output.service.name.green().bold());
     print_field("Environment:", &output.environment.name.blue().bold());
     if output.root.id != output.service.id {
-        print_field("Cluster root:", &output.root.name);
+        print_field("Original service:", &output.root.name);
     }
-    print_field("Status:", &status_label(output.is_cluster));
+    if output.is_cluster {
+        print_field("HA:", &on_off(true));
+    } else {
+        print_field("HA:", &format!("{} (standalone)", on_off(false)));
+    }
 
     if output.is_cluster {
         println!();
-        println!("{}", "Members:".bold());
+        println!("{}", "Nodes:".bold());
         println!(
             "  {:<28} {:<12} {:<10} {:<10} LAG",
             "NAME", "CONFIG ROLE", "LIVE ROLE", "STATE"
         );
         for member in &output.members {
             let live_role = match &member.reachable {
-                Some(true) => member.live_role.as_deref().unwrap_or("-"),
+                Some(true) => member
+                    .live_role
+                    .as_deref()
+                    .map(live_role_label)
+                    .unwrap_or("-"),
                 Some(false) => "unreachable",
                 None => "-",
             };
@@ -510,7 +537,11 @@ fn print_ha_status(engine: &DatabaseEngine, output: &HaStatusOutput) {
             println!(
                 "  {:<28} {:<12} {:<10} {:<10} {}",
                 member.service.name,
-                member.cluster_role.as_deref().unwrap_or("-"),
+                member
+                    .cluster_role
+                    .as_deref()
+                    .map(role_label)
+                    .unwrap_or("-"),
                 live_role,
                 state,
                 lag
@@ -542,14 +573,15 @@ fn validate_role_count(
 
     let Some(options) = rules.role_options.get(role) else {
         bail!(
-            "{} high-availability clusters have no {role} nodes, so {flag} does not apply here.",
-            engine.display_name
+            "{} HA clusters have no {} nodes, so {flag} doesn't apply here.",
+            engine.display_name,
+            role_label(role)
         );
     };
 
     if !options.is_empty() && !options.contains(&requested) {
         bail!(
-            "{flag} must be one of {} for a {} cluster (got {requested}).",
+            "{flag} must be one of {} for a {} cluster (you passed {requested}).",
             options
                 .iter()
                 .map(|o| o.to_string())
@@ -569,10 +601,8 @@ async fn convert(
     json: bool,
     args: ConvertArgs,
 ) -> Result<()> {
-    if let Some(coordinators) = args.coordinators
-        && coordinators % 2 == 0
-    {
-        bail!("--coordinators must be an odd number for consensus quorum (got {coordinators})");
+    if let Some(coordinators) = args.coordinators {
+        cluster_scale::validate_odd_coordinator_count(coordinators)?;
     }
 
     let ctx = resolve_service_context(project, service, environment).await?;
@@ -599,12 +629,7 @@ async fn convert(
     // template was authored against rather than a code-side assumption.
     let template_code = engine
         .ha_template_code_for(target_service.ha_template_code.as_deref())
-        .with_context(|| {
-            format!(
-                "{} has no high-availability companion template.",
-                engine.display_name
-            )
-        })?;
+        .with_context(|| format!("Railway doesn't offer HA for {}.", engine.display_name))?;
 
     // Everything the conversion is bounded by -- eligible images, supported
     // majors, and the counts each role accepts -- is declared by the COMPANION
@@ -629,27 +654,29 @@ async fn convert(
             .source
             .as_ref()
             .and_then(|s| s.image.as_deref()),
-        has_start_command: target_service
+        start_command: target_service
             .deploy
             .as_ref()
-            .and_then(|d| d.start_command.as_deref())
-            .is_some_and(|c| !c.trim().is_empty()),
+            .and_then(|d| d.start_command.as_deref()),
     });
     if !blockers.is_empty() {
         bail!(
-            "Cannot convert {} to HA:\n  - {}",
+            "Can't convert {} to HA:\n  - {}",
             root.root_name,
             blockers.join("\n  - ")
         );
     }
 
-    if !confirm_or_bail(
+    if !confirm_deploy_or_bail(
+        &ctx,
         &format!(
-            "Convert {} to an HA cluster? Connection endpoints will change and active connections will drop.",
+            "Convert {} to an HA cluster? Connection strings point to the cluster's reverse proxy, and active connections drop.",
             root.root_name.yellow()
         ),
         args.yes,
-    )? {
+    )
+    .await?
+    {
         println!("Cancelled.");
         return Ok(());
     }
@@ -672,17 +699,36 @@ async fn convert(
             .find(|edge| edge.node.service_id.as_deref() == Some(root.root_id.as_str()))
             .map(|edge| edge.node.id.clone())
     });
+    if let Some(volume_instance_id) = volume_instance_id
+        && let Err(err) =
+            template_apply::create_pre_conversion_backup(&ctx, volume_instance_id).await
+    {
+        // The backup is the escape hatch for the topology surgery below, so
+        // its absence is the user's call. `--yes` runs keep today's posture:
+        // say so and continue.
+        let note = format!(
+            "Railway couldn't back up {}'s volume before converting",
+            root.root_name
+        );
+        if args.yes {
+            eprintln!("Warning: {note} ({err:#}). Converting without a backup.");
+        } else {
+            eprintln!("{note}: {err:#}");
+            if !confirm_or_bail("Convert without a backup?", false)? {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+    }
     let result = template_apply::apply_composable_template(
         &ctx,
         ApplyTemplateParams {
             template_code,
             service_id: root.root_id.clone(),
-            volume_instance_id,
             replica_count: args.replicas,
             internal_count: args.coordinators,
             edge_count: args.edge,
             edge_variables: None,
-            kind: ApplyKind::Conversion,
             auto_deploy: !args.no_deploy,
         },
     )
@@ -693,11 +739,7 @@ async fn convert(
         .await?
         .config;
     if !json {
-        let verb = if result.deployed {
-            "Converted and deployed"
-        } else {
-            "Converted (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(result.deployed, "Converted");
         println!(
             "{verb} {} to an HA cluster in environment {} (project {}).",
             root.root_name.bold(),
@@ -727,12 +769,7 @@ async fn revert(
     let template_code = engine
         .ha
         .map(|ha| ha.template_code.to_string())
-        .with_context(|| {
-            format!(
-                "{} has no high-availability companion template.",
-                engine.display_name
-            )
-        })?;
+        .with_context(|| format!("Railway doesn't offer HA for {}.", engine.display_name))?;
 
     // What this engine's companion actually deploys, so the sweep below can
     // recognize its own debris instead of every orphan in the environment.
@@ -740,7 +777,7 @@ async fn revert(
         template_apply::fetch_companion_image_repositories(&ctx, &template_code).await;
     if companion_repositories.is_empty() {
         eprintln!(
-            "Warning: could not read the {template_code} template's images, so members left behind by an earlier scale-up cannot be told apart from unrelated services and will be left in place. Re-run once the template is reachable, or remove them from the dashboard."
+            "Warning: Railway couldn't read the {template_code} template's images, so nodes left behind by an earlier scale-up can't be told apart from unrelated services and stay in place. Retry once the template is reachable, or remove them from the cluster view."
         );
     }
 
@@ -783,28 +820,31 @@ async fn revert(
             .collect::<Vec<_>>()
             .join("\n");
         println!(
-            "{} is already standalone, but {} role-stamped service(s) in this environment run {} cluster images and have no cluster parent:\n{}",
+            "{} is already standalone, but {} service(s) in this environment carry a cluster role, run {} cluster images, and belong to no cluster:\n{}",
             root.root_name.red(),
             leftovers.len(),
             engine.display_name,
             listing
         );
         println!(
-            "These look like debris from a revert that died mid-sweep. They are matched by \
-             image lineage, not by membership -- a revert clears parent links before deleting, \
+            "These look like nodes left behind by a revert that stopped partway. They are matched \
+             by image, not by membership. A revert clears the cluster links before deleting, \
              so another {} cluster in this environment could leave services in the same state. \
              Check the names above before continuing.",
             engine.display_name
         );
         if !args.remove_orphans {
             bail!(
-                "Refusing to delete services that cannot be attributed to {} with certainty. \
-                 Re-run with --remove-orphans once you have confirmed the list above belongs to it.",
+                "Railway can't tell for certain that these services belonged to {}, so it won't delete them. \
+                 Retry with --remove-orphans once you've confirmed the list above belongs to it.",
                 root.root_name
             );
         }
         if !confirm_or_bail(
-            &format!("Delete the {} service(s) listed above?", leftovers.len()),
+            &format!(
+                "Delete the {} service(s) listed above and their volumes?",
+                leftovers.len()
+            ),
             args.yes,
         )? {
             println!("Cancelled.");
@@ -813,20 +853,20 @@ async fn revert(
         for (member_id, member_name) in &leftovers {
             if !json {
                 println!(
-                    "Removing cluster member {} left behind by an earlier revert...",
+                    "Removing {} and its volume (left behind by an earlier revert)...",
                     member_name.bold()
                 );
             }
             cluster_scale::delete_member(&ctx, &config, member_id)
                 .await
-                .with_context(|| format!("Failed to remove cluster member {member_name}"))?;
+                .with_context(|| format!("Failed to remove {member_name}"))?;
         }
         let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
             .await?
             .config;
         if !json {
             println!(
-                "Removed {} cluster member(s) left behind by an earlier revert of {}.",
+                "Removed {} node(s) left behind by an earlier revert of {}.",
                 leftovers.len(),
                 root.root_name.bold()
             );
@@ -869,21 +909,9 @@ async fn revert(
             );
         }
         eprintln!(
-            "Warning: could not reach any cluster member to verify {} is the current primary before reverting. Proceeding anyway.",
+            "Warning: Railway couldn't reach any node to confirm {} is the primary before reverting. Continuing anyway.",
             root.root_name
         );
-    }
-
-    if !confirm_or_bail(
-        &format!(
-            "Revert {} to a standalone {}? Connection endpoints will change and active connections will drop.",
-            root.root_name.red(),
-            engine.display_name
-        ),
-        args.yes,
-    )? {
-        println!("Cancelled.");
-        return Ok(());
     }
 
     // Snapshot the membership BEFORE reverting: the revert patch clears
@@ -895,6 +923,24 @@ async fn revert(
         .filter(|m| m.service_id != root.root_id)
         .map(|m| (m.service_id.clone(), m.service_name.clone()))
         .collect();
+
+    if !confirm_deploy_or_bail(
+        &ctx,
+        &format!(
+            "Revert {} to a standalone {}? Railway deletes the cluster's other services ({}) and keeps {}. Connection strings point back to {}, and active connections drop.",
+            root.root_name.red(),
+            engine.display_name,
+            pre_revert_members.len(),
+            root.root_name,
+            root.root_name
+        ),
+        args.yes,
+    )
+    .await?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
 
     let result = template_apply::revert_template(
         &ctx,
@@ -936,7 +982,7 @@ async fn revert(
         }
         if std::time::Instant::now() >= apply_deadline {
             eprintln!(
-                "Warning: the reverted configuration has not finished applying yet; sweeping remaining members anyway."
+                "Warning: the revert hasn't finished applying yet. Removing the remaining nodes anyway."
             );
             break;
         }
@@ -955,13 +1001,13 @@ async fn revert(
     for (member_id, member_name) in &leftovers {
         if !json {
             println!(
-                "Removing live-scaled cluster member {} left behind by the template revert...",
+                "Removing {} and its volume (a node added after the conversion, which the revert left behind)...",
                 member_name.bold()
             );
         }
         cluster_scale::delete_member(&ctx, &config, member_id)
             .await
-            .with_context(|| format!("Failed to remove cluster member {member_name}"))?;
+            .with_context(|| format!("Failed to remove {member_name}"))?;
     }
     let config = if leftovers.is_empty() {
         config
@@ -972,11 +1018,7 @@ async fn revert(
     };
 
     if !json {
-        let verb = if result.deployed {
-            "Reverted and deployed"
-        } else {
-            "Reverted (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(result.deployed, "Reverted");
         println!(
             "{verb} {} to a standalone {} in environment {} (project {}).",
             root.root_name.bold(),
@@ -1010,8 +1052,9 @@ async fn scale(
 
     if !ha_state.is_cluster {
         bail!(
-            "{} is not an HA cluster. Run `ha convert` first.",
-            root.root_name
+            "{} is not an HA cluster. Run `railway {} ha convert` first.",
+            root.root_name,
+            engine.key
         );
     }
 
@@ -1026,60 +1069,74 @@ async fn scale(
             .any(|m| m.cluster_role.as_deref() == Some("internal"))
     {
         bail!(
-            "This {} cluster has no coordinator nodes, so --coordinators does not apply.",
+            "This {} cluster has no coordinator nodes, so --coordinators doesn't apply.",
             engine.display_name
         );
-    }
-
-    let mut summary_lines = Vec::new();
-    if let Some(n) = args.replicas {
-        summary_lines.push(format!("replicas -> {n}"));
-    }
-    if let Some(n) = args.coordinators {
-        summary_lines.push(format!("coordinators -> {n}"));
-    }
-    if let Some(n) = args.edge {
-        summary_lines.push(format!("edge -> {n}"));
-    }
-    if !confirm_or_bail(
-        &format!(
-            "Scale {} ({})? This may create or delete whole services and volumes.",
-            root.root_name.yellow(),
-            summary_lines.join(", ")
-        ),
-        args.yes,
-    )? {
-        println!("Cancelled.");
-        return Ok(());
     }
 
     // When replicas are being REMOVED, ask the cluster which node currently
     // holds the primary role, so scale-down never deletes the acting primary:
     // deletion order is by node number, and after a failover the primary can
-    // be ANY replica, whatever its number. Degrades to a warning when no
-    // member answers -- the same posture as revert's primacy precheck.
-    let current_replicas = ha_state
-        .members
-        .iter()
-        .filter(|m| m.cluster_role.as_deref() == Some("replica"))
-        .count() as i64;
+    // be ANY replica, whatever its number. Read-only, and done BEFORE the
+    // prompt so that what the user confirms names the nodes that go. When no
+    // node answers, the prompt says so and names them anyway -- the same
+    // degrade-to-a-warning posture as revert's primacy precheck.
+    let current_replicas = cluster_scale::current_replicas(&config, &root.root_id, &names);
+    let mut primary_unknown_note = None;
     let live_primary_id = match args.replicas {
-        Some(target) if target < current_replicas => {
+        Some(target) if target < current_replicas.len() as i64 => {
             let live = probe_data_nodes(engine, &ctx, &config, &ha_state).await;
             let primary = live
                 .iter()
                 .find(|(_, member)| member.is_primary == Some(true))
                 .map(|(id, _)| id.clone());
             if primary.is_none() {
-                eprintln!(
-                    "Warning: could not determine {}'s current primary before scaling down; removing the highest-numbered replica(s) by name alone.",
-                    root.root_name
-                );
+                let removed = cluster_scale::replicas_to_remove(
+                    &current_replicas,
+                    target,
+                    &root.root_name,
+                    engine,
+                    None,
+                )?
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect::<Vec<_>>()
+                .join(", ");
+                primary_unknown_note = Some(format!(
+                    "Railway couldn't confirm which node is the primary. Scaling down removes {removed}. If one of them is the primary, the cluster fails over."
+                ));
             }
             primary
         }
         _ => None,
     };
+
+    let mut summary_lines = Vec::new();
+    if let Some(n) = args.replicas {
+        summary_lines.push(format!("replicas: {n}"));
+    }
+    if let Some(n) = args.coordinators {
+        summary_lines.push(format!("coordinators: {n}"));
+    }
+    if let Some(n) = args.edge {
+        summary_lines.push(format!("reverse proxies: {n}"));
+    }
+    let mut prompt = format!(
+        "Scale {} ({})? Railway creates or deletes whole services and their volumes.",
+        root.root_name.yellow(),
+        summary_lines.join(", ")
+    );
+    if let Some(note) = &primary_unknown_note {
+        if args.yes {
+            eprintln!("Warning: {note}");
+        } else {
+            prompt = format!("{prompt} {note}");
+        }
+    }
+    if !confirm_deploy_or_bail(&ctx, &prompt, args.yes).await? {
+        println!("Cancelled.");
+        return Ok(());
+    }
 
     let result = cluster_scale::scale_cluster(
         &ctx,
@@ -1109,12 +1166,8 @@ async fn scale(
 }
 
 fn print_scale_result(root_name: &str, result: &cluster_scale::ScaleClusterResult) {
-    let verb = if result.deployed {
-        "Scaled and deployed"
-    } else {
-        "Scaled (deploys skipped -- applies on the next deploy)"
-    };
-    println!("{verb} {} -- ", root_name.bold());
+    let verb = deploy_outcome(result.deployed, "Scaled");
+    println!("{verb} {}.", root_name.bold());
 
     let print_dimension = |label: &str, summary: &ScaleDimensionSummary| {
         if summary.is_noop() {
@@ -1141,7 +1194,7 @@ fn print_scale_result(root_name: &str, result: &cluster_scale::ScaleClusterResul
         target_replicas,
     }) = &result.edge
     {
-        println!("  Edge ({region}): {previous_replicas} -> {target_replicas}");
+        println!("  Reverse proxies ({region}): {previous_replicas} to {target_replicas}");
     }
 }
 
@@ -1156,8 +1209,8 @@ async fn preflight_ssh(ctx: &ServiceContext, yes: bool) -> Result<()> {
     };
     if let Err(e) = preflight {
         bail!(
-            "Switchover is driven over SSH (ssh <instance>@ssh.railway.com), and no usable \
-             SSH key is available: {e:#}"
+            "Switching the primary needs an SSH key registered with Railway. Add one with \
+             `railway ssh keys add`, then retry. ({e:#})"
         );
     }
     Ok(())
@@ -1187,22 +1240,26 @@ async fn switchover(
         .members
         .iter()
         .find(|m| m.service_id == args.to || m.service_name.eq_ignore_ascii_case(&args.to))
-        .with_context(|| format!("\"{}\" is not a member of this HA cluster", args.to))?;
+        .with_context(|| format!("\"{}\" is not a node of this cluster", args.to))?;
 
     if !matches!(
         candidate.cluster_role.as_deref(),
         Some("root") | Some("replica")
     ) {
         bail!(
-            "Switchover target must be a {} data node (root or replica), not \"{}\".",
-            engine.display_name,
-            candidate.cluster_role.as_deref().unwrap_or("unknown")
+            "The switchover target must be a data node (the original service or a replica). \"{}\" is a {} node.",
+            candidate.service_name,
+            candidate
+                .cluster_role
+                .as_deref()
+                .map(role_label)
+                .unwrap_or("unknown")
         );
     }
 
     if !confirm_or_bail(
         &format!(
-            "Promote {} to primary? This causes a brief write downtime while the cluster fails over.",
+            "Make {} the primary? Writes pause for a few seconds while the primary switches over.",
             candidate.service_name.yellow()
         ),
         args.yes,
@@ -1215,22 +1272,29 @@ async fn switchover(
 
     match engine.ha.map(|ha| ha.switchover) {
         Some(SwitchoverMechanism::Patroni) => {
-            switchover_via_patroni(&ctx, &config, &root, &ha_state, candidate, json).await
+            switchover_via_patroni(engine, &ctx, &config, &root, &ha_state, candidate, json).await
         }
         Some(SwitchoverMechanism::DeclaredHttp { http_client }) => {
-            switchover_via_declared_endpoint(&ctx, &config, &root, candidate, http_client, json)
-                .await
+            switchover_via_declared_endpoint(
+                engine,
+                &ctx,
+                &config,
+                &root,
+                candidate,
+                http_client,
+                json,
+            )
+            .await
         }
-        None => bail!(
-            "{} has no high-availability companion template.",
-            engine.display_name
-        ),
+        None => bail!("Railway doesn't offer HA for {}.", engine.display_name),
     }
 }
 
-/// Switchover through a coordinator API: one member's view names the whole
+/// Switchover through Patroni's API: one member's view names the whole
 /// cluster, so the request is addressed from whichever member answers.
+#[allow(clippy::too_many_arguments)]
 async fn switchover_via_patroni(
+    engine: &DatabaseEngine,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     root: &super::RootContext,
@@ -1247,7 +1311,7 @@ async fn switchover_via_patroni(
             .collect::<Vec<_>>(),
     )
     .await
-    .context("Failed to resolve live cluster member instances")?;
+    .context("Couldn't find the cluster's running nodes")?;
 
     let probe_targets: Vec<String> = instance_ids.values().cloned().collect();
     let (probe_instance_id, cluster_members) = match patroni::probe_any(&probe_targets).await {
@@ -1259,8 +1323,8 @@ async fn switchover_via_patroni(
                 .collect::<Vec<_>>()
                 .join("\n");
             bail!(
-                "Could not reach any cluster member's coordinator API to determine the current \
-                 primary. Per-member errors:\n{detail}"
+                "Couldn't reach Patroni on any node to find the current primary. Per-node \
+                 errors:\n{detail}"
             );
         }
     };
@@ -1268,7 +1332,7 @@ async fn switchover_via_patroni(
     let leader = cluster_members
         .iter()
         .find(|m| m.role == "leader")
-        .context("The cluster's coordinator did not report a current primary")?;
+        .context("Patroni didn't report a current primary")?;
 
     let candidate_node_name = database_plugins::member_identity_name(
         config,
@@ -1281,7 +1345,7 @@ async fn switchover_via_patroni(
         .any(|m| m.name.to_ascii_lowercase() == candidate_node_name)
     {
         bail!(
-            "\"{}\" is not currently a recognized cluster member.",
+            "Patroni doesn't list \"{}\" as a node of this cluster right now.",
             candidate.service_name
         );
     }
@@ -1304,12 +1368,13 @@ async fn switchover_via_patroni(
         );
     } else {
         println!(
-            "Requested switchover from {} to {}.",
+            "Requested the switchover from {} to {}.",
             leader.name.bold(),
             candidate.service_name.bold()
         );
         println!(
-            "The cluster is performing the failover -- run `ha status` shortly to confirm the new primary."
+            "The primary is switching over. Run `railway {} ha status` in a moment to confirm the new primary.",
+            engine.key
         );
     }
     Ok(())
@@ -1320,7 +1385,9 @@ async fn switchover_via_patroni(
 /// node the primary. There is no cluster-wide endpoint to address, and the
 /// response only says the handoff was accepted -- the role probe flipping is
 /// what confirms it.
+#[allow(clippy::too_many_arguments)]
 async fn switchover_via_declared_endpoint(
+    engine: &DatabaseEngine,
     ctx: &ServiceContext,
     config: &EnvironmentConfig,
     root: &super::RootContext,
@@ -1329,19 +1396,22 @@ async fn switchover_via_declared_endpoint(
     json: bool,
 ) -> Result<()> {
     let wiring = cluster_wiring(config, &root.root_id).with_context(|| {
-        format!(
-            "This cluster declares no wiring, so there is no way to ask {} to become the primary.",
-            candidate.service_name
-        )
+        "This cluster was converted before switchover was supported, so the CLI can't switch its primary. Use Make primary in the cluster view."
+            .to_string()
     })?;
     let endpoint = cluster_probe::resolve(wiring.data_node_switchover.as_ref()).with_context(
-        || "This cluster does not offer a switchover endpoint. Fail over through the dashboard.",
+        || "This cluster doesn't support switchover from the CLI. Use Make primary in the cluster view.",
     )?;
 
     let instance_ids =
         patroni::resolve_instance_ids(ctx, std::slice::from_ref(&candidate.service_id))
             .await
-            .context("Failed to resolve the target's live instance")?;
+            .with_context(|| {
+                format!(
+                    "Couldn't find {}'s running deployment",
+                    candidate.service_name
+                )
+            })?;
     let instance_id = instance_ids.get(&candidate.service_id).with_context(|| {
         format!(
             "{} has no running deployment to promote.",
@@ -1388,7 +1458,8 @@ async fn switchover_via_declared_endpoint(
             candidate.service_name.bold()
         );
         println!(
-            "The cluster is performing the failover -- run `ha status` shortly to confirm the new primary."
+            "The primary is switching over. Run `railway {} ha status` in a moment to confirm the new primary.",
+            engine.key
         );
     }
     Ok(())
@@ -1486,6 +1557,18 @@ mod tests {
         assert_eq!(convert.replicas, Some(2));
         assert_eq!(convert.coordinators, Some(3));
         assert_eq!(convert.edge, Some(1));
+
+        // `--proxies` is the same flag under the name the docs use.
+        let args = Args::parse_from(["ha", "convert", "--proxies", "2"]);
+        let Commands::Convert(convert) = args.command else {
+            panic!("expected convert");
+        };
+        assert_eq!(convert.edge, Some(2));
+        let args = Args::parse_from(["ha", "scale", "--proxies", "2"]);
+        assert!(matches!(
+            args.command,
+            Commands::Scale(ScaleArgs { edge: Some(2), .. })
+        ));
     }
 
     #[test]
@@ -1621,7 +1704,7 @@ mod tests {
             .to_string();
         // Naming the role the cluster lacks beats silently ignoring the flag
         // and converting into a shape the user did not ask for.
-        assert!(err.contains("no internal nodes"));
+        assert!(err.contains("no coordinator nodes"));
         assert!(err.contains("--coordinators"));
 
         // The same flag is fine where the tier exists.
