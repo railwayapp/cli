@@ -1425,7 +1425,7 @@ fn describe_function_code_change(
             severity: "warning".into(),
             path: format!("resources.{}.deploy.startCommand", resource_addr(resource)),
             message: format!(
-                "Function {} is declared without code. Applying removes its start command, and with it the source deployed on Railway. Pass `code` to fn() to keep it, or run `railway config pull` to import it into `functions/`.",
+                "Function {} is declared without code. Applying removes its start command, and with it the source deployed on Railway. Pass `codeFile` (`code_file` in Python) to fn() to keep it, or run `railway config pull` to import the deployed source into `functions/`.",
                 resource_name(previous)
             ),
         });

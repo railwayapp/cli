@@ -2500,7 +2500,7 @@ fn live_function_image_services_are_kind_function() {
         &json!({
             "services": {
                 "hello": {
-                    "source": { "image": "ghcr.io/railwayapp/function:1.4.0" },
+                    "source": { "image": "ghcr.io/railwayapp/function-bun:1.4.0" },
                     "deploy": { "startCommand": super::functions::encode_function_code("export default {}\n") }
                 },
                 "api": { "source": { "image": "ghcr.io/acme/api:1" } }

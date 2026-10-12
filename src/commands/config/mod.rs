@@ -491,13 +491,13 @@ fn write_language_support_files(lang: AuthoringLang, railway_dir: &Path) -> Resu
         AuthoringLang::Go => {
             write_asset_if_missing(
                 &railway_dir.join("go.mod"),
-                "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.2.0\n",
+                "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.5.0\n",
             )?;
         }
         AuthoringLang::Python => {
             write_asset_if_missing(
                 &railway_dir.join("requirements.txt"),
-                "railway-sdk>=0.2.0\n",
+                "railway-sdk>=0.6.0\n",
             )?;
         }
         AuthoringLang::TypeScript => {}
@@ -576,11 +576,19 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         "Updated".dimmed(),
         railway_file.display().to_string().cyan()
     );
-    for file in &function_files {
+    for file in &function_files.written {
         println!(
             "{} {}",
             "Updated".dimmed(),
             file.display().to_string().cyan()
+        );
+    }
+    for file in &function_files.stale {
+        println!(
+            "{} {} {}",
+            "Kept".dimmed(),
+            file.display().to_string().cyan(),
+            "(no function with this name on Railway; delete it if the function is gone)".dimmed()
         );
     }
     if wrote_readme {
@@ -621,7 +629,7 @@ async fn write_pulled_config(
     include_variables: bool,
     environment: Option<String>,
     variables_managed: bool,
-) -> Result<Vec<PathBuf>> {
+) -> Result<WrittenFunctionSources> {
     let imported = load_current_import(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
@@ -645,7 +653,7 @@ async fn write_pulled_config(
 fn write_function_sources(
     config_path: &Path,
     files: &std::collections::BTreeMap<String, FunctionSourceFile>,
-) -> Result<Vec<PathBuf>> {
+) -> Result<WrittenFunctionSources> {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let mut written = Vec::new();
     for file in files.values() {
@@ -655,7 +663,30 @@ fn write_function_sources(
             .with_context(|| format!("Failed to write {}", target.display()))?;
         written.push(target);
     }
-    Ok(written)
+    let stale = stale_function_sources(&config_dir.join(FUNCTIONS_DIR), &written);
+    Ok(WrittenFunctionSources { written, stale })
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct WrittenFunctionSources {
+    written: Vec<PathBuf>,
+    /// `functions/*.ts` from an earlier pull that no function on Railway
+    /// matched this time. Never deleted: the user decides.
+    stale: Vec<PathBuf>,
+}
+
+fn stale_function_sources(functions_dir: &Path, written: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(functions_dir) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ts"))
+        .filter(|path| !written.iter().any(|kept| kept == path))
+        .collect();
+    stale.sort();
+    stale
 }
 
 struct CurrentImport {
@@ -823,7 +854,9 @@ fn render_graph_as_railway_following(
             .and_then(|source| source.get("image"))
             .is_some()
             && resource.r#type == "service"
-            && !function_files.contains_key(resource.address.as_deref().unwrap_or(&resource.name))
+            // Python functions pin the runtime with `runtime=`, not `image()`.
+            && (lang != AuthoringLang::Python
+                || !function_files.contains_key(resource.address.as_deref().unwrap_or(&resource.name)))
     }) {
         imports.push("image");
     }
@@ -1360,10 +1393,12 @@ fn function_source_files(
         else {
             continue;
         };
+        // Dedup case-insensitively: macOS and Windows file systems would
+        // otherwise fold `Hello.ts` and `hello.ts` into one file.
         let stem = function_file_stem(&resource.name);
         let mut file_name = format!("{stem}.ts");
         let mut counter = 2;
-        while !used.insert(file_name.clone()) {
+        while !used.insert(file_name.to_lowercase()) {
             file_name = format!("{stem}-{counter}.ts");
             counter += 1;
         }
@@ -1404,9 +1439,14 @@ fn function_file_stem(name: &str) -> String {
     stem
 }
 
-/// The `fn()` body: `codeFile` first, then everything `service()` would
-/// render except the runtime image and the encoded start command, which the
-/// SDK derives from the file.
+/// The `fn()` body: the code file first, then the live runtime image so the
+/// next plan does not re-pin the SDK's default tag, then everything
+/// `service()` would render except the encoded start command, which the SDK
+/// derives from the file.
+///
+/// The TypeScript and Go SDKs take `codeFile` and an explicit `source`; the
+/// Python SDK takes `code_file` and `runtime="bun:<tag>"` (it rejects `source`
+/// next to `code_file`).
 fn render_function_body(
     resource: &runner::DesiredResource,
     code_file: &str,
@@ -1414,7 +1454,33 @@ fn render_function_body(
     preserve_variables: bool,
     lang: AuthoringLang,
 ) -> String {
-    let mut lines = vec![lang.config_field("codeFile", &ts_string(code_file))];
+    let code_file_key = match lang {
+        AuthoringLang::Python => "code_file",
+        AuthoringLang::TypeScript | AuthoringLang::Go => "codeFile",
+    };
+    let mut lines = vec![lang.config_field(code_file_key, &ts_string(code_file))];
+    if let Some(source) = resource
+        .source
+        .as_ref()
+        .filter(|source| is_image_source(Some(source)))
+    {
+        match lang {
+            AuthoringLang::Python => {
+                if let Some(runtime) = source
+                    .get("image")
+                    .and_then(|image| image.as_str())
+                    .and_then(python_function_runtime)
+                {
+                    lines.push(lang.config_field("runtime", &ts_string(&runtime)));
+                }
+            }
+            AuthoringLang::TypeScript | AuthoringLang::Go => {
+                lines.push(
+                    lang.config_field("source", &render_source_following(source, lang, false)),
+                );
+            }
+        }
+    }
     render_build(resource.build.as_ref(), lang, &mut lines);
     let deploy = resource.deploy.as_ref().map(|deploy| {
         let mut copy = deploy.clone();
@@ -1443,6 +1509,14 @@ fn render_function_body(
         AuthoringLang::TypeScript => format!("{{\n{}\n  }}", lines.join("\n")),
         AuthoringLang::Python | AuthoringLang::Go => lines.join("\n"),
     }
+}
+
+/// The Python SDK's `runtime` for a live function image: `bun:1.2.16` for
+/// `ghcr.io/railwayapp/function-bun:1.2.16`. Images outside the
+/// `function-<runtime>` family are left to the SDK default.
+fn python_function_runtime(image: &str) -> Option<String> {
+    let runtime = image.strip_prefix("ghcr.io/railwayapp/function-")?;
+    (!runtime.is_empty() && !runtime.starts_with(':')).then(|| runtime.to_string())
 }
 
 fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
@@ -2652,7 +2726,7 @@ mod tests {
 
     fn function_resource(name: &str, code: &str) -> runner::DesiredResource {
         let mut resource = service_resource(
-            json!({ "type": "image", "image": "ghcr.io/railwayapp/function:1.4.0" }),
+            json!({ "type": "image", "image": "ghcr.io/railwayapp/function-bun:1.4.0" }),
             json!({
                 "startCommand": crate::iac::functions::encode_function_code(code),
                 "healthcheckPath": "/health"
@@ -2675,12 +2749,12 @@ mod tests {
     fn pull_renderer_authors_functions_with_a_code_file() {
         let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
         let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
-        assert!(rendered.contains("import { defineRailway, fn, project, service }"));
+        assert!(rendered.contains("import { defineRailway, fn, image, project, service }"));
         assert!(rendered.contains("const hello = fn(\"hello\", {"));
         assert!(rendered.contains("    codeFile: \"functions/hello.ts\","));
+        assert!(rendered.contains("    source: image(\"ghcr.io/railwayapp/function-bun:1.4.0\"),"));
         assert!(rendered.contains("    healthcheck: \"/health\","));
         assert!(!rendered.contains("run.sh"));
-        assert!(!rendered.contains("image("));
         assert!(!rendered.contains("start:"));
     }
 
@@ -2688,13 +2762,39 @@ mod tests {
     fn pull_renderer_authors_functions_in_python_and_go() {
         let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
         let python = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
-        assert!(
-            python.contains(
-                "hello = fn(\n        \"hello\",\n        codeFile=\"functions/hello.ts\","
-            )
-        );
+        assert!(python.contains("from railway_sdk import define_railway, fn, project, service\n"));
+        assert!(python.contains(
+            "hello = fn(\n        \"hello\",\n        code_file=\"functions/hello.ts\",\n        runtime=\"bun:1.4.0\","
+        ));
+        assert!(!python.contains("codeFile"));
         let go = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
-        assert!(go.contains("hello := railway.Fn(\"hello\", railway.ServiceConfig{\n\t\t\"codeFile\": \"functions/hello.ts\","));
+        assert!(go.contains(
+            "hello := railway.Fn(\"hello\", railway.ServiceConfig{\n\t\t\"codeFile\": \"functions/hello.ts\",\n\t\t\"source\": railway.Image(\"ghcr.io/railwayapp/function-bun:1.4.0\"),"
+        ));
+    }
+
+    #[test]
+    fn pull_renderer_pins_an_older_function_runtime() {
+        let mut resource = function_resource("hello", "export default {}\n");
+        resource.source =
+            Some(json!({ "type": "image", "image": "ghcr.io/railwayapp/function-bun:1.2.16" }));
+        let graph = graph_of(vec![resource]);
+        let ts = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(ts.contains("source: image(\"ghcr.io/railwayapp/function-bun:1.2.16\")"));
+        let python = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        assert!(python.contains("runtime=\"bun:1.2.16\","));
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function-bun:1.2.16").as_deref(),
+            Some("bun:1.2.16")
+        );
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function:1.0.0"),
+            None
+        );
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function-:1"),
+            None
+        );
     }
 
     #[test]
@@ -2718,12 +2818,14 @@ mod tests {
         ]);
         let files = function_source_files(&graph);
         let paths: Vec<&str> = files.values().map(|f| f.relative_path.as_str()).collect();
+        // Case-insensitive: `Hello-World.ts` and `hello-world.ts` are one file
+        // on macOS and Windows.
         assert_eq!(
             paths,
             vec![
                 "functions/etc.ts",
                 "functions/Hello-World.ts",
-                "functions/hello-world.ts"
+                "functions/hello-world-2.ts"
             ]
         );
         assert_eq!(files["service.Hello World"].code, "one\n");
@@ -2733,19 +2835,23 @@ mod tests {
     }
 
     #[test]
-    fn write_function_sources_puts_files_beside_the_config() {
+    fn write_function_sources_puts_files_beside_the_config_and_reports_stale_ones() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(".railway").join("railway.ts");
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let functions_dir = dir.path().join(".railway").join("functions");
+        fs::create_dir_all(&functions_dir).unwrap();
+        fs::write(functions_dir.join("gone.ts"), "old\n").unwrap();
+        fs::write(functions_dir.join("notes.md"), "not a function\n").unwrap();
         let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
-        let written = write_function_sources(&config, &function_source_files(&graph)).unwrap();
-        let expected = dir
-            .path()
-            .join(".railway")
-            .join("functions")
-            .join("hello.ts");
-        assert_eq!(written, vec![expected.clone()]);
+        let result = write_function_sources(&config, &function_source_files(&graph)).unwrap();
+        let expected = functions_dir.join("hello.ts");
+        assert_eq!(result.written, vec![expected.clone()]);
+        assert_eq!(result.stale, vec![functions_dir.join("gone.ts")]);
         assert_eq!(fs::read_to_string(expected).unwrap(), "export default {}\n");
+        assert_eq!(
+            fs::read_to_string(functions_dir.join("gone.ts")).unwrap(),
+            "old\n"
+        );
     }
 
     #[test]
