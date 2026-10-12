@@ -495,6 +495,9 @@ mod tests {
         let (_, value) = parse_service_value("deploy.healthcheckTimeout", "30").unwrap();
         assert_eq!(value, serde_json::json!(30));
 
+        let (_, value) = parse_service_value("deploy.preDeployTimeoutSeconds", "600").unwrap();
+        assert_eq!(value, serde_json::json!(600));
+
         // Should reject non-integers
         let result = parse_service_value("deploy.numReplicas", "not-a-number");
         assert!(result.is_err());
