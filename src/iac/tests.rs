@@ -735,6 +735,141 @@ fn new_service_carries_tracing_on_the_create() {
 }
 
 #[test]
+fn cdn_round_trips_and_default_knobs_are_not_drift() {
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "cdn": { "enabled": true, "htmlCaching": "force" }
+        }),
+    )]);
+    let compiled = graph_to_environment_config(&desired, &CompileOptions::default());
+    assert_eq!(
+        compiled["services"]["web"]["cdn"],
+        json!({ "enabled": true, "htmlCaching": "force" })
+    );
+    let current = environment_config_to_graph(
+        &compiled,
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            ..Default::default()
+        },
+    );
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    // Railway serialises only the knobs that differ from the edge defaults;
+    // an authored default means the same thing as leaving it out.
+    let current = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "cdn": { "enabled": true }
+            }
+        }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "cdn": {
+                "enabled": true,
+                "defaultTtlSeconds": 7200,
+                "htmlCaching": "auto",
+                "staleWhileRevalidate": true,
+                "purgeOnDeploy": "html"
+            }
+        }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    // An uncached service has no block; `enabled: false` means the same
+    // thing, whatever other knobs sit beside it.
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "cdn": { "enabled": false, "htmlCaching": "force" }
+        }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn cdn_changes_plan_an_update_without_a_deploy() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+
+    let enable = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1"), "cdn": { "enabled": true } }),
+    )]);
+    let result = diff(&current, &enable);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "cdn");
+    assert_eq!(result.changes[0]["after"], json!({ "enabled": true }));
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+
+    let cached = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "cdn": { "enabled": true, "purgeOnDeploy": "all" }
+            }
+        }
+    }));
+    let retuned = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "cdn": { "enabled": true, "purgeOnDeploy": "off", "defaultTtlSeconds": 60 }
+        }),
+    )]);
+    let result = diff(&cached, &retuned);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "cdn");
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+    assert_eq!(
+        result.changes[0]["details"],
+        json!([
+            "cdn.defaultTtlSeconds (null → 60)",
+            "cdn.purgeOnDeploy (\"all\" → \"off\")"
+        ])
+    );
+
+    let uncached = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1") }),
+    )]);
+    let result = diff(&cached, &uncached);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "cdn");
+    assert!(result.changes[0]["after"].is_null());
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+}
+
+#[test]
+fn new_service_carries_cdn_on_the_create() {
+    let current = env_config(json!({ "services": {} }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "cdn": { "enabled": true, "htmlCaching": "never" }
+        }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(kinds(&result), vec!["resource.create"]);
+    assert_eq!(
+        result.changes[0]["resource"]["cdn"],
+        json!({ "enabled": true, "htmlCaching": "never" })
+    );
+}
+
+#[test]
 fn template_database_start_command_does_not_churn() {
     let current = managed_db_config(json!({
         "services": {
