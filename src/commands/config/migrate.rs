@@ -253,14 +253,14 @@ async fn generate(args: MigrateArgs) -> Result<()> {
             if !gomod.exists() {
                 fs::write(
                     &gomod,
-                    "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.2.0\n",
+                    "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.5.0\n",
                 )?;
             }
         }
         "py" => {
             let req = railway_dir.join("requirements.txt");
             if !req.exists() {
-                fs::write(&req, "railway-sdk>=0.2.0\n")?;
+                fs::write(&req, "railway-sdk>=0.6.0\n")?;
             }
         }
         _ => {}
@@ -824,6 +824,7 @@ fn new_service(name: &str) -> runner::DesiredResource {
         config: None,
         group_id: None,
         tracing: None,
+        kind: None,
     }
 }
 
@@ -1848,6 +1849,7 @@ healthcheckPath = "/"
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 

@@ -70,6 +70,7 @@ fn go_helper_ident(name: &str) -> &'static str {
         "mongo" => "Mongo",
         "preserve" => "Preserve",
         "service" => "ServiceNamed",
+        "fn" => "Fn",
         "project" => "ProjectNamed",
         _ => "ServiceNamed",
     }

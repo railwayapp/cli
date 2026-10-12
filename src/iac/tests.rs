@@ -2484,6 +2484,131 @@ fn pr_environment_allows_a_pin_matching_the_deployed_branch() {
     assert!(change_set.changes.is_empty());
 }
 
+fn function_service(name: &str, code: &str) -> Value {
+    service(
+        name,
+        json!({
+            "source": image("ghcr.io/railwayapp/function:1.4.0"),
+            "deploy": { "startCommand": super::functions::encode_function_code(code) },
+        }),
+    )
+}
+
+#[test]
+fn live_function_image_services_are_kind_function() {
+    let graph = environment_config_to_graph(
+        &json!({
+            "services": {
+                "hello": {
+                    "source": { "image": "ghcr.io/railwayapp/function-bun:1.4.0" },
+                    "deploy": { "startCommand": super::functions::encode_function_code("export default {}\n") }
+                },
+                "api": { "source": { "image": "ghcr.io/acme/api:1" } }
+            }
+        }),
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            ..Default::default()
+        },
+    );
+    let kind_of = |name: &str| {
+        graph
+            .resources
+            .iter()
+            .find(|resource| resource["name"] == name)
+            .and_then(|resource| resource["kind"].as_str().map(str::to_string))
+    };
+    assert_eq!(kind_of("hello").as_deref(), Some("function"));
+    assert_eq!(kind_of("api").as_deref(), Some("docker-image"));
+}
+
+#[test]
+fn function_code_changes_plan_a_source_diff_instead_of_base64() {
+    let current = graph_from(vec![function_service(
+        "hello",
+        "const a = 1;\nconst b = 2;\n",
+    )]);
+    let mut desired_node = function_service("hello", "const a = 1;\nconst b = 3;\n");
+    desired_node["kind"] = json!("function");
+    let desired = graph_from(vec![desired_node]);
+
+    let result = diff(&current, &desired);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.changes.len(), 1);
+    let change = &result.changes[0];
+    assert_eq!(change["field"], "deploy");
+    assert_eq!(change["summary"], "Update hello source code");
+    let details: Vec<&str> = change["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|detail| detail.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        details,
+        vec![
+            "source code (+1 -1)",
+            "  const a = 1;",
+            "- const b = 2;",
+            "+ const b = 3;"
+        ]
+    );
+    assert!(!serde_json::to_string(&details).unwrap().contains("run.sh"));
+}
+
+#[test]
+fn dropping_a_function_start_command_warns_and_reports_the_removal() {
+    let current = graph_from(vec![function_service("hello", "line 1\nline 2\n")]);
+    let mut without_code = service(
+        "hello",
+        json!({ "source": image("ghcr.io/railwayapp/function:1.4.0") }),
+    );
+    without_code["kind"] = json!("function");
+    let desired = graph_from(vec![without_code]);
+
+    let result = diff(&current, &desired);
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(result.changes[0]["summary"], "Update hello source code");
+    assert_eq!(
+        result.changes[0]["details"],
+        json!(["source code (2 lines, removed)"])
+    );
+    assert_eq!(result.diagnostics.len(), 1);
+    let warning = &result.diagnostics[0];
+    assert_eq!(warning.severity, "warning");
+    assert_eq!(warning.path, "resources.service.hello.deploy.startCommand");
+    assert!(warning.message.contains("declared without code"));
+}
+
+#[test]
+fn creating_a_function_reports_its_source_size() {
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![function_service("hello", "a\nb\nc\n")]);
+    let result = diff(&current, &desired);
+    assert_eq!(result.changes[0]["kind"], "resource.create");
+    assert_eq!(
+        result.changes[0]["details"],
+        json!(["source code (3 lines)"])
+    );
+}
+
+#[test]
+fn unchanged_function_code_with_other_deploy_edits_keeps_plain_details() {
+    let mut current_node = function_service("hello", "same\n");
+    current_node["deploy"]["healthcheckPath"] = json!("/old");
+    let mut desired_node = function_service("hello", "same\n");
+    desired_node["deploy"]["healthcheckPath"] = json!("/new");
+    let result = diff(
+        &graph_from(vec![current_node]),
+        &graph_from(vec![desired_node]),
+    );
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(
+        result.changes[0]["details"],
+        json!(["deploy.healthcheckPath (\"/old\" → \"/new\")"])
+    );
+}
+
 #[test]
 fn pre_deploy_timeout_round_trips_through_plan_and_apply() {
     // `deploy.preDeployTimeoutSeconds` has no special casing anywhere in the

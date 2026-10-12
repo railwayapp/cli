@@ -194,6 +194,7 @@ pub(super) struct DesiredProject {
 pub(super) struct DesiredResource {
     pub(super) address: Option<String>,
     pub(super) r#type: String,
+    pub(super) kind: Option<String>,
     pub(super) name: String,
     pub(super) engine: Option<String>,
     pub(super) variables: Option<serde_json::Map<String, Value>>,
@@ -1117,8 +1118,20 @@ fn print_change(change: &Change, _verbose: bool) {
     println!("  {} {}", marker, summary);
     if let Some(details) = &change.details {
         for detail in details {
-            println!("    {} {}", "└".dimmed(), detail.dimmed());
+            println!("    {} {}", "└".dimmed(), format_detail(detail));
         }
+    }
+}
+
+/// Source code diffs ride along as `+ `/`- ` prefixed details; everything
+/// else is a `path (before → after)` line.
+fn format_detail(detail: &str) -> colored::ColoredString {
+    if detail.starts_with("+ ") {
+        detail.green()
+    } else if detail.starts_with("- ") {
+        detail.red()
+    } else {
+        detail.dimmed()
     }
 }
 
