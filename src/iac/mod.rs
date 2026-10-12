@@ -8,6 +8,7 @@ mod change_set;
 mod compiler;
 mod engine;
 mod eval;
+pub mod functions;
 mod graph;
 mod json;
 pub mod ownership;

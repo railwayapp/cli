@@ -5,6 +5,9 @@ use serde_json::{Map, Value, json};
 
 use crate::controllers::regions::BucketRegion;
 
+use super::functions::{
+    decode_function_code, function_code_of, is_function_resource, source_code_diff_lines,
+};
 use super::graph::{
     RailwayGraph, VariablePolicyReport, resource_addr, resource_address, resource_name,
     resource_type,
@@ -184,8 +187,14 @@ pub fn diff_graphs_following(
                 "severity": "safe",
                 "deployEffect": if matches!(resource_type(resource), "service" | "database") { "deploy" } else { "none" },
             });
-            if let Some(line) = branch_line {
-                change["details"] = json!([line]);
+            let mut details: Vec<String> = branch_line.into_iter().collect();
+            if is_function_resource(resource) {
+                if let Some(code) = resource.get("deploy").and_then(function_code_of) {
+                    details.push(format!("source code ({} lines)", code.lines().count()));
+                }
+            }
+            if !details.is_empty() {
+                change["details"] = json!(details);
             }
             changes.push(change);
             continue;
@@ -260,7 +269,7 @@ pub fn diff_graphs_following(
         if resource_type(previous) == "database" && resource_type(resource) == "database" {
             diff_database_deploy(previous, resource, &mut changes);
         } else if resource_type(previous) == "service" && resource_type(resource) == "service" {
-            diff_service_deploy(previous, resource, &mut changes);
+            diff_service_deploy(previous, resource, &mut changes, &mut diagnostics);
         } else {
             diff_top_level_field(previous, resource, "deploy", &mut changes);
         }
@@ -1267,7 +1276,12 @@ fn diff_top_level_field(
     ));
 }
 
-fn diff_service_deploy(previous: &Value, resource: &Value, changes: &mut Vec<Value>) {
+fn diff_service_deploy(
+    previous: &Value,
+    resource: &Value,
+    changes: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
     let desired_deploy =
         service_deploy_with_current_region(previous.get("deploy"), resource.get("deploy"));
     let switching_away_from_image =
@@ -1301,16 +1315,129 @@ fn diff_service_deploy(previous: &Value, resource: &Value, changes: &mut Vec<Val
     if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
         return;
     }
-    let details = changed_leaf_paths(&normalized_before, &normalized_after, "deploy");
+    let mut details = changed_leaf_paths(&normalized_before, &normalized_after, "deploy");
+    let mut summary = summary_for_field(resource, "deploy", &normalized_before, &normalized_after);
+    if is_function_resource(previous) || is_function_resource(resource) {
+        describe_function_code_change(
+            previous,
+            resource,
+            &normalized_before,
+            &normalized_after,
+            &mut details,
+            &mut summary,
+            diagnostics,
+        );
+    }
     changes.push(update(
         &resource_addr(resource),
         "deploy",
         before,
         after,
-        summary_for_field(resource, "deploy", &normalized_before, &normalized_after),
+        summary,
         Some(details),
         "safe",
     ));
+}
+
+/// Longest source diff a plan prints before eliding the rest.
+const MAX_SOURCE_DIFF_LINES: usize = 200;
+
+/// A function's source travels base64-encoded inside `deploy.startCommand`.
+/// Swap the opaque `startCommand (... → ...)` detail for a decoded source diff,
+/// and warn when the authored side would drop the code altogether.
+fn describe_function_code_change(
+    previous: &Value,
+    resource: &Value,
+    before: &Value,
+    after: &Value,
+    details: &mut Vec<String>,
+    summary: &mut String,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let before_command = field_str(before, "startCommand");
+    let after_command = field_str(after, "startCommand");
+    if before_command == after_command {
+        return;
+    }
+    let before_code = before_command.and_then(decode_function_code);
+    let after_code = after_command.and_then(decode_function_code);
+    if before_code.is_none() && after_code.is_none() {
+        return;
+    }
+    let Some(index) = details
+        .iter()
+        .position(|detail| detail.starts_with("deploy.startCommand ("))
+    else {
+        return;
+    };
+
+    let (headline, diff_lines) = match (&before_code, &after_code) {
+        (Some(before_code), Some(after_code)) => {
+            let (lines, insertions, deletions) = source_code_diff_lines(before_code, after_code);
+            (format!("source code (+{insertions} -{deletions})"), lines)
+        }
+        (Some(before_code), None) => {
+            let line_count = before_code.lines().count();
+            let rest = match after_command {
+                Some(command) => format!("replaced by {}", format_diff_value(&json!(command))),
+                None => "removed".to_string(),
+            };
+            (
+                format!("source code ({line_count} lines, {rest})"),
+                Vec::new(),
+            )
+        }
+        (None, Some(after_code)) => {
+            let line_count = after_code.lines().count();
+            let rest = match before_command {
+                Some(command) => format!("replaces {}", format_diff_value(&json!(command))),
+                None => "added".to_string(),
+            };
+            (
+                format!("source code ({line_count} lines, {rest})"),
+                Vec::new(),
+            )
+        }
+        (None, None) => unreachable!("handled above"),
+    };
+    details[index] = headline;
+
+    // Paths first, so the summary reads the same way `summary_for_field` does.
+    let shown = details
+        .iter()
+        .take(3)
+        .map(|detail| detail_path_for_summary(detail))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = details.len().saturating_sub(3);
+    *summary = format!(
+        "Update {} {shown}{}",
+        resource_name(resource),
+        if remaining > 0 {
+            format!(" and {remaining} more")
+        } else {
+            String::new()
+        }
+    );
+
+    if before_code.is_some() && after_command.is_none() {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            path: format!("resources.{}.deploy.startCommand", resource_addr(resource)),
+            message: format!(
+                "Function {} is declared without code. Applying removes its start command, and with it the source deployed on Railway. Pass `code` to fn() to keep it, or run `railway config pull` to import it into `functions/`.",
+                resource_name(previous)
+            ),
+        });
+    }
+
+    let elided = diff_lines.len().saturating_sub(MAX_SOURCE_DIFF_LINES);
+    let insert_at = index + 1;
+    let mut inserted: Vec<String> = diff_lines.into_iter().take(MAX_SOURCE_DIFF_LINES).collect();
+    if elided > 0 {
+        inserted.push(format!("... ({elided} more lines)"));
+    }
+    details.splice(insert_at..insert_at, inserted);
 }
 
 fn service_deploy_with_current_region(previous: Option<&Value>, desired: Option<&Value>) -> Value {

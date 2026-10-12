@@ -872,6 +872,12 @@ pub fn environment_config_to_graph(
 
             let kind = if service.get("source").and_then(|s| s.get("repo")).is_some() {
                 "github"
+            } else if service
+                .get("source")
+                .and_then(|s| field_str(s, "image"))
+                .is_some_and(super::functions::is_function_image)
+            {
+                "function"
             } else if service.get("source").and_then(|s| s.get("image")).is_some() {
                 "docker-image"
             } else if service
