@@ -162,15 +162,22 @@ enum Stream {
 fn render_error_message(err: &anyhow::Error, mode: OutputMode) -> (Stream, String) {
     match mode {
         OutputMode::Json => {
-            let (code, hint) = match err.downcast_ref::<RailwayError>() {
-                Some(railway_err) => (railway_err.code(), railway_err.hint()),
-                None => ("ERROR", None),
+            let (code, hint, details) = match err.downcast_ref::<RailwayError>() {
+                Some(railway_err) => (
+                    railway_err.code(),
+                    railway_err.hint(),
+                    railway_err.details(),
+                ),
+                None => ("ERROR", None, None),
             };
-            let obj = serde_json::json!({
+            let mut obj = serde_json::json!({
                 "error": err.to_string(),
                 "code": code,
                 "hint": hint,
             });
+            if let Some(details) = details {
+                obj["details"] = details;
+            }
             (Stream::Stdout, obj.to_string())
         }
         OutputMode::Human => {
