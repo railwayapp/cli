@@ -2,10 +2,13 @@ use serde_json::{Value, json};
 
 use super::change_set::{DiffOptions, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
 use super::compiler::{
-    CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
-    graph_to_environment_config, project_definition_to_graph,
+    CompileOptions, EnvironmentConfigToGraphOptions, IAC_PROJECT_FIELDS, IAC_RESOURCE_FIELDS,
+    environment_config_to_graph, graph_to_environment_config, project_definition_to_graph,
+    unknown_field_diagnostics,
 };
-use super::eval::{EvalContext, evaluate_file, evaluate_file_with_context};
+use super::eval::{
+    EvalContext, IAC_FEATURES, PrContext, evaluate_file, evaluate_file_with_context,
+};
 use super::graph::RAILWAY_GRAPH_VERSION;
 use super::partial::IacPartials;
 
@@ -1112,6 +1115,398 @@ fn preserve_variable_never_plans() {
     );
 }
 
+fn graph_with_policy(resources: Vec<Value>, policy: Value) -> super::graph::RailwayGraph {
+    project_definition_to_graph(&json!({
+        "name": "app",
+        "variables": policy,
+        "resources": resources,
+    }))
+}
+
+fn variable_ops(change_set: &super::change_set::ChangeSet) -> Vec<String> {
+    change_set
+        .changes
+        .iter()
+        .filter(|change| {
+            change["kind"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("variable")
+        })
+        .map(|change| {
+            format!(
+                "{} {}:{}",
+                change["kind"].as_str().unwrap_or(""),
+                change["address"].as_str().unwrap_or(""),
+                change["variable"].as_str().unwrap_or("")
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn ignore_patterns_are_removed_from_both_sides_before_diff() {
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_TOKEN": { "value": "a" },
+                "doppler_token": { "value": "case" },
+                "NOT_DOPPLER_TOKEN": { "value": "full" },
+                "ONLY_API": { "value": "web" },
+                "KEEP": { "value": "1" }
+            }},
+            "api": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_TOKEN": { "value": "b" },
+                "ONLY_API": { "value": "api" }
+            }}
+        }
+    }));
+    let desired = project_definition_to_graph(&super::eval::normalize_project(json!({
+        "name": "app",
+        "variables": { "managed": true, "ignore": ["DOPPLER_*", "api/ONLY_*"] },
+        "resources": [
+            service("web", json!({
+                "source": github("r"),
+                "env": {
+                    "KEEP": { "type": "literal", "value": "1" },
+                    "DOPPLER_NEW": { "type": "literal", "value": "nope" },
+                    "PUBLIC": "on"
+                }
+            })),
+            service("api", json!({ "source": github("r"), "variables": {} })),
+        ]
+    })));
+    assert!(!desired.variables.default);
+    assert_eq!(
+        desired.variables.ignore,
+        vec!["DOPPLER_*".to_string(), "api/ONLY_*".to_string()]
+    );
+    let ops = variable_ops(&diff(&current, &desired));
+    assert!(
+        !ops.iter()
+            .any(|op| { op.ends_with(":DOPPLER_TOKEN") || op.ends_with(":DOPPLER_NEW") })
+    );
+    assert!(
+        !ops.iter()
+            .any(|op| op == "variable.delete service.api:ONLY_API")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:ONLY_API")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:doppler_token")
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.web:NOT_DOPPLER_TOKEN")
+    );
+    assert!(ops.iter().any(|op| op == "variable.set service.web:PUBLIC"));
+    assert!(!ops.iter().any(|op| op.contains("KEEP")));
+}
+
+#[test]
+fn unmanaged_variables_plan_no_sets_or_deletes() {
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": { "A": { "value": "1" }, "B": { "value": "2" } } },
+            "quiet": { "source": { "repo": "r" }, "variables": { "C": { "value": "3" } } }
+        }
+    }));
+    let desired = graph_with_policy(
+        vec![
+            service(
+                "web",
+                json!({
+                    "source": github("r"),
+                    "variables": {
+                        "A": { "type": "literal", "value": "changed" },
+                        "NEW": { "type": "literal", "value": "x" }
+                    }
+                }),
+            ),
+            service("quiet", json!({ "source": github("r") })),
+        ],
+        json!({ "managed": false, "ignore": [] }),
+    );
+    let result = diff(&current, &desired);
+    assert!(variable_ops(&result).is_empty());
+    let errors: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .collect();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].path, "resources.service.web.variables");
+    assert_eq!(
+        errors[0].message,
+        "Variables are unmanaged (project variables.managed is false). Remove env from web or set managed: true."
+    );
+}
+
+#[test]
+fn omitted_env_errors_instead_of_deleting_explicit_empty_stays_authoritative() {
+    let current = managed_db_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": { "B": { "value": "2" }, "A": { "value": "1" } } },
+            "api": { "source": { "repo": "r" }, "variables": { "OLD": { "value": "1" }, "KEEP": { "value": "1" } } },
+            "quiet": { "source": { "repo": "r" }, "variables": { "DOPPLER_TOKEN": { "value": "x" } } },
+            "pg": {
+                "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:18" },
+                "variables": { "POSTGRES_PASSWORD": { "value": "s" }, "CUSTOM": { "value": "x" } }
+            }
+        }
+    }));
+    let pg = current
+        .resources
+        .iter()
+        .find(|resource| resource["name"] == "pg")
+        .unwrap();
+    assert!(pg.get("variables").is_none());
+    let desired = graph_with_policy(
+        vec![
+            service("web", json!({ "source": github("r") })),
+            service("api", json!({ "source": github("r"), "env": {} })),
+            service("quiet", json!({ "source": github("r") })),
+            postgres("pg", None),
+        ],
+        json!({ "managed": true, "ignore": ["DOPPLER_*"] }),
+    );
+    let result = diff(&current, &desired);
+    let ops = variable_ops(&result);
+    assert!(ops.iter().any(|op| op == "variable.delete service.api:OLD"));
+    assert!(
+        ops.iter()
+            .any(|op| op == "variable.delete service.api:KEEP")
+    );
+    assert!(ops.iter().all(|op| !op.contains("service.web")));
+    assert!(ops.iter().all(|op| !op.contains("service.quiet")));
+    assert!(ops.iter().all(|op| !op.contains("pg")));
+    let web = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.path == "resources.service.web.variables")
+        .unwrap();
+    assert_eq!(web.severity, "error");
+    assert_eq!(
+        web.message,
+        "web declares no env but Railway has 2 variables (A, B). Declare them, mark them preserve(), or add them to variables.ignore."
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.path != "resources.service.quiet.variables")
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.path.contains("database.pg"))
+    );
+}
+
+#[test]
+fn declared_ignored_key_is_an_error_and_not_set() {
+    let current = env_config(json!({ "services": { "web": { "source": { "repo": "r" } } } }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({
+                "source": github("r"),
+                "variables": {
+                    "DOPPLER_TOKEN": { "type": "literal", "value": "x" },
+                    "SECRET": { "type": "literal", "value": "y" },
+                    "OK": { "type": "literal", "value": "z" }
+                }
+            }),
+        )],
+        json!({ "managed": true, "ignore": ["DOPPLER_*", "web/SECRET"] }),
+    );
+    let result = diff(&current, &desired);
+    let ops = variable_ops(&result);
+    assert!(
+        ops.iter()
+            .all(|op| !op.contains("DOPPLER") && !op.contains("SECRET"))
+    );
+    assert!(ops.iter().any(|op| op == "variable.set service.web:OK"));
+    let messages: Vec<_> = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert!(messages.contains(&"web.DOPPLER_TOKEN is declared and also ignored by \"DOPPLER_*\"."));
+    assert!(messages.contains(&"web.SECRET is declared and also ignored by \"web/SECRET\"."));
+}
+
+#[test]
+fn malformed_ignore_patterns_error() {
+    let current = env_config(json!({ "services": { "web": { "source": { "repo": "r" } } } }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({ "source": github("r"), "variables": {} }),
+        )],
+        json!({ "managed": true, "ignore": ["", "a/b/c", "web/", "ghost/*"] }),
+    );
+    let errors: Vec<_> = diff(&current, &desired)
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.severity == "error")
+        .map(|diagnostic| diagnostic.message)
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|message| message == "variables.ignore contains an empty pattern.")
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("a/b/c") && message.contains("more than one"))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|message| message.contains("web/") && message.contains("empty key"))
+    );
+    assert!(errors.iter().any(|message| {
+        message.contains("ghost") && message.contains("neither in the file nor on Railway")
+    }));
+}
+
+#[test]
+fn unused_ignore_pattern_warns() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "repo": "r" }, "variables": {
+            "KEEP": { "value": "1" },
+            "OTHER": { "value": "1" }
+        } } }
+    }));
+    let desired = graph_with_policy(
+        vec![service(
+            "web",
+            json!({
+                "source": github("r"),
+                "variables": { "OTHER": { "type": "preserve" } }
+            }),
+        )],
+        json!({ "managed": true, "ignore": ["UNUSED_*", "KEEP"] }),
+    );
+    let result = diff(&current, &desired);
+    let warnings: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == "warning")
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].message,
+        "variables.ignore pattern \"UNUSED_*\" matches no variable."
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != "error")
+    );
+    assert!(variable_ops(&result).is_empty());
+}
+
+#[test]
+fn variable_policy_report_and_header_line() {
+    let bare = graph_from(vec![service("web", json!({}))]);
+    assert!(bare.variables.default && bare.variables.managed && bare.variables.ignore.is_empty());
+    let current = env_config(json!({
+        "services": {
+            "web": { "source": { "repo": "r" }, "variables": {
+                "DOPPLER_A": { "value": "1" },
+                "DOPPLER_B": { "value": "2" },
+                "OTHER": { "value": "3" }
+            }},
+            "metabase": { "source": { "repo": "r" }, "variables": {
+                "MB_DB": { "value": "1" },
+                "SITE": { "value": "1" }
+            }}
+        }
+    }));
+    let default_report = super::change_set::variable_policy_report(&current, &bare);
+    assert_eq!(
+        super::graph::format_variable_policy_line(&default_report, 5),
+        "variables: managed (default)"
+    );
+
+    let desired = graph_with_policy(
+        vec![
+            service(
+                "web",
+                json!({
+                    "source": github("r"),
+                    "variables": { "OTHER": { "type": "preserve" } }
+                }),
+            ),
+            service(
+                "metabase",
+                json!({
+                    "source": github("r"),
+                    "variables": {
+                        "MB_DB": { "type": "preserve" },
+                        "SITE": { "type": "preserve" }
+                    }
+                }),
+            ),
+        ],
+        json!({ "managed": true, "ignore": ["DOPPLER_*", "metabase/*"] }),
+    );
+    let report = super::change_set::variable_policy_report(&current, &desired);
+    assert!(!report.default);
+    assert_eq!(report.ignored_count, 4);
+    assert_eq!(report.by_pattern["DOPPLER_*"], 2);
+    assert_eq!(report.by_pattern["metabase/*"], 2);
+    assert_eq!(
+        super::graph::format_variable_policy_line(&report, 5),
+        "variables: managed \u{00b7} 4 ignored on Railway (DOPPLER_* 2, metabase/* 2)"
+    );
+    let value = serde_json::to_value(&report).unwrap();
+    let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "byPattern".to_string(),
+            "default".to_string(),
+            "ignore".to_string(),
+            "ignoredCount".to_string(),
+            "managed".to_string(),
+        ]
+    );
+
+    let explicit = graph_with_policy(
+        vec![service("web", json!({ "source": github("r") }))],
+        json!({ "managed": true, "ignore": [] }),
+    );
+    assert_eq!(
+        super::graph::format_variable_policy_line(
+            &super::change_set::variable_policy_report(&current, &explicit),
+            5
+        ),
+        "variables: managed"
+    );
+
+    let unmanaged = graph_with_policy(
+        vec![service("web", json!({ "source": github("r") }))],
+        json!({ "managed": false }),
+    );
+    assert_eq!(
+        super::graph::format_variable_policy_line(
+            &super::change_set::variable_policy_report(&current, &unmanaged),
+            5
+        ),
+        "variables: unmanaged \u{00b7} 5 on Railway not managed"
+    );
+}
+
 #[test]
 fn redacts_variable_values_in_plan_output() {
     let secret = "sk-super-secret-value-123";
@@ -1575,6 +1970,20 @@ fn eval_context_production() -> EvalContext {
         environment_id: Some("env_123".into()),
         environment: Some("production".into()),
         environment_name: Some("production".into()),
+        pr: None,
+    }
+}
+
+fn eval_context_pr() -> EvalContext {
+    EvalContext {
+        environment: Some("railway-cli-pr-123".into()),
+        environment_name: Some("railway-cli-pr-123".into()),
+        pr: Some(PrContext {
+            number: 123,
+            branch: Some("feat/x".into()),
+            base: Some("dev".into()),
+        }),
+        ..eval_context_production()
     }
 }
 
@@ -1682,6 +2091,176 @@ func Railway(ctx evalCtx) graph {
     );
 }
 
+#[test]
+fn eval_context_pr_environment_json() {
+    let value = eval_context_pr().to_json();
+    assert_eq!(
+        value["pr"],
+        json!({
+            "number": 123,
+            "branch": "feat/x",
+            "base": "dev"
+        })
+    );
+    assert!(value.get("ephemeral").is_none());
+    assert!(value.get("baseEnvironment").is_none());
+}
+
+#[test]
+fn eval_context_non_pr_environment_json() {
+    let value = eval_context_production().to_json();
+    assert!(value["pr"].is_null());
+    assert!(value.get("ephemeral").is_none());
+    assert!(value.get("baseEnvironment").is_none());
+}
+
+#[test]
+fn evaluates_typescript_branching_on_pr_context() {
+    let dir = tempfile_dir("railway-iac-ts-pr-");
+    let file = dir.join("railway.ts");
+    std::fs::write(
+        &file,
+        r#"
+export default (ctx) => ({
+  name: "app",
+  resources: [{
+    address: "service.api",
+    type: "service",
+    name: ctx.pr ? `${ctx.pr.base}:${ctx.pr.number}:${ctx.pr.branch}` : "no-pr",
+  }],
+});
+"#,
+    )
+    .unwrap();
+    let with_pr = evaluate_file_with_context(&file, &eval_context_pr())
+        .expect("node should evaluate railway.ts with ctx.pr");
+    assert!(
+        with_pr
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["name"] == "dev:123:feat/x")
+    );
+    let without_pr = evaluate_file_with_context(&file, &eval_context_production())
+        .expect("node should evaluate railway.ts without ctx.pr");
+    assert!(
+        without_pr
+            .graph
+            .resources
+            .iter()
+            .any(|r| r["name"] == "no-pr")
+    );
+}
+
+#[test]
+fn eval_context_advertises_iac_features() {
+    let value = eval_context_production().to_json();
+    assert_eq!(value["features"], json!(IAC_FEATURES));
+    assert_eq!(
+        value["features"],
+        json!([
+            "variables-policy",
+            "environments",
+            "pr-context",
+            "environment-owned-branch"
+        ])
+    );
+}
+
+#[test]
+fn unknown_project_key_is_an_error() {
+    let diagnostics = unknown_field_diagnostics(&json!({
+        "name": "app",
+        "notAField": true,
+        "resources": []
+    }));
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, "error");
+    assert_eq!(diagnostics[0].path, "project.notAField");
+    assert_eq!(
+        diagnostics[0].message,
+        format!(
+            "Unknown field \"notAField\" on project. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
+fn unknown_resource_key_is_an_error() {
+    let diagnostics = unknown_field_diagnostics(&json!({
+        "name": "app",
+        "resources": [{
+            "address": "service.web",
+            "type": "service",
+            "name": "web",
+            "notAField": true
+        }]
+    }));
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].severity, "error");
+    assert_eq!(diagnostics[0].path, "resources.service.web.notAField");
+    assert_eq!(
+        diagnostics[0].message,
+        format!(
+            "Unknown field \"notAField\" on service.web. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+}
+
+#[test]
+fn accepts_every_known_project_and_resource_key() {
+    let mut project = serde_json::Map::new();
+    for key in IAC_PROJECT_FIELDS {
+        project.insert((*key).to_string(), json!({}));
+    }
+    let mut resource = serde_json::Map::new();
+    for key in IAC_RESOURCE_FIELDS {
+        resource.insert((*key).to_string(), json!({}));
+    }
+    resource.insert("address".into(), json!("service.web"));
+    resource.insert("type".into(), json!("service"));
+    resource.insert("name".into(), json!("web"));
+    project.insert("resources".into(), json!([Value::Object(resource)]));
+    let diagnostics = unknown_field_diagnostics(&Value::Object(project));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let fixtures = json!({
+        "name": "app",
+        "environments": ["production"],
+        "variables": { "managed": false },
+        "resources": [
+            service("web", json!({
+                "source": github("acme/web"),
+                "start": "npm start",
+                "build": "npm run build",
+                "variables": { "PORT": { "type": "literal", "value": "8080" } },
+                "volumeAttachments": {
+                    "data": {
+                        "volume": "volume.data",
+                        "mountPath": "/data",
+                        "volumeConfig": { "sizeMB": 1024 }
+                    }
+                }
+            })),
+            postgres("db", Some("us-west2")),
+            volume("data", json!({ "sizeMB": 1024, "region": "us-west2" })),
+            bucket("assets", "sjc"),
+            {
+                "address": "group.api",
+                "type": "group",
+                "name": "api",
+                "color": "blue",
+                "icon": "box",
+                "isCollapsed": false
+            }
+        ]
+    });
+    let diagnostics = unknown_field_diagnostics(&fixtures);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
 fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -1692,6 +2271,217 @@ fn tempfile_dir(prefix: &str) -> std::path::PathBuf {
 fn legacy_runner_only_when_explicitly_requested() {
     assert!(!super::use_legacy_ts_runner(None));
     assert!(super::use_legacy_ts_runner(Some("railway-iac-ts")));
+}
+
+fn github_source(repo: &str, branch: Option<&str>, root: Option<&str>) -> Value {
+    let mut source = json!({ "type": "github", "repo": repo });
+    if let Some(branch) = branch {
+        source["branch"] = json!(branch);
+    }
+    if let Some(root) = root {
+        source["rootDirectory"] = json!(root);
+    }
+    source
+}
+
+fn follow_with<'a>(
+    in_pr_environment: bool,
+    pr_branch: Option<&'a str>,
+    pr_repo: Option<&'a str>,
+    defaults: &'a std::collections::BTreeMap<String, String>,
+) -> super::change_set::BranchFollow<'a> {
+    super::change_set::BranchFollow {
+        in_pr_environment,
+        pr_branch,
+        pr_repo,
+        default_branches: defaults,
+    }
+}
+
+fn diff_following(
+    current: &super::graph::RailwayGraph,
+    desired: &super::graph::RailwayGraph,
+    follow: &super::change_set::BranchFollow<'_>,
+) -> super::change_set::ChangeSet {
+    super::change_set::diff_graphs_following(
+        DiffOptions {
+            current,
+            desired,
+            reveal_values: false,
+            partial: None,
+            owners: None,
+        },
+        Some(follow),
+    )
+}
+
+#[test]
+fn branchless_desired_source_does_not_change_a_remote_branch() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("develop"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn branchless_source_change_omits_the_branch_key() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("develop"), Some("web")) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, Some("api")) }),
+    )]);
+    let change = diff(&current, &desired)
+        .changes
+        .into_iter()
+        .find(|change| change["field"] == "source")
+        .unwrap();
+    assert!(change["after"].get("branch").is_none());
+    assert!(!change["after"].to_string().contains("branch"));
+    assert_eq!(change["after"]["rootDirectory"], "api");
+}
+
+#[test]
+fn new_branchless_service_plans_the_repo_default_branch() {
+    let defaults = std::collections::BTreeMap::from([("acme/api".into(), "main".into())]);
+    let follow = follow_with(false, None, None, &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    let create = &change_set.changes[0];
+    assert_eq!(create["kind"], "resource.create");
+    assert_eq!(create["resource"]["source"]["branch"], "main");
+    assert_eq!(create["details"][0], "branch: main (repo default)");
+    assert_eq!(
+        create["summary"],
+        "Create service web (branch: main (repo default))"
+    );
+}
+
+#[test]
+fn new_branchless_service_in_a_pr_environment_uses_the_pr_branch() {
+    let defaults = std::collections::BTreeMap::from([
+        ("acme/api".into(), "main".into()),
+        ("other/lib".into(), "trunk".into()),
+    ]);
+    let follow = follow_with(true, Some("feat/login"), Some("Acme/API"), &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![
+        service(
+            "web",
+            json!({ "source": github_source("acme/api", None, None) }),
+        ),
+        service(
+            "lib",
+            json!({ "source": github_source("other/lib", None, None) }),
+        ),
+    ]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    let web = change_set
+        .changes
+        .iter()
+        .find(|change| change["address"] == "service.web")
+        .unwrap();
+    let lib = change_set
+        .changes
+        .iter()
+        .find(|change| change["address"] == "service.lib")
+        .unwrap();
+    assert_eq!(web["resource"]["source"]["branch"], "feat/login");
+    assert_eq!(web["details"][0], "branch: feat/login (PR branch)");
+    assert_eq!(
+        web["summary"],
+        "Create service web (branch: feat/login (PR branch))"
+    );
+    assert_eq!(lib["resource"]["source"]["branch"], "trunk");
+    assert_eq!(lib["details"][0], "branch: trunk (repo default)");
+}
+
+#[test]
+fn new_branchless_service_errors_when_the_default_branch_is_unknown() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(false, None, None, &defaults);
+    let current = graph_from(vec![]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", None, None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.changes.is_empty());
+    assert_eq!(
+        change_set.diagnostics[0].message,
+        "web is new and its github() source has no branch. Set branch for the first deploy; it can be removed afterwards."
+    );
+}
+
+#[test]
+fn pr_environment_rejects_a_pin_that_differs_from_the_deployed_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("main"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert_eq!(
+        change_set.diagnostics[0].message,
+        "web pins branch \"main\" but this PR environment deploys \"feat/login\". Remove branch to follow the environment."
+    );
+}
+
+#[test]
+fn pr_environment_allows_another_repo_to_change_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("main"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "lib",
+        json!({ "source": github_source("other/lib", Some("develop"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    assert!(
+        change_set
+            .changes
+            .iter()
+            .any(|change| change["field"] == "source")
+    );
+}
+
+#[test]
+fn pr_environment_allows_a_pin_matching_the_deployed_branch() {
+    let defaults = std::collections::BTreeMap::new();
+    let follow = follow_with(true, Some("feat/login"), Some("acme/api"), &defaults);
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": github_source("acme/api", Some("feat/login"), None) }),
+    )]);
+    let change_set = diff_following(&current, &desired, &follow);
+    assert!(change_set.diagnostics.is_empty());
+    assert!(change_set.changes.is_empty());
 }
 
 #[test]
