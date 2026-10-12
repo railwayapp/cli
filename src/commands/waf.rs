@@ -1,14 +1,11 @@
-use std::fmt;
-
 use chrono::{DateTime, TimeZone, Utc};
 use colored::ColoredString;
 use serde::Serialize;
 
+use crate::controllers::edge::{ResourceRef, fetch_domains, has_public_domain, print_field};
 use crate::controllers::project::{ServiceContext, resolve_service_context};
 
 use super::*;
-
-const FIELD_LABEL_WIDTH: usize = 22;
 
 type ServiceWafConfig = queries::service_waf_config::ServiceWafConfigServiceInstanceEdgeConfig;
 
@@ -240,20 +237,6 @@ async fn load_waf_status_with_domains(
     Ok(build_status(ctx, available, edge_config, Utc::now()))
 }
 
-async fn fetch_domains(ctx: &ServiceContext) -> Result<queries::domains::DomainsDomains> {
-    let response = post_graphql::<queries::Domains, _>(
-        &ctx.client,
-        ctx.configs.get_backboard(),
-        queries::domains::Variables {
-            project_id: ctx.project_id.clone(),
-            environment_id: ctx.environment_id.clone(),
-            service_id: ctx.service_id.clone(),
-        },
-    )
-    .await?;
-    Ok(response.domains)
-}
-
 async fn fetch_waf_config(ctx: &ServiceContext) -> Result<Option<ServiceWafConfig>> {
     let response = post_graphql::<queries::ServiceWafConfig, _>(
         &ctx.client,
@@ -346,21 +329,6 @@ fn ensure_available(domains: &queries::domains::DomainsDomains) -> Result<()> {
     }
 }
 
-fn has_public_domain(domains: &queries::domains::DomainsDomains) -> bool {
-    domains
-        .service_domains
-        .iter()
-        .any(|domain| is_applied_domain_sync_status(&domain.sync_status))
-        || domains
-            .custom_domains
-            .iter()
-            .any(|domain| is_applied_domain_sync_status(&domain.sync_status))
-}
-
-fn is_applied_domain_sync_status<T: fmt::Debug>(sync_status: &T) -> bool {
-    matches!(enum_name(sync_status).as_str(), "ACTIVE" | "UNSPECIFIED")
-}
-
 fn print_status(status: &WafStatusOutput) {
     println!("{}", "WAF".bold());
     println!();
@@ -407,11 +375,6 @@ fn print_status(status: &WafStatusOutput) {
     }
 }
 
-fn print_field(label: &str, value: &dyn fmt::Display) {
-    let padded = format!("{label:<FIELD_LABEL_WIDTH$}");
-    println!("{} {value}", padded.dimmed());
-}
-
 fn status_label(enabled: bool) -> ColoredString {
     if enabled {
         "enabled".green().bold()
@@ -427,10 +390,6 @@ fn state_label(state: UnderAttackState) -> ColoredString {
         UnderAttackState::ActiveTimed => "active".green(),
         UnderAttackState::Expired => "expired".yellow(),
     }
-}
-
-fn enum_name<T: fmt::Debug>(value: &T) -> String {
-    format!("{value:?}")
 }
 
 fn epoch_time(epoch: i64) -> Option<DateTime<Utc>> {
@@ -490,13 +449,6 @@ fn parse_duration(value: &str) -> std::result::Result<UnderAttackDuration, Strin
             "must be one of forever, 1h, 3h, 12h, 24h, 0, 3600, 10800, 43200, or 86400".to_string(),
         ),
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResourceRef {
-    id: String,
-    name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -738,52 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn public_domain_availability_requires_applied_sync_status() {
-        let empty = domains(Vec::new());
-        assert!(!has_public_domain(&empty));
-
-        let creating = domains(vec![queries::domains::ServiceDomainSyncStatus::CREATING]);
-        assert!(!has_public_domain(&creating));
-
-        let deleting = domains(vec![queries::domains::ServiceDomainSyncStatus::DELETING]);
-        assert!(!has_public_domain(&deleting));
-
-        let active = domains(vec![queries::domains::ServiceDomainSyncStatus::ACTIVE]);
-        assert!(has_public_domain(&active));
-
-        let unspecified = domains(vec![queries::domains::ServiceDomainSyncStatus::UNSPECIFIED]);
-        assert!(has_public_domain(&unspecified));
-    }
-
-    #[test]
     fn remaining_label_formats_like_dashboard_countdown() {
         assert_eq!(remaining_label(60), "1m");
         assert_eq!(remaining_label(3_600), "1h");
         assert_eq!(remaining_label(9_660), "2h 41m");
-    }
-
-    fn domains(
-        sync_statuses: Vec<queries::domains::ServiceDomainSyncStatus>,
-    ) -> queries::domains::DomainsDomains {
-        queries::domains::DomainsDomains {
-            service_domains: sync_statuses
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(index, sync_status)| queries::domains::DomainsDomainsServiceDomains {
-                        id: format!("sd_{index}"),
-                        domain: format!("web-{index}.up.railway.app"),
-                        suffix: Some("up.railway.app".to_string()),
-                        environment_id: "env_123".to_string(),
-                        service_id: "svc_123".to_string(),
-                        target_port: None,
-                        sync_status,
-                        created_at: None,
-                        updated_at: None,
-                    },
-                )
-                .collect(),
-            custom_domains: Vec::new(),
-        }
     }
 }
