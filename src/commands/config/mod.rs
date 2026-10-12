@@ -557,7 +557,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     let mode = mode.expect("variables policy is resolved when writing a file");
 
     create_parent(&railway_file)?;
-    write_pulled_config(
+    let function_files = write_pulled_config(
         &railway_file,
         args.force,
         args.runner,
@@ -576,6 +576,13 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         "Updated".dimmed(),
         railway_file.display().to_string().cyan()
     );
+    for file in &function_files {
+        println!(
+            "{} {}",
+            "Updated".dimmed(),
+            file.display().to_string().cyan()
+        );
+    }
     if wrote_readme {
         println!(
             "{} {}",
@@ -614,7 +621,7 @@ async fn write_pulled_config(
     include_variables: bool,
     environment: Option<String>,
     variables_managed: bool,
-) -> Result<()> {
+) -> Result<Vec<PathBuf>> {
     let imported = load_current_import(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
@@ -627,7 +634,28 @@ async fn write_pulled_config(
             imported.pr_repo.as_deref(),
         ),
         force,
-    )
+    )?;
+    write_function_sources(path, &function_source_files(&imported.graph))
+}
+
+/// Writes each function's decoded source beside the config file, at the
+/// `codeFile` path the rendered `fn()` references. The config file is already
+/// written, so an existing source file is overwritten rather than refused:
+/// the two always travel together.
+fn write_function_sources(
+    config_path: &Path,
+    files: &std::collections::BTreeMap<String, FunctionSourceFile>,
+) -> Result<Vec<PathBuf>> {
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut written = Vec::new();
+    for file in files.values() {
+        let target = config_dir.join(&file.relative_path);
+        create_parent(&target)?;
+        fs::write(&target, &file.code)
+            .with_context(|| format!("Failed to write {}", target.display()))?;
+        written.push(target);
+    }
+    Ok(written)
 }
 
 struct CurrentImport {
@@ -787,6 +815,7 @@ fn render_graph_as_railway_following(
     }) {
         imports.push("github");
     }
+    let function_files = function_source_files(graph);
     if graph.resources.iter().any(|resource| {
         resource
             .source
@@ -794,11 +823,15 @@ fn render_graph_as_railway_following(
             .and_then(|source| source.get("image"))
             .is_some()
             && resource.r#type == "service"
+            && !function_files.contains_key(resource.address.as_deref().unwrap_or(&resource.name))
     }) {
         imports.push("image");
     }
     if preserve_variables && graph.resources.iter().any(has_preserved_variables) {
         imports.push("preserve");
+    }
+    if !function_files.is_empty() {
+        imports.push("fn");
     }
     if graph.resources.iter().any(|resource| {
         resource.r#type == "database" && resource.engine.as_deref() == Some("postgres")
@@ -921,6 +954,21 @@ fn render_graph_as_railway_following(
                 }
             }
             "service" => {
+                if let Some(file) = function_files.get(&resource_key) {
+                    let body = render_function_body(
+                        resource,
+                        &file.relative_path,
+                        &resource_names,
+                        preserve_variables,
+                        lang,
+                    );
+                    out.push_str(&assign_stmt(
+                        lang,
+                        &var_name,
+                        &service_call_with(lang, "fn", &ts_string(&resource.name), &body),
+                    ));
+                    continue;
+                }
                 let body = render_service_body_following(
                     resource,
                     &source_aliases,
@@ -1074,18 +1122,23 @@ fn region_arg(lang: AuthoringLang, region: &str) -> String {
 }
 
 fn service_call(lang: AuthoringLang, name: &str, body: &str) -> String {
+    service_call_with(lang, "service", name, body)
+}
+
+/// `helper` is `service` or `fn`; both take the same config shape.
+fn service_call_with(lang: AuthoringLang, helper: &str, name: &str, body: &str) -> String {
     if body.is_empty() {
         return match lang {
-            AuthoringLang::Go => format!("{}({name}, nil)", lang.helper("service")),
-            _ => call_helper(lang, "service", &[name.to_string()]),
+            AuthoringLang::Go => format!("{}({name}, nil)", lang.helper(helper)),
+            _ => call_helper(lang, helper, &[name.to_string()]),
         };
     }
     match lang {
-        AuthoringLang::TypeScript => format!("service({name}, {body})"),
-        AuthoringLang::Python => format!("service(\n        {name},\n{body}\n    )"),
+        AuthoringLang::TypeScript => format!("{helper}({name}, {body})"),
+        AuthoringLang::Python => format!("{helper}(\n        {name},\n{body}\n    )"),
         AuthoringLang::Go => format!(
             "{}({name}, railway.ServiceConfig{{\n{body}\n  }})",
-            lang.helper("service")
+            lang.helper(helper)
         ),
     }
 }
@@ -1258,6 +1311,134 @@ fn render_service_body_following(
     if lines.is_empty() {
         return String::new();
     }
+    match lang {
+        AuthoringLang::TypeScript => format!("{{\n{}\n  }}", lines.join("\n")),
+        AuthoringLang::Python | AuthoringLang::Go => lines.join("\n"),
+    }
+}
+
+/// Where `config pull` keeps a function's source, relative to the config file.
+const FUNCTIONS_DIR: &str = "functions";
+
+/// A function's decoded source and the file `config pull` writes it to.
+#[derive(Debug, Clone, PartialEq)]
+struct FunctionSourceFile {
+    /// `functions/<name>.ts`, the `codeFile` the generated config references.
+    relative_path: String,
+    code: String,
+}
+
+fn is_function_resource(resource: &runner::DesiredResource) -> bool {
+    if resource.r#type != "service" {
+        return false;
+    }
+    resource.kind.as_deref() == Some("function")
+        || resource
+            .source
+            .as_ref()
+            .and_then(|source| source.get("image"))
+            .and_then(|image| image.as_str())
+            .is_some_and(crate::iac::functions::is_function_image)
+}
+
+/// Functions whose start command decodes to source, keyed by resource
+/// address. A function whose command does not decode stays a plain
+/// `service()` with the raw `start`, so nothing is silently lost.
+fn function_source_files(
+    graph: &runner::DesiredGraph,
+) -> std::collections::BTreeMap<String, FunctionSourceFile> {
+    let mut used = std::collections::HashSet::new();
+    let mut files = std::collections::BTreeMap::new();
+    for resource in &graph.resources {
+        if !is_function_resource(resource) {
+            continue;
+        }
+        let Some(code) = resource
+            .deploy
+            .as_ref()
+            .and_then(crate::iac::functions::function_code_of)
+        else {
+            continue;
+        };
+        let stem = function_file_stem(&resource.name);
+        let mut file_name = format!("{stem}.ts");
+        let mut counter = 2;
+        while !used.insert(file_name.clone()) {
+            file_name = format!("{stem}-{counter}.ts");
+            counter += 1;
+        }
+        let key = resource
+            .address
+            .as_deref()
+            .unwrap_or(&resource.name)
+            .to_string();
+        files.insert(
+            key,
+            FunctionSourceFile {
+                relative_path: format!("{FUNCTIONS_DIR}/{file_name}"),
+                code,
+            },
+        );
+    }
+    files
+}
+
+/// Service names are free text; the file name keeps letters, digits, `-`,
+/// `_` and `.`, and never starts with a dot.
+fn function_file_stem(name: &str) -> String {
+    let mut stem: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    stem = stem.trim_start_matches(['.', '-', '_']).to_string();
+    if stem.is_empty() {
+        stem = "function".to_string();
+    }
+    stem
+}
+
+/// The `fn()` body: `codeFile` first, then everything `service()` would
+/// render except the runtime image and the encoded start command, which the
+/// SDK derives from the file.
+fn render_function_body(
+    resource: &runner::DesiredResource,
+    code_file: &str,
+    resource_names: &std::collections::HashMap<String, String>,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+) -> String {
+    let mut lines = vec![lang.config_field("codeFile", &ts_string(code_file))];
+    render_build(resource.build.as_ref(), lang, &mut lines);
+    let deploy = resource.deploy.as_ref().map(|deploy| {
+        let mut copy = deploy.clone();
+        if let Some(obj) = copy.as_object_mut() {
+            obj.remove("startCommand");
+        }
+        copy
+    });
+    render_deploy(deploy.as_ref(), resource.source.as_ref(), lang, &mut lines);
+    render_networking(resource.networking.as_ref(), lang, &mut lines);
+    render_tracing(resource.tracing.as_ref(), lang, &mut lines);
+    render_volume_attachments(
+        resource.volume_attachments.as_ref(),
+        resource_names,
+        lang,
+        &mut lines,
+    );
+    render_variables(
+        resource.variables.as_ref(),
+        resource_names,
+        lang,
+        &mut lines,
+        preserve_variables,
+    );
     match lang {
         AuthoringLang::TypeScript => format!("{{\n{}\n  }}", lines.join("\n")),
         AuthoringLang::Python | AuthoringLang::Go => lines.join("\n"),
@@ -2351,6 +2532,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 
@@ -2373,6 +2555,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 
@@ -2465,6 +2648,104 @@ mod tests {
         assert!(rendered.contains("const frontend = github(\"org/frontend\")"));
         assert!(rendered.contains("const frontend2 = service(\"frontend\""));
         assert_eq!(rendered.matches("source: frontend,").count(), 2);
+    }
+
+    fn function_resource(name: &str, code: &str) -> runner::DesiredResource {
+        let mut resource = service_resource(
+            json!({ "type": "image", "image": "ghcr.io/railwayapp/function:1.4.0" }),
+            json!({
+                "startCommand": crate::iac::functions::encode_function_code(code),
+                "healthcheckPath": "/health"
+            }),
+        );
+        resource.address = Some(format!("service.{name}"));
+        resource.name = name.to_string();
+        resource.kind = Some("function".to_string());
+        resource
+    }
+
+    fn graph_of(resources: Vec<runner::DesiredResource>) -> runner::DesiredGraph {
+        runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources,
+        }
+    }
+
+    #[test]
+    fn pull_renderer_authors_functions_with_a_code_file() {
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(rendered.contains("import { defineRailway, fn, project, service }"));
+        assert!(rendered.contains("const hello = fn(\"hello\", {"));
+        assert!(rendered.contains("    codeFile: \"functions/hello.ts\","));
+        assert!(rendered.contains("    healthcheck: \"/health\","));
+        assert!(!rendered.contains("run.sh"));
+        assert!(!rendered.contains("image("));
+        assert!(!rendered.contains("start:"));
+    }
+
+    #[test]
+    fn pull_renderer_authors_functions_in_python_and_go() {
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let python = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        assert!(
+            python.contains(
+                "hello = fn(\n        \"hello\",\n        codeFile=\"functions/hello.ts\","
+            )
+        );
+        let go = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
+        assert!(go.contains("hello := railway.Fn(\"hello\", railway.ServiceConfig{\n\t\t\"codeFile\": \"functions/hello.ts\","));
+    }
+
+    #[test]
+    fn pull_renderer_keeps_a_function_image_service_without_decodable_code_as_a_service() {
+        let mut resource = function_resource("hello", "ignored");
+        resource.deploy = Some(json!({ "startCommand": "bun run index.ts" }));
+        let graph = graph_of(vec![resource]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(rendered.contains("const hello = service(\"hello\", {"));
+        assert!(rendered.contains("start: \"bun run index.ts\""));
+        assert!(!rendered.contains("fn("));
+        assert!(function_source_files(&graph).is_empty());
+    }
+
+    #[test]
+    fn function_source_files_decode_code_and_never_collide() {
+        let graph = graph_of(vec![
+            function_resource("Hello World", "one\n"),
+            function_resource("hello-world", "two\n"),
+            function_resource("../etc", "three\n"),
+        ]);
+        let files = function_source_files(&graph);
+        let paths: Vec<&str> = files.values().map(|f| f.relative_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "functions/etc.ts",
+                "functions/Hello-World.ts",
+                "functions/hello-world.ts"
+            ]
+        );
+        assert_eq!(files["service.Hello World"].code, "one\n");
+        assert_eq!(files["service.../etc"].code, "three\n");
+        assert_eq!(function_file_stem("...hidden"), "hidden");
+        assert_eq!(function_file_stem("   "), "function");
+    }
+
+    #[test]
+    fn write_function_sources_puts_files_beside_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".railway").join("railway.ts");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let written = write_function_sources(&config, &function_source_files(&graph)).unwrap();
+        let expected = dir
+            .path()
+            .join(".railway")
+            .join("functions")
+            .join("hello.ts");
+        assert_eq!(written, vec![expected.clone()]);
+        assert_eq!(fs::read_to_string(expected).unwrap(), "export default {}\n");
     }
 
     #[test]

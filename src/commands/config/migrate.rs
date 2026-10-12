@@ -824,6 +824,7 @@ fn new_service(name: &str) -> runner::DesiredResource {
         config: None,
         group_id: None,
         tracing: None,
+        kind: None,
     }
 }
 
@@ -1848,6 +1849,7 @@ healthcheckPath = "/"
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 
