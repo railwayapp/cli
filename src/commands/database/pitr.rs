@@ -36,7 +36,7 @@ use crate::{
         exec::exec_probe_in_container,
         patroni::{self, PatroniMember},
         project::{ServiceContext, resolve_service_context},
-        template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
+        template_apply::{self, ApplyTemplateParams, RevertTemplateParams},
     },
     errors::RailwayError,
     gql::{mutations, queries},
@@ -44,13 +44,48 @@ use crate::{
 };
 
 use super::{
-    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label, yes_no,
+    ResourceRef, confirm_deploy_or_bail, confirm_or_bail, deploy_outcome, on_off, print_field,
+    resolve_root, service_name_map, yes_no,
 };
+
+/// How a config cluster role reads in copy (`root` is the original service).
+fn role_label(role: &str) -> &str {
+    match role {
+        "root" => "original",
+        "internal" => "coordinator",
+        "edge" => "proxy",
+        other => other,
+    }
+}
+
+/// How a live Patroni role reads in copy: Patroni calls the primary `leader`.
+fn live_role_label(role: &str) -> &str {
+    if role == "leader" { "primary" } else { role }
+}
+
+/// How a rollout phase reads in copy. The phase ids stay as they are under
+/// `--json`.
+fn phase_label(phase: &str) -> &str {
+    match phase {
+        "planning" => "planning",
+        "creating_bucket" => "creating the archive bucket",
+        "writing_variables" => "setting the archive variables",
+        "patching_dcs" => "updating the cluster's settings",
+        "rolling_replicas" => "restarting replicas",
+        "switching_over" => "switching the primary",
+        "rolling_ex_leader" => "restarting the former primary",
+        "removing_variables" => "removing the archive variables",
+        "verifying" => "verifying",
+        "done" => "done",
+        "failed" => "failed",
+        other => other,
+    }
+}
 
 /// Manage point-in-time recovery (continuous backups)
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples (any database command with PITR works the same way):\n\n  railway postgres pitr status --service postgres\n  railway mysql pitr enable --service mysql\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway mysql pitr backup create --service mysql --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone database or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow), on engines whose PITR supports HA.\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container, on engines that ship one; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
+    after_help = "Examples (any database command with PITR works the same way):\n\n  railway postgres pitr status --service postgres\n  railway mysql pitr enable --service mysql\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway mysql pitr backup create --service mysql --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` detect whether the target is a standalone database or an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the enable/disable rollout), on engines whose PITR supports HA.\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container, on engines that ship one. It reads \"unavailable\" instead of failing the command if the service isn't reachable."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -68,13 +103,13 @@ enum Commands {
     /// Disable point-in-time recovery
     Disable(DisableArgs),
 
-    /// Show HA PITR enable/disable workflow progress (HA clusters only)
+    /// Show the progress of a PITR enable/disable rollout (HA clusters only)
     Progress(ProgressArgs),
 
-    /// Cancel a stuck HA PITR enable/disable workflow (HA clusters only)
+    /// Cancel a stuck PITR enable/disable rollout (HA clusters only)
     Cancel,
 
-    /// Clear a completed HA PITR workflow's progress snapshot (HA clusters only)
+    /// Clear a finished PITR rollout's progress record (HA clusters only)
     Clear,
 
     /// Restore to a point in time into a new service
@@ -89,8 +124,8 @@ enum Commands {
 
 #[derive(Parser)]
 struct EnableArgs {
-    /// Commit the config change without triggering deploys -- it applies on
-    /// the next deploy (standalone only; HA enable always applies live)
+    /// Stage the change without deploying (it applies on the next deploy).
+    /// Standalone only: an HA rollout always applies live
     #[clap(long)]
     no_deploy: bool,
 }
@@ -101,15 +136,15 @@ struct DisableArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Commit the config change without triggering deploys -- it applies on
-    /// the next deploy (standalone only; HA disable always applies live)
+    /// Stage the change without deploying (it applies on the next deploy).
+    /// Standalone only: an HA rollout always applies live
     #[clap(long)]
     no_deploy: bool,
 }
 
 #[derive(Parser)]
 struct ProgressArgs {
-    /// Poll until the workflow reaches a terminal phase
+    /// Keep polling until the rollout finishes
     #[clap(long)]
     watch: bool,
 }
@@ -349,7 +384,7 @@ async fn print_status(
     let blockers = match template_apply::fetch_adoption_rules(ctx, pitr.template_code).await {
         Ok(rules) => rules.blockers(&AdoptionTarget {
             image: root_pitr.image.as_deref(),
-            has_start_command: root_pitr.has_start_command,
+            start_command: root_pitr.start_command.as_deref(),
         }),
         Err(_) => Vec::new(),
     };
@@ -420,31 +455,42 @@ fn print_pitr_status(output: &PitrStatusOutput) {
     print_field("Service:", &output.service.name.green().bold());
     print_field("Environment:", &output.environment.name.blue().bold());
     if output.root.id != output.service.id {
-        print_field("Cluster root:", &output.root.name);
+        print_field("Original service:", &output.root.name);
     }
     print_field("HA cluster:", &yes_no(output.is_ha_cluster));
-    print_field("Status:", &status_label(output.enabled));
-    print_field("Bucket wired:", &yes_no(output.bucket_wired));
+    print_field("PITR:", &on_off(output.enabled));
+    print_field(
+        "Archive bucket:",
+        &if output.bucket_wired {
+            "connected"
+        } else {
+            "not connected"
+        },
+    );
 
     for blocker in &output.blockers {
         println!();
-        print_field("Blocker:", &blocker.yellow());
+        print_field("Can't enable:", &blocker.yellow());
     }
 
     if !output.members.is_empty() {
         println!();
-        println!("{}", "Members:".bold());
+        println!("{}", "Nodes:".bold());
         for member in &output.members {
-            let role = member.cluster_role.as_deref().unwrap_or("-");
+            let role = member
+                .cluster_role
+                .as_deref()
+                .map(role_label)
+                .unwrap_or("-");
             let role = match &member.live_role {
-                Some(live) => format!("{role}, {live}"),
+                Some(live) => format!("{role}, {}", live_role_label(live)),
                 None => role.to_string(),
             };
             println!(
-                "  {:<24} {:<16} {}",
+                "  {:<24} {:<20} {}",
                 member.service.name,
                 role,
-                status_label(member.enabled)
+                on_off(member.enabled)
             );
         }
     }
@@ -490,13 +536,12 @@ fn print_pitr_status(output: &PitrStatusOutput) {
         match &live.archiver_error {
             Some(err) => print_field("Archiver:", &format!("unavailable ({err})").dimmed()),
             None => {
-                let healthy = live.archiver_healthy.unwrap_or(false);
                 print_field(
                     "Archiver:",
-                    &if live.archiver_healthy.is_some() {
-                        status_label(healthy)
-                    } else {
-                        "unknown".dimmed().bold()
+                    &match live.archiver_healthy {
+                        Some(true) => "healthy".green().bold(),
+                        Some(false) => "failing".red().bold(),
+                        None => "unknown".dimmed().bold(),
                     },
                 );
                 print_field(
@@ -522,7 +567,7 @@ fn ha_pitr_unsupported_reason(engine: &DatabaseEngine, pitr: &PitrSpec) -> Optio
         return None;
     }
     Some(format!(
-        "{} PITR is standalone-only: its archiver does not run on HA cluster members",
+        "{} PITR is standalone-only and doesn't run on HA clusters",
         engine.display_name
     ))
 }
@@ -579,11 +624,11 @@ async fn enable(
         .context("Failed to check PITR eligibility")?;
     let blockers = rules.blockers(&AdoptionTarget {
         image: pitr_state.image.as_deref(),
-        has_start_command: pitr_state.has_start_command,
+        start_command: pitr_state.start_command.as_deref(),
     });
     if !blockers.is_empty() {
         bail!(
-            "Cannot enable PITR for {}:\n  - {}",
+            "Can't enable PITR for {}:\n  - {}",
             root.root_name,
             blockers.join("\n  - ")
         );
@@ -592,13 +637,13 @@ async fn enable(
     if ha_state.is_cluster {
         if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
             bail!(
-                "Cannot enable PITR for {}: it is the root of an HA cluster, and {reason}.",
+                "Can't enable PITR for {}: it is an HA cluster, and {reason}.",
                 root.root_name
             );
         }
         if args.no_deploy {
             eprintln!(
-                "Note: --no-deploy has no effect here -- enabling PITR on an HA cluster runs a live rolling restart with no staging step."
+                "Note: --no-deploy has no effect on an HA cluster. The rollout restarts nodes live, and nothing is staged."
             );
         }
         let response = post_graphql::<mutations::EnablePitrForHaCluster, _>(
@@ -632,19 +677,18 @@ async fn enable(
             );
         }
     } else {
+        // `enable` asks nothing, so a pre-existing staged patch is a warning
+        // rather than a prompt.
+        template_apply::warn_if_preexisting_staged_changes(&ctx).await;
         let result = template_apply::apply_composable_template(
             &ctx,
             ApplyTemplateParams {
                 template_code: pitr.template_code.to_string(),
                 service_id: root.root_id.clone(),
-                // Overlay applies never take the pre-conversion safety
-                // backup, so no volume-instance resolution is needed.
-                volume_instance_id: None,
                 replica_count: None,
                 internal_count: None,
                 edge_count: None,
                 edge_variables: None,
-                kind: ApplyKind::Overlay,
                 auto_deploy: !args.no_deploy,
             },
         )
@@ -652,11 +696,7 @@ async fn enable(
         .context("Failed to enable PITR")?;
 
         if !json {
-            let verb = if result.deployed {
-                "Enabled and deployed"
-            } else {
-                "Enabled (deploys skipped -- applies on the next deploy)"
-            };
+            let verb = deploy_outcome(result.deployed, "Enabled");
             println!(
                 "{verb} PITR for {} in environment {} (project {}).",
                 root.root_name.bold(),
@@ -713,19 +753,32 @@ async fn disable(
     if ha_state.is_cluster
         && let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr)
     {
-        bail!(
-            "Cannot disable PITR for {} via the rolling HA workflow: {reason}.",
-            root.root_name
-        );
+        bail!("Can't disable PITR for {}: {reason}.", root.root_name);
     }
 
-    if !confirm_or_bail(
-        &format!(
-            "Disable PITR for {}? This stops continuous archiving; existing backups are kept.",
-            root.root_name.red()
-        ),
-        args.yes,
-    )? {
+    // The two paths do different things to the archive: the standalone
+    // revert deletes the PITR bucket on purpose (the volume backups stay),
+    // while the HA rollout keeps it.
+    let confirmed = if ha_state.is_cluster {
+        confirm_or_bail(
+            &format!(
+                "Disable PITR for {}? Nodes restart one at a time. The PITR bucket is kept.",
+                root.root_name.red()
+            ),
+            args.yes,
+        )?
+    } else {
+        confirm_deploy_or_bail(
+            &ctx,
+            &format!(
+                "Disable PITR for {}? Railway stops archiving and deletes the PITR bucket, so you can no longer restore to a point in time. Your volume backups are kept.",
+                root.root_name.red()
+            ),
+            args.yes,
+        )
+        .await?
+    };
+    if !confirmed {
         println!("Cancelled.");
         return Ok(());
     }
@@ -753,21 +806,21 @@ async fn disable(
                         .map(|m| m.service_name.clone())
                         .collect();
                     bail!(
-                        "Cannot disable PITR: replication is not caught up on {}. Wait for replicas to catch up and try again.",
+                        "Can't disable PITR: replication isn't caught up on {}. Wait for the replicas to catch up, then retry.",
                         unhealthy.join(", ")
                     );
                 }
             }
             Err(err) => {
                 eprintln!(
-                    "Warning: could not check replication health before disabling PITR: {err:#}"
+                    "Warning: Railway couldn't check replication health before disabling PITR: {err:#}"
                 );
             }
         }
 
         if args.no_deploy {
             eprintln!(
-                "Note: --no-deploy has no effect here -- disabling PITR on an HA cluster runs a live rolling restart with no staging step."
+                "Note: --no-deploy has no effect on an HA cluster. The rollout restarts nodes live, and nothing is staged."
             );
         }
         let response = post_graphql::<mutations::DisablePitrForHaCluster, _>(
@@ -813,11 +866,7 @@ async fn disable(
         .context("Failed to disable PITR")?;
 
         if !json {
-            let verb = if result.deployed {
-                "Disabled and deployed"
-            } else {
-                "Disabled (deploys skipped -- applies on the next deploy)"
-            };
+            let verb = deploy_outcome(result.deployed, "Disabled");
             println!(
                 "{verb} PITR on {} in environment {} (project {}).",
                 root.root_name.bold(),
@@ -842,7 +891,7 @@ async fn cancel(
     json: bool,
 ) -> Result<()> {
     if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
-        bail!("{reason}, so there is no rolling PITR workflow to cancel.");
+        bail!("{reason}, so there is no PITR rollout to cancel.");
     }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
@@ -853,7 +902,7 @@ async fn cancel(
     let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
-            "{} is not an HA cluster; there is no PITR workflow to cancel.",
+            "{} is not an HA cluster, so there is no PITR rollout to cancel.",
             root.root_name
         );
     }
@@ -867,7 +916,7 @@ async fn cancel(
         },
     )
     .await
-    .context("Failed to cancel the PITR workflow")?;
+    .context("Failed to cancel the PITR rollout")?;
 
     if json {
         println!(
@@ -875,7 +924,7 @@ async fn cancel(
             serde_json::to_string_pretty(&serde_json::json!({"cancelled": true}))?
         );
     } else {
-        println!("Cancelled the PITR workflow for {}.", root.root_name.bold());
+        println!("Cancelled the PITR rollout for {}.", root.root_name.bold());
     }
     Ok(())
 }
@@ -889,7 +938,7 @@ async fn clear(
     json: bool,
 ) -> Result<()> {
     if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
-        bail!("{reason}, so there is no rolling PITR workflow progress to clear.");
+        bail!("{reason}, so there is no PITR rollout progress to clear.");
     }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
@@ -900,7 +949,7 @@ async fn clear(
     let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
-            "{} is not an HA cluster; there is no PITR workflow progress to clear.",
+            "{} is not an HA cluster, so there is no PITR rollout progress to clear.",
             root.root_name
         );
     }
@@ -914,7 +963,7 @@ async fn clear(
         },
     )
     .await
-    .context("Failed to clear the PITR workflow progress")?;
+    .context("Failed to clear the PITR rollout progress")?;
 
     if json {
         println!(
@@ -923,7 +972,7 @@ async fn clear(
         );
     } else {
         println!(
-            "Cleared PITR workflow progress for {}.",
+            "Cleared the PITR rollout progress for {}.",
             root.root_name.bold()
         );
     }
@@ -983,7 +1032,7 @@ async fn progress(
     args: ProgressArgs,
 ) -> Result<()> {
     if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
-        bail!("{reason}, so there is no rolling PITR workflow progress to show.");
+        bail!("{reason}, so there is no PITR rollout progress to show.");
     }
     let ctx = resolve_service_context(project, service, environment).await?;
     let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
@@ -994,7 +1043,7 @@ async fn progress(
     let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if !ha_state.is_cluster {
         bail!(
-            "{} is not an HA cluster; there is no PITR workflow progress to show.",
+            "{} is not an HA cluster, so there is no PITR rollout progress to show.",
             root.root_name
         );
     }
@@ -1019,7 +1068,7 @@ async fn progress(
             println!("{}", serde_json::json!({"active": false}));
         } else {
             println!(
-                "No PITR enable/disable workflow found for {}.",
+                "No PITR enable/disable rollout found for {}.",
                 root.root_name.bold()
             );
         }
@@ -1087,7 +1136,7 @@ async fn follow_progress(
                 continue;
             }
             Err(err) => {
-                return Err(err).context("Failed to fetch the PITR workflow progress");
+                return Err(err).context("Failed to fetch the PITR rollout progress");
             }
         };
 
@@ -1127,11 +1176,11 @@ async fn follow_progress(
                     .clone()
                     .unwrap_or_else(|| "no error detail reported".to_string());
                 bail!(
-                    "The PITR workflow failed{}: {detail}",
+                    "The PITR rollout failed{}: {detail}",
                     output
                         .failed_at_phase
                         .as_deref()
-                        .map(|phase| format!(" during {phase}"))
+                        .map(|phase| format!(" while {}", phase_label(phase)))
                         .unwrap_or_default()
                 );
             }
@@ -1143,7 +1192,7 @@ async fn follow_progress(
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Timed out after {}s waiting for the workflow to reach a terminal phase. It keeps running server-side -- follow it with `railway {} pitr progress --watch`.",
+                "Stopped waiting after {}s. The rollout keeps going on Railway. Follow it with `railway {} pitr progress --watch`.",
                 opts.deadline.as_secs(),
                 engine.key
             );
@@ -1175,8 +1224,14 @@ async fn follow_started_ha_workflow(
     };
 
     if !json {
+        let verb = if direction == "enable" {
+            "Enabling"
+        } else {
+            "Disabling"
+        };
         println!(
-            "Rolling the cluster to {direction} PITR -- members restart one at a time; this can take several minutes. Following progress (the workflow keeps running server-side if you interrupt)..."
+            "{verb} PITR on {}. Nodes restart one at a time, then the primary switches over, with a few seconds of downtime. This takes several minutes. You can press Ctrl+C, and the rollout keeps going.",
+            root.root_name.bold()
         );
     }
 
@@ -1201,7 +1256,7 @@ async fn follow_started_ha_workflow(
             .await
             .map_err(|err| match err {
                 WorkflowError::Timeout => anyhow::anyhow!(
-                    "The PITR workflow is still running (the CLI stopped waiting). Follow it with `railway {} pitr progress --watch`.",
+                    "The PITR rollout is still running (the CLI stopped waiting). Follow it with `railway {} pitr progress --watch`.",
                     engine.key
                 ),
                 other => other.into(),
@@ -1281,11 +1336,11 @@ fn build_progress_output(
 }
 
 fn print_progress(output: &PitrProgressOutput) {
-    println!("{}", "PITR HA workflow progress".bold());
+    println!("{}", "PITR rollout".bold());
     println!();
-    print_field("Root:", &output.root.name);
+    print_field("Original service:", &output.root.name);
     print_field("Direction:", &output.direction);
-    print_field("Phase:", &output.phase.bold());
+    print_field("Phase:", &phase_label(&output.phase).bold());
     print_field("Started:", &output.started_at);
     print_field("Updated:", &output.updated_at);
     if let Some(completed_at) = &output.completed_at {
@@ -1295,17 +1350,17 @@ fn print_progress(output: &PitrProgressOutput) {
         print_field("Error:", &error.red());
     }
     if let Some(failed_at) = &output.failed_at_phase {
-        print_field("Failed at phase:", &failed_at.red());
+        print_field("Failed while:", &phase_label(failed_at).red());
     }
 
     if !output.members.is_empty() {
         println!();
-        println!("{}", "Members:".bold());
+        println!("{}", "Nodes:".bold());
         for member in &output.members {
             println!(
-                "  {:<28} {:<6} {}",
+                "  {:<28} {:<8} {}",
                 member.service_name,
-                if member.is_leader { "leader" } else { "-" },
+                if member.is_leader { "primary" } else { "-" },
                 member.status
             );
         }
@@ -1336,7 +1391,7 @@ async fn restore(
 
     if !confirm_or_bail(
         &format!(
-            "Restore {} to {}? This creates a brand-new service ({new_service_note}) from the point-in-time snapshot -- {} keeps running untouched.",
+            "Create a new service, {new_service_note}, with {}'s data as of {}? {} keeps running unchanged.",
             root.root_name.yellow(),
             target_timestamp.to_rfc3339(),
             root.root_name
@@ -1373,15 +1428,12 @@ async fn restore(
         );
     } else {
         println!(
-            "Started a point-in-time restore of {} to {}.",
+            "Started a point-in-time restore of {} as of {}.",
             root.root_name.bold(),
             target_timestamp.to_rfc3339()
         );
-        if let Some(id) = &workflow_id {
-            print_field("Workflow:", id);
-        }
         println!(
-            "This runs in the background; the new service will appear in the dashboard once provisioning completes."
+            "The restore runs in the background. {new_service_note} appears in your project once it's ready."
         );
     }
     Ok(())
@@ -1410,12 +1462,7 @@ async fn resolve_volume_instance_id(
         .iter()
         .find(|edge| edge.node.service_id.as_deref() == Some(root.root_id.as_str()))
         .map(|edge| edge.node.id.clone())
-        .with_context(|| {
-            format!(
-                "{} has no volume attached -- PITR backups require a volume.",
-                root.root_name
-            )
-        })
+        .with_context(|| format!("{} has no volume, and backups need one.", root.root_name))
 }
 
 async fn backup_list(
@@ -1510,9 +1557,6 @@ async fn backup_create(
         );
     } else {
         println!("Started an on-demand backup for {}.", root.root_name.bold());
-        if let Some(id) = &workflow_id {
-            print_field("Workflow:", id);
-        }
         println!(
             "Check `railway {} pitr backup list` once it completes.",
             engine.key
@@ -1586,12 +1630,9 @@ async fn backup_delete(
         );
     } else {
         println!(
-            "Started deleting {} backup(s) -- deletion runs in the background.",
+            "Started deleting {} backup(s). Deletion runs in the background.",
             args.ids.len()
         );
-        for id in workflow_ids.iter().flatten() {
-            print_field("Workflow:", id);
-        }
     }
     Ok(())
 }
@@ -1660,28 +1701,29 @@ async fn backup_restore(
     let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
     if ha_state.is_cluster {
         bail!(
-            "{} is an HA cluster: restoring a backup in place would leave its replicas diverged from the restored leader. Use the dashboard, which reseeds replicas as part of the restore.",
+            "{} is an HA cluster, and restoring a backup in place would leave its replicas out of step with the restored primary. Restore from the cluster view, which rebuilds the replicas too.",
             root.root_name
         );
     }
 
     let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
 
-    if !confirm_or_bail(
+    // The restore commits the environment's staged patch at the end (see
+    // below), so anything already staged rides along: the prompt says so.
+    if !confirm_deploy_or_bail(
+        &ctx,
         &format!(
             "Restore {} from backup {}? This overwrites the current data with the backup's contents.",
             root.root_name.red(),
             args.id
         ),
         args.yes,
-    )? {
+    )
+    .await?
+    {
         println!("Cancelled.");
         return Ok(());
     }
-
-    // The restore commits the environment's staged patch at the end (see
-    // below), so anything already staged rides along.
-    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
 
     let response = post_graphql::<mutations::VolumeInstanceBackupRestore, _>(
         &ctx.client,
@@ -1705,7 +1747,7 @@ async fn backup_restore(
     if let Some(workflow_id) = &workflow_id {
         if !json {
             println!(
-                "Copying backup {} into a fresh volume -- this scales with the volume's size...",
+                "Copying backup {} into a new volume. This takes longer for larger volumes...",
                 args.id
             );
         }
@@ -1719,14 +1761,20 @@ async fn backup_restore(
         .await
         .map_err(|err| match err {
             WorkflowError::Timeout => anyhow::anyhow!(
-                "The restore is still copying data server-side. When it finishes, the volume swap appears as staged changes on the environment -- apply them to finish the restore."
+                "The restore is still copying data on Railway. When it finishes, deploy the staged changes in {} to complete it.",
+                ctx.environment_name
             ),
             other => other.into(),
         })?;
 
         deployed = template_apply::commit_staged_patch(&ctx, true)
             .await
-            .context("The backup was copied, but applying the staged volume swap failed -- apply the environment's staged changes to finish the restore")?;
+            .with_context(|| {
+                format!(
+                    "The backup was copied, but deploying the staged change failed. Deploy the staged changes in {} to complete the restore.",
+                    ctx.environment_name
+                )
+            })?;
     }
 
     if json {
@@ -1748,9 +1796,6 @@ async fn backup_restore(
             root.root_name.bold(),
             args.id
         );
-        if let Some(id) = &workflow_id {
-            print_field("Workflow:", id);
-        }
     }
     Ok(())
 }
@@ -2072,7 +2117,7 @@ async fn discover_ha_cluster(
         .await
         .map_err(|err| {
             HaDiscoveryFailure::without_coverage(format!(
-                "could not resolve the members' live deployments: {err:#}"
+                "could not resolve the nodes' live deployments: {err:#}"
             ))
         })?;
     let live: Vec<String> = nodes
@@ -2081,7 +2126,7 @@ async fn discover_ha_cluster(
         .collect();
     if live.is_empty() {
         return Err(HaDiscoveryFailure::without_coverage(
-            "no HA member has a live deployment".to_string(),
+            "no node has a live deployment".to_string(),
         ));
     }
     match patroni::probe_first_available(&live, Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS)).await
@@ -2121,8 +2166,8 @@ fn describe_discovery_failures(
         })
         .collect();
     format!(
-        "Patroni could not be reached on any HA member ({})",
-        parts.join("; ")
+        "Patroni could not be reached on any node ({})",
+        parts.join(", ")
     )
 }
 
@@ -2161,19 +2206,16 @@ fn select_ha_leader(
                 .map(|m| m.name.as_str())
                 .collect();
             if unmatched.is_empty() {
-                Err(
-                    "Patroni reports no leader, so no member is archiving WAL right now"
-                        .to_string(),
-                )
+                Err("Patroni reports no primary, so no node is archiving WAL right now".to_string())
             } else {
                 Err(format!(
-                    "Patroni's leader ({}) matches no member of this cluster",
+                    "Patroni's primary ({}) matches no node of this cluster",
                     unmatched.join(", ")
                 ))
             }
         }
         many => Err(format!(
-            "Patroni reports {} leaders ({}); archiver health has no single owner",
+            "Patroni reports {} primaries ({}), so archiver health has no single owner",
             many.len(),
             many.iter()
                 .map(|i| members[*i].service.name.as_str())
@@ -2217,7 +2259,7 @@ where
             let leader_name = members[index].service.name.clone();
             let Some(instance_id) = view.instance_ids.get(&members[index].service.id) else {
                 return unavailable(format!(
-                    "{leader_name} is the Patroni leader but has no live deployment"
+                    "{leader_name} is the primary but has no live deployment"
                 ));
             };
             let mut probe = probe_instance(instance_id.clone(), ProbeParts::Full).await;
@@ -2255,7 +2297,7 @@ fn coverage_only(mut probe: PitrLiveProbe, reason: String) -> PitrLiveProbe {
         discard_archiver_data(&mut probe, reason);
     } else {
         probe.unavailable_reason = Some(match probe.unavailable_reason.take() {
-            Some(existing) => format!("{reason}; coverage probe failed: {existing}"),
+            Some(existing) => format!("{reason}. The coverage probe failed too: {existing}"),
             None => reason,
         });
     }
@@ -3030,7 +3072,7 @@ mod tests {
             patroni_member("postgres-2", "replica"),
         ];
         let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
-        assert!(err.contains("no leader"), "{err}");
+        assert!(err.contains("no primary"), "{err}");
         // Roles are still recorded so the Members listing stays truthful.
         assert_eq!(members[0].live_role.as_deref(), Some("replica"));
 
@@ -3041,7 +3083,7 @@ mod tests {
         ];
         let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
         assert!(
-            err.contains("2 leaders") && err.contains("Postgres, Postgres-2"),
+            err.contains("2 primaries") && err.contains("Postgres, Postgres-2"),
             "{err}"
         );
 
@@ -3158,7 +3200,7 @@ mod tests {
             live.archiver_error
                 .as_deref()
                 .unwrap()
-                .contains("no leader")
+                .contains("no primary")
         );
         let json = serde_json::to_value(&live).unwrap();
         for field in [
