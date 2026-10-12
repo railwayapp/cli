@@ -96,7 +96,7 @@ macro_rules! commands {
                                 error_message: result
                                     .as_ref()
                                     .err()
-                                    .map(|e| $crate::telemetry::truncate_message(&format!("{e}"))),
+                                    .map(|e| $crate::telemetry::truncate_message(&format!("{e:#}"))),
                                 duration_ms: duration.as_millis() as u64,
                                 cli_version: env!("CARGO_PKG_VERSION"),
                                 os: ::std::env::consts::OS,

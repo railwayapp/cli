@@ -8,6 +8,7 @@ mod change_set;
 mod compiler;
 mod engine;
 mod eval;
+pub mod functions;
 mod graph;
 mod json;
 pub mod ownership;
@@ -25,7 +26,10 @@ pub use engine::{NativeRun, run as run_native};
 #[allow(dead_code)]
 pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
 #[allow(dead_code)]
-pub use graph::{RAILWAY_GRAPH_VERSION, RailwayGraph, resource_address, validate_graph};
+pub use graph::{
+    RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicyReport, format_variable_policy_line,
+    resource_address, validate_graph,
+};
 #[allow(dead_code)]
 pub use partial::{needs_partial_claim_apply, parse_partial_name};
 

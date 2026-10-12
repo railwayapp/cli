@@ -1,4 +1,5 @@
 mod authoring;
+mod environment;
 mod migrate;
 mod partials;
 mod runner;
@@ -58,6 +59,10 @@ struct SharedArgs {
     /// Path to the Railway configuration file. Defaults to nearest .railway/railway.{ts,py,go}.
     #[clap(long)]
     file: Option<PathBuf>,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    environment: Option<String>,
 
     /// Output raw runner JSON.
     #[clap(long)]
@@ -127,11 +132,73 @@ impl std::fmt::Display for InitMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum VariablesMode {
+    Managed,
+    Unmanaged,
+}
+
+impl VariablesMode {
+    fn managed(self) -> bool {
+        matches!(self, Self::Managed)
+    }
+}
+
+impl std::fmt::Display for VariablesMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Managed => "managed — this file owns every variable on these services",
+            Self::Unmanaged => {
+                "unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)"
+            }
+        })
+    }
+}
+
+fn session_is_interactive() -> bool {
+    std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
+}
+
+fn resolve_variables_mode(flag: Option<VariablesMode>, interactive: bool) -> Result<VariablesMode> {
+    if let Some(mode) = flag {
+        return Ok(mode);
+    }
+    if !interactive {
+        bail!("Pass --variables=managed or --variables=unmanaged.");
+    }
+    prompt_select(
+        "How should this file treat variables?",
+        vec![VariablesMode::Managed, VariablesMode::Unmanaged],
+    )
+}
+
+fn reject_unmanaged_include(mode: VariablesMode, include_variables: bool) -> Result<()> {
+    if include_variables && !mode.managed() {
+        bail!("--include-variables cannot be used with --variables=unmanaged.");
+    }
+    Ok(())
+}
+
+fn variables_policy_written(mode: VariablesMode) -> &'static str {
+    match mode {
+        VariablesMode::Managed => {
+            "Variables are managed — this file owns every variable on these services."
+        }
+        VariablesMode::Unmanaged => {
+            "Variables are unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)."
+        }
+    }
+}
+
 #[derive(Parser)]
 struct InitArgs {
     /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
+
+    /// Who owns service variables when importing: `managed` or `unmanaged`.
+    #[clap(long, value_enum, value_name = "managed|unmanaged")]
+    variables: Option<VariablesMode>,
 }
 
 #[derive(Parser)]
@@ -139,6 +206,10 @@ struct PullArgs {
     /// Overwrite an existing authoring file.
     #[clap(long)]
     force: bool,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    environment: Option<String>,
 
     /// Output raw imported graph JSON instead of writing files.
     #[clap(long)]
@@ -159,6 +230,10 @@ struct PullArgs {
     /// Ask an agent to turn imported state into idiomatic authoring code.
     #[clap(long)]
     agent: bool,
+
+    /// Who owns service variables: `managed` or `unmanaged`.
+    #[clap(long, value_enum, value_name = "managed|unmanaged")]
+    variables: Option<VariablesMode>,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -329,6 +404,7 @@ async fn init_config(args: InitArgs) -> Result<()> {
         )?
     };
 
+    let mut imported_variables = None;
     match init_mode {
         InitMode::GenerateFromRepo => write_new(
             &railway_file,
@@ -336,7 +412,18 @@ async fn init_config(args: InitArgs) -> Result<()> {
             args.force,
         )?,
         InitMode::ImportFromRailway => {
-            write_pulled_config(&railway_file, args.force, None, true, false).await?
+            let mode = resolve_variables_mode(args.variables, session_is_interactive())?;
+            write_pulled_config(
+                &railway_file,
+                args.force,
+                None,
+                true,
+                false,
+                None,
+                mode.managed(),
+            )
+            .await?;
+            imported_variables = Some(mode);
         }
         InitMode::MinimalFile => write_new(
             &railway_file,
@@ -364,6 +451,9 @@ async fn init_config(args: InitArgs) -> Result<()> {
     );
     println!();
     println!("{}", "Next steps".bold());
+    if let Some(mode) = imported_variables {
+        println!("  {} {}", "•".cyan(), variables_policy_written(mode));
+    }
     println!(
         "  {} Edit {} to describe your Railway project.",
         "•".cyan(),
@@ -401,13 +491,13 @@ fn write_language_support_files(lang: AuthoringLang, railway_dir: &Path) -> Resu
         AuthoringLang::Go => {
             write_asset_if_missing(
                 &railway_dir.join("go.mod"),
-                "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.2.0\n",
+                "module railway-config\n\ngo 1.22\n\nrequire github.com/railwayapp/railway-go-sdk v0.5.0\n",
             )?;
         }
         AuthoringLang::Python => {
             write_asset_if_missing(
                 &railway_dir.join("requirements.txt"),
-                "railway-sdk>=0.2.0\n",
+                "railway-sdk>=0.6.0\n",
             )?;
         }
         AuthoringLang::TypeScript => {}
@@ -440,6 +530,17 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     let relative_file = format!(".railway/{}", lang.file_name());
     let readme_file = cwd.join(".railway").join("README.md");
 
+    let mode = if args.json {
+        args.variables
+    } else {
+        Some(resolve_variables_mode(
+            args.variables,
+            session_is_interactive(),
+        )?)
+    };
+    if let Some(mode) = mode {
+        reject_unmanaged_include(mode, args.include_variables)?;
+    }
     if args.include_variables {
         eprintln!(
             "{} non-sealed variables, including secrets, will be decrypted and included in the spec",
@@ -448,18 +549,22 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
 
     if args.json {
-        let graph = load_current_graph(args.runner, args.include_variables).await?;
+        let graph =
+            load_current_graph(args.runner, args.include_variables, args.environment).await?;
         println!("{}", serde_json::to_string_pretty(&graph)?);
         return Ok(());
     }
+    let mode = mode.expect("variables policy is resolved when writing a file");
 
     create_parent(&railway_file)?;
-    write_pulled_config(
+    let function_files = write_pulled_config(
         &railway_file,
         args.force,
         args.runner,
         !args.omit_preserved_variables,
         args.include_variables,
+        args.environment,
+        mode.managed(),
     )
     .await?;
     let wrote_readme = write_asset_if_missing(&readme_file, &iac_readme(lang))?;
@@ -471,6 +576,21 @@ async fn pull_config(args: PullArgs) -> Result<()> {
         "Updated".dimmed(),
         railway_file.display().to_string().cyan()
     );
+    for file in &function_files.written {
+        println!(
+            "{} {}",
+            "Updated".dimmed(),
+            file.display().to_string().cyan()
+        );
+    }
+    for file in &function_files.stale {
+        println!(
+            "{} {} {}",
+            "Kept".dimmed(),
+            file.display().to_string().cyan(),
+            "(no function with this name on Railway; delete it if the function is gone)".dimmed()
+        );
+    }
     if wrote_readme {
         println!(
             "{} {}",
@@ -480,6 +600,7 @@ async fn pull_config(args: PullArgs) -> Result<()> {
     }
     println!();
     println!("{}", "Next steps".bold());
+    println!("  {} {}", "•".cyan(), variables_policy_written(mode));
     println!(
         "  {} Review {} and remove anything you do not want managed from code.",
         "•".cyan(),
@@ -506,20 +627,88 @@ async fn write_pulled_config(
     runner: Option<String>,
     preserve_variables: bool,
     include_variables: bool,
-) -> Result<()> {
-    let graph = load_current_graph(runner, include_variables).await?;
+    environment: Option<String>,
+    variables_managed: bool,
+) -> Result<WrittenFunctionSources> {
+    let imported = load_current_import(runner, include_variables, environment).await?;
     let lang = AuthoringLang::from_path(path).unwrap_or(AuthoringLang::TypeScript);
     write_new(
         path,
-        &render_graph_as_railway(&graph, preserve_variables, lang),
+        &render_graph_as_railway_following(
+            &imported.graph,
+            preserve_variables,
+            lang,
+            variables_managed,
+            imported.pr_repo.as_deref(),
+        ),
         force,
-    )
+    )?;
+    write_function_sources(path, &function_source_files(&imported.graph))
+}
+
+/// Writes each function's decoded source beside the config file, at the
+/// `codeFile` path the rendered `fn()` references. The config file is already
+/// written, so an existing source file is overwritten rather than refused:
+/// the two always travel together.
+fn write_function_sources(
+    config_path: &Path,
+    files: &std::collections::BTreeMap<String, FunctionSourceFile>,
+) -> Result<WrittenFunctionSources> {
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut written = Vec::new();
+    for file in files.values() {
+        let target = config_dir.join(&file.relative_path);
+        create_parent(&target)?;
+        fs::write(&target, &file.code)
+            .with_context(|| format!("Failed to write {}", target.display()))?;
+        written.push(target);
+    }
+    let stale = stale_function_sources(&config_dir.join(FUNCTIONS_DIR), &written);
+    Ok(WrittenFunctionSources { written, stale })
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct WrittenFunctionSources {
+    written: Vec<PathBuf>,
+    /// `functions/*.ts` from an earlier pull that no function on Railway
+    /// matched this time. Never deleted: the user decides.
+    stale: Vec<PathBuf>,
+}
+
+fn stale_function_sources(functions_dir: &Path, written: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(functions_dir) else {
+        return Vec::new();
+    };
+    let mut stale: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ts"))
+        .filter(|path| !written.iter().any(|kept| kept == path))
+        .collect();
+    stale.sort();
+    stale
+}
+
+struct CurrentImport {
+    graph: runner::DesiredGraph,
+    pr_repo: Option<String>,
 }
 
 async fn load_current_graph(
     runner: Option<String>,
     decrypt_variables: bool,
+    environment: Option<String>,
 ) -> Result<runner::DesiredGraph> {
+    Ok(load_current_import(runner, decrypt_variables, environment)
+        .await?
+        .graph)
+}
+
+async fn load_current_import(
+    runner: Option<String>,
+    decrypt_variables: bool,
+    environment: Option<String>,
+) -> Result<CurrentImport> {
     // The native engine's `current` command reads live state and does not
     // evaluate an authoring file. The legacy TypeScript runner still requires
     // a file on disk, so keep a throwaway stub only on that path.
@@ -546,6 +735,7 @@ async fn load_current_graph(
         out: None,
         plan: None,
         source_tree: None,
+        environment,
     };
     let response = runner::run(&args, "current").await?;
     drop(temp_dir);
@@ -569,9 +759,13 @@ async fn load_current_graph(
         bail!("Could not import Railway configuration:\n{diagnostics}");
     }
 
-    response
-        .current_graph
-        .context("Railway did not return current project state")
+    let pr_repo = response.pull_pr_repo().map(str::to_string);
+    Ok(CurrentImport {
+        graph: response
+            .current_graph
+            .context("Railway did not return current project state")?,
+        pr_repo,
+    })
 }
 
 fn write_pull_stub() -> Result<tempfile::TempDir> {
@@ -597,7 +791,30 @@ fn render_graph_as_railway(
     graph: &runner::DesiredGraph,
     preserve_variables: bool,
     lang: AuthoringLang,
+    variables_managed: bool,
 ) -> String {
+    render_graph_as_railway_following(graph, preserve_variables, lang, variables_managed, None)
+}
+
+fn render_graph_as_railway_following(
+    graph: &runner::DesiredGraph,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+    variables_managed: bool,
+    pr_repo: Option<&str>,
+) -> String {
+    let stripped;
+    let graph = if variables_managed {
+        graph
+    } else {
+        let mut copy = graph.clone();
+        for resource in &mut copy.resources {
+            resource.variables = None;
+        }
+        stripped = copy;
+        &stripped
+    };
+    let preserve_variables = preserve_variables && variables_managed;
     let mut imports = vec!["defineRailway", "project", "service"];
     if graph
         .resources
@@ -629,6 +846,7 @@ fn render_graph_as_railway(
     }) {
         imports.push("github");
     }
+    let function_files = function_source_files(graph);
     if graph.resources.iter().any(|resource| {
         resource
             .source
@@ -636,11 +854,17 @@ fn render_graph_as_railway(
             .and_then(|source| source.get("image"))
             .is_some()
             && resource.r#type == "service"
+            // Python functions pin the runtime with `runtime=`, not `image()`.
+            && (lang != AuthoringLang::Python
+                || !function_files.contains_key(resource.address.as_deref().unwrap_or(&resource.name)))
     }) {
         imports.push("image");
     }
     if preserve_variables && graph.resources.iter().any(has_preserved_variables) {
         imports.push("preserve");
+    }
+    if !function_files.is_empty() {
+        imports.push("fn");
     }
     if graph.resources.iter().any(|resource| {
         resource.r#type == "database" && resource.engine.as_deref() == Some("postgres")
@@ -669,7 +893,11 @@ fn render_graph_as_railway(
 
     let source_aliases = shared_github_sources(graph);
     for (alias, source) in &source_aliases {
-        out.push_str(&assign_stmt(lang, alias, &render_source(source, lang)));
+        out.push_str(&assign_stmt(
+            lang,
+            alias,
+            &render_source_following(source, lang, omit_pulled_branch(source, pr_repo)),
+        ));
     }
     if !source_aliases.is_empty() {
         out.push('\n');
@@ -759,12 +987,28 @@ fn render_graph_as_railway(
                 }
             }
             "service" => {
-                let body = render_service_body(
+                if let Some(file) = function_files.get(&resource_key) {
+                    let body = render_function_body(
+                        resource,
+                        &file.relative_path,
+                        &resource_names,
+                        preserve_variables,
+                        lang,
+                    );
+                    out.push_str(&assign_stmt(
+                        lang,
+                        &var_name,
+                        &service_call_with(lang, "fn", &ts_string(&resource.name), &body),
+                    ));
+                    continue;
+                }
+                let body = render_service_body_following(
                     resource,
                     &source_aliases,
                     &resource_names,
                     preserve_variables,
                     lang,
+                    pr_repo,
                 );
                 out.push_str(&assign_stmt(
                     lang,
@@ -850,7 +1094,12 @@ fn render_graph_as_railway(
         .as_ref()
         .map(|project| project.name.as_str())
         .unwrap_or("imported-project");
-    out.push_str(&render_project_return(lang, project_name, &top_level_names));
+    out.push_str(&render_project_return(
+        lang,
+        project_name,
+        &top_level_names,
+        Some(variables_managed),
+    ));
     out
 }
 
@@ -906,31 +1155,60 @@ fn region_arg(lang: AuthoringLang, region: &str) -> String {
 }
 
 fn service_call(lang: AuthoringLang, name: &str, body: &str) -> String {
+    service_call_with(lang, "service", name, body)
+}
+
+/// `helper` is `service` or `fn`; both take the same config shape.
+fn service_call_with(lang: AuthoringLang, helper: &str, name: &str, body: &str) -> String {
     if body.is_empty() {
         return match lang {
-            AuthoringLang::Go => format!("{}({name}, nil)", lang.helper("service")),
-            _ => call_helper(lang, "service", &[name.to_string()]),
+            AuthoringLang::Go => format!("{}({name}, nil)", lang.helper(helper)),
+            _ => call_helper(lang, helper, &[name.to_string()]),
         };
     }
     match lang {
-        AuthoringLang::TypeScript => format!("service({name}, {body})"),
-        AuthoringLang::Python => format!("service(\n        {name},\n{body}\n    )"),
+        AuthoringLang::TypeScript => format!("{helper}({name}, {body})"),
+        AuthoringLang::Python => format!("{helper}(\n        {name},\n{body}\n    )"),
         AuthoringLang::Go => format!(
             "{}({name}, railway.ServiceConfig{{\n{body}\n  }})",
-            lang.helper("service")
+            lang.helper(helper)
         ),
     }
 }
 
-fn render_project_return(lang: AuthoringLang, project_name: &str, resources: &[String]) -> String {
+fn render_project_return(
+    lang: AuthoringLang,
+    project_name: &str,
+    resources: &[String],
+    variables_managed: Option<bool>,
+) -> String {
     let name = ts_string(project_name);
     let list = list_literal(lang, resources);
+    let Some(managed) = variables_managed else {
+        return match lang {
+            AuthoringLang::TypeScript => {
+                format!("\n  return project({name}, {{\n    resources: {list},\n  }});\n}});\n")
+            }
+            AuthoringLang::Python => format!("    return project({name}, resources={list})\n"),
+            AuthoringLang::Go => {
+                format!("  return {}({name}, {list})\n}}\n", lang.helper("project"))
+            }
+        };
+    };
+    let ts_bool = if managed { "true" } else { "false" };
+    let py_bool = if managed { "True" } else { "False" };
+    let go_bool = if managed { "true" } else { "false" };
     match lang {
-        AuthoringLang::TypeScript => {
-            format!("\n  return project({name}, {{\n    resources: {list},\n  }});\n}});\n")
-        }
-        AuthoringLang::Python => format!("    return project({name}, resources={list})\n"),
-        AuthoringLang::Go => format!("  return {}({name}, {list})\n}}\n", lang.helper("project")),
+        AuthoringLang::TypeScript => format!(
+            "\n  return project({name}, {{\n    variables: {{ managed: {ts_bool} }},\n    resources: {list},\n  }});\n}});\n"
+        ),
+        AuthoringLang::Python => format!(
+            "    return project({name}, variables={{\"managed\": {py_bool}}}, resources={list})\n"
+        ),
+        AuthoringLang::Go => format!(
+            "  return {}({name}, {list}, railway.ProjectConfig{{\n    Variables: &railway.VariablesPolicy{{Managed: {go_bool}}},\n  }})\n}}\n",
+            lang.helper("project")
+        ),
     }
 }
 
@@ -1001,6 +1279,24 @@ fn render_service_body(
     preserve_variables: bool,
     lang: AuthoringLang,
 ) -> String {
+    render_service_body_following(
+        resource,
+        source_aliases,
+        resource_names,
+        preserve_variables,
+        lang,
+        None,
+    )
+}
+
+fn render_service_body_following(
+    resource: &runner::DesiredResource,
+    source_aliases: &std::collections::BTreeMap<String, serde_json::Value>,
+    resource_names: &std::collections::HashMap<String, String>,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+    pr_repo: Option<&str>,
+) -> String {
     let mut lines = Vec::new();
     if let Some(source) = &resource.source {
         if source
@@ -1011,16 +1307,16 @@ fn render_service_body(
             let alias = source_aliases
                 .iter()
                 .find_map(|(alias, shared_source)| (shared_source == source).then_some(alias));
-            let value = alias
-                .cloned()
-                .unwrap_or_else(|| render_source(source, lang));
+            let value = alias.cloned().unwrap_or_else(|| {
+                render_source_following(source, lang, omit_pulled_branch(source, pr_repo))
+            });
             lines.push(lang.config_field("source", &value));
         } else if source
             .get("image")
             .and_then(|value| value.as_str())
             .is_some()
         {
-            lines.push(lang.config_field("source", &render_source(source, lang)));
+            lines.push(lang.config_field("source", &render_source_following(source, lang, false)));
         }
     }
     render_build(resource.build.as_ref(), lang, &mut lines);
@@ -1054,7 +1350,194 @@ fn render_service_body(
     }
 }
 
+/// Where `config pull` keeps a function's source, relative to the config file.
+const FUNCTIONS_DIR: &str = "functions";
+
+/// A function's decoded source and the file `config pull` writes it to.
+#[derive(Debug, Clone, PartialEq)]
+struct FunctionSourceFile {
+    /// `functions/<name>.ts`, the `codeFile` the generated config references.
+    relative_path: String,
+    code: String,
+}
+
+fn is_function_resource(resource: &runner::DesiredResource) -> bool {
+    if resource.r#type != "service" {
+        return false;
+    }
+    resource.kind.as_deref() == Some("function")
+        || resource
+            .source
+            .as_ref()
+            .and_then(|source| source.get("image"))
+            .and_then(|image| image.as_str())
+            .is_some_and(crate::iac::functions::is_function_image)
+}
+
+/// Functions whose start command decodes to source, keyed by resource
+/// address. A function whose command does not decode stays a plain
+/// `service()` with the raw `start`, so nothing is silently lost.
+fn function_source_files(
+    graph: &runner::DesiredGraph,
+) -> std::collections::BTreeMap<String, FunctionSourceFile> {
+    let mut used = std::collections::HashSet::new();
+    let mut files = std::collections::BTreeMap::new();
+    for resource in &graph.resources {
+        if !is_function_resource(resource) {
+            continue;
+        }
+        let Some(code) = resource
+            .deploy
+            .as_ref()
+            .and_then(crate::iac::functions::function_code_of)
+        else {
+            continue;
+        };
+        // Dedup case-insensitively: macOS and Windows file systems would
+        // otherwise fold `Hello.ts` and `hello.ts` into one file.
+        let stem = function_file_stem(&resource.name);
+        let mut file_name = format!("{stem}.ts");
+        let mut counter = 2;
+        while !used.insert(file_name.to_lowercase()) {
+            file_name = format!("{stem}-{counter}.ts");
+            counter += 1;
+        }
+        let key = resource
+            .address
+            .as_deref()
+            .unwrap_or(&resource.name)
+            .to_string();
+        files.insert(
+            key,
+            FunctionSourceFile {
+                relative_path: format!("{FUNCTIONS_DIR}/{file_name}"),
+                code,
+            },
+        );
+    }
+    files
+}
+
+/// Service names are free text; the file name keeps letters, digits, `-`,
+/// `_` and `.`, and never starts with a dot.
+fn function_file_stem(name: &str) -> String {
+    let mut stem: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    stem = stem.trim_start_matches(['.', '-', '_']).to_string();
+    if stem.is_empty() {
+        stem = "function".to_string();
+    }
+    stem
+}
+
+/// The `fn()` body: the code file first, then the live runtime image so the
+/// next plan does not re-pin the SDK's default tag, then everything
+/// `service()` would render except the encoded start command, which the SDK
+/// derives from the file.
+///
+/// The TypeScript and Go SDKs take `codeFile` and an explicit `source`; the
+/// Python SDK takes `code_file` and `runtime="bun:<tag>"` (it rejects `source`
+/// next to `code_file`).
+fn render_function_body(
+    resource: &runner::DesiredResource,
+    code_file: &str,
+    resource_names: &std::collections::HashMap<String, String>,
+    preserve_variables: bool,
+    lang: AuthoringLang,
+) -> String {
+    let code_file_key = match lang {
+        AuthoringLang::Python => "code_file",
+        AuthoringLang::TypeScript | AuthoringLang::Go => "codeFile",
+    };
+    let mut lines = vec![lang.config_field(code_file_key, &ts_string(code_file))];
+    if let Some(source) = resource
+        .source
+        .as_ref()
+        .filter(|source| is_image_source(Some(source)))
+    {
+        match lang {
+            AuthoringLang::Python => {
+                if let Some(runtime) = source
+                    .get("image")
+                    .and_then(|image| image.as_str())
+                    .and_then(python_function_runtime)
+                {
+                    lines.push(lang.config_field("runtime", &ts_string(&runtime)));
+                }
+            }
+            AuthoringLang::TypeScript | AuthoringLang::Go => {
+                lines.push(
+                    lang.config_field("source", &render_source_following(source, lang, false)),
+                );
+            }
+        }
+    }
+    render_build(resource.build.as_ref(), lang, &mut lines);
+    let deploy = resource.deploy.as_ref().map(|deploy| {
+        let mut copy = deploy.clone();
+        if let Some(obj) = copy.as_object_mut() {
+            obj.remove("startCommand");
+        }
+        copy
+    });
+    render_deploy(deploy.as_ref(), resource.source.as_ref(), lang, &mut lines);
+    render_networking(resource.networking.as_ref(), lang, &mut lines);
+    render_tracing(resource.tracing.as_ref(), lang, &mut lines);
+    render_volume_attachments(
+        resource.volume_attachments.as_ref(),
+        resource_names,
+        lang,
+        &mut lines,
+    );
+    render_variables(
+        resource.variables.as_ref(),
+        resource_names,
+        lang,
+        &mut lines,
+        preserve_variables,
+    );
+    match lang {
+        AuthoringLang::TypeScript => format!("{{\n{}\n  }}", lines.join("\n")),
+        AuthoringLang::Python | AuthoringLang::Go => lines.join("\n"),
+    }
+}
+
+/// The Python SDK's `runtime` for a live function image: `bun:1.2.16` for
+/// `ghcr.io/railwayapp/function-bun:1.2.16`. Images outside the
+/// `function-<runtime>` family are left to the SDK default.
+fn python_function_runtime(image: &str) -> Option<String> {
+    let runtime = image.strip_prefix("ghcr.io/railwayapp/function-")?;
+    (!runtime.is_empty() && !runtime.starts_with(':')).then(|| runtime.to_string())
+}
+
 fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
+    render_source_following(source, lang, false)
+}
+
+fn omit_pulled_branch(source: &serde_json::Value, pr_repo: Option<&str>) -> bool {
+    let Some(pr_repo) = pr_repo else {
+        return false;
+    };
+    source
+        .get("repo")
+        .and_then(|value| value.as_str())
+        .is_some_and(|repo| repo.eq_ignore_ascii_case(pr_repo))
+}
+
+fn render_source_following(
+    source: &serde_json::Value,
+    lang: AuthoringLang,
+    omit_branch: bool,
+) -> String {
     let (helper, identifier) =
         if let Some(repo) = source.get("repo").and_then(|value| value.as_str()) {
             ("github", repo)
@@ -1071,7 +1554,7 @@ fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
     if helper != "image" || !supports_image_auto_updates(identifier) {
         options.remove("autoUpdates");
     }
-    if options.get("branch").and_then(|value| value.as_str()) == Some("main") {
+    if omit_branch {
         options.remove("branch");
     }
     if options
@@ -1808,7 +2291,7 @@ fn railway_stub_with_service(
     };
     let web = service_call(lang, "\"web\"", &body);
     let web_stmt = assign_stmt(lang, "web", &web);
-    let return_stmt = render_project_return(lang, project_name, &["web".to_string()]);
+    let return_stmt = render_project_return(lang, project_name, &["web".to_string()], None);
     let imports = if github_source.is_some() {
         vec!["defineRailway", "github", "project", "service"]
     } else {
@@ -1888,6 +2371,7 @@ async fn run_sync(args: SharedArgs, stage: bool, apply: bool) -> Result<()> {
         out: args.out,
         plan: args.plan,
         source_tree: args.source_tree,
+        environment: args.environment,
     })
     .await
 }
@@ -1936,7 +2420,11 @@ async fn ensure_config_initialized(args: &SharedArgs) -> Result<()> {
         bail!("Run `railway config init` to create .railway/railway.ts, then try again.");
     }
 
-    init_config(InitArgs { force: false }).await?;
+    init_config(InitArgs {
+        force: false,
+        variables: None,
+    })
+    .await?;
     println!();
     Ok(())
 }
@@ -2118,6 +2606,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 
@@ -2140,6 +2629,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            kind: None,
         }
     }
 
@@ -2148,7 +2638,7 @@ mod tests {
             project: Some(runner::DesiredProject { name: "app".into() }),
             resources: vec![database_resource("postgres", "postgres", networking)],
         };
-        render_graph_as_railway(&graph, true, AuthoringLang::TypeScript)
+        render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true)
     }
 
     #[test]
@@ -2226,12 +2716,142 @@ mod tests {
             resources: vec![frontend, worker],
         };
 
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
 
         assert_eq!(rendered.matches("const frontend =").count(), 1);
         assert!(rendered.contains("const frontend = github(\"org/frontend\")"));
         assert!(rendered.contains("const frontend2 = service(\"frontend\""));
         assert_eq!(rendered.matches("source: frontend,").count(), 2);
+    }
+
+    fn function_resource(name: &str, code: &str) -> runner::DesiredResource {
+        let mut resource = service_resource(
+            json!({ "type": "image", "image": "ghcr.io/railwayapp/function-bun:1.4.0" }),
+            json!({
+                "startCommand": crate::iac::functions::encode_function_code(code),
+                "healthcheckPath": "/health"
+            }),
+        );
+        resource.address = Some(format!("service.{name}"));
+        resource.name = name.to_string();
+        resource.kind = Some("function".to_string());
+        resource
+    }
+
+    fn graph_of(resources: Vec<runner::DesiredResource>) -> runner::DesiredGraph {
+        runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources,
+        }
+    }
+
+    #[test]
+    fn pull_renderer_authors_functions_with_a_code_file() {
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(rendered.contains("import { defineRailway, fn, image, project, service }"));
+        assert!(rendered.contains("const hello = fn(\"hello\", {"));
+        assert!(rendered.contains("    codeFile: \"functions/hello.ts\","));
+        assert!(rendered.contains("    source: image(\"ghcr.io/railwayapp/function-bun:1.4.0\"),"));
+        assert!(rendered.contains("    healthcheck: \"/health\","));
+        assert!(!rendered.contains("run.sh"));
+        assert!(!rendered.contains("start:"));
+    }
+
+    #[test]
+    fn pull_renderer_authors_functions_in_python_and_go() {
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let python = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        assert!(python.contains("from railway_sdk import define_railway, fn, project, service\n"));
+        assert!(python.contains(
+            "hello = fn(\n        \"hello\",\n        code_file=\"functions/hello.ts\",\n        runtime=\"bun:1.4.0\","
+        ));
+        assert!(!python.contains("codeFile"));
+        let go = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
+        assert!(go.contains(
+            "hello := railway.Fn(\"hello\", railway.ServiceConfig{\n\t\t\"codeFile\": \"functions/hello.ts\",\n\t\t\"source\": railway.Image(\"ghcr.io/railwayapp/function-bun:1.4.0\"),"
+        ));
+    }
+
+    #[test]
+    fn pull_renderer_pins_an_older_function_runtime() {
+        let mut resource = function_resource("hello", "export default {}\n");
+        resource.source =
+            Some(json!({ "type": "image", "image": "ghcr.io/railwayapp/function-bun:1.2.16" }));
+        let graph = graph_of(vec![resource]);
+        let ts = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(ts.contains("source: image(\"ghcr.io/railwayapp/function-bun:1.2.16\")"));
+        let python = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        assert!(python.contains("runtime=\"bun:1.2.16\","));
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function-bun:1.2.16").as_deref(),
+            Some("bun:1.2.16")
+        );
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function:1.0.0"),
+            None
+        );
+        assert_eq!(
+            python_function_runtime("ghcr.io/railwayapp/function-:1"),
+            None
+        );
+    }
+
+    #[test]
+    fn pull_renderer_keeps_a_function_image_service_without_decodable_code_as_a_service() {
+        let mut resource = function_resource("hello", "ignored");
+        resource.deploy = Some(json!({ "startCommand": "bun run index.ts" }));
+        let graph = graph_of(vec![resource]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(rendered.contains("const hello = service(\"hello\", {"));
+        assert!(rendered.contains("start: \"bun run index.ts\""));
+        assert!(!rendered.contains("fn("));
+        assert!(function_source_files(&graph).is_empty());
+    }
+
+    #[test]
+    fn function_source_files_decode_code_and_never_collide() {
+        let graph = graph_of(vec![
+            function_resource("Hello World", "one\n"),
+            function_resource("hello-world", "two\n"),
+            function_resource("../etc", "three\n"),
+        ]);
+        let files = function_source_files(&graph);
+        let paths: Vec<&str> = files.values().map(|f| f.relative_path.as_str()).collect();
+        // Case-insensitive: `Hello-World.ts` and `hello-world.ts` are one file
+        // on macOS and Windows.
+        assert_eq!(
+            paths,
+            vec![
+                "functions/etc.ts",
+                "functions/Hello-World.ts",
+                "functions/hello-world-2.ts"
+            ]
+        );
+        assert_eq!(files["service.Hello World"].code, "one\n");
+        assert_eq!(files["service.../etc"].code, "three\n");
+        assert_eq!(function_file_stem("...hidden"), "hidden");
+        assert_eq!(function_file_stem("   "), "function");
+    }
+
+    #[test]
+    fn write_function_sources_puts_files_beside_the_config_and_reports_stale_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".railway").join("railway.ts");
+        let functions_dir = dir.path().join(".railway").join("functions");
+        fs::create_dir_all(&functions_dir).unwrap();
+        fs::write(functions_dir.join("gone.ts"), "old\n").unwrap();
+        fs::write(functions_dir.join("notes.md"), "not a function\n").unwrap();
+        let graph = graph_of(vec![function_resource("hello", "export default {}\n")]);
+        let result = write_function_sources(&config, &function_source_files(&graph)).unwrap();
+        let expected = functions_dir.join("hello.ts");
+        assert_eq!(result.written, vec![expected.clone()]);
+        assert_eq!(result.stale, vec![functions_dir.join("gone.ts")]);
+        assert_eq!(fs::read_to_string(expected).unwrap(), "export default {}\n");
+        assert_eq!(
+            fs::read_to_string(functions_dir.join("gone.ts")).unwrap(),
+            "old\n"
+        );
     }
 
     #[test]
@@ -2337,10 +2957,41 @@ mod tests {
         assert!(rendered_image.contains("schedule"));
         let rendered_github = render_source(&github_source, AuthoringLang::TypeScript);
         assert!(rendered_github.contains("branch: \"feature\""));
+        let rendered_main = render_source(
+            &json!({ "repo": "railwayapp/nixpacks", "branch": "main" }),
+            AuthoringLang::TypeScript,
+        );
+        assert!(rendered_main.contains("branch: \"main\""));
         assert!(!rendered_github.contains("autoUpdates"));
         assert!(
             !render_source(&unsupported_source, AuthoringLang::TypeScript).contains("autoUpdates")
         );
+    }
+
+    #[test]
+    fn pull_renderer_omits_branch_only_for_the_pr_repo() {
+        let pr = service_resource(
+            json!({ "repo": "Acme/API", "branch": "feat/login" }),
+            json!({}),
+        );
+        let mut other =
+            service_resource(json!({ "repo": "other/lib", "branch": "main" }), json!({}));
+        other.address = Some("service.lib".into());
+        other.name = "lib".into();
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject { name: "app".into() }),
+            resources: vec![pr, other],
+        };
+        let rendered = render_graph_as_railway_following(
+            &graph,
+            true,
+            AuthoringLang::TypeScript,
+            true,
+            Some("acme/api"),
+        );
+        assert!(rendered.contains("github(\"Acme/API\")"));
+        assert!(!rendered.contains("feat/login"));
+        assert!(rendered.contains("branch: \"main\""));
     }
 
     #[test]
@@ -2360,6 +3011,25 @@ mod tests {
         assert!(rendered.contains("startCommand"));
         assert!(rendered.contains("limitOverride"));
         assert!(!rendered.contains("requiredMountPath"));
+    }
+
+    #[test]
+    fn pull_renderer_keeps_pre_deploy_timeout_in_the_deploy_block() {
+        let resource = service_resource(
+            json!({ "image": "ghcr.io/acme/web:1" }),
+            json!({ "preDeployCommand": ["npm run migrate"], "preDeployTimeoutSeconds": 600 }),
+        );
+
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+
+        assert!(rendered.contains("preDeploy: \"npm run migrate\""));
+        assert!(rendered.contains("preDeployTimeoutSeconds: 600"));
     }
 
     #[test]
@@ -2417,7 +3087,7 @@ mod tests {
                 json!({ "startCommand": "./app" }),
             )],
         };
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Python);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
         assert!(rendered.contains("from railway_sdk import"));
         assert!(rendered.contains("def main(ctx=None):"));
         assert!(rendered.contains("source=github(\"org/app\")"));
@@ -2437,11 +3107,95 @@ mod tests {
                 json!({ "startCommand": "./app" }),
             )],
         };
-        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
         assert!(rendered.contains("github.com/railwayapp/railway-go-sdk"));
         assert!(rendered.contains("func Railway(ctx railway.Context)"));
         assert!(rendered.contains("railway.Github(\"org/app\")"));
         assert!(rendered.contains("\"start\": \"./app\""));
         assert!(rendered.contains("railway.ServiceNamed"));
+    }
+
+    #[test]
+    fn variables_mode_requires_a_flag_when_not_interactive() {
+        let error = resolve_variables_mode(None, false).unwrap_err().to_string();
+        assert_eq!(error, "Pass --variables=managed or --variables=unmanaged.");
+        assert_eq!(
+            resolve_variables_mode(Some(VariablesMode::Unmanaged), false).unwrap(),
+            VariablesMode::Unmanaged
+        );
+    }
+
+    #[test]
+    fn include_variables_conflicts_with_unmanaged() {
+        let error = reject_unmanaged_include(VariablesMode::Unmanaged, true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "--include-variables cannot be used with --variables=unmanaged."
+        );
+        assert!(reject_unmanaged_include(VariablesMode::Managed, true).is_ok());
+        assert!(reject_unmanaged_include(VariablesMode::Unmanaged, false).is_ok());
+    }
+
+    #[test]
+    fn variables_prompt_options_are_the_two_policy_lines() {
+        assert_eq!(
+            VariablesMode::Managed.to_string(),
+            "managed — this file owns every variable on these services"
+        );
+        assert_eq!(
+            VariablesMode::Unmanaged.to_string(),
+            "unmanaged — IaC never reads or writes variables (use with secret managers like Doppler)"
+        );
+    }
+
+    #[test]
+    fn pull_renderer_writes_variables_policy_for_both_modes() {
+        let mut resource = service_resource(json!({ "image": "nginx" }), json!({}));
+        resource.variables = Some(
+            json!({
+                "SECRET": { "type": "preserve" },
+                "NODE_ENV": { "type": "literal", "value": "production" }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "demo".into(),
+            }),
+            resources: vec![resource],
+        };
+
+        let ts_managed = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        let ts_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, false);
+        assert!(ts_managed.contains("variables: { managed: true }"));
+        assert!(ts_managed.find("variables:").unwrap() < ts_managed.find("resources:").unwrap());
+        assert!(ts_managed.contains("SECRET: preserve()"));
+        assert!(ts_managed.contains("NODE_ENV: \"production\""));
+        assert!(ts_unmanaged.contains("variables: { managed: false }"));
+        assert!(!ts_unmanaged.contains("env:"));
+        assert!(!ts_unmanaged.contains("preserve()"));
+        assert!(!ts_unmanaged.contains("NODE_ENV"));
+
+        let py_managed = render_graph_as_railway(&graph, true, AuthoringLang::Python, true);
+        let py_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::Python, false);
+        assert!(py_managed.contains("variables={\"managed\": True}"));
+        assert!(py_managed.find("variables=").unwrap() < py_managed.find("resources=").unwrap());
+        assert!(py_managed.contains("preserve()"));
+        assert!(py_unmanaged.contains("variables={\"managed\": False}"));
+        assert!(!py_unmanaged.contains("env="));
+        assert!(!py_unmanaged.contains("preserve()"));
+
+        let go_managed = render_graph_as_railway(&graph, true, AuthoringLang::Go, true);
+        let go_unmanaged = render_graph_as_railway(&graph, true, AuthoringLang::Go, false);
+        assert!(go_managed.contains("railway.ProjectConfig{"));
+        assert!(go_managed.contains("Variables: &railway.VariablesPolicy{Managed: true}"));
+        assert!(go_managed.contains("railway.Preserve()"));
+        assert!(go_unmanaged.contains("Variables: &railway.VariablesPolicy{Managed: false}"));
+        assert!(!go_unmanaged.contains("\"env\""));
+        assert!(!go_unmanaged.contains("Preserve"));
     }
 }

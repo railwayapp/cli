@@ -327,6 +327,7 @@ mod tests {
         let plan = from_runner_json(&raw, "abc".into()).unwrap();
         assert_eq!(plan.kind, KIND);
         assert_eq!(plan.source_tree, "abc");
+        assert_eq!(plan.environment_id, "env_1");
         assert_eq!(plan.config_etag, "etag_1");
         assert!(!plan.destructive);
         let encoded = serde_json::to_string(&plan).unwrap();

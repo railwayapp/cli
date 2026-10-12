@@ -9,14 +9,26 @@ use serde_json::{Value, json};
 
 use crate::config::LinkedProject;
 
-use super::compiler::project_definition_to_graph;
+use super::change_set::Diagnostic;
+use super::compiler::{
+    normalize_resource_env, project_definition_to_graph, unknown_field_diagnostics,
+};
 use super::graph::RailwayGraph;
 use super::partial::parse_partial_name;
+
+/// Capabilities this CLI honours. SDKs refuse to emit a feature that is not listed.
+pub const IAC_FEATURES: &[&str] = &[
+    "variables-policy",
+    "environments",
+    "pr-context",
+    "environment-owned-branch",
+];
 
 pub struct EvaluatedFile {
     pub file: PathBuf,
     pub graph: RailwayGraph,
     pub partial: Option<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Linked project + command, matching the JSON the legacy TS runner sent as `context`.
@@ -28,6 +40,14 @@ pub struct EvalContext {
     pub environment_id: Option<String>,
     pub environment: Option<String>,
     pub environment_name: Option<String>,
+    pub pr: Option<PrContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrContext {
+    pub number: i64,
+    pub branch: Option<String>,
+    pub base: Option<String>,
 }
 
 impl EvalContext {
@@ -40,6 +60,7 @@ impl EvalContext {
             environment_id: linked.environment.clone(),
             environment: environment.clone(),
             environment_name: environment,
+            pr: None,
         }
     }
 
@@ -51,6 +72,12 @@ impl EvalContext {
             "environmentId": self.environment_id,
             "environment": self.environment,
             "environmentName": self.environment_name,
+            "pr": self.pr.as_ref().map(|pr| json!({
+                "number": pr.number,
+                "branch": pr.branch,
+                "base": pr.base,
+            })),
+            "features": IAC_FEATURES,
         })
     }
 }
@@ -80,15 +107,18 @@ pub fn evaluate_file_with_context(file: &Path, ctx: &EvalContext) -> Result<Eval
         .cloned()
         .or_else(|| payload.get("graph").cloned())
         .unwrap_or(payload.clone());
-    let graph = project_definition_to_graph(&normalize_project(project));
+    let project = normalize_project(project);
+    let diagnostics = unknown_field_diagnostics(&project);
+    let graph = project_definition_to_graph(&project);
     Ok(EvaluatedFile {
         file,
         graph,
         partial,
+        diagnostics,
     })
 }
 
-fn normalize_project(mut project: Value) -> Value {
+pub(crate) fn normalize_project(mut project: Value) -> Value {
     if project.get("resources").is_none() {
         if let Some(resources) = project.get("Resources").cloned() {
             project["resources"] = resources;
@@ -125,6 +155,7 @@ fn normalize_project(mut project: Value) -> Value {
                     resource["build"] = json!({ "buildCommand": build });
                 }
             }
+            normalize_resource_env(resource);
         }
     }
     if project.get("name").is_none() {
@@ -265,10 +296,32 @@ func railwayIacFillValue(v reflect.Value, payload map[string]any) {{
   t := v.Type()
   for i := 0; i < t.NumField(); i++ {{
     field := t.Field(i)
-    if !field.IsExported() || field.Type.Kind() != reflect.String {{
+    if !field.IsExported() {{
       continue
     }}
     name := strings.ToLower(field.Name)
+    if field.Type.Kind() == reflect.Slice && field.Type.Elem().Kind() == reflect.String {{
+      for _, key := range []string{{field.Name, name}} {{
+        raw, ok := payload[key].([]any)
+        if !ok {{
+          continue
+        }}
+        out := reflect.MakeSlice(field.Type, 0, len(raw))
+        for _, item := range raw {{
+          text, ok := item.(string)
+          if !ok {{
+            continue
+          }}
+          out = reflect.Append(out, reflect.ValueOf(text))
+        }}
+        v.Field(i).Set(out)
+        break
+      }}
+      continue
+    }}
+    if field.Type.Kind() != reflect.String {{
+      continue
+    }}
     keys := []string{{field.Name, name}}
     switch name {{
     case "command":
