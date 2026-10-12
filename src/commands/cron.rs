@@ -266,7 +266,7 @@ async fn list(args: ListArgs) -> Result<()> {
             "{}",
             format!(
                 "Logs for a run: railway logs -s {} --since {since} --until {until}",
-                ctx.service_name
+                shell_quote(&ctx.service_name)
             )
             .dimmed()
         );
@@ -335,7 +335,7 @@ async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-const STARTED_WIDTH: usize = 24;
+const STARTED_WIDTH: usize = 26;
 const STATUS_WIDTH: usize = 12;
 const DURATION_WIDTH: usize = 12;
 
@@ -359,7 +359,10 @@ fn clamp_limit(limit: i64) -> i64 {
 
 fn describe_schedule(schedule: &str, next_run_at: Option<DateTime<Utc>>) -> String {
     let mut line = match Cron::from_str(schedule) {
-        Ok(cron) => format!("Schedule: {schedule} ({})", cron.describe().to_lowercase()),
+        Ok(cron) => format!(
+            "Schedule: {schedule} ({})",
+            cron.describe().to_lowercase().trim_end_matches('.')
+        ),
         Err(_) => format!("Schedule: {schedule}"),
     };
     if let Some(next) = next_run_at {
@@ -393,6 +396,18 @@ fn status_note(status: &DeploymentInstanceStatus) -> Option<&'static str> {
     match status {
         DeploymentInstanceStatus::SKIPPED => Some("previous run still running"),
         _ => None,
+    }
+}
+
+/// Quote a value for a copy-pasteable shell example when it needs it.
+fn shell_quote(value: &str) -> String {
+    let plain = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'));
+    if plain && !value.is_empty() {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -439,6 +454,7 @@ mod tests {
     fn schedule_line_describes_and_tolerates_bad_input() {
         let line = describe_schedule("*/5 * * * *", None);
         assert!(line.starts_with("Schedule: */5 * * * * ("), "{line}");
+        assert!(!line.contains('.'), "{line}");
         assert!(!line.contains("next run"));
 
         let line = describe_schedule("not a cron", Some(Utc::now() + Duration::minutes(3)));
@@ -457,6 +473,17 @@ mod tests {
 
         let meta = serde_json::json!({ "cronSchedule": "" , "serviceManifest": {} });
         assert_eq!(cron_schedule_from_meta(&meta), None);
+    }
+
+    #[test]
+    fn shell_quote_only_when_needed() {
+        assert_eq!(shell_quote("worker"), "worker");
+        assert_eq!(shell_quote("my-svc_1.0"), "my-svc_1.0");
+        assert_eq!(
+            shell_quote("Gauge: Template Metrics Ingest"),
+            "'Gauge: Template Metrics Ingest'"
+        );
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]
