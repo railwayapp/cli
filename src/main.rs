@@ -55,6 +55,7 @@ commands!(
     completion,
     config,
     connect,
+    cron,
     delete,
     deploy,
     deployment,

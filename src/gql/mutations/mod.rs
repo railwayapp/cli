@@ -359,6 +359,14 @@ pub struct ServiceInstanceDeploy;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DeploymentInstanceExecutionCreate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DeploymentInstanceExecutionCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceInstanceDeployLatestCommit.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
