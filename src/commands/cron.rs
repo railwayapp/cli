@@ -9,6 +9,7 @@ use is_terminal::IsTerminal;
 use serde::Serialize;
 
 use super::*;
+use crate::commands::output::limit::clamp_list_limit;
 use crate::{
     controllers::project::{
         ProjectServiceInstanceNode, ServiceContext, find_service_instance,
@@ -23,7 +24,7 @@ use crate::{
 /// View recent runs of a cron service or trigger one off-schedule
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway cron list\n  railway cron list --service worker --environment production --limit 50\n  railway cron list --json\n  railway cron run --service worker --yes\n  railway cron run --yes --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service, --environment, or --project to pick another.\n  `cron run` enqueues the run and returns immediately. It can take a few minutes to show up in `cron list`.\n  Non-interactive `cron run` must pass --yes."
+    after_help = "Examples:\n\n  railway cron list\n  railway cron list --service worker --environment production --limit 50\n  railway cron list --json\n  railway cron run --service worker --yes\n  railway cron run --yes --json\n\nAutomation notes:\n  Uses the linked service by default. Pass --service and --environment to pick another; --project also requires --environment.\n  `cron run` enqueues the run and returns immediately. It can take a few minutes to show up in `cron list`.\n  Non-interactive `cron run` must pass --yes."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -164,7 +165,7 @@ struct RunOutput {
 }
 
 async fn list(args: ListArgs) -> Result<()> {
-    let limit = clamp_limit(args.limit);
+    let limit = clamp_list_limit(args.limit);
     let cron = resolve_cron_service(args.target).await?;
     let ctx = &cron.ctx;
 
@@ -338,24 +339,6 @@ async fn run(args: RunArgs) -> Result<()> {
 const STARTED_WIDTH: usize = 26;
 const STATUS_WIDTH: usize = 12;
 const DURATION_WIDTH: usize = 12;
-
-fn clamp_limit(limit: i64) -> i64 {
-    if limit > 1000 {
-        eprintln!(
-            "{}",
-            "Warning: limit cannot exceed 1000, using 1000 instead".yellow()
-        );
-        1000
-    } else if limit < 1 {
-        eprintln!(
-            "{}",
-            "Warning: limit must be at least 1, using 1 instead".yellow()
-        );
-        1
-    } else {
-        limit
-    }
-}
 
 fn describe_schedule(schedule: &str, next_run_at: Option<DateTime<Utc>>) -> String {
     let mut line = match Cron::from_str(schedule) {
