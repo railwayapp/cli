@@ -2578,6 +2578,13 @@ fn dropping_a_function_start_command_warns_and_reports_the_removal() {
     assert_eq!(warning.severity, "warning");
     assert_eq!(warning.path, "resources.service.hello.deploy.startCommand");
     assert!(warning.message.contains("declared without code"));
+    // The SDK field is `codeFile` (`code_file` in Python), not `code`.
+    assert!(
+        warning
+            .message
+            .contains("Pass `codeFile` (`code_file` in Python) to fn()")
+    );
+    assert!(!warning.message.contains("Pass `code` "));
 }
 
 #[test]
