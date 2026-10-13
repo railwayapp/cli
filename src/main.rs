@@ -1088,6 +1088,7 @@ mod cli_tests {
             assert_parses(&["mcp", "install", "--remote", "--agent", "codex"]);
             assert_parses(&["mcp", "install", "--agent", "pi"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "pi"]);
+            assert_parses(&["mcp", "install", "--agent", "antigravity"]);
             assert_parses(&["mcp", "install", "--local"]);
             assert_parses(&["mcp", "install", "--local", "--agent", "cursor"]);
             assert_parses(&["mcp", "install", "--oauth"]);
