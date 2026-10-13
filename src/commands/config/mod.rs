@@ -1493,6 +1493,7 @@ fn render_function_body(
     render_deploy(deploy.as_ref(), resource.source.as_ref(), lang, &mut lines);
     render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_tracing(resource.tracing.as_ref(), lang, &mut lines);
+    render_cdn(resource.cdn.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -2773,6 +2774,20 @@ mod tests {
         assert!(rendered.contains("    healthcheck: \"/health\","));
         assert!(!rendered.contains("run.sh"));
         assert!(!rendered.contains("start:"));
+    }
+
+    #[test]
+    fn pull_renderer_authors_cdn_on_functions() {
+        let mut resource = function_resource("hello", "export default {}\n");
+        resource.cdn = Some(json!({ "enabled": true, "purgeOnDeploy": "all" }));
+        let graph = graph_of(vec![resource]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(
+            rendered.contains("const hello = fn(\"hello\", {"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("cdn: {"), "{rendered}");
+        assert!(rendered.contains("purgeOnDeploy: \"all\""), "{rendered}");
     }
 
     #[test]
