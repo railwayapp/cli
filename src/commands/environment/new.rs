@@ -25,6 +25,65 @@ pub async fn new_environment(args: Args) -> Result<()> {
     let name = select_name_new(&args, is_terminal)?;
     let duplicate_id = select_duplicate_id_new(&args, &project, is_terminal)?;
 
+    // --detach: do an atomic server-side duplicate and return immediately, letting
+    // the service/volume copy run in a background workflow instead of blocking on it.
+    if args.detach {
+        // The server-side copy can't apply CLI-side per-service overrides.
+        if !args.config.get_all_service_configs().is_empty() {
+            bail!(
+                "--detach cannot be combined with --service-config/--service-variable; \
+                 omit --detach to apply per-service overrides."
+            );
+        }
+
+        let spinner = create_spinner_if(!json, "Creating environment...".into());
+
+        let vars = mutations::environment_create::Variables {
+            project_id: project.id.clone(),
+            name,
+            // Some(src) => atomic server-side duplicate; None => empty environment
+            source_id: duplicate_id.clone(),
+            apply_changes_in_background: Some(true),
+        };
+
+        let response = post_graphql::<mutations::EnvironmentCreate, _>(
+            &client,
+            &configs.get_backboard(),
+            vars,
+        )
+        .await?;
+
+        let env_id = response.environment_create.id.clone();
+        let env_name = response.environment_create.name.clone();
+
+        if json {
+            println!("{}", serde_json::json!({"id": env_id, "name": env_name}));
+        } else if let Some(spinner) = spinner {
+            let suffix = if duplicate_id.is_some() {
+                " (copy running in the background)"
+            } else {
+                ""
+            };
+            spinner.finish_with_message(format!(
+                "{} {} {}{}",
+                "Environment".green(),
+                env_name.magenta().bold(),
+                "created!".green(),
+                suffix
+            ));
+        }
+
+        configs.link_project(
+            project_id,
+            linked_project.name.clone(),
+            env_id,
+            Some(env_name),
+        )?;
+        configs.write()?;
+
+        return Ok(());
+    }
+
     // Step 1: Create a new empty environment (no sourceEnvironmentId)
     let vars = mutations::environment_create::Variables {
         project_id: project.id.clone(),
