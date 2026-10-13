@@ -2,7 +2,7 @@
 //! `.railway/railway.ts`. CaC → graph/DSL translation lives in the CLI only.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -18,7 +18,6 @@ use crate::{
     config::Configs,
     gql::mutations::{self, ServiceInstanceUpdate},
     iac::{EvalContext, evaluate_file_with_context},
-    util::cac_deprecation::{find_all_cac_files, find_cac_file},
     util::prompt::prompt_confirm_with_default,
 };
 
@@ -50,8 +49,7 @@ pub struct MigrateArgs {
     #[clap(long)]
     delete_files: bool,
 
-    /// Migrate only the service with this name. With a single Config as Code
-    /// file it instead overrides the emitted service name.
+    /// Migrate only the service with this name in the linked environment.
     #[clap(long)]
     service: Option<String>,
 
@@ -267,15 +265,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
     }
 
     if args.delete_files {
-        for service in &services {
-            fs::remove_file(&service.path)
-                .with_context(|| format!("Failed to delete {}", service.path.display()))?;
-            eprintln!(
-                "{} {}",
-                "Deleted".green().bold(),
-                display_rel(&cwd, &service.path).cyan()
-            );
-        }
+        delete_cac_files(&cwd, &services)?;
         eprintln!(
             "  {} Push these deletions only after cutover — the platform reads them until then.",
             "!".yellow().bold()
@@ -330,6 +320,19 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         "Note:".yellow().bold(),
         "railway config plan".cyan()
     );
+    Ok(())
+}
+
+fn delete_cac_files(cwd: &Path, services: &[CacService]) -> Result<()> {
+    let paths: BTreeSet<_> = services.iter().map(|service| &service.path).collect();
+    for path in paths {
+        fs::remove_file(path).with_context(|| format!("Failed to delete {}", path.display()))?;
+        eprintln!(
+            "{} {}",
+            "Deleted".green().bold(),
+            display_rel(cwd, path).cyan()
+        );
+    }
     Ok(())
 }
 
@@ -478,33 +481,31 @@ async fn discover_cac_services(
     service_filter: Option<&str>,
 ) -> Result<Vec<CacService>> {
     let root = git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let mut files = find_all_cac_files(&root);
-    if files.is_empty() {
-        if let Some(one) = find_cac_file(cwd) {
-            files.push(one);
-        }
-    }
-    if files.is_empty() {
-        bail!("No railway.json or railway.toml found in this repository.");
-    }
+    let env_index = environment_cac_index(&root)
+        .await
+        .context("Could not read Config as Code settings for the linked environment")?;
+    discover_cac_services_from_index(&root, &env_index, service_filter)
+}
 
-    let env_index = environment_cac_index(&root).await.unwrap_or_default();
-    let mut claimed = HashSet::new();
+fn discover_cac_services_from_index(
+    root: &Path,
+    env_index: &[(String, EnvCacMeta)],
+    service_filter: Option<&str>,
+) -> Result<Vec<CacService>> {
     let mut services = Vec::new();
-
-    for (rel, meta) in &env_index {
-        let path = root.join(rel);
-        if !path.is_file() {
-            eprintln!(
-                "{} {} is set as the Railway Config File for {} but was not found on disk.",
-                "Warning:".yellow().bold(),
-                rel.cyan(),
-                meta.name.cyan()
-            );
+    for (rel, meta) in env_index {
+        if service_filter.is_some_and(|filter| filter != meta.name) {
             continue;
         }
+        let path = root.join(rel);
+        if !path.is_file() {
+            bail!(
+                "{} is set as the Railway Config File for {} but was not found on disk.",
+                rel,
+                meta.name
+            );
+        }
         let cac = parse_cac_file(&path)?;
-        claimed.insert(canonicalize_or_clone(&path));
         services.push(CacService {
             name: meta.name.clone(),
             path,
@@ -512,29 +513,11 @@ async fn discover_cac_services(
         });
     }
 
-    for path in files {
-        if claimed.contains(&canonicalize_or_clone(&path)) {
-            continue;
-        }
-        let name = guess_service_name(cwd, &path);
-        let cac = parse_cac_file(&path)?;
-        services.push(CacService { name, path, cac });
-    }
-
     apply_service_filter(&mut services, service_filter)?;
-
-    services.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
-
-    let mut seen = HashSet::new();
-    for service in &services {
-        if !seen.insert(service.name.clone()) {
-            bail!(
-                "Two Config as Code files map to the service name {}. Rename one of the directories or remove one of the files.",
-                service.name
-            );
-        }
+    if services.is_empty() {
+        bail!("No Config as Code files found for services in the linked environment.");
     }
-
+    services.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
     Ok(services)
 }
 
@@ -544,18 +527,10 @@ fn apply_service_filter(services: &mut Vec<CacService>, filter: Option<&str>) ->
     };
     if services.iter().any(|service| service.name == filter) {
         services.retain(|service| service.name == filter);
-    } else if services.len() == 1 {
-        // Single-file repos historically used --service to override the
-        // guessed name; keep that working.
-        services[0].name = filter.to_string();
     } else {
         bail!("No Config as Code file found for service {filter}.");
     }
     Ok(())
-}
-
-fn canonicalize_or_clone(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn git_root(start: &Path) -> Option<PathBuf> {
@@ -586,7 +561,7 @@ struct EnvCacMeta {
     name: String,
 }
 
-async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMeta>> {
+async fn environment_cac_index(root: &Path) -> Result<Vec<(String, EnvCacMeta)>> {
     let configs = Configs::new()?;
     let linked = configs.get_linked_project().await?;
     let environment_id = linked
@@ -640,53 +615,90 @@ async fn environment_cac_index(root: &Path) -> Result<BTreeMap<String, EnvCacMet
         "query IacMigrateServices($id: String!) { project(id: $id) { services(first: 1000) { edges { node { id name } } } } }",
         json!({ "id": linked.project }),
     )
-    .await
-    .ok()
-    .and_then(|data| data.project)
-    .and_then(|project| project.services)
-    .map(|connection| {
-        connection
-            .edges
-            .into_iter()
-            .map(|edge| (edge.node.id, edge.node.name.unwrap_or_default()))
-            .collect::<BTreeMap<_, _>>()
-    })
-    .unwrap_or_default();
+    .await?
+    .project
+    .context("Could not read the linked project's services")?
+    .services
+    .context("Could not read the linked project's services")?
+    .edges
+    .into_iter()
+    .map(|edge| (edge.node.id, edge.node.name.unwrap_or_default()))
+    .collect::<BTreeMap<_, _>>();
 
-    let mut index = BTreeMap::new();
-    let Some(services) = env
-        .environment
-        .config
-        .get("services")
-        .and_then(JsonValue::as_object)
-    else {
+    let repo = super::detect_github_remote(root);
+    index_environment_cac(root, &env.environment.config, &names, repo.as_deref())
+}
+
+fn index_environment_cac(
+    root: &Path,
+    config: &JsonValue,
+    names: &BTreeMap<String, String>,
+    repo: Option<&str>,
+) -> Result<Vec<(String, EnvCacMeta)>> {
+    // Keep one association per environment service, including shared paths.
+    // Repository files alone must never introduce services from other projects.
+    let mut index = Vec::new();
+    let Some(services) = config.get("services").and_then(JsonValue::as_object) else {
         return Ok(index);
     };
     for (id, service) in services {
-        let Some(config_file) = service.get("configFile").and_then(JsonValue::as_str) else {
-            continue;
-        };
-        if !is_cac_config_file(config_file) {
+        let source = service.get("source").unwrap_or(&JsonValue::Null);
+        if source.get("image").and_then(JsonValue::as_str).is_some()
+            || source.get("code").and_then(JsonValue::as_str).is_some()
+        {
             continue;
         }
-        let Some(rel) = normalize_config_file_path(config_file) else {
-            eprintln!(
-                "{} Railway Config File path {} for service {} escapes the repository; skipping.",
-                "Warning:".yellow().bold(),
-                config_file.cyan(),
-                names.get(id).cloned().unwrap_or_else(|| id.clone()).cyan()
-            );
+        if let (Some(local_repo), Some(service_repo)) =
+            (repo, source.get("repo").and_then(JsonValue::as_str))
+            && !local_repo.eq_ignore_ascii_case(service_repo)
+        {
             continue;
-        };
-        let rel = rel.as_str();
+        }
         let name = names
             .get(id)
-            .cloned()
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| guess_service_name(root, Path::new(rel)));
-        index.insert(rel.to_string(), EnvCacMeta { name });
+            .with_context(|| format!("Could not resolve the name of service {id}"))?;
+        let config_file = service
+            .get("configFile")
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let rel = if let Some(config_file) = config_file {
+            if !is_cac_config_file(config_file) {
+                continue;
+            }
+            normalize_config_file_path(config_file).with_context(|| {
+                format!("Railway Config File path {config_file} for service {name} escapes the repository")
+            })?
+        } else {
+            let root_dir = source
+                .get("rootDirectory")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let root_dir = normalize_config_file_path(root_dir).with_context(|| {
+                format!("Root directory for service {name} escapes the repository")
+            })?;
+            let Some(path) = default_cac_file(root, &root_dir) else {
+                continue;
+            };
+            path
+        };
+        index.push((rel, EnvCacMeta { name: name.clone() }));
     }
     Ok(index)
+}
+
+fn default_cac_file(root: &Path, root_dir: &str) -> Option<String> {
+    // Match the builder: TOML wins over JSON; for each name, prefer the
+    // service root over the repository root. Never search sibling directories.
+    for name in ["railway.toml", "railway.json"] {
+        for relative in [Path::new(root_dir).join(name), PathBuf::from(name)] {
+            if root.join(&relative).is_file() {
+                return Some(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// The platform stores `configFile` as repo-root-relative, but users commonly
@@ -752,20 +764,6 @@ fn parse_cac_file(path: &Path) -> Result<CacFile> {
             .with_context(|| format!("Failed to parse JSON {}", path.display())),
         other => bail!("Unsupported Config as Code extension: .{other}"),
     }
-}
-
-fn guess_service_name(cwd: &Path, cac_path: &Path) -> String {
-    cac_path
-        .parent()
-        .and_then(|p| {
-            if p == cwd {
-                cwd.file_name().map(|n| n.to_string_lossy().into_owned())
-            } else {
-                p.file_name().map(|n| n.to_string_lossy().into_owned())
-            }
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "web".to_string())
 }
 
 fn render_migrated(
@@ -1614,6 +1612,148 @@ mod tests {
     }
 
     #[test]
+    fn migrates_shared_config_only_for_the_linked_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("apps/shared/railway.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"build":{"buildCommand":"pnpm build"}}"#).unwrap();
+        let config = json!({
+            "services": {
+                "web-id": { "configFile": "/apps/shared/railway.json" },
+                "worker-id": { "configFile": "./apps/shared/railway.json" }
+            }
+        });
+        let names = BTreeMap::from([
+            ("web-id".into(), "web".into()),
+            ("worker-id".into(), "worker".into()),
+        ]);
+        let unrelated = root.join("apps/unrelated/railway.json");
+        fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+        fs::write(&unrelated, "not valid JSON").unwrap();
+        let index = index_environment_cac(root, &config, &names, None).unwrap();
+        let services = discover_cac_services_from_index(root, &index, None).unwrap();
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| service.name.as_str())
+                .collect::<Vec<_>>(),
+            ["web", "worker"]
+        );
+        for service in &services {
+            assert_eq!(service.path, path);
+            assert_eq!(
+                service.cac.build.build_command.as_deref(),
+                Some("pnpm build")
+            );
+        }
+
+        for name in ["web", "worker"] {
+            let selected = discover_cac_services_from_index(root, &index, Some(name)).unwrap();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].name, name);
+            assert_eq!(selected[0].path, path);
+        }
+
+        let graph = runner::DesiredGraph {
+            project: Some(runner::DesiredProject {
+                name: "example".into(),
+            }),
+            resources: vec![
+                graph_resource(
+                    "service",
+                    "web",
+                    None,
+                    None,
+                    preserve(&["WEB_ONLY", "SHARED"]),
+                ),
+                graph_resource("service", "worker", None, None, preserve(&["SHARED"])),
+            ],
+        };
+        let out = render_migrated(&graph, &services, AuthoringLang::TypeScript, false, true);
+        assert!(out.contains("service(\"web\""), "{out}");
+        assert!(out.contains("service(\"worker\""), "{out}");
+        assert!(!out.contains("unrelated"), "{out}");
+        assert!(!out.contains("export const partial"), "{out}");
+        assert_eq!(out.matches("WEB_ONLY: preserve()").count(), 1, "{out}");
+        assert_eq!(out.matches("SHARED: preserve()").count(), 2, "{out}");
+        assert_eq!(out.matches("build: \"pnpm build\"").count(), 2, "{out}");
+        delete_cac_files(root, &services).unwrap();
+        assert!(!path.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn discovers_default_paths_using_environment_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for relative in [
+            "railway.toml",
+            "railway.json",
+            "apps/backend/railway.toml",
+            "apps/frontend/railway.json",
+            "apps/unrelated/railway.toml",
+        ] {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, if relative.ends_with("json") { "{}" } else { "" }).unwrap();
+        }
+        let config = json!({ "services": {
+            "api": { "source": { "repo": "acme/commerce", "rootDirectory": "/apps/backend" } },
+            "web": { "source": { "repo": "acme/commerce", "rootDirectory": "./apps/frontend" } },
+            "worker": { "source": { "repo": "acme/commerce" } },
+            "foreign": { "source": { "repo": "acme/other" }, "configFile": "/railway.json" },
+            "db": { "source": { "image": "postgres:17" } }
+        }});
+        let names = BTreeMap::from([
+            ("api".into(), "api-service".into()),
+            ("web".into(), "web-service".into()),
+            ("worker".into(), "worker".into()),
+            ("foreign".into(), "foreign".into()),
+            ("db".into(), "db".into()),
+            ("not-in-environment".into(), "unrelated".into()),
+        ]);
+        let index = index_environment_cac(root, &config, &names, Some("Acme/Commerce")).unwrap();
+        let services = discover_cac_services_from_index(root, &index, None).unwrap();
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| (
+                    service.name.as_str(),
+                    service.path.strip_prefix(root).unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("api-service", Path::new("apps/backend/railway.toml")),
+                ("web-service", Path::new("railway.toml")),
+                ("worker", Path::new("railway.toml")),
+            ]
+        );
+
+        fs::remove_file(root.join("railway.toml")).unwrap();
+        let index = index_environment_cac(root, &config, &names, Some("acme/commerce")).unwrap();
+        let web = discover_cac_services_from_index(root, &index, Some("web-service")).unwrap();
+        assert_eq!(web[0].path, root.join("apps/frontend/railway.json"));
+    }
+
+    #[test]
+    fn does_not_guess_when_environment_mapping_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("railway.json"), "{}").unwrap();
+        let names = BTreeMap::from([("api-id".into(), "api".into())]);
+        let config = json!({ "services": { "api-id": { "configFile": "/missing/railway.json" } } });
+        let index = index_environment_cac(root, &config, &names, None).unwrap();
+        let err = discover_cac_services_from_index(root, &index, None)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("missing/railway.json"));
+        assert!(err.to_string().contains("api"));
+        assert!(discover_cac_services_from_index(root, &[], None).is_err());
+        assert!(index_environment_cac(root, &config, &BTreeMap::new(), None).is_err());
+    }
+
+    #[test]
     fn normalizes_config_file_paths_relative_to_root() {
         let root = Path::new("/repo");
         for input in [
@@ -1745,11 +1885,13 @@ mod tests {
     }
 
     #[test]
-    fn service_filter_renames_a_single_service() {
-        let mut services = vec![svc("guessed-dir", CacFile::default())];
-        apply_service_filter(&mut services, Some("backend")).unwrap();
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].name, "backend");
+    fn service_filter_does_not_rename_a_single_service() {
+        let mut services = vec![svc("worker", CacFile::default())];
+        let err = apply_service_filter(&mut services, Some("web")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("No Config as Code file found for service web")
+        );
     }
 
     #[test]
