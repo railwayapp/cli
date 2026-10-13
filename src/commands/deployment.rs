@@ -1,5 +1,6 @@
 use super::*;
 use crate::client::post_graphql;
+use crate::commands::output::limit::clamp_list_limit;
 use crate::controllers::project::resolve_service_context;
 use crate::gql::queries::deployments::{DeploymentStatus, ResponseData, Variables};
 use chrono::{DateTime, Local, Utc};
@@ -91,21 +92,7 @@ async fn list_deployments(
     limit: i64,
     json: bool,
 ) -> Result<()> {
-    let limit = if limit > 1000 {
-        eprintln!(
-            "{}",
-            "Warning: limit cannot exceed 1000, using 1000 instead".yellow()
-        );
-        1000
-    } else if limit < 1 {
-        eprintln!(
-            "{}",
-            "Warning: limit must be at least 1, using 1 instead".yellow()
-        );
-        1
-    } else {
-        limit
-    };
+    let limit = clamp_list_limit(limit);
 
     let ctx = resolve_service_context(project, service, environment).await?;
     let client = ctx.client;

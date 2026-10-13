@@ -82,6 +82,13 @@ fn focused_help_retains_side_effects_and_workflow_examples() {
             vec!["sandbox", "fork"],
             vec!["are not inherited", "--domain web:3000"],
         ),
+        (
+            vec!["cron"],
+            vec![
+                "railway cron run --service worker --yes",
+                "Non-interactive `cron run` must pass --yes",
+            ],
+        ),
     ] {
         let text = help(&args, "--help");
         for expected in expected {
@@ -133,6 +140,9 @@ fn documented_examples_parse_without_executing_commands() {
         ],
         vec!["ca", "bootstrap", "list", "--environment", "staging"],
         vec!["ca", "bootstrap", "list", "--json"],
+        vec!["cron", "list", "--json"],
+        vec!["cron", "runs", "--service", "worker", "--limit", "5"],
+        vec!["cron", "trigger", "--yes", "--json"],
         vec![
             "ca",
             "bootstrap",
