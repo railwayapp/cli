@@ -2463,6 +2463,52 @@ fn branchless_desired_source_does_not_change_a_remote_branch() {
     assert!(diff(&current, &desired).changes.is_empty());
 }
 
+const PINNED_IMAGE: &str =
+    "ghcr.io/acme/api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn omitted_service_source_does_not_clear_a_remote_image() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": PINNED_IMAGE } } }
+    }));
+    let desired = graph_from(vec![service("web", json!({}))]);
+    let changes = diff(&current, &desired).changes;
+    assert!(
+        !changes.iter().any(|change| change["field"] == "source"),
+        "{changes:#?}"
+    );
+}
+
+#[test]
+fn omitted_service_source_keeps_registry_credentials() {
+    let current = env_config(json!({
+        "services": { "web": {
+            "source": { "image": PINNED_IMAGE },
+            "deploy": { "registryCredentials": { "username": "*****", "password": "*****" } }
+        } }
+    }));
+    let desired = graph_from(vec![service("web", json!({}))]);
+    let changes = diff(&current, &desired).changes;
+    assert!(changes.is_empty(), "{changes:#?}");
+}
+
+#[test]
+fn declared_service_image_change_is_still_planned() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": PINNED_IMAGE } } }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/api:2") }),
+    )]);
+    let change = diff(&current, &desired)
+        .changes
+        .into_iter()
+        .find(|change| change["field"] == "source")
+        .unwrap();
+    assert_eq!(change["after"]["image"], "ghcr.io/acme/api:2");
+}
+
 #[test]
 fn branchless_source_change_omits_the_branch_key() {
     let current = graph_from(vec![service(
