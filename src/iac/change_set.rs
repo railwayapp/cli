@@ -276,6 +276,7 @@ pub fn diff_graphs_following(
         diff_top_level_field(previous, resource, "groupId", &mut changes);
         if resource_type(resource) == "service" {
             diff_top_level_field(previous, resource, "tracing", &mut changes);
+            diff_top_level_field(previous, resource, "cdn", &mut changes);
         }
         diff_networking(previous, resource, &mut changes, &mut diagnostics);
         if resource_type(previous) == "bucket" && resource_type(resource) == "bucket" {
@@ -1884,10 +1885,11 @@ fn update(
 }
 
 /// Auto-instrumentation reaches running containers live; only
-/// `tracing.enabled` needs a deploy, for the OpenTelemetry variables. Mirrors
+/// `tracing.enabled` needs a deploy, for the OpenTelemetry variables. CDN
+/// settings live on the edge and never reach the container. Mirrors
 /// backboard's `changesThatSkipRedeploy`.
 fn deploy_effect_for_update(field_name: &str, details: Option<&[String]>) -> &'static str {
-    if field_name == "config" || field_name == "groupId" {
+    if field_name == "config" || field_name == "groupId" || field_name == "cdn" {
         return "none";
     }
     if field_name == "tracing" {
@@ -2045,6 +2047,45 @@ fn is_unknown_current_variable(value: Option<&Value>) -> bool {
         || (field_str(value, "type") == Some("literal") && field_str(value, "value") == Some(""))
 }
 
+/// What the edge applies for every CDN knob the block leaves out. Mirrors
+/// `SERVICE_CDN_DEFAULTS` in `@railway/models`.
+fn cdn_default(key: &str) -> Option<Value> {
+    match key {
+        "defaultTtlSeconds" => Some(json!(7200)),
+        "htmlCaching" => Some(json!("auto")),
+        "staleWhileRevalidate" => Some(json!(true)),
+        "purgeOnDeploy" => Some(json!("html")),
+        _ => None,
+    }
+}
+
+/// Railway serialises a `cdn` block only while caching is on, and only the
+/// knobs that differ from the edge defaults. So `enabled: false`, `null` and
+/// no block are all the same thing, and `{ enabled: true }` is a service
+/// caching with the defaults.
+pub fn normalize_cdn(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return Value::Null;
+    };
+    let normalized = normalize_cdn_object(object);
+    if normalized.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(normalized)
+    }
+}
+
+fn normalize_cdn_object(object: &Map<String, Value>) -> Map<String, Value> {
+    if object.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Map::new();
+    }
+    object
+        .iter()
+        .filter(|(key, child)| !child.is_null() && cdn_default(key).as_ref() != Some(*child))
+        .map(|(key, child)| (key.clone(), child.clone()))
+        .collect()
+}
+
 fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
     if !value.is_object() {
         return value.clone();
@@ -2084,6 +2125,9 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         // Railway serialises only the switches that are on, so a false or null
         // switch is the same as no switch, and no switches is no block.
         copy.retain(|_, child| child.as_bool() == Some(true));
+    }
+    if field_name == "cdn" {
+        copy = normalize_cdn_object(&copy);
     }
     if field_name == "networking" {
         // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service

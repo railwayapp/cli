@@ -1328,6 +1328,7 @@ fn render_service_body_following(
     );
     render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_tracing(resource.tracing.as_ref(), lang, &mut lines);
+    render_cdn(resource.cdn.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -1492,6 +1493,7 @@ fn render_function_body(
     render_deploy(deploy.as_ref(), resource.source.as_ref(), lang, &mut lines);
     render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_tracing(resource.tracing.as_ref(), lang, &mut lines);
+    render_cdn(resource.cdn.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -1910,6 +1912,20 @@ fn render_tracing(
         return;
     }
     lines.push(lang.config_field("tracing", &code_value(&serde_json::Value::Object(on), lang)));
+}
+
+/// Only while caching is on, and only the knobs that differ from the edge
+/// defaults: Railway serialises an uncached service without a `cdn` block, and
+/// a plan treats a default knob as absent.
+fn render_cdn(cdn: Option<&serde_json::Value>, lang: AuthoringLang, lines: &mut Vec<String>) {
+    let Some(cdn) = cdn else {
+        return;
+    };
+    let cdn = crate::iac::normalize_cdn(cdn);
+    if cdn.is_null() {
+        return;
+    }
+    lines.push(lang.config_field("cdn", &code_value(&cdn, lang)));
 }
 
 fn is_image_source(source: Option<&serde_json::Value>) -> bool {
@@ -2606,6 +2622,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            cdn: None,
             kind: None,
         }
     }
@@ -2629,6 +2646,7 @@ mod tests {
             config: None,
             group_id: None,
             tracing: None,
+            cdn: None,
             kind: None,
         }
     }
@@ -2756,6 +2774,20 @@ mod tests {
         assert!(rendered.contains("    healthcheck: \"/health\","));
         assert!(!rendered.contains("run.sh"));
         assert!(!rendered.contains("start:"));
+    }
+
+    #[test]
+    fn pull_renderer_authors_cdn_on_functions() {
+        let mut resource = function_resource("hello", "export default {}\n");
+        resource.cdn = Some(json!({ "enabled": true, "purgeOnDeploy": "all" }));
+        let graph = graph_of(vec![resource]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(
+            rendered.contains("const hello = fn(\"hello\", {"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("cdn: {"), "{rendered}");
+        assert!(rendered.contains("purgeOnDeploy: \"all\""), "{rendered}");
     }
 
     #[test]
@@ -2902,6 +2934,41 @@ mod tests {
             AuthoringLang::TypeScript,
         );
         assert!(!rendered.contains("tracing"), "{rendered}");
+    }
+
+    #[test]
+    fn pull_renderer_authors_cdn_knobs_that_differ_from_the_defaults() {
+        let mut resource = service_resource(json!({ "image": "nginx:latest" }), json!({}));
+        resource.cdn = Some(json!({
+            "enabled": true,
+            "defaultTtlSeconds": 7200,
+            "htmlCaching": "force",
+            "staleWhileRevalidate": true,
+            "purgeOnDeploy": "all"
+        }));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert!(rendered.contains("cdn: {"), "{rendered}");
+        assert!(rendered.contains("enabled: true"), "{rendered}");
+        assert!(rendered.contains("htmlCaching: \"force\""), "{rendered}");
+        assert!(rendered.contains("purgeOnDeploy: \"all\""), "{rendered}");
+        assert!(!rendered.contains("defaultTtlSeconds"), "{rendered}");
+        assert!(!rendered.contains("staleWhileRevalidate"), "{rendered}");
+
+        resource.cdn = Some(json!({ "enabled": false, "htmlCaching": "force" }));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert!(!rendered.contains("cdn"), "{rendered}");
     }
 
     #[test]

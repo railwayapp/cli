@@ -206,6 +206,7 @@ pub(super) struct DesiredResource {
     pub(super) config: Option<Value>,
     pub(super) group_id: Option<String>,
     pub(super) tracing: Option<Value>,
+    pub(super) cdn: Option<Value>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
