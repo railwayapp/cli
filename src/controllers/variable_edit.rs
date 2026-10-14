@@ -773,7 +773,6 @@ mod tests {
         assert!(err.to_string().contains("Duplicate"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn temp_edit_path_uses_prefix_extension_and_sanitised_service() {
         let path = temp_edit_path("edge-rules", "my service/web", "json");
@@ -785,6 +784,7 @@ mod tests {
         assert!(name.ends_with(".json"), "{name}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_edit_document_is_owner_readable_only() {
         use std::os::unix::fs::PermissionsExt;
