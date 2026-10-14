@@ -8,7 +8,7 @@ use crate::controllers::variables::{
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -216,12 +216,9 @@ pub fn render_variable_plan_plain(service: &str, changes: &[VarChange], reveal: 
         .join("\n")
 }
 
-/// Serialize an edit snapshot as a dotenv document with a Railway header.
-pub fn write_edit_document(
-    path: &Path,
-    snapshot: &EditSnapshot,
-    header_lines: &[&str],
-) -> Result<()> {
+/// Create (or truncate) an edit buffer readable only by the owner, so a
+/// document that may hold secrets never sits world-readable in `/tmp`.
+pub fn create_private_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -229,9 +226,18 @@ pub fn write_edit_document(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
+    options
         .open(path)
-        .with_context(|| format!("Failed to create temp file {}", path.display()))?;
+        .with_context(|| format!("Failed to create temp file {}", path.display()))
+}
+
+/// Serialize an edit snapshot as a dotenv document with a Railway header.
+pub fn write_edit_document(
+    path: &Path,
+    snapshot: &EditSnapshot,
+    header_lines: &[&str],
+) -> Result<()> {
+    let mut file = create_private_file(path)?;
 
     for line in header_lines {
         writeln!(file, "# {line}")?;
@@ -439,13 +445,15 @@ pub fn require_confirm_destructive(
     )
 }
 
-pub fn temp_edit_path(service: &str) -> PathBuf {
+/// Unique path under the temp dir for an edit buffer:
+/// `railway-<prefix>-<service>-<pid>-<millis>.<extension>`.
+pub fn temp_edit_path(prefix: &str, service: &str, extension: &str) -> PathBuf {
     let safe: String = service
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     std::env::temp_dir().join(format!(
-        "railway-vars-{}-{}-{}.env",
+        "railway-{prefix}-{}-{}-{}.{extension}",
         safe,
         std::process::id(),
         std::time::SystemTime::now()
@@ -622,7 +630,7 @@ mod tests {
             ]),
             read_only: BTreeMap::new(),
         };
-        let path = temp_edit_path("test");
+        let path = temp_edit_path("vars", "test", "env");
         write_edit_document(&path, &snapshot, &["header"]).unwrap();
         let parsed = parse_edit_document(&fs::read_to_string(&path).unwrap()).unwrap();
         let _ = fs::remove_file(&path);
@@ -638,7 +646,7 @@ mod tests {
     #[test]
     fn read_only_railway_vars_are_comments_only() {
         let snapshot = demo_snapshot();
-        let path = temp_edit_path("demo");
+        let path = temp_edit_path("vars", "demo", "env");
         write_edit_document(&path, &snapshot, &["demo"]).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
         let _ = fs::remove_file(&path);
@@ -767,9 +775,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn temp_edit_path_uses_prefix_extension_and_sanitised_service() {
+        let path = temp_edit_path("edge-rules", "my service/web", "json");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.starts_with("railway-edge-rules-my-service-web-"),
+            "{name}"
+        );
+        assert!(name.ends_with(".json"), "{name}");
+    }
+
+    #[test]
     fn write_edit_document_is_owner_readable_only() {
         use std::os::unix::fs::PermissionsExt;
-        let path = temp_edit_path("perms");
+        let path = temp_edit_path("vars", "perms", "env");
         write_edit_document(&path, &demo_snapshot(), &["header"]).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = fs::remove_file(&path);
@@ -805,7 +824,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn editor_abort_deletes_the_temp_file() {
-        let path = temp_edit_path("abort");
+        let path = temp_edit_path("vars", "abort", "env");
         write_edit_document(&path, &demo_snapshot(), &["abort"]).unwrap();
         assert!(path.exists());
         let err = with_editor("false", || edit_file_and_cleanup(&path)).unwrap_err();
@@ -816,7 +835,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn editor_success_returns_contents_and_deletes_the_temp_file() {
-        let path = temp_edit_path("ok");
+        let path = temp_edit_path("vars", "ok", "env");
         write_edit_document(&path, &demo_snapshot(), &["ok"]).unwrap();
         let contents = with_editor("true", || edit_file_and_cleanup(&path)).unwrap();
         assert!(contents.contains("LOG_LEVEL=info"));

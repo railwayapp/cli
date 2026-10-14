@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal, Read};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Read, Write};
 
 use anyhow::anyhow;
 use serde::Serialize;
@@ -8,7 +7,9 @@ use serde_json::{Value, json};
 
 use crate::controllers::edge::{ResourceRef, fetch_domains, has_public_domain, print_field};
 use crate::controllers::project::{ServiceContext, resolve_service_context};
-use crate::controllers::variable_edit::edit_file_and_cleanup;
+use crate::controllers::variable_edit::{
+    create_private_file, edit_file_and_cleanup, temp_edit_path,
+};
 use crate::errors::RailwayError;
 use crate::util::prompt::prompt_confirm_with_default;
 
@@ -230,8 +231,10 @@ async fn edit(ctx: &ServiceContext, yes: bool, json: bool) -> Result<()> {
     text.push('\n');
 
     loop {
-        let path = temp_edit_path(&ctx.service_name);
-        fs::write(&path, &text).with_context(|| format!("Failed to write {}", path.display()))?;
+        let path = temp_edit_path("edge-rules", &ctx.service_name, "json");
+        create_private_file(&path)?
+            .write_all(text.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
 
         eprintln!(
             "{} {}",
@@ -254,11 +257,15 @@ async fn edit(ctx: &ServiceContext, yes: bool, json: bool) -> Result<()> {
                 if diagnostics.is_empty() {
                     return save_edited(ctx, ruleset, yes, json).await;
                 }
-                eprintln!("{}", format_diagnostics(&diagnostics));
+                if !json {
+                    eprintln!("{}", format_diagnostics(&diagnostics));
+                }
                 invalid_rules_error(diagnostics)
             }
             Err(error) => {
-                eprintln!("{} {error:#}", "error:".red().bold());
+                if !json {
+                    eprintln!("{} {error:#}", "error:".red().bold());
+                }
                 error
             }
         };
@@ -460,7 +467,9 @@ async fn write_ruleset(ctx: &ServiceContext, ruleset: Option<&Value>) -> Result<
             input: mutations::update_service_edge_rules::UpdateServiceEdgeRulesInput {
                 service_id: ctx.service_id.clone(),
                 environment_id: ctx.environment_id.clone(),
-                edge_rules: ruleset.cloned(),
+                // The contract is "null clears": put the null on the wire rather
+                // than rely on the server coalescing an omitted field.
+                edge_rules: Some(ruleset.cloned().unwrap_or(Value::Null)),
             },
         },
     )
@@ -516,22 +525,6 @@ fn normalize_ruleset(value: Value) -> Result<Value> {
 
 fn empty_ruleset() -> Value {
     json!({ "version": 1, "rules": [] })
-}
-
-fn temp_edit_path(service: &str) -> PathBuf {
-    let safe: String = service
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    std::env::temp_dir().join(format!(
-        "railway-edge-rules-{}-{}-{}.json",
-        safe,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ))
 }
 
 fn ensure_available(domains: &queries::domains::DomainsDomains) -> Result<()> {
@@ -1335,16 +1328,5 @@ mod tests {
             "\"Block bots\""
         );
         assert_eq!(rule_label(&json!({})), "(unnamed)");
-    }
-
-    #[test]
-    fn temp_edit_path_is_json_and_sanitised() {
-        let path = temp_edit_path("my service/web");
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        assert!(
-            name.starts_with("railway-edge-rules-my-service-web-"),
-            "{name}"
-        );
-        assert!(name.ends_with(".json"), "{name}");
     }
 }
