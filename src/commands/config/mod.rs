@@ -1799,8 +1799,6 @@ fn render_build(build: Option<&serde_json::Value>, lang: AuthoringLang, lines: &
             .iter()
             .filter(|(key, value)| {
                 !matches!((key.as_str(), value),
-                    ("builder", serde_json::Value::String(builder)) if builder == "RAILPACK" || builder == "NIXPACKS"
-                ) && !matches!((key.as_str(), value),
                     ("buildEnvironment", serde_json::Value::String(environment)) if environment == "V3"
                 )
             })
@@ -2150,7 +2148,7 @@ fn py_value(value: &serde_json::Value) -> String {
             }
             let fields = object
                 .iter()
-                .map(|(key, value)| format!("{}: {}", ts_key(key), py_value(value)))
+                .map(|(key, value)| format!("{:?}: {}", key, py_value(value)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{{ {fields} }}")

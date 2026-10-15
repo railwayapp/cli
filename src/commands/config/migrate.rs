@@ -849,6 +849,15 @@ fn overlay_cac_service(graph: &mut runner::DesiredGraph, service: &CacService) -
 }
 
 fn apply_cac_fields(resource: &mut runner::DesiredResource, cac: &CacFile) -> Option<i64> {
+    if let Some(builder) = &cac.build.builder {
+        object_mut(&mut resource.build).insert("builder".into(), json!(builder));
+    }
+    if let Some(path) = &cac.build.dockerfile_path {
+        object_mut(&mut resource.build).insert("dockerfilePath".into(), json!(path));
+    }
+    if let Some(patterns) = &cac.build.watch_patterns {
+        object_mut(&mut resource.build).insert("watchPatterns".into(), json!(patterns));
+    }
     if let Some(cmd) = &cac.build.build_command {
         object_mut(&mut resource.build).insert("buildCommand".into(), json!(cmd));
     }
@@ -941,28 +950,11 @@ fn cac_extra_lines(cac: &CacFile, replicas: Option<i64>, lang: AuthoringLang) ->
         AuthoringLang::Python => format!("        # {text}"),
         AuthoringLang::Go => format!("\t\t// {text}"),
     };
-    if let Some(dockerfile) = &cac.build.dockerfile_path {
-        lines.push(comment(format!(
-            "dockerfilePath from CaC: {}",
-            js_string(dockerfile)
-        )));
-    }
-    if let Some(builder) = &cac.build.builder {
-        lines.push(comment(format!("builder from CaC: {}", js_string(builder))));
-    }
     if let Some(cron) = &cac.deploy.cron_schedule {
         lines.push(comment(format!(
             "cronSchedule from CaC: {}",
             js_string(cron)
         )));
-    }
-    if let Some(watch) = &cac.build.watch_patterns {
-        let arr = watch
-            .iter()
-            .map(|pattern| js_string(pattern))
-            .collect::<Vec<_>>()
-            .join(", ");
-        lines.push(comment(format!("watchPatterns from CaC: [{arr}]")));
     }
     lines
 }
@@ -2041,6 +2033,71 @@ healthcheckPath = "/"
     }
 
     #[test]
+    fn preserves_cac_build_settings_for_multiple_services() {
+        for builder in ["DOCKERFILE", "NIXPACKS", "RAILPACK"] {
+            let names = ["email-server", "pdf-server"];
+            let mut graph = runner::DesiredGraph {
+                project: Some(runner::DesiredProject {
+                    name: "monorepo".into(),
+                }),
+                resources: names.iter().map(|name| new_service(name)).collect(),
+            };
+            graph.resources[0].build = Some(json!({
+                "builder": "NIXPACKS",
+                "buildEnvironment": "V3",
+                "buildCommand": "pnpm build",
+                "watchPatterns": ["/old/**/*"]
+            }));
+            graph.resources[1].build = Some(json!({
+                "builder": "NIXPACKS",
+                "buildEnvironment": "V3"
+            }));
+            let services = names.map(|name| {
+                svc(
+                    name,
+                    CacFile {
+                        build: CacBuild {
+                            builder: Some(builder.into()),
+                            watch_patterns: (builder == "DOCKERFILE").then(|| {
+                                vec![
+                                    "pnpm-lock.yaml".into(),
+                                    format!("/apps/{name}/**/*"),
+                                    "/packages/**/*".into(),
+                                ]
+                            }),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+            });
+
+            for lang in [
+                AuthoringLang::TypeScript,
+                AuthoringLang::Python,
+                AuthoringLang::Go,
+            ] {
+                let out = render_migrated(&graph, &services, lang, false, true);
+                let builder_field = match lang {
+                    AuthoringLang::TypeScript => format!("builder: \"{builder}\""),
+                    _ => format!("\"builder\": \"{builder}\""),
+                };
+                assert_eq!(out.matches(&builder_field).count(), 2, "{out}");
+                assert!(out.contains("pnpm build"), "{out}");
+                assert!(!out.contains("from CaC"), "{out}");
+                if builder == "DOCKERFILE" {
+                    assert!(!out.contains("NIXPACKS"), "{out}");
+                    assert!(!out.contains("/old/**/*"), "{out}");
+                    assert_eq!(out.matches("pnpm-lock.yaml").count(), 2, "{out}");
+                    for name in names {
+                        assert!(out.contains(&format!("/apps/{name}/**/*")), "{out}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn overlays_cac_onto_the_pulled_graph_without_a_partial() {
         let out = render_migrated(
             &pulled_graph(),
@@ -2053,15 +2110,17 @@ healthcheckPath = "/"
         assert!(out.contains("image(\"metabase/metabase\")"), "{out}");
         assert!(out.contains("service(\"api\""), "{out}");
         let api = &out[out.find("service(\"api\"").unwrap()..];
-        assert!(api.contains("build: \"pnpm build\""), "{api}");
+        assert!(
+            api.contains(
+                "build: { buildCommand: \"pnpm build\", dockerfilePath: \"Dockerfile.api\" }"
+            ),
+            "{api}"
+        );
         assert!(api.contains("start: \"pnpm start\""), "{api}");
         assert!(api.contains("healthcheck: \"/health\""), "{api}");
         assert!(api.contains("API_KEY: preserve()"), "{api}");
         assert!(api.contains("DATABASE_URL: preserve()"), "{api}");
-        assert!(
-            api.contains("dockerfilePath from CaC: \"Dockerfile.api\""),
-            "{api}"
-        );
+        assert!(!api.contains("dockerfilePath from CaC"), "{api}");
         assert_eq!(out.matches("preserve()").count(), 2, "{out}");
         assert!(!out.contains("export const partial"), "{out}");
         assert!(!out[..out.find("service(\"api\"").unwrap()].contains("pnpm build"));
@@ -2076,10 +2135,15 @@ healthcheckPath = "/"
         assert!(py.contains("def main(ctx=None):"), "{py}");
         assert!(py.contains("postgres(\"postgres\")"), "{py}");
         assert!(py.contains("image(\"metabase/metabase\")"), "{py}");
-        assert!(py.contains("build=\"pnpm build\""), "{py}");
+        assert!(
+            py.contains(
+                "build={ \"buildCommand\": \"pnpm build\", \"dockerfilePath\": \"Dockerfile.api\" }"
+            ),
+            "{py}"
+        );
         assert!(py.contains("\"API_KEY\": preserve()"), "{py}");
         assert!(py.contains("\"DATABASE_URL\": preserve()"), "{py}");
-        assert!(py.contains("dockerfilePath from CaC"), "{py}");
+        assert!(!py.contains("dockerfilePath from CaC"), "{py}");
         assert!(!py.contains("PARTIAL"), "{py}");
 
         let go = render_migrated(&graph, &services, AuthoringLang::Go, false, true);
@@ -2088,10 +2152,13 @@ healthcheckPath = "/"
         assert!(go.contains("railway.Postgres(\"postgres\")"), "{go}");
         assert!(go.contains("railway.Image(\"metabase/metabase\")"), "{go}");
         assert!(go.contains("railway.ServiceNamed"), "{go}");
-        assert!(go.contains("\"build\": \"pnpm build\""), "{go}");
+        assert!(
+            go.contains("\"build\": map[string]any{\"buildCommand\": \"pnpm build\", \"dockerfilePath\": \"Dockerfile.api\"}"),
+            "{go}"
+        );
         assert!(go.contains("railway.Preserve()"), "{go}");
         assert_eq!(go.matches("railway.Preserve()").count(), 2, "{go}");
-        assert!(go.contains("dockerfilePath from CaC"), "{go}");
+        assert!(!go.contains("dockerfilePath from CaC"), "{go}");
         assert!(!go.contains("const Partial"), "{go}");
     }
 
@@ -2106,7 +2173,12 @@ healthcheckPath = "/"
         );
         assert!(out.contains("export const partial = \"api\""), "{out}");
         assert!(out.contains("service(\"api\""), "{out}");
-        assert!(out.contains("build: \"pnpm build\""), "{out}");
+        assert!(
+            out.contains(
+                "build: { buildCommand: \"pnpm build\", dockerfilePath: \"Dockerfile.api\" }"
+            ),
+            "{out}"
+        );
         assert!(out.contains("API_KEY: preserve()"), "{out}");
         assert!(!out.contains("postgres("), "{out}");
         assert!(!out.contains("metabase"), "{out}");
