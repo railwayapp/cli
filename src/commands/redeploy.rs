@@ -48,10 +48,10 @@ pub struct Args {
     commit: Option<String>,
 }
 
-/// What `railway redeploy` is being asked to do.
+/// What `railway redeploy` is being asked to do, fully resolved.
 enum Mode {
-    /// Redeploy the latest deployment as-is.
-    Latest,
+    /// Redeploy the deployment with this id as-is.
+    Latest(String),
     /// Pull the latest commit or image from the configured source.
     FromSource,
     /// One-off deploy of a specific commit.
@@ -77,11 +77,12 @@ fn short_sha(sha: &str) -> &str {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let mode = match (args.from_source, args.commit.as_deref()) {
-        (true, _) => Mode::FromSource,
-        (false, Some(sha)) => Mode::Commit(normalize_commit_sha(sha)?),
-        (false, None) => Mode::Latest,
-    };
+    // Validate the SHA shape before any network round trip.
+    let commit = args
+        .commit
+        .as_deref()
+        .map(normalize_commit_sha)
+        .transpose()?;
 
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
@@ -98,36 +99,34 @@ pub async fn command(args: Args) -> Result<()> {
     let service_in_env = find_service_instance(&environment_instances, &service_node_id)
         .ok_or_else(|| anyhow!("The service specified doesn't exist in the current environment"))?;
 
-    let latest_deployment_id = match &mode {
-        Mode::Latest => {
-            let latest = service_in_env
-                .latest_deployment
-                .as_ref()
-                .ok_or_else(|| anyhow!("No deployment found for service"))?;
-            if !latest.can_redeploy {
-                bail!(
-                    "The latest deployment for service {service_name} cannot be redeployed. \
-                    This may be because it's currently building, deploying, or was removed."
-                );
-            }
-            Some(latest.id.clone())
+    let mode = if args.from_source {
+        Mode::FromSource
+    } else if let Some(sha) = commit {
+        let has_repo = service_in_env
+            .source
+            .as_ref()
+            .and_then(|s| s.repo.as_ref())
+            .is_some();
+        if !has_repo {
+            bail!(
+                "Service {service_name} is not connected to a repository in environment \
+                {environment_name}, so there is no commit to deploy. Use --from-source \
+                to pull the latest image instead."
+            );
         }
-        Mode::FromSource => None,
-        Mode::Commit(_) => {
-            let has_repo = service_in_env
-                .source
-                .as_ref()
-                .and_then(|s| s.repo.as_ref())
-                .is_some();
-            if !has_repo {
-                bail!(
-                    "Service {service_name} is not connected to a repository in environment \
-                    {environment_name}, so there is no commit to deploy. Use --from-source \
-                    to pull the latest image instead."
-                );
-            }
-            None
+        Mode::Commit(sha)
+    } else {
+        let latest = service_in_env
+            .latest_deployment
+            .as_ref()
+            .ok_or_else(|| anyhow!("No deployment found for service"))?;
+        if !latest.can_redeploy {
+            bail!(
+                "The latest deployment for service {service_name} cannot be redeployed. \
+                This may be because it's currently building, deploying, or was removed."
+            );
         }
+        Mode::Latest(latest.id.clone())
     };
 
     let (prompt_msg, spinner_msg, finish_msg) = match &mode {
@@ -155,7 +154,7 @@ pub async fn command(args: Args) -> Result<()> {
                 ),
             )
         }
-        Mode::Latest => (
+        Mode::Latest(_) => (
             format!(
                 "Redeploy the latest deployment from service {service_name} in environment {environment_name}?"
             ),
@@ -183,8 +182,8 @@ pub async fn command(args: Args) -> Result<()> {
 
     let spinner = create_spinner_if(!args.json, spinner_msg);
 
-    let json_output = match (mode, latest_deployment_id) {
-        (Mode::FromSource, _) => {
+    let json_output = match mode {
+        Mode::FromSource => {
             post_graphql::<mutations::ServiceInstanceDeployLatestCommit, _>(
                 &client,
                 configs.get_backboard(),
@@ -196,7 +195,7 @@ pub async fn command(args: Args) -> Result<()> {
             .await?;
             serde_json::json!({ "success": true })
         }
-        (Mode::Commit(sha), _) => {
+        Mode::Commit(sha) => {
             let response = post_graphql::<mutations::ServiceInstanceDeployCommit, _>(
                 &client,
                 configs.get_backboard(),
@@ -209,7 +208,7 @@ pub async fn command(args: Args) -> Result<()> {
             .await?;
             serde_json::json!({ "id": response.service_instance_deploy_v2 })
         }
-        (Mode::Latest, Some(id)) => {
+        Mode::Latest(id) => {
             let response = post_graphql::<mutations::DeploymentRedeploy, _>(
                 &client,
                 configs.get_backboard(),
@@ -218,7 +217,6 @@ pub async fn command(args: Args) -> Result<()> {
             .await?;
             serde_json::json!({ "id": response.deployment_redeploy.id })
         }
-        (Mode::Latest, None) => unreachable!("latest mode always resolves a deployment id"),
     };
 
     if args.json {
