@@ -1007,6 +1007,128 @@ fn parent_process_kind() -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduler / service hosts — the `automation:` fallback
+// ---------------------------------------------------------------------------
+//
+// A large share of `agent_unknown:*` is not an agent at all: scripts that a
+// scheduler or service manager runs on a loop (warehouse audit 2026-10-16:
+// 79 users produced 87% of `agent_unknown:node` events, ~22h/day of
+// `logs` / `deployment` / `ssh` polling; `agent_unknown:node:wscript` was 77
+// users at ~3,400 events each). Naming the host they hang off lets the
+// warehouse keep them out of agent counts.
+//
+// The signal is the shape of the whole chain, not one process: every
+// unix process eventually descends from launchd / systemd, so reaching one
+// only means something when nothing session-like sits in between. The walk
+// steps over shells, interpreters and the wrappers people put in crontabs
+// and unit files, and gives up at the first other process (a terminal, an
+// IDE, sshd, tmux, an app). Losing coverage is fine; calling a human's or
+// an agent's session "automation" is not.
+
+/// Ancestors the scheduler walk steps over: our own binary, shells,
+/// interpreters, package runners, and crontab / unit-file wrappers.
+const AUTOMATION_TRANSPARENT: &[&str] = &[
+    "railway",
+    // Shells
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "cmd",
+    "powershell",
+    "pwsh",
+    // Interpreters / package runners
+    "node",
+    "deno",
+    "bun",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "python",
+    "python2",
+    "python3",
+    "uv",
+    "ruby",
+    "perl",
+    // Wrappers
+    "env",
+    "nohup",
+    "setsid",
+    "timeout",
+    "flock",
+    "nice",
+    "ionice",
+    "chronic",
+    "run-parts",
+    "sudo",
+    "su",
+    "doas",
+    "xargs",
+    "caffeinate",
+];
+
+/// Scheduler or service host for a process basename, as the `<kind>` in
+/// `automation:<kind>`. `svchost` is included because Windows 10+ runs
+/// scheduled tasks as children of the Schedule service's svchost; anything
+/// else svchost parents directly is a service, which is automation too.
+fn automation_kind_from_basename(basename: &str) -> Option<&'static str> {
+    match basename {
+        "cron" | "crond" | "anacron" | "cronie" => Some("cron"),
+        "launchd" => Some("launchd"),
+        "systemd" => Some("systemd"),
+        "taskeng" | "taskhost" | "taskhostw" | "svchost" => Some("task_scheduler"),
+        "services" => Some("windows_service"),
+        "wscript" | "cscript" => Some("wscript"),
+        "pythonw" => Some("pythonw"),
+        "pm2" => Some("pm2"),
+        "supervisord" => Some("supervisord"),
+        _ => None,
+    }
+}
+
+/// Lowercased basename of a node's argv0, with a login shell's leading `-`
+/// and a versioned interpreter's suffix (`python3.12`) normalized away.
+fn automation_basename(command: &str) -> String {
+    let argv0 = command.split_whitespace().next().unwrap_or("");
+    let basename = exe_basename(argv0).trim_start_matches('-');
+    if basename.starts_with("python3.") || basename.starts_with("python2.") {
+        return basename[..7].to_string();
+    }
+    basename.to_string()
+}
+
+/// Walk up from `pid` (the CLI's own process) and return the scheduler
+/// kind when the chain reaches one through transparent ancestors only.
+fn automation_kind_in_ancestry(
+    snapshot: &HashMap<u32, ProcessNode>,
+    pid: u32,
+) -> Option<&'static str> {
+    // `walk_ancestors` stops on `Some`; `Err(())` marks "gave up here".
+    walk_ancestors(snapshot, pid, 15, |node| {
+        let basename = automation_basename(&node.command);
+        if let Some(kind) = automation_kind_from_basename(&basename) {
+            return Some(Ok(kind));
+        }
+        if AUTOMATION_TRANSPARENT.contains(&basename.as_str()) {
+            return None;
+        }
+        Some(Err(()))
+    })
+    .and_then(Result::ok)
+}
+
+fn automation_host_from_tree() -> Option<&'static str> {
+    let snapshot = process_snapshot();
+    if snapshot.is_empty() {
+        return None;
+    }
+    automation_kind_in_ancestry(snapshot, std::process::id())
+}
+
+// ---------------------------------------------------------------------------
 // Layer 4 — CI provider detection
 // ---------------------------------------------------------------------------
 
@@ -1863,6 +1985,15 @@ fn detect_caller_uncached() -> String {
     if interactive {
         return "tty".to_string();
     }
+    // A scheduler or service manager running us through nothing but shells,
+    // interpreters and wrappers is a scripted loop, not an agent. Checked
+    // last so named agents, IDE hosts, cloud IDEs and CI all win first.
+    if let Some(kind) = automation_host_from_tree() {
+        return match ancestor_residue().filter(|residue| residue != kind) {
+            Some(residue) => format!("automation:{}:{}", kind, residue),
+            None => format!("automation:{}", kind),
+        };
+    }
     match (parent_process_kind(), ancestor_residue()) {
         (Some(kind), Some(residue)) => format!("agent_unknown:{}:{}", kind, residue),
         (Some(kind), None) => format!("agent_unknown:{}", kind),
@@ -1886,6 +2017,9 @@ fn is_agent_caller(caller: &str) -> bool {
     if caller == "ci" || caller.starts_with("ci:") {
         return false;
     }
+    // `automation:*` stays agent-like on purpose: is_agent() suppresses
+    // prompts for these non-interactive runs exactly as it did when they
+    // were `agent_unknown:*`, so the rename changes attribution only.
     // Cloud IDE host with no agent identified (interactive caught above
     // returns `tty:<host>`; the `cloud_ide:<host>` branch only fires for
     // non-interactive subprocess use, which is agent-like).
@@ -2352,9 +2486,10 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
-        caller_from_mcp_client_name, caller_from_mcp_client_name_with, caller_from_process_name,
-        is_agent_caller, is_agent_harness, mcp_client_header_value, new_session_uuid,
-        parent_kind_from_command, residue_from_command, truncate_message, walk_ancestors,
+        automation_kind_in_ancestry, caller_from_mcp_client_name, caller_from_mcp_client_name_with,
+        caller_from_process_name, is_agent_caller, is_agent_harness, mcp_client_header_value,
+        new_session_uuid, parent_kind_from_command, residue_from_command, truncate_message,
+        walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -3114,6 +3249,114 @@ mod tests {
         snap.insert(8400, node(8000, "railway status"));
         snap.insert(8000, node(1, "-/bin/zsh"));
         assert_eq!(agent_ancestor_pid(&snap, 8000), None);
+    }
+
+    #[test]
+    fn automation_detects_cron_through_shell_and_interpreter() {
+        // cron (300) -> sh -c (310) -> node loop.js (320) -> railway (330)
+        let mut snap = HashMap::new();
+        snap.insert(330, node(320, "railway logs --json"));
+        snap.insert(320, node(310, "node /home/x/loop.js"));
+        snap.insert(310, node(300, "/bin/sh -c 'node /home/x/loop.js'"));
+        snap.insert(300, node(1, "/usr/sbin/cron -f"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 330), Some("cron"));
+    }
+
+    #[test]
+    fn automation_detects_detached_loop_under_launchd_and_systemd() {
+        // nohup'd node loop reparented to launchd once its terminal closed.
+        let mut snap = HashMap::new();
+        snap.insert(530, node(520, "railway deployment list"));
+        snap.insert(520, node(1, "node poll.js"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 530), Some("launchd"));
+
+        // systemd user service running a versioned python.
+        let mut snap = HashMap::new();
+        snap.insert(730, node(720, "railway logs"));
+        snap.insert(720, node(700, "/usr/bin/python3.12 watcher.py"));
+        snap.insert(700, node(1, "/lib/systemd/systemd --user"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 730), Some("systemd"));
+    }
+
+    #[test]
+    fn automation_detects_windows_script_hosts_and_task_scheduler() {
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(20, "node.exe"));
+        snap.insert(20, node(10, "wscript.exe"));
+        snap.insert(10, node(4, "svchost.exe"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 40), Some("wscript"));
+
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(20, "cmd.exe"));
+        snap.insert(20, node(4, "taskhostw.exe"));
+        assert_eq!(
+            automation_kind_in_ancestry(&snap, 40),
+            Some("task_scheduler")
+        );
+
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(4, "pythonw.exe"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 40), Some("pythonw"));
+    }
+
+    #[test]
+    fn automation_stops_at_session_hosts() {
+        // Terminal session: zsh -> login -> Terminal -> launchd. `login`
+        // is not transparent, so reaching launchd above it means nothing.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway logs"));
+        snap.insert(80, node(70, "-zsh"));
+        snap.insert(70, node(60, "login -pf cody"));
+        snap.insert(
+            60,
+            node(
+                1,
+                "/system/applications/utilities/terminal.app/contents/macos/terminal",
+            ),
+        );
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // Detached tmux server under launchd: tmux stops the walk.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway logs"));
+        snap.insert(80, node(70, "bash"));
+        snap.insert(70, node(1, "tmux new -s work"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // ssh into a box: sshd stops the walk before systemd.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway status"));
+        snap.insert(80, node(70, "bash -c 'railway status'"));
+        snap.insert(70, node(1, "sshd: cody@notty"));
+        snap.insert(1, node(0, "/lib/systemd/systemd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // An unknown agent binary in the chain stops it too.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway up"));
+        snap.insert(80, node(70, "bash -c 'railway up'"));
+        snap.insert(70, node(1, "/opt/mystery-agent/bin/mystery"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // Container whose pid 1 is the app: no scheduler anywhere.
+        let mut snap = HashMap::new();
+        snap.insert(30, node(20, "railway logs"));
+        snap.insert(20, node(1, "sh -c 'railway logs'"));
+        snap.insert(1, node(0, "node server.js"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 30), None);
+    }
+
+    #[test]
+    fn automation_callers_stay_agent_like_for_prompting() {
+        assert!(is_agent_caller("automation:cron"));
+        assert!(is_agent_caller("automation:wscript:sync"));
     }
 
     #[test]
