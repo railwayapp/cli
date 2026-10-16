@@ -707,17 +707,41 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
     None
 }
 
-/// Walk the process tree from the current PID upward looking for a
-/// recognized agent binary in the ancestry. Up to 15 hops because some
-/// agents introduce multiple wrapper layers (npm/npx/node/shell/agent).
-fn agent_from_process_tree() -> Option<&'static str> {
+/// The first recognized ancestor, and whether it is an IDE application
+/// (Cursor / Windsurf hosting the terminal) rather than an agent binary.
+fn agent_hit_from_process_tree() -> Option<(&'static str, bool)> {
     let snapshot = process_snapshot();
     if snapshot.is_empty() {
         return None;
     }
     walk_ancestors(snapshot, std::process::id(), 15, |node| {
         caller_from_process_name(&node.command)
+            .map(|agent| (agent, is_ide_host_process(&node.command, agent)))
     })
+}
+
+/// True when a process matched only because it is the IDE application
+/// itself: `windsurf`, or `cursor` without the `cursor-agent` CLI.
+fn is_ide_host_process(command: &str, agent: &str) -> bool {
+    match agent {
+        "windsurf" => true,
+        "cursor" => !command.to_ascii_lowercase().contains("cursor-agent"),
+        _ => false,
+    }
+}
+
+/// True when `CURSOR_TRACE_ID` is what made [`agent_from_strong_env`] say
+/// `cursor`: Cursor sets it in every process, while the agent's own shell
+/// also carries `CURSOR_AGENT`.
+fn is_cursor_ide_only_env() -> bool {
+    std::env::var_os("CURSOR_TRACE_ID").is_some() && std::env::var_os("CURSOR_AGENT").is_none()
+}
+
+/// Walk the process tree from the current PID upward looking for a
+/// recognized agent binary in the ancestry. Up to 15 hops because some
+/// agents introduce multiple wrapper layers (npm/npx/node/shell/agent).
+fn agent_from_process_tree() -> Option<&'static str> {
+    agent_hit_from_process_tree().map(|(agent, _)| agent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1955,21 +1979,35 @@ fn detect_caller_uncached() -> String {
         return v;
     }
 
+    let interactive = std::io::stdout().is_terminal();
+
     // 2. Strong agent env signal (CLAUDECODE, CURSOR_AGENT, PI_CODING_AGENT,
     //    __COG_BASHRC_SOURCED, etc.). This wins over both process-tree and
     //    cloud-IDE detection because an agent running inside Codespaces is
     //    still that agent — the IDE host is a less interesting axis.
+    //    `CURSOR_TRACE_ID` is the exception: Cursor sets it in every process
+    //    it spawns, including a human's integrated terminal, so on its own
+    //    in an interactive session it names the IDE, not the agent (the
+    //    agent's own shell carries `CURSOR_AGENT`). Step 4 turns that into
+    //    `tty:cursor`.
     if let Some(agent) = agent_from_strong_env() {
-        return agent.to_string();
+        if !(interactive && agent == "cursor" && is_cursor_ide_only_env()) {
+            return agent.to_string();
+        }
     }
 
     // 3. Process-tree walk. Catches CLIs whose env we can't fingerprint
     //    (Codex, Goose, Aider, Junie, OpenCode in older versions, ...).
-    if let Some(agent) = agent_from_process_tree() {
+    //    When the only match is the IDE application itself (Cursor or
+    //    Windsurf hosting the terminal) and a human is at the terminal, it's
+    //    a person typing in the IDE's terminal, so report `tty:<ide>`. A
+    //    non-interactive run under the IDE keeps the IDE slug, as before.
+    if let Some((agent, ide_host)) = agent_hit_from_process_tree() {
+        if interactive && ide_host {
+            return format!("tty:{}", agent);
+        }
         return agent.to_string();
     }
-
-    let interactive = std::io::stdout().is_terminal();
 
     // 4. AI-IDE host detection. Combined with the TTY check, this gives us
     //    `tty:<ide>` (human in IDE terminal — axis for "AI IDE adoption")
@@ -2526,8 +2564,8 @@ mod tests {
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
         automation_kind_in_ancestry, caller_from_mcp_client_name, caller_from_mcp_client_name_with,
         caller_from_process_name, encode_tty_streams, is_agent_caller, is_agent_harness,
-        mcp_client_header_value, new_session_uuid, parent_kind_from_command, residue_from_command,
-        truncate_message, tty_streams, walk_ancestors,
+        is_ide_host_process, mcp_client_header_value, new_session_uuid, parent_kind_from_command,
+        residue_from_command, truncate_message, tty_streams, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -2546,6 +2584,28 @@ mod tests {
         let value = tty_streams();
         assert_eq!(value.len(), 3);
         assert!(value.chars().all(|c| matches!(c, 'i' | 'o' | 'e' | '-')));
+    }
+
+    #[test]
+    fn ide_application_processes_are_hosts_not_agents() {
+        let cases = [
+            (
+                "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin) --type=utility",
+                true,
+            ),
+            ("/usr/share/cursor/cursor --no-sandbox", true),
+            ("/Applications/Windsurf.app/Contents/MacOS/Electron", true),
+            (
+                "/Users/x/.local/share/cursor-agent/versions/1/cursor-agent",
+                false,
+            ),
+            ("node /Applications/Cursor.app/.../cursor-agent", false),
+            ("/usr/local/bin/claude", false),
+        ];
+        for (command, host) in cases {
+            let agent = caller_from_process_name(command).expect(command);
+            assert_eq!(is_ide_host_process(command, agent), host, "{command}");
+        }
     }
 
     #[test]
