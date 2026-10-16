@@ -380,16 +380,17 @@ fn quote_remote_command(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub fn run_native_ssh_with_opts(
+/// Assemble the `ssh` invocation for `run_native_ssh_with_opts`, with the TTY
+/// state passed in so the option selection can be tested.
+fn build_session_command(
     service_instance_id: &str,
     command: Option<&[String]>,
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
     extra_opts: &[String],
-) -> Result<i32> {
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
-
+    stdin_tty: bool,
+    stdout_tty: bool,
+) -> Command {
     let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
     for opt in extra_opts {
         ssh_cmd.arg(opt);
@@ -421,6 +422,15 @@ pub fn run_native_ssh_with_opts(
         None => {}
     }
 
+    // Without a terminal on stdin, ssh cannot ask "Are you sure you want to
+    // continue connecting?" and dies with "Host key verification failed" on a
+    // machine that has not trusted the relay yet. accept-new trusts the key on
+    // first contact but still rejects a changed one. Placed after `extra_opts`
+    // so a caller-supplied policy wins (ssh keeps the first value it sees).
+    if !stdin_tty {
+        ssh_cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
+    }
+
     ssh_cmd.arg(&target);
 
     if let Some(cmd_args) = command {
@@ -432,6 +442,26 @@ pub fn run_native_ssh_with_opts(
     ssh_cmd.stdin(Stdio::inherit());
     ssh_cmd.stdout(Stdio::inherit());
     ssh_cmd.stderr(Stdio::inherit());
+
+    ssh_cmd
+}
+
+pub fn run_native_ssh_with_opts(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
+    extra_opts: &[String],
+) -> Result<i32> {
+    let mut ssh_cmd = build_session_command(
+        service_instance_id,
+        command,
+        identity_file,
+        durable,
+        extra_opts,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    );
 
     let status = ssh_cmd.status().context("Failed to execute ssh command")?;
     Ok(status.code().unwrap_or(1))
@@ -796,5 +826,51 @@ mod quote_remote_command_tests {
         let input = args(&["printf", "%s", ""]);
         let quoted = quote_remote_command(&input);
         assert_eq!(remote_shell_split(&quoted), input);
+    }
+}
+
+#[cfg(test)]
+mod session_command_tests {
+    use super::*;
+
+    fn session_args(stdin_tty: bool, stdout_tty: bool, extra_opts: &[String]) -> Vec<String> {
+        let command = vec!["true".to_string()];
+        build_session_command(
+            "service:abc",
+            Some(&command),
+            None,
+            None,
+            extra_opts,
+            stdin_tty,
+            stdout_tty,
+        )
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    const ACCEPT_NEW: &str = "StrictHostKeyChecking=accept-new";
+
+    #[test]
+    fn piped_stdin_trusts_the_relay_on_first_contact() {
+        let args = session_args(false, true, &[]);
+        assert!(args.iter().any(|arg| arg == ACCEPT_NEW), "{args:?}");
+    }
+
+    #[test]
+    fn terminal_stdin_keeps_the_interactive_host_key_prompt() {
+        let args = session_args(true, true, &[]);
+        assert!(!args.iter().any(|arg| arg.contains("StrictHostKeyChecking")));
+    }
+
+    #[test]
+    fn caller_supplied_policy_comes_first_and_wins() {
+        let extra = vec!["-o".to_string(), "StrictHostKeyChecking=yes".to_string()];
+        let args = session_args(false, false, &extra);
+        let strict = args
+            .iter()
+            .position(|arg| arg == "StrictHostKeyChecking=yes");
+        let accept = args.iter().position(|arg| arg == ACCEPT_NEW);
+        assert!(strict < accept, "{args:?}");
     }
 }
