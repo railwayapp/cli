@@ -2637,8 +2637,14 @@ mod tests {
             ("clinesque", "mcp_unknown:clinesque"),
             ("omp-other", "mcp_unknown:omp-other"),
         ];
+        // Pin "no harness detected" so generic names don't resolve through
+        // the env/process fallback when the suite runs inside an agent.
         for (name, expected) in cases {
-            assert_eq!(caller_from_mcp_client_name(name), expected, "{name}");
+            assert_eq!(
+                caller_from_mcp_client_name_with(name, || None),
+                expected,
+                "{name}"
+            );
         }
     }
 
@@ -2767,8 +2773,8 @@ mod tests {
             "opencode"
         );
         assert_eq!(
-            caller_from_mcp_client_name_with("grok-shell-railway", never),
-            "mcp_unknown:grok-shell-railway"
+            caller_from_mcp_client_name_with("totally-new-ide", never),
+            "mcp_unknown:totally-new-ide"
         );
     }
 
