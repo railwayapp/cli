@@ -126,6 +126,7 @@ struct CliEventTrackInput {
     environment_id: Option<String>,
     service_id: Option<String>,
     error_class: Option<String>,
+    tty_streams: String,
 }
 
 #[derive(Serialize)]
@@ -1912,6 +1913,42 @@ pub(crate) fn detect_caller() -> String {
     CALLER.get_or_init(detect_caller_uncached).clone()
 }
 
+/// Which stdio streams are attached to a terminal, as three positional
+/// characters for stdin / stdout / stderr: the stream's letter when it is a
+/// TTY, `-` when it is not. `ioe` is a fully interactive terminal, `i-e` is a
+/// human piping stdout (`railway logs | grep`), and `---` is a subprocess with
+/// every stream redirected.
+///
+/// Caller detection decides "interactive" from stdout alone (see
+/// [`detect_caller_uncached`]), so a piped human command in a terminal reads
+/// as `agent_unknown:<terminal>`. This field is reported alongside the caller
+/// so the warehouse can measure how many of those events had stdin and stderr
+/// on a terminal before the classification itself changes. Cached so every
+/// event a process emits reports the same value.
+fn tty_streams() -> &'static str {
+    static TTY_STREAMS: OnceLock<&'static str> = OnceLock::new();
+    TTY_STREAMS.get_or_init(|| {
+        encode_tty_streams(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )
+    })
+}
+
+fn encode_tty_streams(stdin: bool, stdout: bool, stderr: bool) -> &'static str {
+    match (stdin, stdout, stderr) {
+        (true, true, true) => "ioe",
+        (true, true, false) => "io-",
+        (true, false, true) => "i-e",
+        (true, false, false) => "i--",
+        (false, true, true) => "-oe",
+        (false, true, false) => "-o-",
+        (false, false, true) => "--e",
+        (false, false, false) => "---",
+    }
+}
+
 fn detect_caller_uncached() -> String {
     // 1. Explicit user override — always wins.
     if let Some(v) = safe_env(RAILWAY_CALLER_ENV) {
@@ -2306,6 +2343,7 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
         environment_id: context.environment_id,
         service_id: context.service_id,
         error_class,
+        tty_streams: tty_streams().to_string(),
     };
 
     let body = json!({
@@ -2487,11 +2525,28 @@ mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
         automation_kind_in_ancestry, caller_from_mcp_client_name, caller_from_mcp_client_name_with,
-        caller_from_process_name, is_agent_caller, is_agent_harness, mcp_client_header_value,
-        new_session_uuid, parent_kind_from_command, residue_from_command, truncate_message,
-        walk_ancestors,
+        caller_from_process_name, encode_tty_streams, is_agent_caller, is_agent_harness,
+        mcp_client_header_value, new_session_uuid, parent_kind_from_command, residue_from_command,
+        truncate_message, tty_streams, walk_ancestors,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn encodes_tty_streams_positionally() {
+        assert_eq!(encode_tty_streams(true, true, true), "ioe");
+        // Human piping stdout: the case stdout-only detection misreads.
+        assert_eq!(encode_tty_streams(true, false, true), "i-e");
+        assert_eq!(encode_tty_streams(false, false, true), "--e");
+        assert_eq!(encode_tty_streams(false, false, false), "---");
+        assert_eq!(encode_tty_streams(false, true, false), "-o-");
+    }
+
+    #[test]
+    fn tty_streams_is_three_safe_characters() {
+        let value = tty_streams();
+        assert_eq!(value.len(), 3);
+        assert!(value.chars().all(|c| matches!(c, 'i' | 'o' | 'e' | '-')));
+    }
 
     #[test]
     fn truncate_message_leaves_short_messages_alone() {
