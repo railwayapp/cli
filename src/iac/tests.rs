@@ -869,6 +869,181 @@ fn new_service_carries_cdn_on_the_create() {
     );
 }
 
+fn block_admin_rule() -> Value {
+    json!({
+        "priority": 10,
+        "if": { "attr": "http.path", "op": "matches", "value": "/admin*" },
+        "then": { "action": "block" }
+    })
+}
+
+fn bypass_api_rule() -> Value {
+    json!({
+        "priority": 20,
+        "description": "Bypass cache for the API",
+        "if": { "attr": "http.path", "op": "matches", "value": "/api*" },
+        "then": { "action": "cache_override", "params": { "bypass": true } }
+    })
+}
+
+#[test]
+fn edge_rules_round_trip_and_the_canonical_form_is_not_drift() {
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "edgeRules": [block_admin_rule(), bypass_api_rule()]
+        }),
+    )]);
+    let compiled = graph_to_environment_config(&desired, &CompileOptions::default());
+    assert_eq!(
+        compiled["services"]["web"]["edgeRules"],
+        json!([block_admin_rule(), bypass_api_rule()])
+    );
+    let current = environment_config_to_graph(
+        &compiled,
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            ..Default::default()
+        },
+    );
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    // Railway serialises the rules sorted by priority without ids, defaults
+    // or empty params; the same rules reordered with all of that spelled out
+    // mean the same thing.
+    let current = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "edgeRules": [block_admin_rule(), bypass_api_rule()]
+            }
+        }
+    }));
+    let mut spelled_out_bypass = bypass_api_rule();
+    spelled_out_bypass["id"] = json!("rul_2l3imrrd1hdzp");
+    spelled_out_bypass["enabled"] = json!(true);
+    spelled_out_bypass["mode"] = json!("enforce");
+    spelled_out_bypass["if"]["key"] = Value::Null;
+    let mut spelled_out_block = block_admin_rule();
+    spelled_out_block["description"] = Value::Null;
+    spelled_out_block["then"]["params"] = json!({});
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "edgeRules": [spelled_out_bypass, spelled_out_block]
+        }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+
+    // A service without rules has no list; an empty list means the same.
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1"), "edgeRules": [] }),
+    )]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
+fn edge_rule_changes_plan_an_update_without_a_deploy() {
+    let current = env_config(json!({
+        "services": { "web": { "source": { "image": "ghcr.io/acme/web:1" } } }
+    }));
+
+    let add = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "edgeRules": [block_admin_rule()]
+        }),
+    )]);
+    let result = diff(&current, &add);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "edgeRules");
+    assert_eq!(result.changes[0]["after"], json!([block_admin_rule()]));
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+    assert_eq!(result.changes[0]["summary"], "Update web edgeRules[10]");
+    assert_eq!(
+        result.changes[0]["details"],
+        json!([format!(
+            "edgeRules[10] (null → {})",
+            serde_json::to_string(&block_admin_rule()).unwrap()
+        )])
+    );
+
+    // The list is replaced as a whole, so a disabled rule is a change to
+    // the list, reported per rule rather than leaf by leaf.
+    let guarded = env_config(json!({
+        "services": {
+            "web": {
+                "source": { "image": "ghcr.io/acme/web:1" },
+                "edgeRules": [block_admin_rule(), bypass_api_rule()]
+            }
+        }
+    }));
+    let mut disabled_block = block_admin_rule();
+    disabled_block["enabled"] = json!(false);
+    let retuned = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "edgeRules": [bypass_api_rule(), disabled_block.clone()]
+        }),
+    )]);
+    let result = diff(&guarded, &retuned);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "edgeRules");
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+    assert_eq!(
+        result.changes[0]["after"],
+        json!([bypass_api_rule(), disabled_block])
+    );
+    assert_eq!(
+        result.changes[0]["details"],
+        json!([format!(
+            "edgeRules[10] ({} → {})",
+            serde_json::to_string(&block_admin_rule()).unwrap(),
+            serde_json::to_string(&disabled_block).unwrap()
+        )])
+    );
+
+    let unguarded = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/web:1") }),
+    )]);
+    let result = diff(&guarded, &unguarded);
+    assert_eq!(kinds(&result), vec!["resource.update"]);
+    assert_eq!(result.changes[0]["field"], "edgeRules");
+    assert!(result.changes[0]["after"].is_null());
+    assert_eq!(result.changes[0]["deployEffect"], "none");
+    assert_eq!(
+        result.changes[0]["summary"],
+        "Update web edgeRules[10], edgeRules[20]"
+    );
+}
+
+#[test]
+fn new_service_carries_edge_rules_on_the_create() {
+    let current = env_config(json!({ "services": {} }));
+    let desired = graph_from(vec![service(
+        "web",
+        json!({
+            "source": image("ghcr.io/acme/web:1"),
+            "edgeRules": [block_admin_rule()]
+        }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(kinds(&result), vec!["resource.create"]);
+    assert_eq!(
+        result.changes[0]["resource"]["edgeRules"],
+        json!([block_admin_rule()])
+    );
+}
+
 #[test]
 fn template_database_start_command_does_not_churn() {
     let current = managed_db_config(json!({
