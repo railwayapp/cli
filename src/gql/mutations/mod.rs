@@ -372,6 +372,15 @@ pub struct DeploymentInstanceExecutionCreate;
 )]
 pub struct ServiceInstanceDeployLatestCommit;
 
+/// One-off deploy of a specific commit, without pinning it in the environment config.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceInstanceDeployCommit.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceInstanceDeployCommit;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
