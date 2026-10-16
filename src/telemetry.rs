@@ -1176,14 +1176,70 @@ fn ai_ide_host_from_env() -> Option<&'static str> {
 /// clients catalog themselves in the warehouse without re-shipping the CLI;
 /// the dbt-side caller_class macro folds the whole `mcp_unknown(:*)` family
 /// into `agent_unknown`.
+///
+/// A generic or missing name (`cli`, `mcp`, `rmcp`, an empty string, ...)
+/// names a transport library or a placeholder rather than the harness, so it
+/// must not shadow a harness we can identify from the environment or the
+/// process tree: those names fall back to env/process detection and only
+/// pass through as `mcp_unknown:<name>` when that finds nothing. Warehouse
+/// 2026-10-16: ~1.8k users/30d sent an empty name and ~1.4k more sent `cli`,
+/// `rmcp` or `mcp`, most of them inside Claude Code or Codex sessions.
 fn caller_from_mcp_client_name(name: &str) -> String {
+    caller_from_mcp_client_name_with(name, harness_from_env_or_process_tree)
+}
+
+/// [`caller_from_mcp_client_name`] with the env/process fallback injected, so
+/// tests don't depend on the harness running them (CLAUDECODE et al.).
+fn caller_from_mcp_client_name_with(
+    name: &str,
+    harness: impl FnOnce() -> Option<&'static str>,
+) -> String {
     if let Some(known) = known_caller_from_mcp_client_name(name) {
         return known.to_string();
     }
-    match mcp_client_name_slug(name) {
+    let slug = mcp_client_name_slug(name);
+    if slug.as_deref().is_none_or(is_generic_mcp_client_slug)
+        && let Some(agent) = harness()
+    {
+        return agent.to_string();
+    }
+    match slug {
         Some(slug) => format!("mcp_unknown:{slug}"),
         None => "mcp_unknown".to_string(),
     }
+}
+
+fn harness_from_env_or_process_tree() -> Option<&'static str> {
+    agent_from_strong_env().or_else(agent_from_process_tree)
+}
+
+/// Sanitized clientInfo names that identify an SDK, a placeholder or a
+/// connectivity check rather than a harness. Names of two characters or
+/// fewer (`t`, `p`, `cc`, ...) are treated the same way.
+fn is_generic_mcp_client_slug(slug: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "acp",
+        "app",
+        "audit",
+        "check",
+        "cli",
+        "client",
+        "connection-check",
+        "desktop",
+        "diag",
+        "diagnostic",
+        "mcp",
+        "mcp-client",
+        "mcp-test-client",
+        "probe",
+        "rmcp",
+        "setup-check",
+        "smoke",
+        "test",
+        "test-client",
+        "verify",
+    ];
+    slug.len() <= 2 || GENERIC.contains(&slug)
 }
 
 /// Header-safe identity for an MCP client name, used by `railway mcp proxy`
@@ -1934,8 +1990,9 @@ pub(crate) fn current_agent_session_id() -> Option<String> {
     resolve_agent_session_id(&caller)
 }
 
-/// Attribution for the deploy tarball upload (`x-railway-caller` /
-/// `x-railway-agent-session` headers). Returns `Some` only when the CLI
+/// Attribution for the deploy tarball upload and `railway mcp proxy`
+/// upstream requests (`x-railway-caller` / `x-railway-agent-session`
+/// headers). Returns `Some` only when the CLI
 /// detects an agent harness driving it — backboard treats header presence
 /// as the agent signal (`platform_create_deployment.source = "CLI Agent"`),
 /// so human-driven runs send nothing. Values mirror the telemetry event
@@ -2240,9 +2297,9 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
-        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
-        mcp_client_header_value, new_session_uuid, parent_kind_from_command, residue_from_command,
-        truncate_message, walk_ancestors,
+        caller_from_mcp_client_name, caller_from_mcp_client_name_with, caller_from_process_name,
+        is_agent_caller, is_agent_harness, mcp_client_header_value, new_session_uuid,
+        parent_kind_from_command, residue_from_command, truncate_message, walk_ancestors,
     };
     use std::collections::HashMap;
 
@@ -2500,9 +2557,17 @@ mod tests {
             caller_from_mcp_client_name("some::client v2"),
             "mcp_unknown:some-client-v2"
         );
-        // Nothing safe survives → plain mcp_unknown, same as before.
-        assert_eq!(caller_from_mcp_client_name("   "), "mcp_unknown");
-        assert_eq!(caller_from_mcp_client_name("漢字"), "mcp_unknown");
+        // Nothing safe survives → plain mcp_unknown when no harness is
+        // detectable either (the fallback is pinned to None so the test
+        // doesn't depend on the harness running it).
+        assert_eq!(
+            caller_from_mcp_client_name_with("   ", || None),
+            "mcp_unknown"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("漢字", || None),
+            "mcp_unknown"
+        );
         // Length-bounded: 48 chars of name max after the prefix.
         let long = caller_from_mcp_client_name(&"x".repeat(300));
         assert!(long.starts_with("mcp_unknown:"));
@@ -2510,6 +2575,47 @@ mod tests {
         // Output always passes the telemetry charset filter, so the
         // composed caller survives safe_telemetry_value downstream.
         assert!(super::safe_telemetry_value(&long).is_some());
+    }
+
+    #[test]
+    fn generic_mcp_client_names_defer_to_harness_detection() {
+        // A transport library or placeholder name must not shadow a harness
+        // the env / process tree identifies.
+        for name in [
+            "", "   ", "cli", "MCP", "rmcp", "acp", "probe", "t", "cc", "漢字",
+        ] {
+            assert_eq!(
+                caller_from_mcp_client_name_with(name, || Some("claude_code")),
+                "claude_code",
+                "{name:?}"
+            );
+        }
+        // With no harness detected they still catalog themselves.
+        assert_eq!(
+            caller_from_mcp_client_name_with("cli", || None),
+            "mcp_unknown:cli"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("rmcp", || None),
+            "mcp_unknown:rmcp"
+        );
+        assert_eq!(caller_from_mcp_client_name_with("", || None), "mcp_unknown");
+    }
+
+    #[test]
+    fn specific_mcp_client_names_beat_harness_detection() {
+        // A recognized name is authoritative, and a specific unknown name is
+        // a better identifier than env inherited from a parent session, so
+        // neither consults the fallback.
+        let never = || -> Option<&'static str> { panic!("fallback consulted") };
+        assert_eq!(
+            caller_from_mcp_client_name_with("opencode", never),
+            "opencode"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("grok-shell-railway", never),
+            "mcp_unknown:grok-shell-railway"
+        );
     }
 
     #[test]

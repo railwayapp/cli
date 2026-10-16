@@ -58,6 +58,10 @@ struct ProxyState {
     /// Resolved once at startup: the proxy's working directory is fixed for
     /// the life of the process, so the link cannot change under it.
     link: LinkContext,
+    /// The harness that spawned the proxy, resolved once at startup from the
+    /// environment and process tree. Sent upstream so traffic stays
+    /// attributed when the harness's `clientInfo.name` is missing or generic.
+    harness: HarnessAttribution,
 }
 
 #[derive(Default)]
@@ -98,6 +102,27 @@ struct SessionMeta {
 /// Deliberately NOT covered: resolving a project from a RAILWAY_TOKEN, which
 /// costs a GraphQL round trip and would put a network call (and a 15s connect
 /// timeout on a bad one) in front of proxy startup while the harness waits.
+/// Who is driving the proxy, as env/process detection sees it. Empty when the
+/// proxy runs from a human terminal or CI (the same gate the deploy upload
+/// uses), so those requests carry no caller header.
+#[derive(Clone, Default)]
+struct HarnessAttribution {
+    caller: Option<String>,
+    agent_session_id: Option<String>,
+}
+
+impl HarnessAttribution {
+    fn detect() -> Self {
+        match telemetry::deploy_attribution() {
+            Some((caller, agent_session_id)) => Self {
+                caller: Some(caller),
+                agent_session_id,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct LinkContext {
     project_id: Option<String>,
@@ -124,6 +149,12 @@ const SCOPING_PARAMS: [&str; 4] = ["projectId", "environmentId", "serviceId", "d
 const MCP_TRANSPORT_HEADER: &str = "x-railway-mcp-transport";
 const MCP_TRANSPORT_VALUE: &str = "cli-proxy";
 const MCP_CLIENT_HEADER: &str = "x-railway-mcp-client";
+/// Agent attribution, named as backboard reads them
+/// (helpers/agentAttribution.ts). Backboard prefers `x-railway-caller` over
+/// `x-railway-mcp-client`, so the proxy sends the best identity it has in
+/// both.
+const RAILWAY_CALLER_HEADER: &str = "x-railway-caller";
+const RAILWAY_AGENT_SESSION_HEADER: &str = "x-railway-agent-session";
 /// Names the context the proxy filled in on this call. Injection is otherwise
 /// invisible — the server cannot tell an injected projectId from one the
 /// caller chose — so without this there is no way to measure how often it
@@ -170,6 +201,7 @@ pub async fn serve_proxy() -> Result<()> {
         session: Mutex::new(SessionMeta::default()),
         recovery: Mutex::new(()),
         link,
+        harness: HarnessAttribution::detect(),
     });
 
     // All stdout writes go through one task so concurrent responses can't
@@ -544,9 +576,7 @@ async fn post_message(
         .header("accept", "application/json, text/event-stream")
         .header("x-source", consts::get_user_agent())
         .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE);
-    if let Some(client) = metadata.client_name.as_deref() {
-        req = req.header(MCP_CLIENT_HEADER, client);
-    }
+    req = with_attribution(req, metadata.client_name.as_deref(), &state.harness);
     if metadata.injected {
         req = req.header(MCP_INJECTED_HEADER, "projectId");
     }
@@ -571,6 +601,37 @@ async fn post_message(
         .send()
         .await
         .context("failed to reach the remote MCP server")
+}
+
+/// Attach agent attribution to an upstream request. The client name from the
+/// harness's `initialize` handshake is the stronger identity and wins for
+/// `x-railway-caller`; the env/process-detected harness covers a handshake
+/// with no usable name (and any request whose metadata lacks one), which
+/// previously reached backboard with no caller at all. Warehouse 2026-10-16:
+/// ~13k users/wk of proxied connect events arrived caller-less, 99% of them
+/// users whose other proxied events were attributed.
+fn with_attribution(
+    mut req: reqwest::RequestBuilder,
+    client_name: Option<&str>,
+    harness: &HarnessAttribution,
+) -> reqwest::RequestBuilder {
+    if let Some(client) = client_name {
+        req = req.header(MCP_CLIENT_HEADER, client);
+    }
+    if let Some(caller) = client_name
+        .or(harness.caller.as_deref())
+        .filter(|c| header_safe(c))
+    {
+        req = req.header(RAILWAY_CALLER_HEADER, caller);
+    }
+    if let Some(session) = harness
+        .agent_session_id
+        .as_deref()
+        .filter(|s| header_safe(s))
+    {
+        req = req.header(RAILWAY_AGENT_SESSION_HEADER, session);
+    }
+    req
 }
 
 /// A header may only carry visible ASCII; a value that cannot restate the body
@@ -840,9 +901,7 @@ async fn end_session(state: &ProxyState) {
         .header("mcp-session-id", session_id)
         .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE)
         .timeout(Duration::from_secs(5));
-    if let Some(client) = client_name.as_deref() {
-        req = req.header(MCP_CLIENT_HEADER, client);
-    }
+    req = with_attribution(req, client_name.as_deref(), &state.harness);
     let _ = req.send().await;
 }
 
@@ -1027,6 +1086,62 @@ mod tests {
             "params": { "protocolVersion": "2025-03-26" }
         });
         assert_eq!(extract_mcp_client_header(&msg), None);
+    }
+
+    fn attribution_headers(
+        client_name: Option<&str>,
+        harness: &HarnessAttribution,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let req = with_attribution(
+            reqwest::Client::new().post("http://127.0.0.1/mcp"),
+            client_name,
+            harness,
+        )
+        .build()
+        .unwrap();
+        let get = |name: &str| {
+            req.headers()
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        (
+            get(MCP_CLIENT_HEADER),
+            get(RAILWAY_CALLER_HEADER),
+            get(RAILWAY_AGENT_SESSION_HEADER),
+        )
+    }
+
+    #[test]
+    fn harness_attribution_covers_a_missing_client_name() {
+        let harness = HarnessAttribution {
+            caller: Some("codex".to_string()),
+            agent_session_id: Some("0199f0c2-thread".to_string()),
+        };
+        // No usable clientInfo name: the detected harness still names the
+        // caller, where the request previously carried no attribution.
+        assert_eq!(
+            attribution_headers(None, &harness),
+            (
+                None,
+                Some("codex".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A handshake name wins for the caller and is still sent as the
+        // client header.
+        assert_eq!(
+            attribution_headers(Some("mcp_unknown:totally-new-ide"), &harness),
+            (
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A human or CI launch detects nothing and sends nothing extra.
+        assert_eq!(
+            attribution_headers(None, &HarnessAttribution::default()),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -1360,6 +1475,9 @@ mod recovery_tests {
                             assert_eq!(headers["authorization"], "Bearer test-token");
                             assert_eq!(headers[MCP_METHOD_HEADER], method);
                             assert_eq!(headers[MCP_CLIENT_HEADER], "claude_code");
+                            // The handshake name beats the detected harness.
+                            assert_eq!(headers[RAILWAY_CALLER_HEADER], "claude_code");
+                            assert_eq!(headers[RAILWAY_AGENT_SESSION_HEADER], "agent-session-1");
                             assert_eq!(headers[MCP_TRANSPORT_HEADER], MCP_TRANSPORT_VALUE);
                             let (status, session_header) = match method {
                                 "initialize" => {
@@ -1474,6 +1592,10 @@ mod recovery_tests {
             }),
             recovery: Mutex::new(()),
             link: LinkContext::default(),
+            harness: HarnessAttribution {
+                caller: Some("codex".to_string()),
+                agent_session_id: Some("agent-session-1".to_string()),
+            },
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let requests = (1..=callers).map(|id| {
