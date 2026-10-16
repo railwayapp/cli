@@ -595,15 +595,123 @@ fn exe_basename(argv0: &str) -> &str {
     basename.strip_suffix(".exe").unwrap_or(basename)
 }
 
+/// Interpreters and launchers whose first operand names the program that
+/// actually runs (`node /x/cli.js`, `python -m aider`, `bash run.sh`).
+const INTERPRETERS: &[&str] = &[
+    "node",
+    "nodejs",
+    "bun",
+    "bunx",
+    "deno",
+    "npx",
+    "pnpx",
+    "npm",
+    "pnpm",
+    "yarn",
+    "uv",
+    "uvx",
+    "pipx",
+    "ruby",
+    "pythonw",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+];
+
+/// Launcher subcommands that sit between the interpreter and the program
+/// (`npm exec x`, `pnpm dlx x`, `uv run x`, `pipx run x`, `uv tool run x`).
+const LAUNCHER_SUBCOMMANDS: &[&str] = &["exec", "dlx", "x", "run", "tool"];
+
+fn is_interpreter(basename: &str) -> bool {
+    INTERPRETERS.contains(&basename)
+        || basename
+            .strip_prefix("python")
+            .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// The part of a (lowercased) command line that identifies the program:
+/// argv0, plus the first operand when argv0 is an interpreter. Everything
+/// else is dropped, because agent names showing up in arguments (`--model
+/// qwen3-coder`, a project path) or in the user's own folder names (macOS
+/// `login -pf cody`, `/Users/cody/...`, `~/code/copilot-dashboard/...`)
+/// were attributing runs to agents that never ran (warehouse 2026-10-16).
+///
+/// Inside a home directory only the segments that look like installed
+/// tooling survive: everything from the first hidden directory on
+/// (`~/.nvm/...`, `~/.hermes/...`), `node_modules` packages, and the
+/// program's own basename. Paths outside a home directory (`/opt/...`,
+/// `/usr/local/...`, `/Applications/X.app/...`) are kept whole.
+fn identity_surface(lower: &str) -> String {
+    let mut tokens = lower.split_whitespace();
+    let Some(argv0) = tokens.next() else {
+        return String::new();
+    };
+    let mut surface = identity_path(argv0);
+    if is_interpreter(exe_basename(argv0)) {
+        // `-m` / `-c` style flags are skipped; the module or script that
+        // follows is the operand.
+        if let Some(operand) =
+            tokens.find(|t| !t.starts_with('-') && !LAUNCHER_SUBCOMMANDS.contains(t))
+        {
+            surface.push(' ');
+            surface.push_str(&identity_path(operand));
+        }
+    }
+    surface
+}
+
+fn identity_path(path: &str) -> String {
+    let segments: Vec<&str> = path.split(['/', '\\']).collect();
+    let home_user = segments
+        .iter()
+        .position(|s| *s == "users" || *s == "home")
+        .filter(|&i| i <= 1 && segments.len() > i + 1);
+    let Some(i) = home_user else {
+        return path.to_string();
+    };
+    let rest = &segments[i + 2..];
+    let last = rest.len().saturating_sub(1);
+    let mut kept = Vec::new();
+    let mut in_tooling = false;
+    // Set right after a `node_modules` segment: keep the package name (and
+    // its `@scope`, if any) even when the install sits in a plain folder.
+    let mut want_package = false;
+    for (n, seg) in rest.iter().enumerate() {
+        if seg.starts_with('.') && seg.len() > 1 {
+            in_tooling = true;
+        }
+        if *seg == "node_modules" {
+            want_package = true;
+            continue;
+        }
+        if in_tooling || n == last || want_package {
+            kept.push(*seg);
+        }
+        if want_package && !seg.starts_with('@') {
+            want_package = false;
+        }
+    }
+    kept.join("/")
+}
+
 /// Map a process command line to a canonical agent slug. Operates on the
 /// lowercased full command line so that node-bundled agents (e.g. `node
 /// /path/to/cursor-agent`) match even though their `comm` is just `node`.
 /// On Windows the snapshot carries only the exe basename (`codex.exe`),
 /// which the substring arms and [`exe_basename`] normalization both handle.
 fn caller_from_process_name(command: &str) -> Option<&'static str> {
-    let lower = command.to_ascii_lowercase();
-    let argv0 = lower.split_whitespace().next().unwrap_or("");
+    let full = command.to_ascii_lowercase();
+    let argv0 = full.split_whitespace().next().unwrap_or("");
     let basename = exe_basename(argv0);
+    // Substring arms below only see the identity surface (the binary, or the
+    // script an interpreter runs), never arbitrary arguments or the user's
+    // home-directory name. See [`identity_surface`].
+    let lower = identity_surface(&full);
 
     // Short / generic agent names need exact-basename matching to avoid
     // false positives (`pi` vs `pilot`, `amp` vs `chamber`, `droid` vs
@@ -2763,6 +2871,84 @@ mod tests {
     fn does_not_detect_short_agent_names_as_substrings() {
         assert_eq!(caller_from_process_name("pilot"), None);
         assert_eq!(caller_from_process_name("example"), None);
+    }
+
+    #[test]
+    fn agent_names_in_user_paths_and_arguments_do_not_match() {
+        // macOS Terminal's `login -pf <user>` and sshd sit above every shell.
+        assert_eq!(caller_from_process_name("login -pf cody"), None);
+        assert_eq!(caller_from_process_name("sshd: cody@pts/0"), None);
+        // The home-directory name is not identity.
+        assert_eq!(
+            caller_from_process_name("/Users/cody/.bun/bin/bun run dev"),
+            None
+        );
+        assert_eq!(caller_from_process_name("/home/cody/bin/deploy.sh"), None);
+        assert_eq!(
+            caller_from_process_name("C:\\Users\\cody\\tools\\run.exe"),
+            None
+        );
+        // A user's own project folder named after an agent.
+        assert_eq!(
+            caller_from_process_name("node /Users/x/code/copilot-dashboard/server.js"),
+            None
+        );
+        assert_eq!(
+            caller_from_process_name("python /home/x/projects/cursor-clone/app.py"),
+            None
+        );
+        // Agent names in arguments (model ids, flags, paths) are not identity.
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/hermes --model qwen3-coder"),
+            Some("hermes")
+        );
+        assert_eq!(
+            caller_from_process_name("node /opt/svc/worker.js --project gemini-demo"),
+            None
+        );
+        assert_eq!(caller_from_process_name("make deploy CODY=1"), None);
+    }
+
+    #[test]
+    fn installed_agents_still_match_from_home_tooling_dirs() {
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/x/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ),
+            Some("claude_code")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/cody/.npm-global/lib/node_modules/@github/copilot/index.js"
+            ),
+            Some("copilot_cli")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/x/code/app/node_modules/@google/gemini-cli/dist/index.js"
+            ),
+            Some("gemini_cli")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "/Users/cody/.local/share/cursor-agent/versions/1/cursor-agent"
+            ),
+            Some("cursor")
+        );
+        assert_eq!(
+            caller_from_process_name("python3.12 -m aider --yes"),
+            Some("aider")
+        );
+        assert_eq!(caller_from_process_name("npx @openai/codex"), Some("codex"));
+        assert_eq!(caller_from_process_name("uv run aider"), Some("aider"));
+        assert_eq!(
+            caller_from_process_name("npm exec @google/gemini-cli"),
+            Some("gemini_cli")
+        );
+        assert_eq!(
+            caller_from_process_name("/Users/cody/bin/aider"),
+            Some("aider")
+        );
     }
 
     #[test]
