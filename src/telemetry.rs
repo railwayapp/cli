@@ -611,6 +611,18 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
         "pi" => return Some("pi"),
         "amp" => return Some("amp"),
         "droid" => return Some("factory_droid"),
+        // Surfaced as ancestor residues on agent_unknown (warehouse
+        // 2026-10-16): hermes ~550 users/wk across node/shell/python
+        // parents, grok ~146. Exact basenames only: `grok` must not match
+        // `ngrok`, and `crush` / `kimi` are too short for substrings.
+        "hermes" => return Some("hermes"),
+        "grok" => return Some("grok"),
+        "crush" => return Some("crush"),
+        "kimi" | "kimi-cli" => return Some("kimi_code"),
+        // Kiro's terminal agent. Deliberately NOT the Kiro IDE binary
+        // (`kiro`): this walk runs before the TTY check, so matching an IDE
+        // process would turn every human terminal inside it into an agent.
+        "kiro-cli" => return Some("kiro"),
         _ => {}
     }
 
@@ -620,6 +632,18 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
     // specific patterns first.
     if lower.contains("cursor-agent") {
         return Some("cursor");
+    }
+    if lower.contains("hermes-agent") {
+        return Some("hermes");
+    }
+    if lower.contains("grok-cli") {
+        return Some("grok");
+    }
+    if lower.contains("openclaw") {
+        return Some("openclaw");
+    }
+    if lower.contains("auggie") {
+        return Some("augment");
     }
     if lower.contains("opencode") {
         return Some("opencode");
@@ -1230,6 +1254,37 @@ fn mcp_client_name_slug(name: &str) -> Option<String> {
     }
 }
 
+/// Exact matches on the sanitized client-name slug, so spacing / casing
+/// variants of a name map the same way the warehouse sees them. Every name
+/// here was a recurring `mcp_unknown:<slug>` in the warehouse (audit
+/// 2026-10-16, last 30 days); slugs match the dbt-side recovery in
+/// dbt-analytics normalize_caller.sql (`mcp_unknown_recovered_agent`).
+/// Generic names (`cli`, `mcp`, `rmcp`, `acp`, `probe`, `desktop`) and
+/// `local-agent-mode-railway*` (origin unconfirmed) stay unmapped.
+fn known_caller_from_mcp_client_slug(name: &str) -> Option<&'static str> {
+    let slug = mcp_client_name_slug(name)?;
+    let caller = match slug.as_str() {
+        "grok-shell-railway" => "grok",
+        s if s.starts_with("grok-shell-railway-") => "grok",
+        "copilot-cli" => "copilot_cli",
+        "pi" | "pi-mcp-railway" => "pi",
+        "omp" | "omp-coding-agent" => "oh_my_pi",
+        "factory-cli" => "factory_droid",
+        "dev.warp.warp" | "dev.warp.warp-stable" => "warp",
+        "openclaw-bundle-mcp" => "openclaw",
+        "kimi-code" => "kimi_code",
+        "augment-mcp-client" => "augment",
+        "junie-client" => "junie",
+        "qwen-cli-mcp-client-railway" => "qwen_code",
+        "amp-mcp-client" => "amp",
+        // Cline's SDK reports `@cline/core`; the bare name is the extension.
+        "cline" => "cline",
+        s if s.starts_with("@cline/") => "cline",
+        _ => return None,
+    };
+    Some(caller)
+}
+
 /// The recognized-client mapping table. Returns None for clients we don't
 /// catalog yet; the caller composes the `mcp_unknown:<name>` passthrough.
 fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
@@ -1254,11 +1309,11 @@ fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
         // identifiable slice of the local-MCP `mcp_unknown` bucket.
         return Some("claude_code");
     }
+    if let Some(known) = known_caller_from_mcp_client_slug(name) {
+        return Some(known);
+    }
     if lower == "codex-mcp-client" || lower.contains("codex") {
         return Some("codex");
-    }
-    if lower == "cline" {
-        return Some("cline");
     }
     if lower == "roo code" || lower == "roo-code" {
         return Some("roo_code");
@@ -2331,6 +2386,51 @@ mod tests {
     }
 
     #[test]
+    fn detects_harnesses_cataloged_from_ancestor_residue() {
+        assert_eq!(caller_from_process_name("hermes"), Some("hermes"));
+        assert_eq!(
+            caller_from_process_name("python /home/u/.hermes/hermes-agent/run.py"),
+            Some("hermes")
+        );
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/grok"),
+            Some("grok")
+        );
+        assert_eq!(
+            caller_from_process_name("node /usr/lib/node_modules/grok-cli/dist/index.js"),
+            Some("grok")
+        );
+        assert_eq!(
+            caller_from_process_name("node /opt/openclaw/gateway.js"),
+            Some("openclaw")
+        );
+        assert_eq!(caller_from_process_name("auggie --print"), Some("augment"));
+        assert_eq!(caller_from_process_name("crush"), Some("crush"));
+        assert_eq!(caller_from_process_name("kimi"), Some("kimi_code"));
+        assert_eq!(caller_from_process_name("kimi.exe"), Some("kimi_code"));
+        assert_eq!(caller_from_process_name("kiro-cli chat"), Some("kiro"));
+    }
+
+    #[test]
+    fn residue_harness_names_do_not_overmatch() {
+        // `grok` is exact-basename only: ngrok tunnels are common parents.
+        assert_eq!(caller_from_process_name("ngrok http 3000"), None);
+        assert_eq!(caller_from_process_name("/usr/local/bin/ngrok"), None);
+        // Short names are exact-basename only.
+        assert_eq!(caller_from_process_name("crushftp"), None);
+        assert_eq!(caller_from_process_name("kimiko"), None);
+        // The Kiro IDE process itself is not an agent signal (it would
+        // reclassify human terminals); only its CLI agent is.
+        assert_eq!(
+            caller_from_process_name("/Applications/Kiro.app/Contents/MacOS/Kiro"),
+            None
+        );
+        // Only the exact `hermes` basename and the `hermes-agent` path
+        // marker match, not tools that merely start with the name.
+        assert_eq!(caller_from_process_name("hermesc -emit-binary"), None);
+    }
+
+    #[test]
     fn detects_factory_droid_process_name() {
         assert_eq!(
             caller_from_process_name("factory-droid"),
@@ -2429,6 +2529,60 @@ mod tests {
             mcp_client_header_value("Totally New IDE").as_deref(),
             Some("mcp_unknown:totally-new-ide")
         );
+    }
+
+    #[test]
+    fn maps_mcp_client_names_cataloged_2026_10() {
+        let cases = [
+            ("grok-shell-railway", "grok"),
+            ("grok-shell-railway-mcp-server", "grok"),
+            ("grok-shell-railway-local", "grok"),
+            ("copilot-cli", "copilot_cli"),
+            ("pi", "pi"),
+            ("pi-mcp-railway", "pi"),
+            ("omp", "oh_my_pi"),
+            ("omp-coding-agent", "oh_my_pi"),
+            ("factory-cli", "factory_droid"),
+            ("dev.warp.warp-stable", "warp"),
+            ("dev.warp.warp", "warp"),
+            ("openclaw-bundle-mcp", "openclaw"),
+            ("kimi-code", "kimi_code"),
+            ("augment-mcp-client", "augment"),
+            ("junie-client", "junie"),
+            ("qwen-cli-mcp-client-railway", "qwen_code"),
+            ("amp-mcp-client", "amp"),
+            ("@cline/core", "cline"),
+            ("Cline", "cline"),
+            // Casing / spacing variants resolve through the slug.
+            ("Grok Shell Railway", "grok"),
+            ("Copilot CLI", "copilot_cli"),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(caller_from_mcp_client_name(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn cataloged_2026_10_names_do_not_overmatch() {
+        let cases = [
+            // Generic names stay in the passthrough.
+            ("cli", "mcp_unknown:cli"),
+            ("rmcp", "mcp_unknown:rmcp"),
+            ("mcp", "mcp_unknown:mcp"),
+            (
+                "local-agent-mode-railway",
+                "mcp_unknown:local-agent-mode-railway",
+            ),
+            // Prefix-only arms need their delimiter.
+            ("grok-shell-railwayx", "mcp_unknown:grok-shell-railwayx"),
+            ("pilot", "mcp_unknown:pilot"),
+            ("incline", "mcp_unknown:incline"),
+            ("clinesque", "mcp_unknown:clinesque"),
+            ("omp-other", "mcp_unknown:omp-other"),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(caller_from_mcp_client_name(name), expected, "{name}");
+        }
     }
 
     #[test]
