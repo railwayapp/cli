@@ -1028,6 +1028,33 @@ fn warns_instead_of_deleting_mounted_volume() {
 }
 
 #[test]
+fn warns_instead_of_deleting_undeclared_bucket() {
+    let current = environment_config_to_graph(
+        &json!({
+            "services": { "web": { "source": { "image": "ghcr.io/acme/api:1.2.3" } } },
+            "buckets": { "bkt-1": { "region": "sjc" } }
+        }),
+        &EnvironmentConfigToGraphOptions {
+            project_name: Some("app".into()),
+            bucket_names_by_id: super::compiler::map_from_str(&[("bkt-1", "files")]),
+            ..Default::default()
+        },
+    );
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "source": image("ghcr.io/acme/api:1.2.3") }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(!kinds(&result).contains(&"resource.delete".to_string()));
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.path == "resources.bucket.files" && d.message.contains("never deleted"))
+    );
+}
+
+#[test]
 fn removing_a_service_is_destructive() {
     let current = env_config(json!({
         "services": {
