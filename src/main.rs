@@ -583,6 +583,15 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
+            assert_parses(&["redeploy", "--commit", "3f2a9c1"]);
+            assert_parses(&[
+                "redeploy", "--commit", "3f2a9c1", "-s", "web", "--yes", "--json",
+            ]);
+            assert_parses(&["redeploy", "--from-source"]);
+            assert!(
+                parse(&["redeploy", "--commit", "3f2a9c1", "--from-source"]).is_err(),
+                "--commit and --from-source are mutually exclusive"
+            );
             assert_subcommand(&["cdn", "status"], "cdn");
             assert_subcommand(&["waf", "under-attack", "status"], "waf");
             assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
@@ -740,6 +749,7 @@ mod cli_tests {
             assert_parses(&["service", "logs", "-s", "myservice"]);
             assert_parses(&["service", "redeploy"]);
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
+            assert_parses(&["service", "redeploy", "--commit", "3f2a9c1"]);
             assert_parses(&["service", "restart"]);
             assert_parses(&[
                 "service",
