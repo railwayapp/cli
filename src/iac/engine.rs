@@ -534,10 +534,27 @@ async fn fetch_current_environment(
     environment_id: &str,
     decrypt_variables: bool,
 ) -> Result<EnvNode> {
+    let mut environment =
+        fetch_environment_config(client, endpoint, environment_id, decrypt_variables).await?;
+    if environment.is_ephemeral {
+        environment.source_environment =
+            fetch_source_environment(client, endpoint, environment_id).await;
+    }
+    Ok(environment)
+}
+
+/// The environment's own config. `sourceEnvironment` is deliberately not
+/// asked for here; see `fetch_source_environment`.
+async fn fetch_environment_config(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    decrypt_variables: bool,
+) -> Result<EnvNode> {
     let query_with_partials = r#"
       query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
         environment(id: $environmentId) {
-          id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
+          id name projectId isEphemeral meta { branch prNumber prRepo } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
         }
       }
     "#;
@@ -549,7 +566,7 @@ async fn fetch_current_environment(
             let query = r#"
               query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
                 environment(id: $environmentId) {
-                  id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
+                  id name projectId isEphemeral meta { branch prNumber prRepo } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
                 }
               }
             "#;
@@ -561,6 +578,46 @@ async fn fetch_current_environment(
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// The environment a PR environment was created from, for `ctx.pr.base`.
+///
+/// Asked for on its own, and only for an ephemeral environment, because
+/// `sourceEnvironment` is a different environment from the one being
+/// configured, and a project token scoped to one environment may not read
+/// another. Inside `IacEnvironmentConfig`, that one refused field failed the
+/// whole query, so a project token for any environment created from another
+/// (a duplicated staging environment, say) could not pull, plan or apply at
+/// all, though nothing outside a PR environment reads the field. Here a
+/// refusal only leaves `ctx.pr.base` unset.
+async fn fetch_source_environment(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+) -> Option<SourceEnvironment> {
+    #[derive(Deserialize)]
+    struct SourceQuery {
+        environment: SourceNode,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SourceNode {
+        #[serde(default)]
+        source_environment: Option<SourceEnvironment>,
+    }
+
+    let query = r#"
+      query IacSourceEnvironment($environmentId: String!) {
+        environment(id: $environmentId) { sourceEnvironment { name } }
+      }
+    "#;
+    let vars = json!({ "environmentId": environment_id });
+    post_graphql_raw::<SourceQuery, _>(client, endpoint, query, vars)
+        .await
+        .ok()?
+        .environment
+        .source_environment
 }
 
 async fn fill_name_maps(
@@ -869,6 +926,94 @@ mod tests {
             "config": {}
         }));
         assert!(production.pr_context().is_none());
+    }
+
+    mod environment_fetch {
+        use super::*;
+        use crate::testkit::MockBackboard;
+
+        // `post_graphql_raw` sends no `operationName`, so `MockBackboard`
+        // files these requests under "" and serves the responses in order.
+        const RAW: &str = "";
+
+        fn environment(fields: Value) -> Value {
+            json!({ "environment": fields })
+        }
+
+        fn pr_environment() -> Value {
+            environment(json!({
+                "id": "env",
+                "isEphemeral": true,
+                "meta": { "branch": "feat/x", "prNumber": 9 },
+                "config": {}
+            }))
+        }
+
+        fn sent_query(request: &Value) -> &str {
+            request["query"].as_str().unwrap_or_default()
+        }
+
+        #[tokio::test]
+        async fn never_asks_for_the_source_environment_outside_a_pr_environment() {
+            let server = MockBackboard::spawn();
+            let staging = environment(json!({
+                "id": "env",
+                "name": "staging",
+                "isEphemeral": false,
+                "config": {}
+            }));
+            server.stub(RAW, staging);
+
+            let client = reqwest::Client::new();
+            let fetched = fetch_current_environment(&client, &server.url(), "env", false)
+                .await
+                .unwrap();
+
+            assert_eq!(fetched.name.as_deref(), Some("staging"));
+            let requests = server.requests();
+            assert_eq!(requests.len(), 1);
+            assert!(!sent_query(&requests[0]).contains("sourceEnvironment"));
+        }
+
+        #[tokio::test]
+        async fn reads_a_pr_environments_base_in_its_own_query() {
+            let server = MockBackboard::spawn();
+            server.stub(RAW, pr_environment());
+            let source = environment(json!({ "sourceEnvironment": { "name": "dev" } }));
+            server.stub(RAW, source);
+
+            let client = reqwest::Client::new();
+            let fetched = fetch_current_environment(&client, &server.url(), "env", false)
+                .await
+                .unwrap();
+
+            let pr = fetched.pr_context().unwrap();
+            assert_eq!(pr.base.as_deref(), Some("dev"));
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            assert!(!sent_query(&requests[0]).contains("sourceEnvironment"));
+            assert!(sent_query(&requests[1]).contains("sourceEnvironment"));
+        }
+
+        #[tokio::test]
+        async fn a_failed_base_lookup_leaves_the_pr_context_without_a_base() {
+            // Any failure stands in for the refusal here: a scripted
+            // "Not Authorized" would send a logged-in developer's real session
+            // off to be probed.
+            let server = MockBackboard::spawn();
+            server.stub(RAW, pr_environment());
+            server.stub_graphql_error(RAW, "Problem processing request");
+
+            let client = reqwest::Client::new();
+            let fetched = fetch_current_environment(&client, &server.url(), "env", false)
+                .await
+                .unwrap();
+
+            let pr = fetched.pr_context().unwrap();
+            assert_eq!(pr.number, 9);
+            assert_eq!(pr.branch.as_deref(), Some("feat/x"));
+            assert!(pr.base.is_none());
+        }
     }
 
     fn wire_after_apply(ok_before: bool, apply_result: Value) -> Value {
