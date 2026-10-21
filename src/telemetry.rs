@@ -525,25 +525,22 @@ fn decode_sz_exe_file(buf: &[u16]) -> String {
 /// snapshot (the same API `commands/shell.rs` uses for shell detection).
 ///
 /// Toolhelp exposes only the executable basename (`szExeFile`), not the
-/// full argv, so `command` here is e.g. `codex.exe` / `node.exe` rather
-/// than `node C:\...\cursor-agent`. That is enough for the exact-basename
-/// and distinctive-substring arms of [`caller_from_process_name`] and for
-/// [`parent_kind_from_command`] bucketing; node-bundled agents without a
-/// distinctive binary name are still caught by their strong env vars
-/// (Layer 1), which is how all the major node-shipped harnesses identify
-/// themselves anyway.
+/// full argv, so every row starts as e.g. `codex.exe` / `node.exe`. That is
+/// enough for the exact-basename and distinctive-substring arms of
+/// [`caller_from_process_name`] and for [`parent_kind_from_command`]
+/// bucketing, but not for node- or python-hosted agents (`node.exe` running
+/// `...\node_modules\@anthropic-ai\claude-code\cli.js`), which is why
+/// ~66% of low-volume `agent_unknown:node` users were on Windows and the
+/// ancestor residue never fired there.
 ///
-/// LIMITATION: because only the basename is available, [`agent_ancestor_pid`]
-/// can't recognize node-bundled agents (they run as `node.exe`), so the
-/// persistent session-file anchor falls back to the immediate parent on
-/// Windows rather than the agent ancestor. This is masked for the major
-/// agents because their session env vars (CLAUDE_CODE_SESSION_ID,
-/// CODEX_THREAD_ID, ...) resolve first in [`resolve_agent_session_id`];
-/// agents without one fragment their sessions, but the dbt-side
-/// is_unstitched_agent_session macro flags those as unstitched rather than
-/// miscounting them. Recovering the full argv would require reading the
-/// PEB (NtQueryInformationProcess + ReadProcessMemory) and still wouldn't
-/// help node-bundled agents, so it isn't worth the fragility.
+/// [`enrich_ancestor_command_lines`] closes that gap for the rows that
+/// matter: it reads the real command line of each ANCESTOR of this process
+/// (never the rest of the table) and rewrites those rows into the same
+/// lowercased `argv0 args...` shape the unix snapshot carries, so the
+/// identification, parent-kind and residue layers run unchanged. Rows it
+/// can't read (access denied, protected or elevated processes, pre-8.1
+/// Windows, the time budget running out) keep their Toolhelp basename, so
+/// the worst case is exactly the previous behavior.
 #[cfg(windows)]
 fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -581,8 +578,349 @@ fn build_windows_snapshot() -> Option<HashMap<u32, ProcessNode>> {
             }
         }
         CloseHandle(snapshot);
+        enrich_ancestor_command_lines(&mut map);
         Some(map)
     }
+}
+
+/// Upper bound on ancestor hops [`enrich_ancestor_command_lines`] reads;
+/// matches the 15-hop ancestry walks that consume the snapshot.
+#[cfg(windows)]
+const WINDOWS_CMDLINE_MAX_HOPS: u32 = 15;
+
+/// Wall-clock budget for reading ancestor command lines. Each hop is an
+/// OpenProcess + two queries (microseconds), so this only bites on a
+/// pathologically slow machine; past it the remaining rows keep their
+/// Toolhelp basename.
+#[cfg(windows)]
+const WINDOWS_CMDLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Replace the Toolhelp basename with the real command line for each
+/// ancestor of the current process (see [`build_windows_snapshot`]).
+///
+/// The current process's own row is deliberately left as its basename: its
+/// argv is the user's `railway ...` command, whose flag values (`--set
+/// COPILOT_KEY=...`, project names) would feed the substring arms of
+/// [`caller_from_process_name`] and misattribute the call.
+///
+/// Toolhelp's `th32ParentProcessID` is recorded at creation and goes stale
+/// when a parent exits and its pid is reused. A real ancestor is always
+/// created before its descendants, so the walk stops at the first row whose
+/// creation time is later than the newest descendant time seen so far:
+/// past a broken link the rows describe someone else's process tree.
+#[cfg(windows)]
+fn enrich_ancestor_command_lines(map: &mut HashMap<u32, ProcessNode>) {
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcess};
+    use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    let started = std::time::Instant::now();
+    let me = std::process::id();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+    // CloseHandle; process_creation_time only reads through it.
+    let mut newest_allowed = unsafe { process_creation_time(GetCurrentProcess()) };
+    let mut pid = match map.get(&me) {
+        Some(node) => node.ppid,
+        None => return,
+    };
+
+    for _ in 0..WINDOWS_CMDLINE_MAX_HOPS {
+        // 0 = System Idle, 4 = System: kernel rows with no command line.
+        if pid == 0 || pid == 4 || pid == me || started.elapsed() > WINDOWS_CMDLINE_BUDGET {
+            return;
+        }
+        let Some(ppid) = map.get(&pid).map(|node| node.ppid) else {
+            return;
+        };
+
+        // SAFETY: least-privilege query handle (the right GetProcessTimes
+        // and the command-line query both need), checked for null and
+        // closed on every path; the helpers only read through it.
+        let (created, command_line) = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                (None, None)
+            } else {
+                let created = process_creation_time(handle);
+                let command_line = query_process_command_line(handle);
+                CloseHandle(handle);
+                (created, command_line)
+            }
+        };
+
+        if let (Some(created), Some(bound)) = (created, newest_allowed)
+            && created > bound
+        {
+            return;
+        }
+        if created.is_some() {
+            newest_allowed = created;
+        }
+
+        if let (Some(command_line), Some(node)) = (command_line, map.get_mut(&pid)) {
+            let argv = parse_windows_command_line(&command_line);
+            node.command = windows_command_from_argv(&node.command, &argv);
+        }
+
+        if ppid == pid {
+            return;
+        }
+        pid = ppid;
+    }
+}
+
+/// Creation time of the process behind `handle` as FILETIME ticks, or None
+/// when the query fails.
+///
+/// # Safety
+/// `handle` must be a live process handle (or pseudo-handle) opened with at
+/// least PROCESS_QUERY_LIMITED_INFORMATION.
+#[cfg(windows)]
+unsafe fn process_creation_time(handle: winapi::um::winnt::HANDLE) -> Option<u64> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::processthreadsapi::GetProcessTimes;
+
+    let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user: FILETIME = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+    if ok == 0 {
+        return None;
+    }
+    Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        process_handle: winapi::um::winnt::HANDLE,
+        process_information_class: u32,
+        process_information: *mut winapi::ctypes::c_void,
+        process_information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
+}
+
+/// Read a process's command line with
+/// `NtQueryInformationProcess(ProcessCommandLineInformation)` (Windows 8.1+).
+///
+/// Chosen over reading the target's PEB with ReadProcessMemory because the
+/// kernel copies the string into our buffer: no PROCESS_VM_READ right (which
+/// fails for far more processes), and no 32/64-bit layout differences
+/// between a WOW64 process and us. Any failure returns None and the caller
+/// keeps the Toolhelp basename.
+///
+/// # Safety
+/// `handle` must be a live process handle opened with at least
+/// PROCESS_QUERY_LIMITED_INFORMATION.
+#[cfg(windows)]
+unsafe fn query_process_command_line(handle: winapi::um::winnt::HANDLE) -> Option<String> {
+    use winapi::shared::ntdef::UNICODE_STRING;
+
+    const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+    const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+    const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
+    // Command lines are capped at 32,767 UTF-16 units; leave room for the
+    // UNICODE_STRING header. Anything claiming more is refused.
+    const MAX_BYTES: u32 = 32_767 * 2 + 64;
+
+    let mut wanted: u32 = 4096;
+    for _ in 0..2 {
+        // u64 elements keep the buffer aligned for the UNICODE_STRING
+        // header the kernel writes at its start.
+        let mut buf = vec![0u64; (wanted as usize).div_ceil(8)];
+        let byte_len = (buf.len() * 8) as u32;
+        let mut returned: u32 = 0;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                handle,
+                PROCESS_COMMAND_LINE_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                byte_len,
+                &mut returned,
+            )
+        };
+        if status == 0 {
+            if (byte_len as usize) < std::mem::size_of::<UNICODE_STRING>() {
+                return None;
+            }
+            // SAFETY: the buffer is 8-byte aligned and at least as large as
+            // the header the kernel wrote on success.
+            let header = unsafe { std::ptr::read(buf.as_ptr().cast::<UNICODE_STRING>()) };
+            // SAFETY: viewing our own initialized u64 buffer as bytes.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), byte_len as usize) };
+            return decode_command_line_buffer(
+                bytes,
+                buf.as_ptr() as usize,
+                header.Buffer as usize,
+                header.Length as usize,
+            );
+        }
+        let resizable = matches!(
+            status,
+            STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL | STATUS_BUFFER_OVERFLOW
+        );
+        if !resizable || returned <= byte_len || returned > MAX_BYTES {
+            return None;
+        }
+        wanted = returned;
+    }
+    None
+}
+
+/// Decode the UTF-16 command line out of a ProcessCommandLineInformation
+/// result. `buffer_addr` / `length` come from the UNICODE_STRING header the
+/// kernel wrote at the start of `bytes` (whose address is `base_addr`); the
+/// string must lie entirely inside our own buffer or nothing is decoded, so
+/// a malformed header can never make us read outside it.
+///
+/// Defined unconditionally so the bounds checks are unit-tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn decode_command_line_buffer(
+    bytes: &[u8],
+    base_addr: usize,
+    buffer_addr: usize,
+    length: usize,
+) -> Option<String> {
+    if length == 0 || !length.is_multiple_of(2) {
+        return None;
+    }
+    let offset = buffer_addr.checked_sub(base_addr)?;
+    let end = offset.checked_add(length)?;
+    if !offset.is_multiple_of(2) || end > bytes.len() {
+        return None;
+    }
+    let units: Vec<u16> = bytes[offset..end]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// Split a Windows command line into argv using the MSVC runtime /
+/// `CommandLineToArgvW` rules, so quoted paths with spaces stay whole:
+/// argv0 runs to the closing quote (no escapes) or to whitespace; after it,
+/// `2n` backslashes before a quote are `n` backslashes and the quote toggles
+/// quoting, `2n+1` are `n` backslashes and a literal quote, other
+/// backslashes are literal, and `""` inside quotes is a literal quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_windows_command_line(command_line: &str) -> Vec<String> {
+    let chars: Vec<char> = command_line.chars().collect();
+    let mut args = Vec::new();
+    let mut i = 0;
+
+    // argv0
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return args;
+    }
+    let mut argv0 = String::new();
+    if chars[i] == '"' {
+        i += 1;
+        while i < chars.len() && chars[i] != '"' {
+            argv0.push(chars[i]);
+            i += 1;
+        }
+        i += 1;
+    } else {
+        while i < chars.len() && !chars[i].is_whitespace() {
+            argv0.push(chars[i]);
+            i += 1;
+        }
+    }
+    args.push(argv0);
+
+    loop {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= chars.len() {
+            return args;
+        }
+        let mut arg = String::new();
+        let mut quoted = false;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                let run_start = i;
+                while i < chars.len() && chars[i] == '\\' {
+                    i += 1;
+                }
+                let run = i - run_start;
+                if i < chars.len() && chars[i] == '"' {
+                    arg.extend(std::iter::repeat_n('\\', run / 2));
+                    if run % 2 == 1 {
+                        arg.push('"');
+                        i += 1;
+                    }
+                } else {
+                    arg.extend(std::iter::repeat_n('\\', run));
+                }
+                continue;
+            }
+            if c == '"' {
+                if quoted && i + 1 < chars.len() && chars[i + 1] == '"' {
+                    arg.push('"');
+                    i += 2;
+                    continue;
+                }
+                quoted = !quoted;
+                i += 1;
+                continue;
+            }
+            if c.is_whitespace() && !quoted {
+                break;
+            }
+            arg.push(c);
+            i += 1;
+        }
+        args.push(arg);
+    }
+}
+
+/// Rebuild a parsed Windows argv into the lowercased `argv0 args...` shape
+/// the unix snapshot carries, so the downstream layers see the same thing
+/// on both platforms:
+///
+/// - argv0 is the Toolhelp exe basename (`toolhelp_exe`), not the parsed
+///   argv0, which may be a quoted path with spaces or a bare name without
+///   `.exe`.
+/// - Backslashes become forward slashes, so `script_residue`'s
+///   `node_modules/` package extraction works on Windows paths.
+/// - A leading drive letter is dropped (`c:/users/...` → `/users/...`), so
+///   absolute paths read as absolute to `looks_like_split_path_fragment`,
+///   exactly as on unix.
+///
+/// Arguments are joined with single spaces and NOT re-quoted. An argument
+/// containing spaces therefore splits again downstream, mirroring the unix
+/// `ps` output, and the residue extractor's split-path guard aborts on the
+/// fragment instead of emitting part of a user's directory name.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_command_from_argv(toolhelp_exe: &str, argv: &[String]) -> String {
+    let mut parts = vec![toolhelp_exe.to_ascii_lowercase()];
+    for arg in argv.iter().skip(1) {
+        let lower = arg.to_ascii_lowercase().replace('\\', "/");
+        let bytes = lower.as_bytes();
+        let normalized = if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'/'
+        {
+            lower[2..].to_string()
+        } else {
+            lower
+        };
+        if !normalized.is_empty() {
+            parts.push(normalized);
+        }
+    }
+    parts.join(" ")
 }
 
 /// Extract the executable basename from a (lowercased) argv0: strip the
@@ -1838,9 +2176,8 @@ fn parent_boot_time(pid: u32) -> Option<u64> {
 
 #[cfg(windows)]
 fn parent_boot_time(pid: u32) -> Option<u64> {
-    use winapi::shared::minwindef::FILETIME;
     use winapi::um::handleapi::CloseHandle;
-    use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
+    use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
     // The process creation time (FILETIME ticks since 1601) is the Windows
@@ -1848,22 +2185,15 @@ fn parent_boot_time(pid: u32) -> Option<u64> {
     // lifetime and different for any pid-reuse successor.
     //
     // SAFETY: handle opened with the least-privilege query right and closed
-    // on every path; GetProcessTimes only writes the four out-params.
+    // on every path; process_creation_time only reads through it.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
             return None;
         }
-        let mut creation: FILETIME = std::mem::zeroed();
-        let mut exit: FILETIME = std::mem::zeroed();
-        let mut kernel: FILETIME = std::mem::zeroed();
-        let mut user: FILETIME = std::mem::zeroed();
-        let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+        let created = process_creation_time(handle);
         CloseHandle(handle);
-        if ok == 0 {
-            return None;
-        }
-        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+        created
     }
 }
 
@@ -3448,6 +3778,129 @@ mod tests {
         // A buffer with no NUL terminator uses the whole slice.
         let full: Vec<u16> = "node".encode_utf16().collect();
         assert_eq!(super::decode_sz_exe_file(&full), "node");
+    }
+
+    fn utf16_bytes(text: &str) -> Vec<u8> {
+        text.encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_command_line_buffer_within_bounds() {
+        // Layout the kernel writes: a 16-byte UNICODE_STRING header, then
+        // the string, with the header's Buffer pointing at the string.
+        let mut bytes = vec![0u8; 16];
+        bytes.extend(utf16_bytes("node.exe cli.js"));
+        let base = 0x1000;
+        let len = "node.exe cli.js".len() * 2;
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base + 16, len).as_deref(),
+            Some("node.exe cli.js")
+        );
+    }
+
+    #[test]
+    fn refuses_command_line_buffers_outside_our_allocation() {
+        let mut bytes = vec![0u8; 16];
+        bytes.extend(utf16_bytes("node"));
+        let base = 0x1000;
+        // Pointer before the buffer, length past its end, odd offset or
+        // length, and an empty string all decode to nothing.
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base - 2, 8),
+            None
+        );
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base + 16, 10),
+            None
+        );
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base + 17, 4),
+            None
+        );
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base + 16, 3),
+            None
+        );
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, base + 16, 0),
+            None
+        );
+        assert_eq!(
+            super::decode_command_line_buffer(&bytes, base, usize::MAX, 8),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_windows_command_lines_like_command_line_to_argv() {
+        let parse = super::parse_windows_command_line;
+        // Quoted argv0 with spaces stays whole; no escapes inside it.
+        assert_eq!(
+            parse(r#""C:\Program Files\nodejs\node.exe" C:\a\cli.js --flag"#),
+            vec![
+                r"C:\Program Files\nodejs\node.exe",
+                r"C:\a\cli.js",
+                "--flag"
+            ]
+        );
+        // Quoted arguments with spaces stay whole.
+        assert_eq!(
+            parse(r#"node.exe "C:\Users\John Smith\agent.js" x"#),
+            vec!["node.exe", r"C:\Users\John Smith\agent.js", "x"]
+        );
+        // 2n backslashes + quote: n backslashes, quote toggles.
+        assert_eq!(parse(r#"a "b\\" c"#), vec!["a", r"b\", "c"]);
+        // 2n+1 backslashes + quote: n backslashes and a literal quote.
+        assert_eq!(parse(r#"a b\"c"#), vec!["a", r#"b"c"#]);
+        // Backslashes not before a quote are literal.
+        assert_eq!(parse(r"a b\\c"), vec!["a", r"b\\c"]);
+        // "" inside quotes is a literal quote.
+        assert_eq!(parse(r#"a "b""c""#), vec!["a", r#"b"c"#]);
+        // Extra whitespace and empty input.
+        assert_eq!(parse("  a   b  "), vec!["a", "b"]);
+        assert!(parse("   ").is_empty());
+    }
+
+    #[test]
+    fn rebuilds_windows_argv_into_the_unix_snapshot_shape() {
+        let argv = super::parse_windows_command_line(
+            r#""C:\Program Files\nodejs\node.exe" C:\Users\dev\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js"#,
+        );
+        let command = super::windows_command_from_argv("node.exe", &argv);
+        assert_eq!(
+            command,
+            "node.exe /users/dev/appdata/roaming/npm/node_modules/@anthropic-ai/claude-code/cli.js"
+        );
+        // The node-hosted agent is now identifiable, and the residue layer
+        // recovers the npm package exactly as it does on unix.
+        assert_eq!(caller_from_process_name(&command), Some("claude_code"));
+        assert_eq!(parent_kind_from_command(&command), Some("node"));
+        let unknown = super::windows_command_from_argv(
+            "node.exe",
+            &super::parse_windows_command_line(
+                r"node C:\Users\dev\AppData\Roaming\npm\node_modules\some-new-agent\dist\cli.js",
+            ),
+        );
+        assert_eq!(caller_from_process_name(&unknown), None);
+        assert_eq!(
+            residue_from_command(&unknown).as_deref(),
+            Some("some-new-agent")
+        );
+    }
+
+    #[test]
+    fn windows_paths_with_spaces_abort_the_residue() {
+        // An argument with a space splits again when rejoined (mirroring
+        // unix `ps`), and the split-path guard refuses to emit a fragment of
+        // the user's directory name.
+        let command = super::windows_command_from_argv(
+            "node.exe",
+            &super::parse_windows_command_line(r#"node "C:\Users\John Smith\tools\agent.js""#),
+        );
+        assert_eq!(command, "node.exe /users/john smith/tools/agent.js");
+        assert_eq!(residue_from_command(&command), None);
     }
 
     #[cfg(unix)]
