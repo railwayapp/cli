@@ -1923,9 +1923,21 @@ impl RailwayMcp {
             })?,
         };
 
-        let body = create_deploy_tarball(&path, &path, false, |_, _| {}).map_err(|e| {
+        let tarball = create_deploy_tarball(&path, &path, false, |_, _| {}).map_err(|e| {
             McpError::internal_error(format!("Failed to create deploy tarball: {e}"), None)
         })?;
+        let skipped_note = if tarball.skipped_symlinks.is_empty() {
+            String::new()
+        } else {
+            let listed = tarball
+                .skipped_symlinks
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n\nSkipped symlinks pointing outside the project (not uploaded):\n{listed}")
+        };
+        let body = tarball.bytes;
 
         let hostname = self.configs.get_host();
         let response = upload_deploy_tarball(
@@ -1941,7 +1953,7 @@ impl RailwayMcp {
         .map_err(|e| McpError::internal_error(format!("Failed to deploy: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deployment started!\n  Deployment ID: {}\n  URL: {}\n  Build Logs: {}\n  Domain: {}\n\nUse get_logs with deployment_id '{}' to check build/deploy progress.",
+            "Deployment started!\n  Deployment ID: {}\n  URL: {}\n  Build Logs: {}\n  Domain: {}\n\nUse get_logs with deployment_id '{}' to check build/deploy progress.{skipped_note}",
             response.deployment_id,
             response.url,
             response.logs_url,
