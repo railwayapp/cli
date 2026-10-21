@@ -254,6 +254,7 @@ fn ssh_args_from_target_args(target: &TargetArgs) -> super::Args {
         session: None,
         native: false,
         identity_file: None,
+        json: false,
         command: Vec::new(),
     }
 }
