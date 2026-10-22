@@ -253,7 +253,23 @@ pub struct RegistryCredentials {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LimitOverride {
+    #[serde(deserialize_with = "deserialize_container_limits")]
     pub containers: Option<ContainerLimits>,
+}
+
+fn deserialize_container_limits<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ContainerLimits>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Defaulted structs also accept sequences in Serde. The config schema
+    // requires an object (or null), so reject arrays before decoding fields.
+    let object = Option::<serde_json::Map<String, serde_json::Value>>::deserialize(deserializer)?;
+    object
+        .map(|object| serde_json::from_value::<ContainerLimits>(serde_json::Value::Object(object)))
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 #[skip_serializing_none]
@@ -675,9 +691,10 @@ mod tests {
         assert_eq!(service.parent_service_id.as_deref(), Some("svc-0"));
 
         // The decrypt flag must reach the wire.
-        assert_eq!(server.variables_for("GetEnvironmentConfig"), vec![
-            json!({ "id": "env-1", "decryptVariables": false })
-        ]);
+        assert_eq!(
+            server.variables_for("GetEnvironmentConfig"),
+            vec![json!({ "id": "env-1", "decryptVariables": false })]
+        );
     }
 
     #[tokio::test]
