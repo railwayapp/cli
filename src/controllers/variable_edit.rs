@@ -258,7 +258,8 @@ pub fn write_edit_document(
 
 fn escape_dotenv_value(value: &str) -> String {
     let needs_quotes = value.is_empty()
-        || value.contains([' ', '\t', '\n', '\r', '#', '"', '\'', '\\'])
+        || value.chars().any(char::is_whitespace)
+        || value.contains(['#', '"', '\'', '\\'])
         || value.starts_with(['=', '#']);
 
     if !needs_quotes {
@@ -633,6 +634,48 @@ mod tests {
                 .collect::<BTreeMap<_, _>>(),
             editable_values(&snapshot.editable)
         );
+    }
+
+    #[test]
+    fn dotenv_round_trip_preserves_unicode_whitespace() {
+        // Rust's trim recognizes more whitespace than the dotenv writer used to quote.
+        let whitespace = [
+            '\u{00a0}', '\u{2003}', '\u{2009}', '\u{202f}', '\u{3000}', '\u{0085}', '\u{000b}',
+            '\u{000c}',
+        ];
+        let mut failures = Vec::new();
+        for ch in whitespace {
+            for value in [
+                format!("{ch}value"),
+                format!("value{ch}"),
+                ch.to_string(),
+                format!("left{ch}right"),
+            ] {
+                let snapshot = EditSnapshot {
+                    editable: BTreeMap::from([(
+                        "VALUE".into(),
+                        EditVariableEntry {
+                            value: value.clone(),
+                            is_sealed: false,
+                        },
+                    )]),
+                    read_only: BTreeMap::new(),
+                };
+                let path = temp_edit_path("whitespace");
+                write_edit_document(&path, &snapshot, &[]).unwrap();
+                let parsed = parse_edit_document(&fs::read_to_string(&path).unwrap()).unwrap();
+                let _ = fs::remove_file(&path);
+                if parsed["VALUE"].value != value {
+                    failures.push(format!("{value:?} became {:?}", parsed["VALUE"].value));
+                }
+                if !diff_edit_snapshot(&snapshot, &parsed).is_empty()
+                    && parsed["VALUE"].value == value
+                {
+                    failures.push(format!("unchanged {value:?} produced a diff"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
