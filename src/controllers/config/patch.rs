@@ -106,21 +106,28 @@ fn parse_value_as_type(
             }),
 
         ExpectedType::Number => {
-            // Try integer first, then float
-            if let Ok(n) = value.parse::<i64>() {
-                Ok(serde_json::json!(n))
-            } else {
-                value
-                    .parse::<f64>()
-                    .map(|n| serde_json::json!(n))
-                    .map_err(|_| {
-                        anyhow::anyhow!(
-                            "Invalid value for '{}': expected number, got '{}'",
-                            path,
-                            value
-                        )
-                    })
-            }
+            // Preserve integers before considering floats, including the
+            // existing CLI spelling support (such as +1 and leading zeroes).
+            let number = value
+                .parse::<i64>()
+                .map(serde_json::Number::from)
+                .ok()
+                .or_else(|| value.parse::<u64>().map(serde_json::Number::from).ok())
+                .or_else(|| {
+                    // Non-finite floats must fail, not become null and clear
+                    // a resource limit when the patch is serialized.
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                });
+            number.map(serde_json::Value::Number).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid value for '{}': expected number, got '{}'",
+                    path,
+                    value
+                )
+            })
         }
 
         ExpectedType::Boolean => match value.to_lowercase().as_str() {
@@ -501,6 +508,67 @@ mod tests {
         // Should reject non-integers
         let result = parse_service_value("deploy.numReplicas", "not-a-number");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resource_byte_schema_preserves_numbers() {
+        let root_schema = schema_for!(ServiceInstance);
+        let root = Schema::Object(root_schema.schema.clone());
+        for field in ["memoryBytes", "diskBytes"] {
+            let path = format!("deploy.limitOverride.containers.{field}");
+            let segments: Vec<_> = path.split('.').collect();
+            assert_eq!(
+                get_expected_type(&root_schema, &root, &segments, &path).unwrap(),
+                ExpectedType::Nullable(Box::new(ExpectedType::Number))
+            );
+            for raw in [
+                "2147483648.0000005",
+                "0.25",
+                "9007199254740993",
+                "9223372036854775807",
+                "-9223372036854775808",
+                "0",
+                "+1",
+                "001",
+                "null",
+            ] {
+                let (path, value) = parse_service_value(&path, raw).unwrap();
+                let expected: serde_json::Value = match raw {
+                    "+1" | "001" => serde_json::json!(1),
+                    _ => serde_json::from_str(raw).unwrap(),
+                };
+                assert_eq!(value, expected, "{path}: {raw}");
+                let config = build_config(vec![(format!("services.svc-1.{path}"), value)]).unwrap();
+                let serialized = serde_json::to_value(config).unwrap();
+                let containers =
+                    &serialized["services"]["svc-1"]["deploy"]["limitOverride"]["containers"];
+                if expected.is_null() {
+                    assert!(containers.get(field).is_none());
+                } else {
+                    assert_eq!(containers[field], expected, "{path}: {raw}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resource_number_edits_reject_invalid_input() {
+        for field in ["cpu", "memoryBytes", "diskBytes"] {
+            let path = format!("deploy.limitOverride.containers.{field}");
+            for raw in ["NaN", "inf", "-inf", "1e400", "true", "\"123\"", "[]", "{}"] {
+                assert!(parse_service_value(&path, raw).is_err(), "{path}: {raw}");
+            }
+        }
+        // The changed byte schema must not loosen unrelated integer fields.
+        for raw in ["1.5", "NaN", "true", "9223372036854775808"] {
+            assert!(parse_service_value("deploy.numReplicas", raw).is_err());
+        }
+        assert_eq!(
+            parse_service_value("deploy.limitOverride.containers.cpu", "0.5")
+                .unwrap()
+                .1,
+            serde_json::json!(0.5)
+        );
     }
 
     #[test]
