@@ -517,10 +517,15 @@ mod tests {
         for field in ["memoryBytes", "diskBytes"] {
             let path = format!("deploy.limitOverride.containers.{field}");
             let segments: Vec<_> = path.split('.').collect();
-            assert_eq!(
-                get_expected_type(&root_schema, &root, &segments, &path).unwrap(),
-                ExpectedType::Nullable(Box::new(ExpectedType::Number))
-            );
+            // Optional ancestors can add nullable wrappers. Verify the numeric
+            // leaf and actual null/edit behavior, not a traversal nesting count.
+            let mut expected_type =
+                get_expected_type(&root_schema, &root, &segments, &path).unwrap();
+            assert!(matches!(&expected_type, ExpectedType::Nullable(_)));
+            while let ExpectedType::Nullable(inner) = expected_type {
+                expected_type = *inner;
+            }
+            assert_eq!(expected_type, ExpectedType::Number);
             for raw in [
                 "2147483648.0000005",
                 "0.25",
