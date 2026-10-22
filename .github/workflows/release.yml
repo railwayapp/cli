@@ -228,6 +228,8 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+          # Resolve the newest 24.x instead of a possibly stale runner toolcache
+          check-latest: true
           registry-url: 'https://registry.npmjs.org'
 
       - name: NPM publish
