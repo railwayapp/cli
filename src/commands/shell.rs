@@ -82,7 +82,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     if !args.silent {
-        if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+        for notice in crate::util::host_env::dropped_notices(&dropped) {
             eprintln!("{}", notice.yellow());
         }
         println!("Entering subshell with Railway variables available. Type 'exit' to exit.\n");

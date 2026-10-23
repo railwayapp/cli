@@ -143,7 +143,7 @@ impl DevSession {
             // These run as `sh -c` on the developer's machine, so the same
             // startup-hook names have to be dropped here too.
             let dropped = crate::util::host_env::strip_unsafe_host_vars(&mut vars);
-            if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+            for notice in crate::util::host_env::dropped_notices(&dropped) {
                 eprintln!("{} {}", service_name, notice);
             }
 

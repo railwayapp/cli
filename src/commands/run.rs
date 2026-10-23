@@ -159,7 +159,7 @@ pub async fn command(args: Args) -> Result<()> {
     // Service variables are project-writable, and this command runs as the local
     // user. Drop the names a shell or runtime would execute during startup.
     let dropped = crate::util::host_env::strip_unsafe_host_vars(&mut variables);
-    if let Some(notice) = crate::util::host_env::dropped_notice(&dropped) {
+    for notice in crate::util::host_env::dropped_notices(&dropped) {
         eprintln!("{}", notice.yellow());
     }
 
