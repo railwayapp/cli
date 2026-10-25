@@ -327,7 +327,7 @@ async fn run_ssh_connect(
 /// Open a local SSH tunnel to the database without launching a client, for
 /// pointing external GUI tools (TablePlus, DBeaver, pgAdmin, ...) at a
 /// private-only database. Prints the connection details and holds the tunnel
-/// open until Ctrl+C.
+/// open until Ctrl+C or a termination signal.
 async fn run_tunnel_only(
     client: &Client,
     configs: &Configs,
@@ -362,13 +362,32 @@ async fn run_tunnel_only(
 
     // Unlike run_ssh_connect, there's no client process to hand SIGINT to —
     // the tunnel itself is the session, so we let the default Ctrl+C
-    // behavior stand (no ctrlc::set_handler override) and just wait on it.
-    tokio::signal::ctrl_c()
+    // behavior stand (no ctrlc::set_handler override) and wait for a shutdown
+    // signal so the guard drops for `kill`/`pkill` too, not just Ctrl+C.
+    wait_for_shutdown_signal()
         .await
-        .context("Failed to listen for Ctrl+C")?;
+        .context("Failed to listen for shutdown signals")?;
     eprintln!("\nTunnel closed.");
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result,
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 /// Print the local tunnel's connection details in the shape GUI clients
@@ -976,6 +995,25 @@ mod test {
                 res.unwrap_err().to_string(),
                 RailwayError::InvalidConnectionVariable.to_string()
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shutdown_signal_resolves_on_terminate_and_hangup() {
+        use nix::sys::signal::{Signal, raise};
+
+        for signal in [Signal::SIGTERM, Signal::SIGHUP] {
+            let shutdown = wait_for_shutdown_signal();
+            tokio::pin!(shutdown);
+            assert!(futures_util::poll!(&mut shutdown).is_pending());
+
+            raise(signal).unwrap();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+                .await
+                .unwrap_or_else(|_| panic!("{signal:?} did not end the tunnel"))
+                .unwrap();
         }
     }
 }
