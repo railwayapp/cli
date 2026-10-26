@@ -126,6 +126,7 @@ struct CliEventTrackInput {
     environment_id: Option<String>,
     service_id: Option<String>,
     error_class: Option<String>,
+    tty_streams: String,
 }
 
 #[derive(Serialize)]
@@ -594,15 +595,123 @@ fn exe_basename(argv0: &str) -> &str {
     basename.strip_suffix(".exe").unwrap_or(basename)
 }
 
+/// Interpreters and launchers whose first operand names the program that
+/// actually runs (`node /x/cli.js`, `python -m aider`, `bash run.sh`).
+const INTERPRETERS: &[&str] = &[
+    "node",
+    "nodejs",
+    "bun",
+    "bunx",
+    "deno",
+    "npx",
+    "pnpx",
+    "npm",
+    "pnpm",
+    "yarn",
+    "uv",
+    "uvx",
+    "pipx",
+    "ruby",
+    "pythonw",
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "fish",
+    "pwsh",
+    "powershell",
+    "cmd",
+];
+
+/// Launcher subcommands that sit between the interpreter and the program
+/// (`npm exec x`, `pnpm dlx x`, `uv run x`, `pipx run x`, `uv tool run x`).
+const LAUNCHER_SUBCOMMANDS: &[&str] = &["exec", "dlx", "x", "run", "tool"];
+
+fn is_interpreter(basename: &str) -> bool {
+    INTERPRETERS.contains(&basename)
+        || basename
+            .strip_prefix("python")
+            .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+/// The part of a (lowercased) command line that identifies the program:
+/// argv0, plus the first operand when argv0 is an interpreter. Everything
+/// else is dropped, because agent names showing up in arguments (`--model
+/// qwen3-coder`, a project path) or in the user's own folder names (macOS
+/// `login -pf cody`, `/Users/cody/...`, `~/code/copilot-dashboard/...`)
+/// were attributing runs to agents that never ran (warehouse 2026-10-16).
+///
+/// Inside a home directory only the segments that look like installed
+/// tooling survive: everything from the first hidden directory on
+/// (`~/.nvm/...`, `~/.hermes/...`), `node_modules` packages, and the
+/// program's own basename. Paths outside a home directory (`/opt/...`,
+/// `/usr/local/...`, `/Applications/X.app/...`) are kept whole.
+fn identity_surface(lower: &str) -> String {
+    let mut tokens = lower.split_whitespace();
+    let Some(argv0) = tokens.next() else {
+        return String::new();
+    };
+    let mut surface = identity_path(argv0);
+    if is_interpreter(exe_basename(argv0)) {
+        // `-m` / `-c` style flags are skipped; the module or script that
+        // follows is the operand.
+        if let Some(operand) =
+            tokens.find(|t| !t.starts_with('-') && !LAUNCHER_SUBCOMMANDS.contains(t))
+        {
+            surface.push(' ');
+            surface.push_str(&identity_path(operand));
+        }
+    }
+    surface
+}
+
+fn identity_path(path: &str) -> String {
+    let segments: Vec<&str> = path.split(['/', '\\']).collect();
+    let home_user = segments
+        .iter()
+        .position(|s| *s == "users" || *s == "home")
+        .filter(|&i| i <= 1 && segments.len() > i + 1);
+    let Some(i) = home_user else {
+        return path.to_string();
+    };
+    let rest = &segments[i + 2..];
+    let last = rest.len().saturating_sub(1);
+    let mut kept = Vec::new();
+    let mut in_tooling = false;
+    // Set right after a `node_modules` segment: keep the package name (and
+    // its `@scope`, if any) even when the install sits in a plain folder.
+    let mut want_package = false;
+    for (n, seg) in rest.iter().enumerate() {
+        if seg.starts_with('.') && seg.len() > 1 {
+            in_tooling = true;
+        }
+        if *seg == "node_modules" {
+            want_package = true;
+            continue;
+        }
+        if in_tooling || n == last || want_package {
+            kept.push(*seg);
+        }
+        if want_package && !seg.starts_with('@') {
+            want_package = false;
+        }
+    }
+    kept.join("/")
+}
+
 /// Map a process command line to a canonical agent slug. Operates on the
 /// lowercased full command line so that node-bundled agents (e.g. `node
 /// /path/to/cursor-agent`) match even though their `comm` is just `node`.
 /// On Windows the snapshot carries only the exe basename (`codex.exe`),
 /// which the substring arms and [`exe_basename`] normalization both handle.
 fn caller_from_process_name(command: &str) -> Option<&'static str> {
-    let lower = command.to_ascii_lowercase();
-    let argv0 = lower.split_whitespace().next().unwrap_or("");
+    let full = command.to_ascii_lowercase();
+    let argv0 = full.split_whitespace().next().unwrap_or("");
     let basename = exe_basename(argv0);
+    // Substring arms below only see the identity surface (the binary, or the
+    // script an interpreter runs), never arbitrary arguments or the user's
+    // home-directory name. See [`identity_surface`].
+    let lower = identity_surface(&full);
 
     // Short / generic agent names need exact-basename matching to avoid
     // false positives (`pi` vs `pilot`, `amp` vs `chamber`, `droid` vs
@@ -611,6 +720,18 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
         "pi" => return Some("pi"),
         "amp" => return Some("amp"),
         "droid" => return Some("factory_droid"),
+        // Surfaced as ancestor residues on agent_unknown (warehouse
+        // 2026-10-16): hermes ~550 users/wk across node/shell/python
+        // parents, grok ~146. Exact basenames only: `grok` must not match
+        // `ngrok`, and `crush` / `kimi` are too short for substrings.
+        "hermes" => return Some("hermes"),
+        "grok" => return Some("grok"),
+        "crush" => return Some("crush"),
+        "kimi" | "kimi-cli" => return Some("kimi_code"),
+        // Kiro's terminal agent. Deliberately NOT the Kiro IDE binary
+        // (`kiro`): this walk runs before the TTY check, so matching an IDE
+        // process would turn every human terminal inside it into an agent.
+        "kiro-cli" => return Some("kiro"),
         _ => {}
     }
 
@@ -620,6 +741,18 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
     // specific patterns first.
     if lower.contains("cursor-agent") {
         return Some("cursor");
+    }
+    if lower.contains("hermes-agent") {
+        return Some("hermes");
+    }
+    if lower.contains("grok-cli") {
+        return Some("grok");
+    }
+    if lower.contains("openclaw") {
+        return Some("openclaw");
+    }
+    if lower.contains("auggie") {
+        return Some("augment");
     }
     if lower.contains("opencode") {
         return Some("opencode");
@@ -682,17 +815,41 @@ fn caller_from_process_name(command: &str) -> Option<&'static str> {
     None
 }
 
-/// Walk the process tree from the current PID upward looking for a
-/// recognized agent binary in the ancestry. Up to 15 hops because some
-/// agents introduce multiple wrapper layers (npm/npx/node/shell/agent).
-fn agent_from_process_tree() -> Option<&'static str> {
+/// The first recognized ancestor, and whether it is an IDE application
+/// (Cursor / Windsurf hosting the terminal) rather than an agent binary.
+fn agent_hit_from_process_tree() -> Option<(&'static str, bool)> {
     let snapshot = process_snapshot();
     if snapshot.is_empty() {
         return None;
     }
     walk_ancestors(snapshot, std::process::id(), 15, |node| {
         caller_from_process_name(&node.command)
+            .map(|agent| (agent, is_ide_host_process(&node.command, agent)))
     })
+}
+
+/// True when a process matched only because it is the IDE application
+/// itself: `windsurf`, or `cursor` without the `cursor-agent` CLI.
+fn is_ide_host_process(command: &str, agent: &str) -> bool {
+    match agent {
+        "windsurf" => true,
+        "cursor" => !command.to_ascii_lowercase().contains("cursor-agent"),
+        _ => false,
+    }
+}
+
+/// True when `CURSOR_TRACE_ID` is what made [`agent_from_strong_env`] say
+/// `cursor`: Cursor sets it in every process, while the agent's own shell
+/// also carries `CURSOR_AGENT`.
+fn is_cursor_ide_only_env() -> bool {
+    std::env::var_os("CURSOR_TRACE_ID").is_some() && std::env::var_os("CURSOR_AGENT").is_none()
+}
+
+/// Walk the process tree from the current PID upward looking for a
+/// recognized agent binary in the ancestry. Up to 15 hops because some
+/// agents introduce multiple wrapper layers (npm/npx/node/shell/agent).
+fn agent_from_process_tree() -> Option<&'static str> {
+    agent_hit_from_process_tree().map(|(agent, _)| agent)
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +1140,128 @@ fn parent_process_kind() -> Option<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduler / service hosts — the `automation:` fallback
+// ---------------------------------------------------------------------------
+//
+// A large share of `agent_unknown:*` is not an agent at all: scripts that a
+// scheduler or service manager runs on a loop (warehouse audit 2026-10-16:
+// 79 users produced 87% of `agent_unknown:node` events, ~22h/day of
+// `logs` / `deployment` / `ssh` polling; `agent_unknown:node:wscript` was 77
+// users at ~3,400 events each). Naming the host they hang off lets the
+// warehouse keep them out of agent counts.
+//
+// The signal is the shape of the whole chain, not one process: every
+// unix process eventually descends from launchd / systemd, so reaching one
+// only means something when nothing session-like sits in between. The walk
+// steps over shells, interpreters and the wrappers people put in crontabs
+// and unit files, and gives up at the first other process (a terminal, an
+// IDE, sshd, tmux, an app). Losing coverage is fine; calling a human's or
+// an agent's session "automation" is not.
+
+/// Ancestors the scheduler walk steps over: our own binary, shells,
+/// interpreters, package runners, and crontab / unit-file wrappers.
+const AUTOMATION_TRANSPARENT: &[&str] = &[
+    "railway",
+    // Shells
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "cmd",
+    "powershell",
+    "pwsh",
+    // Interpreters / package runners
+    "node",
+    "deno",
+    "bun",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "python",
+    "python2",
+    "python3",
+    "uv",
+    "ruby",
+    "perl",
+    // Wrappers
+    "env",
+    "nohup",
+    "setsid",
+    "timeout",
+    "flock",
+    "nice",
+    "ionice",
+    "chronic",
+    "run-parts",
+    "sudo",
+    "su",
+    "doas",
+    "xargs",
+    "caffeinate",
+];
+
+/// Scheduler or service host for a process basename, as the `<kind>` in
+/// `automation:<kind>`. `svchost` is included because Windows 10+ runs
+/// scheduled tasks as children of the Schedule service's svchost; anything
+/// else svchost parents directly is a service, which is automation too.
+fn automation_kind_from_basename(basename: &str) -> Option<&'static str> {
+    match basename {
+        "cron" | "crond" | "anacron" | "cronie" => Some("cron"),
+        "launchd" => Some("launchd"),
+        "systemd" => Some("systemd"),
+        "taskeng" | "taskhost" | "taskhostw" | "svchost" => Some("task_scheduler"),
+        "services" => Some("windows_service"),
+        "wscript" | "cscript" => Some("wscript"),
+        "pythonw" => Some("pythonw"),
+        "pm2" => Some("pm2"),
+        "supervisord" => Some("supervisord"),
+        _ => None,
+    }
+}
+
+/// Lowercased basename of a node's argv0, with a login shell's leading `-`
+/// and a versioned interpreter's suffix (`python3.12`) normalized away.
+fn automation_basename(command: &str) -> String {
+    let argv0 = command.split_whitespace().next().unwrap_or("");
+    let basename = exe_basename(argv0).trim_start_matches('-');
+    if basename.starts_with("python3.") || basename.starts_with("python2.") {
+        return basename[..7].to_string();
+    }
+    basename.to_string()
+}
+
+/// Walk up from `pid` (the CLI's own process) and return the scheduler
+/// kind when the chain reaches one through transparent ancestors only.
+fn automation_kind_in_ancestry(
+    snapshot: &HashMap<u32, ProcessNode>,
+    pid: u32,
+) -> Option<&'static str> {
+    // `walk_ancestors` stops on `Some`; `Err(())` marks "gave up here".
+    walk_ancestors(snapshot, pid, 15, |node| {
+        let basename = automation_basename(&node.command);
+        if let Some(kind) = automation_kind_from_basename(&basename) {
+            return Some(Ok(kind));
+        }
+        if AUTOMATION_TRANSPARENT.contains(&basename.as_str()) {
+            return None;
+        }
+        Some(Err(()))
+    })
+    .and_then(Result::ok)
+}
+
+fn automation_host_from_tree() -> Option<&'static str> {
+    let snapshot = process_snapshot();
+    if snapshot.is_empty() {
+        return None;
+    }
+    automation_kind_in_ancestry(snapshot, std::process::id())
+}
+
+// ---------------------------------------------------------------------------
 // Layer 4 — CI provider detection
 // ---------------------------------------------------------------------------
 
@@ -1176,14 +1455,70 @@ fn ai_ide_host_from_env() -> Option<&'static str> {
 /// clients catalog themselves in the warehouse without re-shipping the CLI;
 /// the dbt-side caller_class macro folds the whole `mcp_unknown(:*)` family
 /// into `agent_unknown`.
+///
+/// A generic or missing name (`cli`, `mcp`, `rmcp`, an empty string, ...)
+/// names a transport library or a placeholder rather than the harness, so it
+/// must not shadow a harness we can identify from the environment or the
+/// process tree: those names fall back to env/process detection and only
+/// pass through as `mcp_unknown:<name>` when that finds nothing. Warehouse
+/// 2026-10-16: ~1.8k users/30d sent an empty name and ~1.4k more sent `cli`,
+/// `rmcp` or `mcp`, most of them inside Claude Code or Codex sessions.
 fn caller_from_mcp_client_name(name: &str) -> String {
+    caller_from_mcp_client_name_with(name, harness_from_env_or_process_tree)
+}
+
+/// [`caller_from_mcp_client_name`] with the env/process fallback injected, so
+/// tests don't depend on the harness running them (CLAUDECODE et al.).
+fn caller_from_mcp_client_name_with(
+    name: &str,
+    harness: impl FnOnce() -> Option<&'static str>,
+) -> String {
     if let Some(known) = known_caller_from_mcp_client_name(name) {
         return known.to_string();
     }
-    match mcp_client_name_slug(name) {
+    let slug = mcp_client_name_slug(name);
+    if slug.as_deref().is_none_or(is_generic_mcp_client_slug)
+        && let Some(agent) = harness()
+    {
+        return agent.to_string();
+    }
+    match slug {
         Some(slug) => format!("mcp_unknown:{slug}"),
         None => "mcp_unknown".to_string(),
     }
+}
+
+fn harness_from_env_or_process_tree() -> Option<&'static str> {
+    agent_from_strong_env().or_else(agent_from_process_tree)
+}
+
+/// Sanitized clientInfo names that identify an SDK, a placeholder or a
+/// connectivity check rather than a harness. Names of two characters or
+/// fewer (`t`, `p`, `cc`, ...) are treated the same way.
+fn is_generic_mcp_client_slug(slug: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "acp",
+        "app",
+        "audit",
+        "check",
+        "cli",
+        "client",
+        "connection-check",
+        "desktop",
+        "diag",
+        "diagnostic",
+        "mcp",
+        "mcp-client",
+        "mcp-test-client",
+        "probe",
+        "rmcp",
+        "setup-check",
+        "smoke",
+        "test",
+        "test-client",
+        "verify",
+    ];
+    slug.len() <= 2 || GENERIC.contains(&slug)
 }
 
 /// Header-safe identity for an MCP client name, used by `railway mcp proxy`
@@ -1230,6 +1565,37 @@ fn mcp_client_name_slug(name: &str) -> Option<String> {
     }
 }
 
+/// Exact matches on the sanitized client-name slug, so spacing / casing
+/// variants of a name map the same way the warehouse sees them. Every name
+/// here was a recurring `mcp_unknown:<slug>` in the warehouse (audit
+/// 2026-10-16, last 30 days); slugs match the dbt-side recovery in
+/// dbt-analytics normalize_caller.sql (`mcp_unknown_recovered_agent`).
+/// Generic names (`cli`, `mcp`, `rmcp`, `acp`, `probe`, `desktop`) and
+/// `local-agent-mode-railway*` (origin unconfirmed) stay unmapped.
+fn known_caller_from_mcp_client_slug(name: &str) -> Option<&'static str> {
+    let slug = mcp_client_name_slug(name)?;
+    let caller = match slug.as_str() {
+        "grok-shell-railway" => "grok",
+        s if s.starts_with("grok-shell-railway-") => "grok",
+        "copilot-cli" => "copilot_cli",
+        "pi" | "pi-mcp-railway" => "pi",
+        "omp" | "omp-coding-agent" => "oh_my_pi",
+        "factory-cli" => "factory_droid",
+        "dev.warp.warp" | "dev.warp.warp-stable" => "warp",
+        "openclaw-bundle-mcp" => "openclaw",
+        "kimi-code" => "kimi_code",
+        "augment-mcp-client" => "augment",
+        "junie-client" => "junie",
+        "qwen-cli-mcp-client-railway" => "qwen_code",
+        "amp-mcp-client" => "amp",
+        // Cline's SDK reports `@cline/core`; the bare name is the extension.
+        "cline" => "cline",
+        s if s.starts_with("@cline/") => "cline",
+        _ => return None,
+    };
+    Some(caller)
+}
+
 /// The recognized-client mapping table. Returns None for clients we don't
 /// catalog yet; the caller composes the `mcp_unknown:<name>` passthrough.
 fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
@@ -1254,11 +1620,11 @@ fn known_caller_from_mcp_client_name(name: &str) -> Option<&'static str> {
         // identifiable slice of the local-MCP `mcp_unknown` bucket.
         return Some("claude_code");
     }
+    if let Some(known) = known_caller_from_mcp_client_slug(name) {
+        return Some(known);
+    }
     if lower == "codex-mcp-client" || lower.contains("codex") {
         return Some("codex");
-    }
-    if lower == "cline" {
-        return Some("cline");
     }
     if lower == "roo code" || lower == "roo-code" {
         return Some("roo_code");
@@ -1679,27 +2045,77 @@ pub(crate) fn detect_caller() -> String {
     CALLER.get_or_init(detect_caller_uncached).clone()
 }
 
+/// Which stdio streams are attached to a terminal, as three positional
+/// characters for stdin / stdout / stderr: the stream's letter when it is a
+/// TTY, `-` when it is not. `ioe` is a fully interactive terminal, `i-e` is a
+/// human piping stdout (`railway logs | grep`), and `---` is a subprocess with
+/// every stream redirected.
+///
+/// Caller detection decides "interactive" from stdout alone (see
+/// [`detect_caller_uncached`]), so a piped human command in a terminal reads
+/// as `agent_unknown:<terminal>`. This field is reported alongside the caller
+/// so the warehouse can measure how many of those events had stdin and stderr
+/// on a terminal before the classification itself changes. Cached so every
+/// event a process emits reports the same value.
+fn tty_streams() -> &'static str {
+    static TTY_STREAMS: OnceLock<&'static str> = OnceLock::new();
+    TTY_STREAMS.get_or_init(|| {
+        encode_tty_streams(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )
+    })
+}
+
+fn encode_tty_streams(stdin: bool, stdout: bool, stderr: bool) -> &'static str {
+    match (stdin, stdout, stderr) {
+        (true, true, true) => "ioe",
+        (true, true, false) => "io-",
+        (true, false, true) => "i-e",
+        (true, false, false) => "i--",
+        (false, true, true) => "-oe",
+        (false, true, false) => "-o-",
+        (false, false, true) => "--e",
+        (false, false, false) => "---",
+    }
+}
+
 fn detect_caller_uncached() -> String {
     // 1. Explicit user override — always wins.
     if let Some(v) = safe_env(RAILWAY_CALLER_ENV) {
         return v;
     }
 
+    let interactive = std::io::stdout().is_terminal();
+
     // 2. Strong agent env signal (CLAUDECODE, CURSOR_AGENT, PI_CODING_AGENT,
     //    __COG_BASHRC_SOURCED, etc.). This wins over both process-tree and
     //    cloud-IDE detection because an agent running inside Codespaces is
     //    still that agent — the IDE host is a less interesting axis.
+    //    `CURSOR_TRACE_ID` is the exception: Cursor sets it in every process
+    //    it spawns, including a human's integrated terminal, so on its own
+    //    in an interactive session it names the IDE, not the agent (the
+    //    agent's own shell carries `CURSOR_AGENT`). Step 4 turns that into
+    //    `tty:cursor`.
     if let Some(agent) = agent_from_strong_env() {
-        return agent.to_string();
+        if !(interactive && agent == "cursor" && is_cursor_ide_only_env()) {
+            return agent.to_string();
+        }
     }
 
     // 3. Process-tree walk. Catches CLIs whose env we can't fingerprint
     //    (Codex, Goose, Aider, Junie, OpenCode in older versions, ...).
-    if let Some(agent) = agent_from_process_tree() {
+    //    When the only match is the IDE application itself (Cursor or
+    //    Windsurf hosting the terminal) and a human is at the terminal, it's
+    //    a person typing in the IDE's terminal, so report `tty:<ide>`. A
+    //    non-interactive run under the IDE keeps the IDE slug, as before.
+    if let Some((agent, ide_host)) = agent_hit_from_process_tree() {
+        if interactive && ide_host {
+            return format!("tty:{}", agent);
+        }
         return agent.to_string();
     }
-
-    let interactive = std::io::stdout().is_terminal();
 
     // 4. AI-IDE host detection. Combined with the TTY check, this gives us
     //    `tty:<ide>` (human in IDE terminal — axis for "AI IDE adoption")
@@ -1752,6 +2168,15 @@ fn detect_caller_uncached() -> String {
     if interactive {
         return "tty".to_string();
     }
+    // A scheduler or service manager running us through nothing but shells,
+    // interpreters and wrappers is a scripted loop, not an agent. Checked
+    // last so named agents, IDE hosts, cloud IDEs and CI all win first.
+    if let Some(kind) = automation_host_from_tree() {
+        return match ancestor_residue().filter(|residue| residue != kind) {
+            Some(residue) => format!("automation:{}:{}", kind, residue),
+            None => format!("automation:{}", kind),
+        };
+    }
     match (parent_process_kind(), ancestor_residue()) {
         (Some(kind), Some(residue)) => format!("agent_unknown:{}:{}", kind, residue),
         (Some(kind), None) => format!("agent_unknown:{}", kind),
@@ -1775,6 +2200,9 @@ fn is_agent_caller(caller: &str) -> bool {
     if caller == "ci" || caller.starts_with("ci:") {
         return false;
     }
+    // `automation:*` stays agent-like on purpose: is_agent() suppresses
+    // prompts for these non-interactive runs exactly as it did when they
+    // were `agent_unknown:*`, so the rename changes attribution only.
     // Cloud IDE host with no agent identified (interactive caught above
     // returns `tty:<host>`; the `cloud_ide:<host>` branch only fires for
     // non-interactive subprocess use, which is agent-like).
@@ -1934,8 +2362,9 @@ pub(crate) fn current_agent_session_id() -> Option<String> {
     resolve_agent_session_id(&caller)
 }
 
-/// Attribution for the deploy tarball upload (`x-railway-caller` /
-/// `x-railway-agent-session` headers). Returns `Some` only when the CLI
+/// Attribution for the deploy tarball upload and `railway mcp proxy`
+/// upstream requests (`x-railway-caller` / `x-railway-agent-session`
+/// headers). Returns `Some` only when the CLI
 /// detects an agent harness driving it — backboard treats header presence
 /// as the agent signal (`platform_create_deployment.source = "CLI Agent"`),
 /// so human-driven runs send nothing. Values mirror the telemetry event
@@ -2060,6 +2489,7 @@ async fn send_with_caller_override(event: CliTrackEvent, caller_override: Option
         environment_id: context.environment_id,
         service_id: context.service_id,
         error_class,
+        tty_streams: tty_streams().to_string(),
     };
 
     let body = json!({
@@ -2240,11 +2670,51 @@ pub async fn send_auth_event(event: CliAuthTrackEvent) {
 mod tests {
     use super::{
         ProcessNode, STRONG_AGENT_ENV, agent_ancestor_pid, agent_from_strong_env,
-        caller_from_mcp_client_name, caller_from_process_name, is_agent_caller, is_agent_harness,
-        mcp_client_header_value, new_session_uuid, parent_kind_from_command, residue_from_command,
-        truncate_message, walk_ancestors,
+        automation_kind_in_ancestry, caller_from_mcp_client_name, caller_from_mcp_client_name_with,
+        caller_from_process_name, encode_tty_streams, is_agent_caller, is_agent_harness,
+        is_ide_host_process, mcp_client_header_value, new_session_uuid, parent_kind_from_command,
+        residue_from_command, truncate_message, tty_streams, walk_ancestors,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn encodes_tty_streams_positionally() {
+        assert_eq!(encode_tty_streams(true, true, true), "ioe");
+        // Human piping stdout: the case stdout-only detection misreads.
+        assert_eq!(encode_tty_streams(true, false, true), "i-e");
+        assert_eq!(encode_tty_streams(false, false, true), "--e");
+        assert_eq!(encode_tty_streams(false, false, false), "---");
+        assert_eq!(encode_tty_streams(false, true, false), "-o-");
+    }
+
+    #[test]
+    fn tty_streams_is_three_safe_characters() {
+        let value = tty_streams();
+        assert_eq!(value.len(), 3);
+        assert!(value.chars().all(|c| matches!(c, 'i' | 'o' | 'e' | '-')));
+    }
+
+    #[test]
+    fn ide_application_processes_are_hosts_not_agents() {
+        let cases = [
+            (
+                "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin) --type=utility",
+                true,
+            ),
+            ("/usr/share/cursor/cursor --no-sandbox", true),
+            ("/Applications/Windsurf.app/Contents/MacOS/Electron", true),
+            (
+                "/Users/x/.local/share/cursor-agent/versions/1/cursor-agent",
+                false,
+            ),
+            ("node /Applications/Cursor.app/.../cursor-agent", false),
+            ("/usr/local/bin/claude", false),
+        ];
+        for (command, host) in cases {
+            let agent = caller_from_process_name(command).expect(command);
+            assert_eq!(is_ide_host_process(command, agent), host, "{command}");
+        }
+    }
 
     #[test]
     fn truncate_message_leaves_short_messages_alone() {
@@ -2328,6 +2798,51 @@ mod tests {
             caller_from_process_name("node /usr/local/bin/gemini-cli/index.js"),
             Some("gemini_cli")
         );
+    }
+
+    #[test]
+    fn detects_harnesses_cataloged_from_ancestor_residue() {
+        assert_eq!(caller_from_process_name("hermes"), Some("hermes"));
+        assert_eq!(
+            caller_from_process_name("python /home/u/.hermes/hermes-agent/run.py"),
+            Some("hermes")
+        );
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/grok"),
+            Some("grok")
+        );
+        assert_eq!(
+            caller_from_process_name("node /usr/lib/node_modules/grok-cli/dist/index.js"),
+            Some("grok")
+        );
+        assert_eq!(
+            caller_from_process_name("node /opt/openclaw/gateway.js"),
+            Some("openclaw")
+        );
+        assert_eq!(caller_from_process_name("auggie --print"), Some("augment"));
+        assert_eq!(caller_from_process_name("crush"), Some("crush"));
+        assert_eq!(caller_from_process_name("kimi"), Some("kimi_code"));
+        assert_eq!(caller_from_process_name("kimi.exe"), Some("kimi_code"));
+        assert_eq!(caller_from_process_name("kiro-cli chat"), Some("kiro"));
+    }
+
+    #[test]
+    fn residue_harness_names_do_not_overmatch() {
+        // `grok` is exact-basename only: ngrok tunnels are common parents.
+        assert_eq!(caller_from_process_name("ngrok http 3000"), None);
+        assert_eq!(caller_from_process_name("/usr/local/bin/ngrok"), None);
+        // Short names are exact-basename only.
+        assert_eq!(caller_from_process_name("crushftp"), None);
+        assert_eq!(caller_from_process_name("kimiko"), None);
+        // The Kiro IDE process itself is not an agent signal (it would
+        // reclassify human terminals); only its CLI agent is.
+        assert_eq!(
+            caller_from_process_name("/Applications/Kiro.app/Contents/MacOS/Kiro"),
+            None
+        );
+        // Only the exact `hermes` basename and the `hermes-agent` path
+        // marker match, not tools that merely start with the name.
+        assert_eq!(caller_from_process_name("hermesc -emit-binary"), None);
     }
 
     #[test]
@@ -2419,6 +2934,84 @@ mod tests {
     }
 
     #[test]
+    fn agent_names_in_user_paths_and_arguments_do_not_match() {
+        // macOS Terminal's `login -pf <user>` and sshd sit above every shell.
+        assert_eq!(caller_from_process_name("login -pf cody"), None);
+        assert_eq!(caller_from_process_name("sshd: cody@pts/0"), None);
+        // The home-directory name is not identity.
+        assert_eq!(
+            caller_from_process_name("/Users/cody/.bun/bin/bun run dev"),
+            None
+        );
+        assert_eq!(caller_from_process_name("/home/cody/bin/deploy.sh"), None);
+        assert_eq!(
+            caller_from_process_name("C:\\Users\\cody\\tools\\run.exe"),
+            None
+        );
+        // A user's own project folder named after an agent.
+        assert_eq!(
+            caller_from_process_name("node /Users/x/code/copilot-dashboard/server.js"),
+            None
+        );
+        assert_eq!(
+            caller_from_process_name("python /home/x/projects/cursor-clone/app.py"),
+            None
+        );
+        // Agent names in arguments (model ids, flags, paths) are not identity.
+        assert_eq!(
+            caller_from_process_name("/usr/local/bin/hermes --model qwen3-coder"),
+            Some("hermes")
+        );
+        assert_eq!(
+            caller_from_process_name("node /opt/svc/worker.js --project gemini-demo"),
+            None
+        );
+        assert_eq!(caller_from_process_name("make deploy CODY=1"), None);
+    }
+
+    #[test]
+    fn installed_agents_still_match_from_home_tooling_dirs() {
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/x/.nvm/versions/node/v22/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+            ),
+            Some("claude_code")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/cody/.npm-global/lib/node_modules/@github/copilot/index.js"
+            ),
+            Some("copilot_cli")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "node /Users/x/code/app/node_modules/@google/gemini-cli/dist/index.js"
+            ),
+            Some("gemini_cli")
+        );
+        assert_eq!(
+            caller_from_process_name(
+                "/Users/cody/.local/share/cursor-agent/versions/1/cursor-agent"
+            ),
+            Some("cursor")
+        );
+        assert_eq!(
+            caller_from_process_name("python3.12 -m aider --yes"),
+            Some("aider")
+        );
+        assert_eq!(caller_from_process_name("npx @openai/codex"), Some("codex"));
+        assert_eq!(caller_from_process_name("uv run aider"), Some("aider"));
+        assert_eq!(
+            caller_from_process_name("npm exec @google/gemini-cli"),
+            Some("gemini_cli")
+        );
+        assert_eq!(
+            caller_from_process_name("/Users/cody/bin/aider"),
+            Some("aider")
+        );
+    }
+
+    #[test]
     fn mcp_client_header_value_omits_blank_names() {
         assert_eq!(mcp_client_header_value("   "), None);
         assert_eq!(
@@ -2429,6 +3022,66 @@ mod tests {
             mcp_client_header_value("Totally New IDE").as_deref(),
             Some("mcp_unknown:totally-new-ide")
         );
+    }
+
+    #[test]
+    fn maps_mcp_client_names_cataloged_2026_10() {
+        let cases = [
+            ("grok-shell-railway", "grok"),
+            ("grok-shell-railway-mcp-server", "grok"),
+            ("grok-shell-railway-local", "grok"),
+            ("copilot-cli", "copilot_cli"),
+            ("pi", "pi"),
+            ("pi-mcp-railway", "pi"),
+            ("omp", "oh_my_pi"),
+            ("omp-coding-agent", "oh_my_pi"),
+            ("factory-cli", "factory_droid"),
+            ("dev.warp.warp-stable", "warp"),
+            ("dev.warp.warp", "warp"),
+            ("openclaw-bundle-mcp", "openclaw"),
+            ("kimi-code", "kimi_code"),
+            ("augment-mcp-client", "augment"),
+            ("junie-client", "junie"),
+            ("qwen-cli-mcp-client-railway", "qwen_code"),
+            ("amp-mcp-client", "amp"),
+            ("@cline/core", "cline"),
+            ("Cline", "cline"),
+            // Casing / spacing variants resolve through the slug.
+            ("Grok Shell Railway", "grok"),
+            ("Copilot CLI", "copilot_cli"),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(caller_from_mcp_client_name(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn cataloged_2026_10_names_do_not_overmatch() {
+        let cases = [
+            // Generic names stay in the passthrough.
+            ("cli", "mcp_unknown:cli"),
+            ("rmcp", "mcp_unknown:rmcp"),
+            ("mcp", "mcp_unknown:mcp"),
+            (
+                "local-agent-mode-railway",
+                "mcp_unknown:local-agent-mode-railway",
+            ),
+            // Prefix-only arms need their delimiter.
+            ("grok-shell-railwayx", "mcp_unknown:grok-shell-railwayx"),
+            ("pilot", "mcp_unknown:pilot"),
+            ("incline", "mcp_unknown:incline"),
+            ("clinesque", "mcp_unknown:clinesque"),
+            ("omp-other", "mcp_unknown:omp-other"),
+        ];
+        // Pin "no harness detected" so generic names don't resolve through
+        // the env/process fallback when the suite runs inside an agent.
+        for (name, expected) in cases {
+            assert_eq!(
+                caller_from_mcp_client_name_with(name, || None),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -2500,9 +3153,17 @@ mod tests {
             caller_from_mcp_client_name("some::client v2"),
             "mcp_unknown:some-client-v2"
         );
-        // Nothing safe survives → plain mcp_unknown, same as before.
-        assert_eq!(caller_from_mcp_client_name("   "), "mcp_unknown");
-        assert_eq!(caller_from_mcp_client_name("漢字"), "mcp_unknown");
+        // Nothing safe survives → plain mcp_unknown when no harness is
+        // detectable either (the fallback is pinned to None so the test
+        // doesn't depend on the harness running it).
+        assert_eq!(
+            caller_from_mcp_client_name_with("   ", || None),
+            "mcp_unknown"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("漢字", || None),
+            "mcp_unknown"
+        );
         // Length-bounded: 48 chars of name max after the prefix.
         let long = caller_from_mcp_client_name(&"x".repeat(300));
         assert!(long.starts_with("mcp_unknown:"));
@@ -2510,6 +3171,47 @@ mod tests {
         // Output always passes the telemetry charset filter, so the
         // composed caller survives safe_telemetry_value downstream.
         assert!(super::safe_telemetry_value(&long).is_some());
+    }
+
+    #[test]
+    fn generic_mcp_client_names_defer_to_harness_detection() {
+        // A transport library or placeholder name must not shadow a harness
+        // the env / process tree identifies.
+        for name in [
+            "", "   ", "cli", "MCP", "rmcp", "acp", "probe", "t", "cc", "漢字",
+        ] {
+            assert_eq!(
+                caller_from_mcp_client_name_with(name, || Some("claude_code")),
+                "claude_code",
+                "{name:?}"
+            );
+        }
+        // With no harness detected they still catalog themselves.
+        assert_eq!(
+            caller_from_mcp_client_name_with("cli", || None),
+            "mcp_unknown:cli"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("rmcp", || None),
+            "mcp_unknown:rmcp"
+        );
+        assert_eq!(caller_from_mcp_client_name_with("", || None), "mcp_unknown");
+    }
+
+    #[test]
+    fn specific_mcp_client_names_beat_harness_detection() {
+        // A recognized name is authoritative, and a specific unknown name is
+        // a better identifier than env inherited from a parent session, so
+        // neither consults the fallback.
+        let never = || -> Option<&'static str> { panic!("fallback consulted") };
+        assert_eq!(
+            caller_from_mcp_client_name_with("opencode", never),
+            "opencode"
+        );
+        assert_eq!(
+            caller_from_mcp_client_name_with("totally-new-ide", never),
+            "mcp_unknown:totally-new-ide"
+        );
     }
 
     #[test]
@@ -2848,6 +3550,114 @@ mod tests {
         snap.insert(8400, node(8000, "railway status"));
         snap.insert(8000, node(1, "-/bin/zsh"));
         assert_eq!(agent_ancestor_pid(&snap, 8000), None);
+    }
+
+    #[test]
+    fn automation_detects_cron_through_shell_and_interpreter() {
+        // cron (300) -> sh -c (310) -> node loop.js (320) -> railway (330)
+        let mut snap = HashMap::new();
+        snap.insert(330, node(320, "railway logs --json"));
+        snap.insert(320, node(310, "node /home/x/loop.js"));
+        snap.insert(310, node(300, "/bin/sh -c 'node /home/x/loop.js'"));
+        snap.insert(300, node(1, "/usr/sbin/cron -f"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 330), Some("cron"));
+    }
+
+    #[test]
+    fn automation_detects_detached_loop_under_launchd_and_systemd() {
+        // nohup'd node loop reparented to launchd once its terminal closed.
+        let mut snap = HashMap::new();
+        snap.insert(530, node(520, "railway deployment list"));
+        snap.insert(520, node(1, "node poll.js"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 530), Some("launchd"));
+
+        // systemd user service running a versioned python.
+        let mut snap = HashMap::new();
+        snap.insert(730, node(720, "railway logs"));
+        snap.insert(720, node(700, "/usr/bin/python3.12 watcher.py"));
+        snap.insert(700, node(1, "/lib/systemd/systemd --user"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 730), Some("systemd"));
+    }
+
+    #[test]
+    fn automation_detects_windows_script_hosts_and_task_scheduler() {
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(20, "node.exe"));
+        snap.insert(20, node(10, "wscript.exe"));
+        snap.insert(10, node(4, "svchost.exe"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 40), Some("wscript"));
+
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(20, "cmd.exe"));
+        snap.insert(20, node(4, "taskhostw.exe"));
+        assert_eq!(
+            automation_kind_in_ancestry(&snap, 40),
+            Some("task_scheduler")
+        );
+
+        let mut snap = HashMap::new();
+        snap.insert(40, node(30, "railway.exe"));
+        snap.insert(30, node(4, "pythonw.exe"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 40), Some("pythonw"));
+    }
+
+    #[test]
+    fn automation_stops_at_session_hosts() {
+        // Terminal session: zsh -> login -> Terminal -> launchd. `login`
+        // is not transparent, so reaching launchd above it means nothing.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway logs"));
+        snap.insert(80, node(70, "-zsh"));
+        snap.insert(70, node(60, "login -pf cody"));
+        snap.insert(
+            60,
+            node(
+                1,
+                "/system/applications/utilities/terminal.app/contents/macos/terminal",
+            ),
+        );
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // Detached tmux server under launchd: tmux stops the walk.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway logs"));
+        snap.insert(80, node(70, "bash"));
+        snap.insert(70, node(1, "tmux new -s work"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // ssh into a box: sshd stops the walk before systemd.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway status"));
+        snap.insert(80, node(70, "bash -c 'railway status'"));
+        snap.insert(70, node(1, "sshd: cody@notty"));
+        snap.insert(1, node(0, "/lib/systemd/systemd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // An unknown agent binary in the chain stops it too.
+        let mut snap = HashMap::new();
+        snap.insert(90, node(80, "railway up"));
+        snap.insert(80, node(70, "bash -c 'railway up'"));
+        snap.insert(70, node(1, "/opt/mystery-agent/bin/mystery"));
+        snap.insert(1, node(0, "/sbin/launchd"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 90), None);
+
+        // Container whose pid 1 is the app: no scheduler anywhere.
+        let mut snap = HashMap::new();
+        snap.insert(30, node(20, "railway logs"));
+        snap.insert(20, node(1, "sh -c 'railway logs'"));
+        snap.insert(1, node(0, "node server.js"));
+        assert_eq!(automation_kind_in_ancestry(&snap, 30), None);
+    }
+
+    #[test]
+    fn automation_callers_stay_agent_like_for_prompting() {
+        assert!(is_agent_caller("automation:cron"));
+        assert!(is_agent_caller("automation:wscript:sync"));
     }
 
     #[test]

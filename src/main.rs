@@ -55,6 +55,7 @@ commands!(
     completion,
     config,
     connect,
+    cron,
     delete,
     deploy,
     deployment,
@@ -583,6 +584,15 @@ mod cli_tests {
             assert_subcommand(&["link"], "link");
             assert_subcommand(&["up"], "up");
             assert_subcommand(&["redeploy"], "redeploy");
+            assert_parses(&["redeploy", "--commit", "3f2a9c1"]);
+            assert_parses(&[
+                "redeploy", "--commit", "3f2a9c1", "-s", "web", "--yes", "--json",
+            ]);
+            assert_parses(&["redeploy", "--from-source"]);
+            assert!(
+                parse(&["redeploy", "--commit", "3f2a9c1", "--from-source"]).is_err(),
+                "--commit and --from-source are mutually exclusive"
+            );
             assert_subcommand(&["cdn", "status"], "cdn");
             assert_subcommand(&["waf", "under-attack", "status"], "waf");
             assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
@@ -740,6 +750,7 @@ mod cli_tests {
             assert_parses(&["service", "logs", "-s", "myservice"]);
             assert_parses(&["service", "redeploy"]);
             assert_parses(&["service", "redeploy", "-s", "myservice"]);
+            assert_parses(&["service", "redeploy", "--commit", "3f2a9c1"]);
             assert_parses(&["service", "restart"]);
             assert_parses(&[
                 "service",
@@ -1088,6 +1099,7 @@ mod cli_tests {
             assert_parses(&["mcp", "install", "--remote", "--agent", "codex"]);
             assert_parses(&["mcp", "install", "--agent", "pi"]);
             assert_parses(&["mcp", "install", "--remote", "--agent", "pi"]);
+            assert_parses(&["mcp", "install", "--agent", "antigravity"]);
             assert_parses(&["mcp", "install", "--local"]);
             assert_parses(&["mcp", "install", "--local", "--agent", "cursor"]);
             assert_parses(&["mcp", "install", "--oauth"]);
@@ -1115,6 +1127,18 @@ mod cli_tests {
             ]);
             assert_parses(&["config", "pull", "--include-variables"]);
             assert_parses(&["config", "pull", "--include-variables", "--force"]);
+            assert_parses(&["config", "plan", "--environment", "staging"]);
+            assert_parses(&["config", "apply", "--environment", "env_123", "--yes"]);
+            assert_parses(&["config", "pull", "--environment", "staging"]);
+            assert_parses(&[
+                "config",
+                "apply",
+                "--plan",
+                "railway-plan.json",
+                "--environment",
+                "staging",
+                "--yes",
+            ]);
         }
     }
 }

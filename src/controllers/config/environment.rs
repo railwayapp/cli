@@ -271,6 +271,7 @@ pub struct ContainerLimits {
 pub struct DeployConfig {
     pub start_command: Option<String>,
     pub pre_deploy_command: Option<serde_json::Value>, // string or [string]
+    pub pre_deploy_timeout_seconds: Option<i64>,
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<i64>,
     pub ipv6_egress_enabled: Option<bool>,

@@ -2,11 +2,58 @@ use serde_json::{Map, Value, json};
 
 use crate::controllers::database_engines::parse_image_ref;
 
+use super::change_set::Diagnostic;
 use super::graph::{
-    Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, resource_addr,
-    resource_address, resource_name, resource_type,
+    Edge, EnvironmentNode, ProjectNode, RAILWAY_GRAPH_VERSION, RailwayGraph, VariablePolicy,
+    resource_addr, resource_address, resource_name, resource_type,
 };
 use super::json::{field, field_str, prune_empty};
+
+/// Top-level project keys `project_definition_to_graph` reads, plus `variables`.
+pub const IAC_PROJECT_FIELDS: &[&str] = &[
+    "name",
+    "resources",
+    "services",
+    "Resources",
+    "environments",
+    "variables",
+];
+
+/// Top-level resource keys the compiler reads, plus `environments`.
+/// `kind` and `start` are read while normalizing; `output` is written onto
+/// database nodes and emitted by the SDKs.
+pub const IAC_RESOURCE_FIELDS: &[&str] = &[
+    "address",
+    "type",
+    "name",
+    "kind",
+    "start",
+    "source",
+    "build",
+    "deploy",
+    "networking",
+    "variables",
+    "volumeAttachments",
+    "volumeMounts",
+    "config",
+    "configFile",
+    "parentServiceId",
+    "groupId",
+    "clusterRole",
+    "replicaConfig",
+    "clusterDisplay",
+    "tracing",
+    "cdn",
+    "engine",
+    "image",
+    "env",
+    "output",
+    "defaultMountPath",
+    "color",
+    "icon",
+    "isCollapsed",
+    "environments",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
@@ -39,6 +86,9 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
             .get("resources")
             .or_else(|| definition.get("services")),
     );
+    for resource in &mut resources {
+        normalize_resource_env(resource);
+    }
     let mut seen: std::collections::HashSet<String> = resources.iter().map(resource_addr).collect();
 
     for resource in resources.clone() {
@@ -120,6 +170,7 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
                 .unwrap_or("imported-project")
                 .to_string(),
         },
+        variables: variable_policy(definition),
         environments: definition
             .get("environments")
             .and_then(Value::as_array)
@@ -136,6 +187,143 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
             .unwrap_or_default(),
         resources,
         edges,
+    }
+}
+
+/// Authoring files say `env`; the graph and the diff speak `variables`.
+/// A missing key stays missing so an omitted env is not an empty map.
+pub(crate) fn normalize_resource_env(resource: &mut Value) {
+    let Some(obj) = resource.as_object_mut() else {
+        return;
+    };
+    let Some(env) = obj.remove("env") else {
+        return;
+    };
+    if obj.contains_key("variables") {
+        return;
+    }
+    obj.insert("variables".to_string(), coerce_env_map(env));
+}
+
+fn coerce_env_map(value: Value) -> Value {
+    let Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = Map::new();
+    for (key, value) in map {
+        let value = match value {
+            Value::String(text) => json!({ "type": "literal", "value": text }),
+            other => other,
+        };
+        out.insert(key, value);
+    }
+    Value::Object(out)
+}
+
+fn variable_policy(definition: &Value) -> VariablePolicy {
+    let Some(raw) = definition.get("variables") else {
+        return VariablePolicy::default();
+    };
+    if raw.is_null() {
+        return VariablePolicy::default();
+    }
+    let Some(obj) = raw.as_object() else {
+        return VariablePolicy {
+            managed: true,
+            ignore: Vec::new(),
+            default: false,
+            error: Some("project.variables must be an object with managed and ignore".into()),
+        };
+    };
+    let managed = match obj.get("managed") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return VariablePolicy {
+                managed: true,
+                ignore: Vec::new(),
+                default: false,
+                error: Some("project.variables.managed must be a boolean".into()),
+            };
+        }
+    };
+    let ignore = match obj.get("ignore") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => {
+            let mut ignore = Vec::new();
+            for item in items {
+                match item.as_str() {
+                    Some(pattern) => ignore.push(pattern.to_string()),
+                    None => {
+                        return VariablePolicy {
+                            managed,
+                            ignore: Vec::new(),
+                            default: false,
+                            error: Some("project.variables.ignore entries must be strings".into()),
+                        };
+                    }
+                }
+            }
+            ignore
+        }
+        Some(_) => {
+            return VariablePolicy {
+                managed,
+                ignore: Vec::new(),
+                default: false,
+                error: Some("project.variables.ignore must be an array of strings".into()),
+            };
+        }
+    };
+    VariablePolicy {
+        managed,
+        ignore,
+        default: false,
+        error: None,
+    }
+}
+
+pub fn unknown_field_diagnostics(definition: &Value) -> Vec<Diagnostic> {
+    let Some(project) = definition.as_object() else {
+        return Vec::new();
+    };
+    let mut diagnostics = Vec::new();
+    for key in project.keys() {
+        if !IAC_PROJECT_FIELDS.contains(&key.as_str()) {
+            diagnostics.push(unknown_field(key, "project"));
+        }
+    }
+    let resources = definition
+        .get("resources")
+        .or_else(|| definition.get("Resources"))
+        .or_else(|| definition.get("services"));
+    for resource in flatten_resources(resources) {
+        let Some(object) = resource.as_object() else {
+            continue;
+        };
+        let address = resource_addr(&resource);
+        for key in object.keys() {
+            if !IAC_RESOURCE_FIELDS.contains(&key.as_str()) {
+                diagnostics.push(unknown_field(key, &address));
+            }
+        }
+    }
+    diagnostics
+}
+
+fn unknown_field(key: &str, address: &str) -> Diagnostic {
+    let path = if address == "project" {
+        format!("project.{key}")
+    } else {
+        format!("resources.{address}.{key}")
+    };
+    Diagnostic {
+        severity: "error".into(),
+        path,
+        message: format!(
+            "Unknown field \"{key}\" on {address}. This CLI (v{}) does not support it; upgrade the Railway CLI.",
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 
@@ -466,6 +654,7 @@ fn service_to_environment_config(
         "replicaConfig",
         "clusterDisplay",
         "tracing",
+        "cdn",
     ] {
         if let Some(value) = field(service, key) {
             config[key] = value.clone();
@@ -685,6 +874,12 @@ pub fn environment_config_to_graph(
 
             let kind = if service.get("source").and_then(|s| s.get("repo")).is_some() {
                 "github"
+            } else if service
+                .get("source")
+                .and_then(|s| field_str(s, "image"))
+                .is_some_and(super::functions::is_function_image)
+            {
+                "function"
             } else if service.get("source").and_then(|s| s.get("image")).is_some() {
                 "docker-image"
             } else if service
@@ -744,6 +939,12 @@ pub fn environment_config_to_graph(
             // ones that are on, so an untraced service has no block at all.
             if let Some(tracing) = service.get("tracing").filter(|t| t.is_object()) {
                 node["tracing"] = tracing.clone();
+            }
+            // Per-environment CDN caching. Railway serialises the block only
+            // while caching is on, and only the knobs that differ from the
+            // edge defaults.
+            if let Some(cdn) = service.get("cdn").filter(|c| c.is_object()) {
+                node["cdn"] = cdn.clone();
             }
             if let Some(group_id) = field_str(service, "groupId") {
                 node["groupId"] = json!(

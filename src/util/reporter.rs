@@ -167,7 +167,7 @@ fn render_error_message(err: &anyhow::Error, mode: OutputMode) -> (Stream, Strin
                 None => ("ERROR", None),
             };
             let obj = serde_json::json!({
-                "error": err.to_string(),
+                "error": format!("{err:#}"),
                 "code": code,
                 "hint": hint,
             });
@@ -294,6 +294,20 @@ mod tests {
         assert_eq!(v["code"], "NOT_AUTHENTICATED");
         assert_eq!(v["error"], "Not signed in.");
         assert!(v["hint"].as_str().unwrap().contains("railway login"));
+    }
+
+    #[test]
+    fn json_error_keeps_the_server_message_under_the_context() {
+        let err = anyhow::anyhow!(
+            "Manual backups and backup schedules are only available for Pro workspaces"
+        )
+        .context("Failed to create a backup");
+        let (_stream, text) = render_error_message(&err, OutputMode::Json);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["error"],
+            "Failed to create a backup: Manual backups and backup schedules are only available for Pro workspaces"
+        );
     }
 
     #[test]
