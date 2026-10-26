@@ -1,15 +1,15 @@
-//! The shared implementation behind `railway postgres`, `railway mysql` and
-//! `railway redis` -- the managed database features (point-in-time recovery,
-//! high-availability clustering, connection pooling) that compose on top of an
-//! existing database service.
+//! The shared implementation behind `railway postgres`, `railway mysql`,
+//! `railway redis` and `railway mongo` -- the managed database features
+//! (point-in-time recovery, high-availability clustering, connection pooling)
+//! that compose on top of an existing database service.
 //!
 //! Each engine gets its own top-level command rather than a single
 //! `railway database` with an `--engine` flag: the features an engine actually
 //! has differ (Redis ships no archiver, only Postgres ships a pooler), and a
 //! per-engine command is the only way `--help` can tell the truth about that.
 //! The subcommand bodies live here, once, and take the engine as a parameter;
-//! the per-engine files (`commands/{postgres,mysql,redis}.rs`) are just the
-//! capability declarations wired to them.
+//! the per-engine files (`commands/{postgres,mysql,redis,mongo}.rs`) are just
+//! the capability declarations wired to them.
 //!
 //! Every environment-config fetch in this module tree uses
 //! `decryptVariables: true`: the non-decrypted config masks EVERY variable

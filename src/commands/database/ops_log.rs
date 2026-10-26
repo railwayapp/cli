@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn each_engine_writes_its_own_trail() {
-        use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
+        use crate::controllers::database_engines::{MONGO, MYSQL, POSTGRES, REDIS};
 
         let filename_for = |engine: &DatabaseEngine| {
             log_path(engine)
@@ -147,6 +147,7 @@ mod tests {
         assert_eq!(filename_for(&POSTGRES), "postgres-ops.jsonl");
         assert_eq!(filename_for(&MYSQL), "mysql-ops.jsonl");
         assert_eq!(filename_for(&REDIS), "redis-ops.jsonl");
+        assert_eq!(filename_for(&MONGO), "mongo-ops.jsonl");
     }
 
     #[test]
