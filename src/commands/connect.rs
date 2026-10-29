@@ -258,6 +258,15 @@ fn connection_url_keys(database_type: &DatabaseType) -> (&'static str, &'static 
     }
 }
 
+fn private_url_key(database_type: &DatabaseType) -> &'static str {
+    match database_type {
+        DatabaseType::PostgreSQL => "DATABASE_PRIVATE_URL",
+        DatabaseType::Redis => "REDIS_PRIVATE_URL",
+        DatabaseType::MongoDB => "MONGO_PRIVATE_URL",
+        DatabaseType::MySQL => "MYSQL_PRIVATE_URL",
+    }
+}
+
 fn default_remote_port(database_type: &DatabaseType) -> u16 {
     match database_type {
         DatabaseType::PostgreSQL => 5432,
@@ -488,20 +497,45 @@ fn local_tunnel_url(
     local_port: u16,
 ) -> Result<(Url, u16)> {
     let (public_key, private_key) = connection_url_keys(database_type);
+    let explicit_private_key = private_url_key(database_type);
     let default_port = default_remote_port(database_type);
 
-    // Prefer the internal URL: it carries the real in-container port. The public
-    // proxy URL is only a credentials fallback — its port is the proxy's, not
-    // the engine's, so fall back to the default in-container port there.
-    let (raw, remote_port_override) = if let Some(internal) = variables.get(private_key) {
-        (internal.clone(), None)
-    } else if let Some(public) = variables.get(public_key) {
-        (public.clone(), Some(default_port))
-    } else {
-        return Err(RailwayError::ConnectionVariableNotFound(private_key.to_string()).into());
-    };
+    // Prefer the internal URL: it carries the real in-container port. On templates
+    // like MySQL where MYSQL_URL references RAILWAY_TCP_PROXY_DOMAIN:RAILWAY_TCP_PROXY_PORT,
+    // disabling the TCP proxy leaves MYSQL_URL as `mysql://user:pass@:/db` (which fails
+    // Url::parse with EmptyHost), while MYSQL_PRIVATE_URL holds the valid internal URL.
+    let candidates = [
+        (variables.get(explicit_private_key), None),
+        (variables.get(private_key), None),
+        (variables.get(public_key), Some(default_port)),
+    ];
 
-    let mut url = Url::parse(&raw).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+    let mut parsed_candidate = None;
+    let mut any_present = false;
+    for (val, override_port) in candidates {
+        if let Some(raw) = val {
+            any_present = true;
+            if let Ok(u) = Url::parse(raw) {
+                parsed_candidate = Some((u, override_port));
+                break;
+            }
+            // If a template URL has an empty host:port (`@:/`) because TCP proxy vars
+            // are unset, repair the placeholder authority so credentials & db name can be used.
+            let repaired = raw.replace("@:/", &format!("@127.0.0.1:{default_port}/"));
+            if repaired != *raw {
+                if let Ok(u) = Url::parse(&repaired) {
+                    parsed_candidate = Some((u, Some(default_port)));
+                    break;
+                }
+            }
+        }
+    }
+
+    let (mut url, remote_port_override) = match parsed_candidate {
+        Some(pair) => pair,
+        None if any_present => return Err(RailwayError::InvalidConnectionVariable.into()),
+        None => return Err(RailwayError::ConnectionVariableNotFound(private_key.to_string()).into()),
+    };
     let remote_port = remote_port_override.unwrap_or_else(|| url.port().unwrap_or(default_port));
 
     url.set_host(Some("127.0.0.1"))
