@@ -18,6 +18,13 @@
 //! runs. Anything that relocates the search for executables, libraries, or
 //! startup files belongs here.
 //!
+//! The list only works if the name it checks is the name the child will see.
+//! An `envp` entry is `name=value`, so a variable called `BASH_ENV=` reaches
+//! the child as `BASH_ENV` with `=` glued onto the value, and the exact match
+//! never fires. Names outside `[A-Za-z_][A-Za-z0-9_]*` are therefore dropped
+//! before the list is consulted; Railway stores names verbatim, so they can
+//! arrive.
+//!
 //! These names are dropped before any local spawn. Dropping is deliberate rather
 //! than overriding: the spawn merges what survives onto the inherited
 //! environment, so a dropped name leaves the local machine's own value in place
@@ -34,6 +41,7 @@ const UNSAFE_NAMES: &[&str] = &[
     "ENV",
     "SHELLOPTS",
     "BASHOPTS",
+    "PS0",
     "PS1",
     "PS2",
     "PS4",
@@ -48,11 +56,13 @@ const UNSAFE_NAMES: &[&str] = &[
     "PYTHONSTARTUP",
     "PYTHONPATH",
     "PYTHONHOME",
+    "PYTHONUSERBASE",
     "RUBYOPT",
     "RUBYLIB",
     "PERL5OPT",
     "PERL5LIB",
     "PERL5DB",
+    "PERLLIB",
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "JDK_JAVA_OPTIONS",
@@ -78,8 +88,24 @@ const UNSAFE_NAMES: &[&str] = &[
     // Build tools: which compiler or wrapper runs, and where packages and
     // toolchains are fetched from.
     "MAKEFLAGS",
+    "MAKEFILES",
     "MFLAGS",
     "GNUMAKEFLAGS",
+    // make's implicit rules shell-expand these, so `CC=touch x; cc` runs on
+    // any make-driven C build; the flag variables can load compiler plugins.
+    "CC",
+    "CXX",
+    "CPP",
+    "LD",
+    "AR",
+    "AS",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "PKG_CONFIG",
+    "PKG_CONFIG_PATH",
+    "PKG_CONFIG_LIBDIR",
     "RUSTC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
@@ -91,6 +117,8 @@ const UNSAFE_NAMES: &[&str] = &[
     "GOINSECURE",
     "GOPRIVATE",
     "GOTOOLCHAIN",
+    "GOPATH",
+    "GOROOT",
     // The CLI's own environment switch; a nested `railway` should keep the
     // local machine's setting.
     "RAILWAY_ENV",
@@ -103,12 +131,20 @@ const UNSAFE_NAMES: &[&str] = &[
     "SHELL",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    "GIT_EXEC_PATH",    // which git-* helpers run
+    "GIT_TEMPLATE_DIR", // hooks copied into new repos
+    "GIT_DIR",          // whose config and hooks apply
+    "GIT_COMMON_DIR",
     // Tools that take a command in an environment variable.
     "GIT_SSH",
     "GIT_SSH_COMMAND",
     "GIT_EXTERNAL_DIFF",
     "GIT_PAGER",
     "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "GIT_ASKPASS",
+    "GIT_PROXY_COMMAND",
+    "SSH_ASKPASS",
     "PAGER",
     "EDITOR",
     "VISUAL",
@@ -133,9 +169,20 @@ const UNSAFE_PREFIXES: &[&str] = &[
     // script-shell settings all live under these.
     "NPM_CONFIG_",
     "YARN_",
+    "PNPM_",
+    "COREPACK_",
     "PIP_",
     "LUA_INIT", // LUA_INIT and the versioned LUA_INIT_5_x forms
 ];
+
+/// Portable environment variable name. Anything else cannot be passed through
+/// `envp` as itself: `=` ends the name early, NUL ends the entry, and a shell
+/// cannot even address the rest.
+fn is_valid_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'_'))
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
 
 fn is_unsafe(name: &str) -> bool {
     // Compare bytes, not a string slice: `&name[..p.len()]` panics when the
@@ -148,12 +195,13 @@ fn is_unsafe(name: &str) -> bool {
 }
 
 /// Removes variables that would let the remote value choose what the child
-/// process executes. Returns the dropped names, sorted, so the caller can tell
-/// the user what was withheld instead of silently losing a variable.
+/// process executes, and names that would not survive the trip into `envp`
+/// intact. Returns the dropped names, sorted, so the caller can tell the user
+/// what was withheld instead of silently losing a variable.
 pub fn strip_unsafe_host_vars(variables: &mut BTreeMap<String, String>) -> Vec<String> {
     let dropped: Vec<String> = variables
         .keys()
-        .filter(|name| is_unsafe(name))
+        .filter(|name| !is_valid_name(name) || is_unsafe(name))
         .cloned()
         .collect();
 
@@ -164,18 +212,19 @@ pub fn strip_unsafe_host_vars(variables: &mut BTreeMap<String, String>) -> Vec<S
     dropped
 }
 
-/// One-line notice for the dropped names. `None` when nothing was dropped.
-pub fn dropped_notice(dropped: &[String]) -> Option<String> {
-    if dropped.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "Skipped {} service variable{} that can execute code in a local process: {}",
-        dropped.len(),
-        if dropped.len() == 1 { "" } else { "s" },
-        dropped.join(", ")
-    ))
+/// One notice line per dropped name, saying why. Invalid names are printed
+/// `{:?}`-quoted so a `=`, NUL or control byte in them stays visible.
+pub fn dropped_notices(dropped: &[String]) -> Vec<String> {
+    dropped
+        .iter()
+        .map(|name| {
+            if is_valid_name(name) {
+                format!("Skipped service variable {name}: it can execute code in a local process")
+            } else {
+                format!("Skipped service variable {name:?}: not a valid environment variable name")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,14 +282,89 @@ mod tests {
     #[test]
     fn a_multibyte_name_does_not_panic() {
         // The prefix check slices by byte length; a name whose second byte is
-        // mid-character would panic on a string slice.
+        // mid-character would panic on a string slice. These are not valid
+        // names either, so they are dropped rather than forwarded.
         let mut vars = map(&[
             ("L\u{00d0}_X", "v"),
             ("\u{00e9}", "v"),
             ("DYL\u{00d0}_X", "v"),
         ]);
-        assert!(strip_unsafe_host_vars(&mut vars).is_empty());
-        assert_eq!(vars.len(), 3);
+        assert_eq!(strip_unsafe_host_vars(&mut vars).len(), 3);
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn drops_names_that_would_not_reach_the_child_intact() {
+        // `BASH_ENV=` with value `=$(…)` is spawned as the envp entry
+        // `BASH_ENV==$(…)`; the child reads it as BASH_ENV and the exact-name
+        // check never saw it. Anything outside [A-Za-z_][A-Za-z0-9_]* goes.
+        let mut vars = map(&[
+            ("BASH_ENV=", "=$(touch /tmp/pwned-bashenv-eq)"),
+            ("PROMPT_COMMAND=", "=touch /tmp/pwned-pc-eq"),
+            ("", "empty"),
+            ("1ABC", "leading digit"),
+            ("A B", "space"),
+            ("A-B", "dash"),
+            ("A.B", "dot"),
+            ("A\0B", "nul"),
+            ("_OK", "1"),
+            ("ok_lower", "1"),
+            ("OK_123", "1"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(
+            dropped,
+            vec![
+                "",
+                "1ABC",
+                "A\0B",
+                "A B",
+                "A-B",
+                "A.B",
+                "BASH_ENV=",
+                "PROMPT_COMMAND="
+            ]
+        );
+        assert_eq!(
+            vars.keys().collect::<Vec<_>>(),
+            vec!["OK_123", "_OK", "ok_lower"]
+        );
+    }
+
+    #[test]
+    fn strips_the_toolchain_names_that_reached_the_child() {
+        // Names that passed the list unfiltered: MAKEFLAGS fires before any
+        // makefile, CC on any make-driven C build, PS0 before each command.
+        let mut vars = map(&[
+            ("MAKEFLAGS", "--eval=$(shell touch /tmp/pwned-makeflags)"),
+            ("MAKEFILES", "/tmp/evil.mk"),
+            ("CC", "touch /tmp/pwned-cc; cc"),
+            ("CXX", "touch /tmp/pwned-cxx; c++"),
+            ("CFLAGS", "-fplugin=/tmp/x.so"),
+            ("LDFLAGS", "-plugin /tmp/x.so"),
+            ("PKG_CONFIG_PATH", "/tmp/pc"),
+            ("PS0", "$(touch /tmp/pwned-ps0)"),
+            ("GIT_PROXY_COMMAND", "touch /tmp/pwned-gitproxy"),
+            ("GIT_ASKPASS", "/tmp/evil"),
+            ("GIT_DIR", "/tmp/evil-repo"),
+            ("GOPATH", "/tmp/go"),
+            ("PNPM_HOME", "/tmp/pnpm"),
+            ("COREPACK_NPM_REGISTRY", "http://127.0.0.1:1/"),
+            ("NPM_CONFIG_REGISTRY", "http://127.0.0.1:1/"),
+            ("PIP_INDEX_URL", "http://127.0.0.1:1/simple"),
+            ("DATABASE_URL", "postgres://localhost/app"),
+            ("GIT_BRANCH", "main"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(dropped.len(), 16);
+        assert_eq!(
+            vars.keys().collect::<Vec<_>>(),
+            vec!["DATABASE_URL", "GIT_BRANCH"]
+        );
     }
 
     #[test]
@@ -315,19 +439,25 @@ mod tests {
             ("PIPELINE_ID", "42"),
             ("JAVA_VERSION", "21"),
             ("RAILWAY_ENVIRONMENT", "production"),
+            ("CC_EMAIL", "ops@example.com"),
+            ("GIT_COMMIT_SHA", "abc123"),
         ]);
 
         assert!(strip_unsafe_host_vars(&mut vars).is_empty());
-        assert_eq!(vars.len(), 14);
+        assert_eq!(vars.len(), 16);
     }
 
     #[test]
-    fn notice_is_none_when_nothing_dropped() {
-        assert!(dropped_notice(&[]).is_none());
-        assert!(
-            dropped_notice(&["BASH_ENV".to_string()])
-                .unwrap()
-                .contains("BASH_ENV")
-        );
+    fn one_notice_per_dropped_name_with_its_reason() {
+        assert!(dropped_notices(&[]).is_empty());
+
+        let notices = dropped_notices(&["BASH_ENV=".to_string(), "MAKEFLAGS".to_string()]);
+
+        assert_eq!(notices.len(), 2);
+        assert!(notices[0].contains("\"BASH_ENV=\""));
+        assert!(notices[0].contains("not a valid environment variable name"));
+        assert!(notices[1].contains("MAKEFLAGS"));
+        assert!(notices[1].contains("can execute code"));
+        assert!(notices.iter().all(|n| !n.contains('\n')));
     }
 }
