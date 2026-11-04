@@ -326,6 +326,19 @@ pub fn diff_graphs_following(
             }
             continue;
         }
+        // The API has no bucket delete, so Backboard drops this change and the
+        // apply still succeeds. Warn instead of planning a delete that never happens.
+        if resource_type(resource) == "bucket" {
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                path: format!("resources.{address}"),
+                message: format!(
+                    "Bucket {} exists on Railway but is not declared in the config. Buckets are never deleted by config apply; delete it from the dashboard if that is intended.",
+                    resource_name(resource)
+                ),
+            });
+            continue;
+        }
         changes.push(json!({
             "kind": "resource.delete",
             "address": address,
