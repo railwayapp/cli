@@ -80,9 +80,13 @@ const UNSAFE_NAMES: &[&str] = &[
     "MAKEFLAGS",
     "MFLAGS",
     "GNUMAKEFLAGS",
+    "CC",
+    "CXX",
+    "PKG_CONFIG",
     "RUSTC",
     "RUSTC_WRAPPER",
     "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC",
     "GOFLAGS",
     "GOPROXY",
     "GOSUMDB",
@@ -91,9 +95,15 @@ const UNSAFE_NAMES: &[&str] = &[
     "GOINSECURE",
     "GOPRIVATE",
     "GOTOOLCHAIN",
-    // The CLI's own environment switch; a nested `railway` should keep the
-    // local machine's setting.
+    // The CLI's own local settings; a nested `railway` should keep the local
+    // machine's values.
     "RAILWAY_ENV",
+    "RAILWAY_IAC_TS_BIN",
+    "RAILWAY_IAC_ENGINE",
+    "RAILWAY_MCP_URL",
+    "RAILWAY_TCP_PROXY_WS_ENDPOINT",
+    "RAILWAY_SESSIONS_DIR",
+    "_RAILWAY_STAGE_UPDATE",
     // Where executables, libraries and startup files are searched for. These
     // name no command themselves; they decide which one a bare name resolves
     // to, or which startup file gets sourced.
@@ -288,14 +298,40 @@ mod tests {
             ("MAKEFLAGS", "--eval=$(shell id)"),
             ("LUA_INIT_5_4", "os.execute('id')"),
             ("GOFLAGS", "-toolexec=/tmp/x"),
+            ("CC", "/tmp/cc"),
+            ("CXX", "/tmp/cxx"),
+            ("PKG_CONFIG", "/tmp/pkg-config"),
+            ("CARGO_BUILD_RUSTC", "/tmp/rustc"),
             ("RAILWAY_ENV", "dev"),
             ("DATABASE_URL", "postgres://localhost/app"),
         ]);
 
         let dropped = strip_unsafe_host_vars(&mut vars);
 
-        assert_eq!(dropped.len(), 8);
+        assert_eq!(dropped.len(), 12);
         assert_eq!(vars.keys().collect::<Vec<_>>(), vec!["DATABASE_URL"]);
+    }
+
+    #[test]
+    fn strips_the_cli_local_settings() {
+        let mut vars = map(&[
+            ("RAILWAY_IAC_TS_BIN", "/tmp/runner"),
+            ("RAILWAY_IAC_ENGINE", "ts"),
+            ("RAILWAY_MCP_URL", "https://example.com"),
+            ("RAILWAY_TCP_PROXY_WS_ENDPOINT", "wss://example.com"),
+            ("RAILWAY_SESSIONS_DIR", "/tmp/sessions"),
+            ("_RAILWAY_STAGE_UPDATE", "1.0.0"),
+            ("RAILWAY_PROJECT_ID", "proj-123"),
+            ("RAILWAY_PUBLIC_DOMAIN", "app.up.railway.app"),
+        ]);
+
+        let dropped = strip_unsafe_host_vars(&mut vars);
+
+        assert_eq!(dropped.len(), 6);
+        assert_eq!(
+            vars.keys().collect::<Vec<_>>(),
+            vec!["RAILWAY_PROJECT_ID", "RAILWAY_PUBLIC_DOMAIN"]
+        );
     }
 
     #[test]
