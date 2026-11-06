@@ -2215,13 +2215,21 @@ pub fn is_agent() -> bool {
     is_agent_caller(&detect_caller())
 }
 
-fn error_class(message: Option<&str>) -> String {
+pub(crate) fn error_class(message: Option<&str>) -> String {
     let Some(message) = message else {
         return "UNKNOWN".to_string();
     };
 
     let message = message.to_ascii_lowercase();
-    let class = if message.contains("not authorized")
+    // The two `railway mcp` proxy outcomes the generic keywords below cannot
+    // place. Matched on the proxy's own fixed phrases (see
+    // `UpstreamFailure::telemetry_message`) so no other command's errors move
+    // between classes.
+    let class = if message.contains("mcp upstream unreachable") {
+        "NETWORK"
+    } else if message.contains("mcp upstream http error") {
+        "UPSTREAM"
+    } else if message.contains("not authorized")
         || message.contains("unauthorized")
         || message.contains("forbidden")
         || message.contains("access denied")
