@@ -1229,12 +1229,23 @@ pub fn preserve_resolved_create_branches(local: &[Value], previewed: &mut [Value
     }
 }
 
+/// "Omit `source` when `.railway/railway.ts` should manage service settings but
+/// not declare a GitHub repository or Docker image." The live source stays.
+fn leaves_source_unmanaged(resource: &Value) -> bool {
+    resource_type(resource) == "service"
+        && resource.get("source").is_none()
+        && !is_function_resource(resource)
+}
+
 fn diff_top_level_field(
     previous: &Value,
     resource: &Value,
     field_name: &str,
     changes: &mut Vec<Value>,
 ) {
+    if field_name == "source" && leaves_source_unmanaged(resource) {
+        return;
+    }
     let mut before = previous.get(field_name).cloned().unwrap_or(Value::Null);
     let mut after = resource.get(field_name).cloned().unwrap_or(Value::Null);
     if field_name == "source"
@@ -1285,9 +1296,9 @@ fn diff_service_deploy(
 ) {
     let desired_deploy =
         service_deploy_with_current_region(previous.get("deploy"), resource.get("deploy"));
-    let switching_away_from_image =
-        field_str(previous.get("source").unwrap_or(&Value::Null), "type") == Some("image")
-            && field_str(resource.get("source").unwrap_or(&Value::Null), "type") != Some("image");
+    let switching_away_from_image = !leaves_source_unmanaged(resource)
+        && field_str(previous.get("source").unwrap_or(&Value::Null), "type") == Some("image")
+        && field_str(resource.get("source").unwrap_or(&Value::Null), "type") != Some("image");
     let (before, after) = if switching_away_from_image
         && previous
             .get("deploy")
