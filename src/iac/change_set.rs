@@ -1311,8 +1311,37 @@ fn diff_service_deploy(
             &desired_deploy,
         )
     };
-    let normalized_before = normalize_for_diff("deploy", &before);
-    let normalized_after = normalize_for_diff("deploy", &after);
+    let mut normalized_before = normalize_for_diff("deploy", &before);
+    let mut normalized_after = normalize_for_diff("deploy", &after);
+    // A single replica is a default only when the other side omits placement.
+    // If both sides specify regions, compare them even when either has one replica.
+    let regions = |deploy: &Value| {
+        deploy
+            .get("multiRegionConfig")
+            .map(|value| {
+                let mut regions = normalize_multi_region_config(value);
+                if let Some(regions) = regions.as_object_mut() {
+                    for config in regions.values_mut().filter_map(Value::as_object_mut) {
+                        if config.get("stackerAssignment").is_some_and(Value::is_null) {
+                            config.remove("stackerAssignment");
+                        }
+                    }
+                }
+                regions
+            })
+            .filter(|value| value.as_object().is_some_and(|obj| !obj.is_empty()))
+    };
+    if let (Some(before_regions), Some(after_regions)) = (regions(&before), regions(&after)) {
+        for (deploy, regions) in [
+            (&mut normalized_before, before_regions),
+            (&mut normalized_after, after_regions),
+        ] {
+            if deploy.is_null() {
+                *deploy = json!({});
+            }
+            deploy["multiRegionConfig"] = regions;
+        }
+    }
     if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
         return;
     }
