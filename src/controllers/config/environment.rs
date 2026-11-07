@@ -253,7 +253,23 @@ pub struct RegistryCredentials {
 #[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema)]
 #[serde(default, rename_all = "camelCase")]
 pub struct LimitOverride {
+    #[serde(deserialize_with = "deserialize_container_limits")]
     pub containers: Option<ContainerLimits>,
+}
+
+fn deserialize_container_limits<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<ContainerLimits>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Defaulted structs also accept sequences in Serde. The config schema
+    // requires an object (or null), so reject arrays before decoding fields.
+    let object = Option::<serde_json::Map<String, serde_json::Value>>::deserialize(deserializer)?;
+    object
+        .map(|object| serde_json::from_value::<ContainerLimits>(serde_json::Value::Object(object)))
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 #[skip_serializing_none]
@@ -261,8 +277,10 @@ pub struct LimitOverride {
 #[serde(default, rename_all = "camelCase")]
 pub struct ContainerLimits {
     pub cpu: Option<f64>,
-    pub memory_bytes: Option<i64>,
-    pub disk_bytes: Option<i64>,
+    // The API can return fractional bytes. Keep integer JSON numbers as
+    // integers, including i64 values that cannot be represented exactly by f64.
+    pub memory_bytes: Option<serde_json::Number>,
+    pub disk_bytes: Option<serde_json::Number>,
 }
 
 #[skip_serializing_none]
@@ -438,6 +456,203 @@ mod tests {
                 "config": config,
             }
         })
+    }
+
+    fn config_with_limits(containers: serde_json::Value) -> serde_json::Value {
+        json!({
+            "services": {
+                "svc-1": {
+                    "source": { "image": "example/image:1" },
+                    "build": { "builder": "RAILPACK" },
+                    "deploy": {
+                        "startCommand": "./start",
+                        "numReplicas": 2,
+                        "limitOverride": { "containers": containers },
+                    },
+                    "variables": { "EXAMPLE": { "value": "fixture" }, "REMOVED": null },
+                    "volumeMounts": { "vol-1": { "mountPath": "/data" } },
+                }
+            },
+            "sharedVariables": { "SHARED": { "value": "fixture" } },
+            "volumes": { "vol-1": { "sizeMb": 1024, "region": "region-1" } },
+            "buckets": { "bucket-1": { "region": "region-1" } },
+            "privateNetworkDisabled": false,
+        })
+    }
+
+    fn assert_config_reads_only(server: &MockBackboard, dir: &tempfile::TempDir, count: usize) {
+        let requests = server.requests();
+        assert_eq!(requests.len(), count);
+        for request in requests {
+            assert_eq!(request["operationName"], "GetEnvironmentConfig");
+            assert_eq!(
+                request["variables"],
+                json!({ "id": "env-1", "decryptVariables": false })
+            );
+            assert!(
+                request["query"]
+                    .as_str()
+                    .unwrap()
+                    .trim_start()
+                    .starts_with("query ")
+            );
+        }
+        assert!(server.auth_headers().iter().all(Option::is_none));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn resource_limits_round_trip_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        let cases = [
+            // The provider payload from issue #1314, including the integer CPU.
+            r#"{"cpu":1,"memoryBytes":2147483648.0000005}"#,
+            r#"{"cpu":0.25,"diskBytes":1073741824.0000002}"#,
+            r#"{"memoryBytes":2147483648,"diskBytes":4294967296}"#,
+            r#"{"memoryBytes":9007199254740993,"diskBytes":9223372036854775807}"#,
+            r#"{"memoryBytes":9223372036854775806,"diskBytes":9007199254740993}"#,
+            r#"{"memoryBytes":-9223372036854775808,"diskBytes":0}"#,
+            r#"{"memoryBytes":0.5,"diskBytes":0.25}"#,
+            r#"{"memoryBytes":2147483648.0,"diskBytes":1e3}"#,
+        ];
+        for raw in cases {
+            let containers = serde_json::from_str(raw).unwrap();
+            server.stub(
+                "GetEnvironmentConfig",
+                environment_payload(config_with_limits(containers)),
+            );
+        }
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        for raw in cases {
+            let response = fetch_environment_config(&client, &configs, "env-1", false)
+                .await
+                .unwrap_or_else(|err| panic!("{raw}: {err:#}"));
+            assert_eq!(response.name, "production");
+            let mut containers: serde_json::Value = serde_json::from_str(raw).unwrap();
+            // CPU already uses f64; only the byte-number representation changes.
+            if let Some(cpu) = containers.get_mut("cpu") {
+                *cpu = json!(cpu.as_f64().unwrap());
+            }
+            let expected = config_with_limits(containers);
+            let serialized = serde_json::to_value(&response.config).unwrap();
+            assert_eq!(serialized, expected, "{raw}");
+
+            let encoded = serde_json::to_string(&response.config).unwrap();
+            let decoded: EnvironmentConfig = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), expected, "{raw}");
+
+            // Duplication and the generated mutation variables also serialize
+            // this model. Exercise their encoding without sending a mutation.
+            let duplicate = prepare_config_for_duplication(response.config);
+            let vars = crate::gql::mutations::environment_patch_commit::Variables {
+                environment_id: "env-copy".into(),
+                patch: duplicate,
+                commit_message: None,
+            };
+            let patch = serde_json::to_value(&vars).unwrap()["patch"].clone();
+            assert_eq!(
+                patch["services"]["svc-1"]["deploy"],
+                expected["services"]["svc-1"]["deploy"]
+            );
+            assert_eq!(patch["sharedVariables"], expected["sharedVariables"]);
+            let vars = crate::gql::mutations::environment_stage_changes::Variables {
+                environment_id: "env-copy".into(),
+                input: vars.patch,
+                merge: Some(true),
+            };
+            assert_eq!(serde_json::to_value(vars).unwrap()["input"], patch);
+        }
+        assert_config_reads_only(&server, &dir, cases.len());
+    }
+
+    #[tokio::test]
+    async fn resource_limits_keep_optional_behavior() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        for containers in [
+            json!({}),
+            json!({"memoryBytes": null, "diskBytes": null}),
+            json!(null),
+        ] {
+            server.stub(
+                "GetEnvironmentConfig",
+                environment_payload(config_with_limits(containers)),
+            );
+        }
+        server.stub(
+            "GetEnvironmentConfig",
+            environment_payload(json!({"services": {"svc-1": {"deploy": {}}}})),
+        );
+        server.stub("GetEnvironmentConfig", environment_payload(json!({})));
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        for index in 0..5 {
+            let response = fetch_environment_config(&client, &configs, "env-1", false)
+                .await
+                .unwrap();
+            let serialized = serde_json::to_value(&response.config).unwrap();
+            let limits = &serialized["services"]["svc-1"]["deploy"]["limitOverride"];
+            assert!(limits["containers"].get("memoryBytes").is_none());
+            assert!(limits["containers"].get("diskBytes").is_none());
+            if index < 2 {
+                assert_eq!(limits["containers"], json!({}));
+            } else {
+                assert!(limits.get("containers").is_none());
+            }
+        }
+        assert_config_reads_only(&server, &dir, 5);
+    }
+
+    #[tokio::test]
+    async fn invalid_resource_limits_refuse_and_recover_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        let healthy = config_with_limits(
+            json!({"memoryBytes": 2147483648.0000005, "diskBytes": 9223372036854775807_i64}),
+        );
+        let mut invalid = Vec::new();
+        for field in ["memoryBytes", "diskBytes"] {
+            for value in [
+                json!("2147483648"),
+                json!(true),
+                json!([]),
+                json!({"value": 1}),
+            ] {
+                let mut containers = json!({});
+                containers[field] = value;
+                invalid.push(config_with_limits(containers));
+            }
+        }
+        for containers in [json!("invalid"), json!(false), json!([])] {
+            invalid.push(config_with_limits(containers));
+        }
+        let mut unrelated = config_with_limits(json!({"memoryBytes": 1}));
+        unrelated["services"]["svc-1"]["deploy"]["numReplicas"] = json!(1.5);
+        invalid.push(unrelated);
+        for config in &invalid {
+            server.stub("GetEnvironmentConfig", environment_payload(config.clone()));
+            server.stub("GetEnvironmentConfig", environment_payload(healthy.clone()));
+        }
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        for config in &invalid {
+            let err = fetch_environment_config(&client, &configs, "env-1", false)
+                .await
+                .err()
+                .expect("malformed config must fail");
+            assert!(
+                format!("{err:#}").contains("Failed to parse environment config"),
+                "{config}: {err:#}"
+            );
+            let recovered = fetch_environment_config(&client, &configs, "env-1", false)
+                .await
+                .unwrap();
+            assert_eq!(serde_json::to_value(recovered.config).unwrap(), healthy);
+        }
+        assert_config_reads_only(&server, &dir, invalid.len() * 2);
     }
 
     #[tokio::test]
