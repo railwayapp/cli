@@ -196,10 +196,15 @@ pub(crate) fn supports_mcp(slug: &str) -> bool {
 
 fn config_path(slug: &str, home: &Path) -> PathBuf {
     match slug {
-        "claude-code" => home.join(".claude.json"),
+        // With CLAUDE_CONFIG_DIR set, Claude Code keeps `.claude.json` inside
+        // that directory and never reads `~/.claude.json`.
+        "claude-code" => match std::env::var_os("CLAUDE_CONFIG_DIR") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(".claude.json"),
+            _ => home.join(".claude.json"),
+        },
         "cursor" => home.join(".cursor").join("mcp.json"),
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
-        "codex" => home.join(".codex").join("config.toml"),
+        "codex" => crate::commands::skills::codex_home(home).join("config.toml"),
         "copilot" => home.join(".copilot").join("mcp-config.json"),
         "factory-droid" => home.join(".factory").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
@@ -1096,5 +1101,96 @@ mod tests {
             McpTransport::from_flags(true, false, true),
             McpTransport::Local
         );
+    }
+
+    /// Runs `f` with the given environment overrides. Env is process-global,
+    /// so these tests hold one lock while it is changed.
+    fn with_env<R>(vars: &[(&str, Option<&std::path::Path>)], f: impl FnOnce() -> R) -> R {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous: Vec<_> = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        // SAFETY: serialized by ENV_LOCK; restored before the lock is released.
+        unsafe {
+            for (key, value) in vars {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        let result = f();
+        unsafe {
+            for (key, value) in previous {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn claude_code_mcp_goes_to_claude_config_dir_when_set() {
+        let home = tempfile::tempdir().unwrap();
+        let seat = tempfile::tempdir().unwrap();
+        let path = with_env(&[("CLAUDE_CONFIG_DIR", Some(seat.path()))], || {
+            config_path("claude-code", home.path())
+        });
+        assert_eq!(path, seat.path().join(".claude.json"));
+    }
+
+    #[test]
+    fn codex_mcp_goes_to_codex_home_when_set() {
+        let home = tempfile::tempdir().unwrap();
+        let codex_home = tempfile::tempdir().unwrap();
+        let path = with_env(&[("CODEX_HOME", Some(codex_home.path()))], || {
+            config_path("codex", home.path())
+        });
+        assert_eq!(path, codex_home.path().join("config.toml"));
+    }
+
+    #[test]
+    fn unset_or_empty_overrides_keep_the_home_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        let empty = std::path::Path::new("");
+        let (claude, codex) = with_env(
+            &[("CLAUDE_CONFIG_DIR", Some(empty)), ("CODEX_HOME", None)],
+            || {
+                (
+                    config_path("claude-code", home.path()),
+                    config_path("codex", home.path()),
+                )
+            },
+        );
+        assert_eq!(claude, home.path().join(".claude.json"));
+        assert_eq!(codex, home.path().join(".codex").join("config.toml"));
+    }
+
+    #[test]
+    fn install_is_detected_where_claude_code_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let seat = tempfile::tempdir().unwrap();
+        let (configured, skills_parent) =
+            with_env(&[("CLAUDE_CONFIG_DIR", Some(seat.path()))], || {
+                let path = config_path("claude-code", home.path());
+                install_for("claude-code", &path, McpTransport::Local).unwrap();
+                let parent = crate::commands::skills::coding_tools(home.path())
+                    .into_iter()
+                    .find(|t| t.slug == "claude-code")
+                    .unwrap()
+                    .global_parent;
+                (
+                    mcp_configured_any_transport(home.path(), "claude-code"),
+                    parent,
+                )
+            });
+        assert!(seat.path().join(".claude.json").exists());
+        assert!(!home.path().join(".claude.json").exists());
+        assert!(configured);
+        assert_eq!(skills_parent, seat.path());
     }
 }
