@@ -256,7 +256,7 @@ async fn list_variables(args: ListArgs) -> Result<()> {
     if args.kv {
         for (key, value) in &variables {
             match value {
-                Some(value) => println!("{key}={value}"),
+                Some(value) => println!("{}", kv_line(key, value)),
                 // A comment, not `KEY=`: this output is meant to be sourced,
                 // and an empty string is not what the variable is set to.
                 None => println!("# {key} is sealed; its value cannot be read"),
@@ -679,4 +679,30 @@ fn read_value_from_stdin() -> Result<String> {
     }
 
     Ok(value.to_string())
+}
+
+fn kv_line(key: &str, value: &str) -> String {
+    format!("{key}={}", crate::util::shell::shell_quote(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kv_line;
+
+    #[test]
+    fn kv_line_quotes_values_for_sourcing() {
+        assert_eq!(kv_line("PLAIN", "abc"), "PLAIN=abc");
+        assert_eq!(kv_line("SPACES", "hello world"), "SPACES='hello world'");
+        assert_eq!(
+            kv_line("QUOTES", "say \"hi\" it's"),
+            r#"QUOTES='say "hi" it'\''s'"#
+        );
+        assert_eq!(kv_line("HASH", "pa#ss"), "HASH='pa#ss'");
+        assert_eq!(kv_line("DOLLAR", "cost$HOME"), "DOLLAR='cost$HOME'");
+        assert_eq!(
+            kv_line("MULTILINE", "line1\nline2"),
+            "MULTILINE='line1\nline2'"
+        );
+        assert_eq!(kv_line("EMPTY", ""), "EMPTY=''");
+    }
 }
