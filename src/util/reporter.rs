@@ -125,6 +125,15 @@ fn defer(rendered: String) {
     let Ok(mut held) = DEFERRED.lock() else {
         return;
     };
+    push_deferred(&mut held, rendered);
+}
+
+/// The dedupe-and-cap rule behind [`defer`], kept apart from the global buffer
+/// so tests can drive it on a local `Vec`. Tests that drove `DEFERRED`
+/// directly were flaky: any test that runs a TUI marks the terminal owned, and
+/// a `warn` raised on another test thread during that window lands in the same
+/// global buffer.
+fn push_deferred(held: &mut Vec<(String, usize)>, rendered: String) {
     if let Some(entry) = held.iter_mut().find(|(text, _)| *text == rendered) {
         entry.1 += 1;
     } else if held.len() < MAX_DEFERRED {
@@ -205,10 +214,6 @@ mod tests {
     use super::*;
     use crate::errors::RailwayError;
 
-    /// `DEFERRED` is process-global, so the tests that drive it directly have
-    /// to run one at a time or they consume each other's entries.
-    static DEFERRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// A warning raised under a TUI must survive to be read, not vanish — and a
     /// condition that recurs on a timer (the config-lock timeout fired every
     /// few seconds in a long `railway ca` session) must come back as one line
@@ -216,17 +221,12 @@ mod tests {
     /// queued.
     #[test]
     fn deferred_warnings_are_deduplicated_and_counted() {
-        let _guard = DEFERRED_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        flush_deferred(); // start from a clean slate
+        let mut held = Vec::new();
+        push_deferred(&mut held, "lock timed out\n".to_string());
+        push_deferred(&mut held, "lock timed out\n".to_string());
+        push_deferred(&mut held, "lock timed out\n".to_string());
+        push_deferred(&mut held, "something else\n".to_string());
 
-        defer("lock timed out\n".to_string());
-        defer("lock timed out\n".to_string());
-        defer("lock timed out\n".to_string());
-        defer("something else\n".to_string());
-
-        let held = DEFERRED.lock().unwrap().clone();
         assert_eq!(
             held,
             vec![
@@ -235,10 +235,22 @@ mod tests {
             ],
             "repeats collapse into a count, and first-seen order is kept"
         );
+    }
 
+    /// Flushing must drain, or the next TUI exit replays the same warnings.
+    /// This one does touch the global buffer, so it only asserts on its own
+    /// uniquely-named entry: other test threads may add or flush theirs.
+    #[test]
+    fn flushing_drains_deferred_warnings() {
+        let mine = "reporter test: flushing_drains_deferred_warnings\n";
+        defer(mine.to_string());
         flush_deferred();
         assert!(
-            DEFERRED.lock().unwrap().is_empty(),
+            !DEFERRED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|(text, _)| text == mine),
             "flushing must drain, or the next TUI exit replays them"
         );
     }
@@ -246,23 +258,16 @@ mod tests {
     /// An unbounded buffer would be a slow leak across an hours-long session.
     #[test]
     fn deferred_warnings_are_capped() {
-        let _guard = DEFERRED_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        flush_deferred();
-
+        let mut held = Vec::new();
         for i in 0..(MAX_DEFERRED + 10) {
-            defer(format!("distinct warning {i}\n"));
+            push_deferred(&mut held, format!("distinct warning {i}\n"));
         }
         // The cap bounds distinct entries, but a repeat of one already held
         // still counts up — that is the case worth keeping.
-        defer("distinct warning 0\n".to_string());
+        push_deferred(&mut held, "distinct warning 0\n".to_string());
 
-        let held = DEFERRED.lock().unwrap().clone();
         assert_eq!(held.len(), MAX_DEFERRED);
         assert_eq!(held[0].1, 2);
-
-        flush_deferred();
     }
 
     #[test]
