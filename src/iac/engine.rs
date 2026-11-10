@@ -207,7 +207,7 @@ pub async fn run(
     let client = GQLClient::new_authorized(configs)?;
     let endpoint = configs.get_backboard();
     let environment_id = linked_project.environment_id()?;
-    let current =
+    let mut current =
         fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
             .await?;
     let mut ctx = EvalContext::from_linked_project(linked_project, command);
@@ -252,6 +252,15 @@ pub async fn run(
         )
         .await?;
     }
+    let restart_policy_hydration = hydrate_declared_restart_policies(
+        &client,
+        &endpoint,
+        environment_id,
+        &mut current,
+        &evaluated.graph,
+        &options,
+    )
+    .await?;
     let current_graph = environment_config_to_graph(&current.config, &options);
     let owners = parse_owners(current.iac_partials.as_ref());
     let pr_branch = current
@@ -345,14 +354,14 @@ pub async fn run(
     }
 
     let variable_policy = variable_policy_report(&current_graph, &evaluated.graph);
+    let mut current_environment =
+        current_environment_value(&current, options.project_name.as_deref());
+    current_environment["restartPolicyHydration"] = json!(restart_policy_hydration);
     let serialized = serde_json::to_value(RunnerWire {
         ok,
         command: command.to_string(),
         file: evaluated.file.to_string_lossy().to_string(),
-        current_environment: Some(current_environment_value(
-            &current,
-            options.project_name.as_deref(),
-        )),
+        current_environment: Some(current_environment),
         change_set: Some(change_set.clone()),
         diff: Some(render_change_set(&change_set)),
         diagnostics: all_diagnostics,
@@ -526,6 +535,213 @@ async fn github_default_branches(
         .into_iter()
         .map(|repo| (repo.full_name.to_ascii_lowercase(), repo.default_branch))
         .collect())
+}
+
+// Resolve only restart fields declared by existing services in this authoring file.
+// An absent serialized key is not evidence that its effective value is unset.
+fn restart_policy_targets(
+    config: &Value,
+    desired: &super::graph::RailwayGraph,
+    options: &EnvironmentConfigToGraphOptions,
+) -> Result<Vec<(String, Vec<&'static str>)>> {
+    let mut targets = Vec::new();
+    for resource in &desired.resources {
+        if resource.get("type").and_then(Value::as_str) != Some("service") {
+            continue;
+        }
+        let Some(wanted) = resource.get("deploy").and_then(Value::as_object) else {
+            continue;
+        };
+        let name = resource
+            .get("name")
+            .and_then(Value::as_str)
+            .context("Service name missing")?;
+        let ids: Vec<_> = options
+            .service_names_by_id
+            .iter()
+            .filter(|(_, value)| value.as_str() == Some(name))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if ids.len() > 1 {
+            bail!("Ambiguous existing service name for restart-policy hydration");
+        }
+        let Some(id) = ids.first() else { continue };
+        let Some(service) = config.get("services").and_then(|v| v.get(id)) else {
+            continue;
+        };
+        let deploy = match service.get("deploy") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_object()
+                    .context("Explicit null or invalid deploy config")?,
+            ),
+        };
+        let mut fields = Vec::new();
+        for key in ["restartPolicyType", "restartPolicyMaxRetries"] {
+            if !wanted.get(key).is_some_and(|v| !v.is_null()) {
+                continue;
+            }
+            match deploy.and_then(|d| d.get(key)) {
+                None => fields.push(key),
+                Some(Value::Null) => {
+                    bail!("Explicit null restart policy requires an explicit contract")
+                }
+                Some(_) => {}
+            }
+        }
+        if !fields.is_empty() {
+            targets.push((id.clone(), fields));
+        }
+    }
+    Ok(targets)
+}
+
+fn verify_restart_policy_etag(data: &Value, environment_id: &str, etag: &str) -> Result<()> {
+    let environment = data
+        .get("environment")
+        .context("Environment response missing")?;
+    if environment.get("id").and_then(Value::as_str) != Some(environment_id)
+        || environment.get("configEtag").and_then(Value::as_str) != Some(etag)
+    {
+        bail!("Environment changed while reading restart policies; re-plan from a fresh snapshot");
+    }
+    Ok(())
+}
+
+fn merge_reported_restart_policy(
+    config: &mut Value,
+    service_id: &str,
+    environment_id: &str,
+    etag: &str,
+    fields: &[&str],
+    data: &Value,
+) -> Result<Value> {
+    if fields.is_empty()
+        || fields
+            .iter()
+            .any(|key| !matches!(*key, "restartPolicyType" | "restartPolicyMaxRetries"))
+    {
+        bail!("Unknown restart-policy hydration field");
+    }
+    verify_restart_policy_etag(data, environment_id, etag)?;
+    let instance = data
+        .get("serviceInstance")
+        .context("Service instance response missing")?;
+    if instance.get("serviceId").and_then(Value::as_str) != Some(service_id)
+        || instance.get("environmentId").and_then(Value::as_str) != Some(environment_id)
+    {
+        bail!("Restart-policy response belongs to a different service or environment");
+    }
+    let service = config
+        .get("services")
+        .and_then(|v| v.get(service_id))
+        .and_then(Value::as_object)
+        .context("Existing service config missing")?;
+    let mut deploy = match service.get("deploy") {
+        None => serde_json::Map::new(),
+        Some(value) => value
+            .as_object()
+            .context("Explicit null or invalid deploy config")?
+            .clone(),
+    };
+    let mut filled = serde_json::Map::new();
+    for key in ["restartPolicyType", "restartPolicyMaxRetries"] {
+        if !fields.contains(&key) && !deploy.contains_key(key) {
+            continue;
+        }
+        let reported = instance
+            .get(key)
+            .context("Native restart-policy field missing")?;
+        let valid = match key {
+            "restartPolicyType" => {
+                matches!(reported.as_str(), Some("ON_FAILURE" | "ALWAYS" | "NEVER"))
+            }
+            _ => reported.as_i64().is_some_and(|n| n >= 0),
+        };
+        if !valid {
+            bail!("Unknown or null native restart-policy value; refusing to invent a default");
+        }
+        if let Some(existing) = deploy.get(key) {
+            if existing != reported {
+                bail!(
+                    "Serialized config and native restart policy disagree; refusing to hide drift"
+                );
+            }
+        } else if fields.contains(&key) {
+            deploy.insert(key.to_string(), reported.clone());
+            filled.insert(key.to_string(), reported.clone());
+        }
+    }
+    // Only the local input representation is completed. No server mutation occurs.
+    config["services"][service_id]["deploy"] = Value::Object(deploy);
+    Ok(json!({
+        "source": "serviceInstance",
+        "serviceId": service_id,
+        "environmentId": environment_id,
+        "configEtag": etag,
+        "filledFields": filled,
+    }))
+}
+
+async fn hydrate_declared_restart_policies(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    current: &mut EnvNode,
+    desired: &super::graph::RailwayGraph,
+    options: &EnvironmentConfigToGraphOptions,
+) -> Result<Vec<Value>> {
+    if current.id != environment_id {
+        bail!("Initial config snapshot belongs to a different environment");
+    }
+    let targets = restart_policy_targets(&current.config, desired, options)?;
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let etag = current
+        .config_etag
+        .clone()
+        .filter(|v| !v.is_empty())
+        .context("Config etag required before restart-policy hydration")?;
+    let mut evidence = Vec::new();
+    for (service_id, fields) in targets {
+        let data: Value = post_graphql_raw(
+            client,
+            endpoint,
+            r#"
+            query IacDeclaredRestartPolicy($environmentId: String!, $serviceId: String!) {
+                environment(id: $environmentId) { id configEtag }
+                serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+                    serviceId environmentId restartPolicyType restartPolicyMaxRetries
+                }
+            }
+        "#,
+            json!({"environmentId": environment_id, "serviceId": service_id}),
+        )
+        .await?;
+        evidence.push(merge_reported_restart_policy(
+            &mut current.config,
+            &service_id,
+            environment_id,
+            &etag,
+            &fields,
+            &data,
+        )?);
+    }
+    let after: Value = post_graphql_raw(
+        client,
+        endpoint,
+        r#"
+        query IacRestartPolicyFinalEtag($environmentId: String!) {
+            environment(id: $environmentId) { id configEtag }
+        }
+    "#,
+        json!({"environmentId": environment_id}),
+    )
+    .await?;
+    verify_restart_policy_etag(&after, environment_id, &etag)?;
+    Ok(evidence)
 }
 
 async fn fetch_current_environment(
@@ -1048,3 +1264,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "engine_restart_policy_tests.rs"]
+mod restart_policy_tests;
