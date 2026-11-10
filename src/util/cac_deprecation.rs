@@ -72,6 +72,7 @@ pub fn find_cac_file(start: &Path) -> Option<PathBuf> {
 
 /// Find every `railway.toml` / `railway.json` under `start`, preferring toml
 /// when both exist in the same directory. Respects `.gitignore`.
+#[cfg(test)]
 pub fn find_all_cac_files(start: &Path) -> Vec<PathBuf> {
     use std::collections::BTreeMap;
 
