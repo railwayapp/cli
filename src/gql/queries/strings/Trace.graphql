@@ -1,0 +1,29 @@
+query Trace($environmentId: String!, $traceId: String!, $maxSpans: Int) {
+  trace(environmentId: $environmentId, traceId: $traceId, maxSpans: $maxSpans) {
+    traceId
+    spanId
+    parentSpanId
+    startedAt
+    durationMs
+    name
+    kind
+    component
+    serviceName
+    serviceId
+    deploymentId
+    deploymentInstanceId
+    statusCode
+    statusMessage
+    resourceAttributes
+    spanAttributes
+    events {
+      timestamp
+      name
+      attributes
+    }
+    links {
+      traceId
+      spanId
+    }
+  }
+}

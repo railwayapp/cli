@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const REMOTE_MCP_URL: &str = "https://mcp.railway.com";
 
-/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Factory Droid).
+/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Factory Droid, Pi, Antigravity).
 ///
 /// Merges a `railway` server entry into each tool's MCP config file. Without `--agent`, only configures detected tools (those with their config dir present).
 #[derive(Parser)]
@@ -20,8 +20,8 @@ pub struct Args {
     #[clap(long, conflicts_with = "local")]
     remote: bool,
 
-    /// Configure the local GraphQL-backed MCP server (`railway mcp`) instead of the
-    /// remote CLI proxy default.
+    /// Configure the local GraphQL-backed MCP server (`railway mcp local`) instead of
+    /// the remote CLI proxy default.
     #[clap(long, conflicts_with_all = ["remote", "oauth"])]
     local: bool,
 
@@ -34,10 +34,11 @@ pub struct Args {
 /// Which flavor of the Railway MCP server an install writes into a harness config.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum McpTransport {
-    /// `railway mcp` — local stdio server backed by GraphQL.
+    /// `railway mcp local` — in-process stdio server backed by GraphQL.
     Local,
-    /// `railway mcp proxy` — local stdio bridge to mcp.railway.com that
-    /// authenticates with the CLI's stored login.
+    /// `railway mcp proxy` — stdio bridge to mcp.railway.com that
+    /// authenticates with the CLI's stored login. Also what a bare
+    /// `railway mcp` starts.
     RemoteProxy,
     /// Plain mcp.railway.com URL — the editor authenticates via its own OAuth flow.
     RemoteOauth,
@@ -61,8 +62,12 @@ impl McpTransport {
 /// The argv written into harness configs for the stdio transports.
 fn stdio_args(transport: McpTransport) -> Vec<&'static str> {
     match transport {
-        McpTransport::Local => vec!["mcp"],
-        McpTransport::RemoteProxy => vec!["mcp", "proxy"],
+        McpTransport::Local => vec!["mcp", "local"],
+        // A bare `mcp` — the canonical invocation now that it starts the
+        // proxy. `mcp proxy` still works and still classifies as remote, so
+        // configs written before the cutover keep running; new ones just say
+        // it the short way.
+        McpTransport::RemoteProxy => vec!["mcp"],
         // RemoteOauth entries are URL-based; callers never ask for its argv.
         McpTransport::RemoteOauth => unreachable!("RemoteOauth has no stdio argv"),
     }
@@ -178,7 +183,14 @@ pub(crate) async fn install_mcp(
 pub(crate) fn supports_mcp(slug: &str) -> bool {
     matches!(
         slug,
-        "claude-code" | "cursor" | "opencode" | "codex" | "copilot" | "factory-droid"
+        "claude-code"
+            | "cursor"
+            | "opencode"
+            | "codex"
+            | "copilot"
+            | "factory-droid"
+            | "pi"
+            | "antigravity"
     )
 }
 
@@ -190,6 +202,8 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
         "codex" => home.join(".codex").join("config.toml"),
         "copilot" => home.join(".copilot").join("mcp-config.json"),
         "factory-droid" => home.join(".factory").join("mcp.json"),
+        "pi" => home.join(".pi").join("agent").join("mcp.json"),
+        "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         // supports_mcp gates this; unreachable in practice.
         _ => home.join(".unsupported"),
     }
@@ -207,14 +221,16 @@ const ALL_TRANSPORTS: [McpTransport; 3] = [
 pub(crate) fn mcp_configured_any_transport(home: &Path, slug: &str) -> bool {
     let path = config_path(slug, home);
     match slug {
-        "claude-code" | "cursor" | "copilot" | "factory-droid" => read_json_or_empty(&path)
-            .ok()
-            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
-            .is_some_and(|entry| {
-                ALL_TRANSPORTS
-                    .iter()
-                    .any(|t| json_mcp_entry_matches(&entry, *t))
-            }),
+        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" | "antigravity" => {
+            read_json_or_empty(&path)
+                .ok()
+                .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+                .is_some_and(|entry| {
+                    ALL_TRANSPORTS
+                        .iter()
+                        .any(|t| json_mcp_entry_matches(&entry, *t))
+                })
+        }
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
@@ -236,10 +252,12 @@ pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, transport: McpTra
     let path = config_path(slug, home);
 
     match slug {
-        "claude-code" | "cursor" | "copilot" | "factory-droid" => read_json_or_empty(&path)
-            .ok()
-            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
-            .is_some_and(|entry| json_mcp_entry_matches(&entry, transport)),
+        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" | "antigravity" => {
+            read_json_or_empty(&path)
+                .ok()
+                .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+                .is_some_and(|entry| json_mcp_entry_matches(&entry, transport))
+        }
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
@@ -249,15 +267,26 @@ pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, transport: McpTra
     }
 }
 
-/// Distinguish `railway mcp` (local) from `railway mcp proxy`: a bare
-/// "contains mcp" check would classify a proxy entry as a local install.
+/// Classify an installed `railway mcp …` entry by which server it starts.
+///
+/// Three-way since the cutover. `mcp local` is the in-process server; `mcp
+/// proxy` is the remote one; and a bare `mcp` — what installs written before
+/// the cutover contain — now starts the proxy too, so it classifies as remote
+/// rather than as the local install it used to be.
 fn stdio_argv_matches<'a>(
     args: impl Iterator<Item = &'a str> + Clone,
     transport: McpTransport,
 ) -> bool {
-    let has_mcp = args.clone().any(|a| a == "mcp");
-    let has_proxy = args.clone().any(|a| a == "proxy");
-    has_mcp && (has_proxy == matches!(transport, McpTransport::RemoteProxy))
+    if !args.clone().any(|a| a == "mcp") {
+        return false;
+    }
+    let has_local = args.clone().any(|a| a == "local");
+    match transport {
+        McpTransport::Local => has_local,
+        McpTransport::RemoteProxy => !has_local,
+        // URL-based; callers match it before narrowing to a stdio transport.
+        McpTransport::RemoteOauth => false,
+    }
 }
 
 fn json_mcp_entry_matches(entry: &JsonValue, transport: McpTransport) -> bool {
@@ -373,6 +402,22 @@ fn install_for(slug: &str, path: &Path, transport: McpTransport) -> Result<()> {
                     "args": stdio_args(stdio),
                     "disabled": false
                 }),
+            };
+            write_json_mcp_servers(path, entry)
+        }
+        "pi" => {
+            let entry = match transport {
+                McpTransport::RemoteOauth => json!({ "url": REMOTE_MCP_URL }),
+                stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
+            };
+            write_json_mcp_servers(path, entry)
+        }
+        "antigravity" => {
+            // Antigravity reads `url` for Streamable HTTP servers (`serverUrl`
+            // is its legacy key) and `command` + `args` for stdio.
+            let entry = match transport {
+                McpTransport::RemoteOauth => json!({ "url": REMOTE_MCP_URL }),
+                stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
             };
             write_json_mcp_servers(path, entry)
         }
@@ -591,7 +636,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_existing_cursor_local_mcp() {
+    fn detects_existing_cursor_bare_mcp_as_remote() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".cursor").join("mcp.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -606,6 +651,42 @@ mod tests {
         )
         .unwrap();
 
+        // A bare `mcp` argv started the in-process server before the
+        // cutover and starts the proxy after it, so an untouched
+        // pre-cutover config now reads as a remote install.
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteProxy
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::Local
+        ));
+        assert!(!mcp_configured_for_slug(
+            home.path(),
+            "cursor",
+            McpTransport::RemoteOauth
+        ));
+    }
+
+    #[test]
+    fn local_installs_are_written_explicitly() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".cursor").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("cursor", &path, McpTransport::Local).unwrap();
+
+        let root: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Must be `mcp local`, not a bare `mcp` — that starts the proxy now.
+        assert_eq!(
+            root.pointer("/mcpServers/railway/args").unwrap(),
+            &serde_json::json!(["mcp", "local"])
+        );
+
         assert!(mcp_configured_for_slug(
             home.path(),
             "cursor",
@@ -616,15 +697,32 @@ mod tests {
             "cursor",
             McpTransport::RemoteProxy
         ));
-        assert!(!mcp_configured_for_slug(
-            home.path(),
-            "cursor",
-            McpTransport::RemoteOauth
-        ));
     }
 
     #[test]
-    fn proxy_entry_is_not_mistaken_for_local() {
+    fn argv_classification_is_three_way() {
+        let cases: [(&[&str], McpTransport, bool); 6] = [
+            (&["mcp", "local"], McpTransport::Local, true),
+            (&["mcp", "local"], McpTransport::RemoteProxy, false),
+            // No longer written by `install`, but pre-cutover configs contain
+            // it and must keep resolving to the remote server.
+            (&["mcp", "proxy"], McpTransport::RemoteProxy, true),
+            (&["mcp", "proxy"], McpTransport::Local, false),
+            // Pre-cutover config: bare `mcp` starts the proxy now.
+            (&["mcp"], McpTransport::RemoteProxy, true),
+            (&["mcp"], McpTransport::Local, false),
+        ];
+        for (argv, transport, expected) in cases {
+            assert_eq!(
+                stdio_argv_matches(argv.iter().copied(), transport),
+                expected,
+                "{argv:?} against {transport:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_installs_are_written_as_a_bare_mcp() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".cursor").join("mcp.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -634,10 +732,7 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         let root: JsonValue = serde_json::from_str(&written).unwrap();
         let railway = root.pointer("/mcpServers/railway").unwrap();
-        assert_eq!(
-            railway.get("args").unwrap(),
-            &serde_json::json!(["mcp", "proxy"])
-        );
+        assert_eq!(railway.get("args").unwrap(), &serde_json::json!(["mcp"]));
 
         assert!(mcp_configured_for_slug(
             home.path(),
@@ -714,7 +809,7 @@ mod tests {
         let railway = root.pointer("/mcp/railway").unwrap();
         assert_eq!(
             railway.get("command").unwrap(),
-            &serde_json::json!(["railway", "mcp", "proxy"])
+            &serde_json::json!(["railway", "mcp"])
         );
 
         assert!(mcp_configured_for_slug(
@@ -730,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_existing_codex_local_mcp() {
+    fn detects_existing_codex_bare_mcp_as_remote() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".codex").join("config.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -744,15 +839,18 @@ mod tests {
         )
         .unwrap();
 
+        // A bare `mcp` argv started the in-process server before the
+        // cutover and starts the proxy after it, so an untouched
+        // pre-cutover config now reads as a remote install.
         assert!(mcp_configured_for_slug(
             home.path(),
             "codex",
-            McpTransport::Local
+            McpTransport::RemoteProxy
         ));
         assert!(!mcp_configured_for_slug(
             home.path(),
             "codex",
-            McpTransport::RemoteProxy
+            McpTransport::Local
         ));
         assert!(!mcp_configured_for_slug(
             home.path(),
@@ -777,8 +875,8 @@ mod tests {
             .and_then(|railway| railway.get("args"))
             .and_then(toml::Value::as_array)
             .unwrap();
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[1].as_str(), Some("proxy"));
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].as_str(), Some("mcp"));
 
         assert!(mcp_configured_for_slug(
             home.path(),
@@ -893,6 +991,85 @@ mod tests {
             "factory-droid",
             McpTransport::RemoteOauth
         ));
+    }
+
+    #[test]
+    fn writes_pi_remote_mcp() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".pi").join("agent").join("mcp.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        install_for("pi", &path, McpTransport::RemoteOauth).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let root: JsonValue = serde_json::from_str(&written).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+
+        assert_eq!(
+            railway.get("url").and_then(JsonValue::as_str),
+            Some("https://mcp.railway.com")
+        );
+        assert!(railway.get("type").is_none());
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "pi",
+            McpTransport::RemoteOauth
+        ));
+        assert!(mcp_configured_any_transport(home.path(), "pi"));
+    }
+
+    #[test]
+    fn writes_antigravity_mcp_for_each_transport() {
+        let home = tempfile::tempdir().unwrap();
+        let path = config_path("antigravity", home.path());
+        assert_eq!(
+            path,
+            home.path()
+                .join(".gemini")
+                .join("config")
+                .join("mcp_config.json")
+        );
+        // Antigravity creates mcp_config.json empty on first run.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+
+        install_for("antigravity", &path, McpTransport::RemoteOauth).unwrap();
+        let root: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+        assert_eq!(
+            railway.get("url").and_then(JsonValue::as_str),
+            Some("https://mcp.railway.com")
+        );
+        assert!(railway.get("type").is_none());
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::RemoteOauth
+        ));
+
+        install_for("antigravity", &path, McpTransport::RemoteProxy).unwrap();
+        let root: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+        assert_eq!(
+            railway.get("command").and_then(JsonValue::as_str),
+            Some("railway")
+        );
+        assert_eq!(railway.get("args"), Some(&json!(["mcp"])));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::RemoteProxy
+        ));
+
+        install_for("antigravity", &path, McpTransport::Local).unwrap();
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::Local
+        ));
+        assert!(mcp_configured_any_transport(home.path(), "antigravity"));
     }
 
     #[test]

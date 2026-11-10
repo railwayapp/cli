@@ -42,8 +42,8 @@ pub struct AgentArgs {
     #[clap(long, conflicts_with = "local")]
     remote: bool,
 
-    /// Configure the local GraphQL-backed MCP server (`railway mcp`) instead of the
-    /// remote CLI proxy default.
+    /// Configure the local GraphQL-backed MCP server (`railway mcp local`) instead of
+    /// the remote CLI proxy default.
     #[clap(long, conflicts_with_all = ["remote", "oauth"])]
     local: bool,
 
@@ -95,7 +95,7 @@ impl fmt::Display for McpChoice {
             McpChoice::Local => write!(
                 f,
                 "Local            {}",
-                "— runs `railway mcp` as a stdio server".dimmed()
+                "— runs `railway mcp local` as a stdio server".dimmed()
             ),
             McpChoice::RemoteOauth => write!(
                 f,
@@ -418,17 +418,25 @@ pub(crate) fn print_agent_health_check() {
     eprintln!("\n{}", "Agent tooling:".dimmed());
 
     if skills_ok {
+        let auto_update_enabled = !crate::telemetry::is_auto_update_disabled();
         let revision = match skills::installed_skills_revision(&home) {
-            Some((installed, skills::SkillsStaleness::UpdateAvailable(newer))) => {
+            Some((installed, skills::SkillsStaleness::UpdatePending(newer)))
+                if auto_update_enabled =>
+            {
+                format!(" (rev {installed} \u{2192} {newer}, automatic update pending)")
+            }
+            Some((installed, skills::SkillsStaleness::UpdateAvailable(newer)))
+                if auto_update_enabled =>
+            {
                 format!(
-                    " (rev {installed} \u{2192} {newer} available, run `railway skills update`)"
+                    " (rev {installed} \u{2192} {newer}, local changes skipped; run `railway skills update` to review)"
                 )
             }
             Some((installed, skills::SkillsStaleness::UpToDate)) => {
                 format!(" (rev {installed}, up to date)")
             }
             // No staleness evidence yet — show the revision, claim nothing.
-            Some((installed, skills::SkillsStaleness::Unknown)) => format!(" (rev {installed})"),
+            Some((installed, _)) => format!(" (rev {installed})"),
             None => String::new(),
         };
         eprintln!(

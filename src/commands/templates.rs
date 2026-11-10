@@ -29,6 +29,7 @@ use crate::{
     consts::TICK_STRING,
     controllers::{environment::get_matched_environment, project::get_project},
     errors::RailwayError,
+    tui_theme::Theme,
     util::{
         progress::create_spinner_if,
         prompt::{
@@ -295,7 +296,13 @@ struct PickerApp {
     request: TemplateSearchRequest,
     results: Vec<TemplateSearchEdge>,
     selected: usize,
-    theme: TerminalTheme,
+    /// Light vs dark terminal *background* — an axis of its own, answered by
+    /// `detect_terminal_theme`, separate from `theme` below (which brand
+    /// theme is selected).
+    bg: TerminalTheme,
+    /// The shared brand theme every ratatui screen reads from
+    /// `~/.railway/tui-prefs.json` (see [`crate::tui_theme`]).
+    theme: &'static Theme,
     loading: bool,
     loading_more: bool,
     error: Option<String>,
@@ -1803,7 +1810,7 @@ async fn run_picker(
         original_hook(info);
     }));
 
-    let (mut terminal, theme) = setup_terminal()?;
+    let (mut terminal, bg) = setup_terminal()?;
     let _cleanup = scopeguard::guard((), |_| {
         restore_terminal();
     });
@@ -1813,7 +1820,8 @@ async fn run_picker(
         request,
         results: Vec::new(),
         selected: 0,
-        theme,
+        bg,
+        theme: Theme::load_preference(),
         loading: true,
         loading_more: false,
         error: None,
@@ -1950,6 +1958,14 @@ fn handle_picker_event(event: Event, app: &mut PickerApp) -> Option<Option<Templ
             queue_picker_search(app);
             None
         }
+        // Every other plain key types into the search box, so cycling the
+        // theme needs a modifier here rather than the bare letter the other
+        // screens use.
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.theme = app.theme.next();
+            let _ = app.theme.save_preference();
+            None
+        }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.request.query.push(ch);
             queue_picker_search(app);
@@ -2044,7 +2060,7 @@ fn render_picker(app: &PickerApp, frame: &mut Frame) {
 
     if area.width < 48 || area.height < 12 {
         let warning = Paragraph::new("Terminal too small. Resize to search templates.")
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(app.theme.pending));
         frame.render_widget(warning, area);
         return;
     }
@@ -2084,7 +2100,7 @@ fn render_search_input(app: &PickerApp, frame: &mut Frame, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .padding(Padding::new(1, 1, 0, 0))
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(app.theme.accent)),
     );
     frame.render_widget(input, area);
 }
@@ -2092,7 +2108,7 @@ fn render_search_input(app: &PickerApp, frame: &mut Frame, area: Rect) {
 fn render_picker_list(app: &PickerApp, frame: &mut Frame, area: Rect) {
     if let Some(error) = &app.error {
         let message = Paragraph::new(format!("Search failed: {error}"))
-            .style(Style::default().fg(Color::Red));
+            .style(Style::default().fg(app.theme.danger));
         frame.render_widget(message, area);
         return;
     }
@@ -2103,7 +2119,7 @@ fn render_picker_list(app: &PickerApp, frame: &mut Frame, area: Rect) {
                 Span::styled("Searching templates ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     spinner_frame().to_string(),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(app.theme.running),
                 ),
             ]))
         } else {
@@ -2117,7 +2133,7 @@ fn render_picker_list(app: &PickerApp, frame: &mut Frame, area: Rect) {
         .results
         .iter()
         .enumerate()
-        .map(|(idx, edge)| template_list_item(&edge.node, idx == app.selected, app.theme))
+        .map(|(idx, edge)| template_list_item(app.theme, &edge.node, idx == app.selected, app.bg))
         .collect();
     let list = List::new(items);
     let mut state = ListState::default();
@@ -2133,7 +2149,7 @@ fn render_picker_hint(app: &PickerApp, frame: &mut Frame, area: Rect) {
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
-            "Enter select  Up/Down move  Esc cancel",
+            "Enter select  Up/Down move  ^t theme  Esc cancel",
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(result_count, Style::default().fg(Color::DarkGray)),
@@ -2270,9 +2286,10 @@ fn perceived_luminance(red: u8, green: u8, blue: u8) -> f64 {
 }
 
 fn template_list_item(
+    theme: &Theme,
     template: &TemplateSearchItem,
     selected: bool,
-    theme: TerminalTheme,
+    bg: TerminalTheme,
 ) -> ListItem<'static> {
     let description = template
         .description
@@ -2288,49 +2305,44 @@ fn template_list_item(
             Line::raw(""),
             Line::from(vec![
                 Span::raw(RESULT_PADDING),
-                Span::styled(template.name.clone(), template_name_style(selected, theme)),
+                Span::styled(template.name.clone(), template_name_style(selected, bg)),
             ]),
             Line::from(vec![
                 Span::raw(RESULT_PADDING),
-                Span::styled(
-                    truncate_chars(&description, 92),
-                    muted_style(selected, theme),
-                ),
+                Span::styled(truncate_chars(&description, 92), muted_style(selected, bg)),
             ]),
-            Line::from(metadata_spans(template, &creator, selected, theme)),
+            Line::from(metadata_spans(theme, template, &creator, selected, bg)),
             Line::raw(""),
         ])
-        .style(Style::default().bg(selected_background(theme)));
+        .style(Style::default().bg(selected_background(bg)));
     }
 
     ListItem::new(vec![
         Line::raw(""),
         Line::from(vec![
             Span::raw(RESULT_PADDING),
-            Span::styled(template.name.clone(), template_name_style(selected, theme)),
+            Span::styled(template.name.clone(), template_name_style(selected, bg)),
         ]),
         Line::from(vec![
             Span::raw(RESULT_PADDING),
-            Span::styled(
-                truncate_chars(&description, 92),
-                muted_style(selected, theme),
-            ),
+            Span::styled(truncate_chars(&description, 92), muted_style(selected, bg)),
         ]),
-        Line::from(metadata_spans(template, &creator, selected, theme)),
+        Line::from(metadata_spans(theme, template, &creator, selected, bg)),
         Line::raw(""),
     ])
 }
 
 fn metadata_spans(
+    theme: &Theme,
     template: &TemplateSearchItem,
     creator: &str,
     selected: bool,
-    theme: TerminalTheme,
+    bg: TerminalTheme,
 ) -> Vec<Span<'static>> {
-    let muted = muted_style(selected, theme);
+    let muted = muted_style(selected, bg);
     let health_style = template
         .health_score
-        .map(health_color)
+        .map(|score| health_color(theme, score))
         .map(|color| Style::default().fg(color))
         .unwrap_or(muted);
 
@@ -2349,7 +2361,7 @@ fn metadata_spans(
         spans.push(Span::styled(" • ", muted));
         spans.push(Span::styled(
             "✓ verified",
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme.running),
         ));
     }
 
@@ -2486,13 +2498,13 @@ fn format_health(value: Option<f64>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn health_color(value: f64) -> Color {
+fn health_color(theme: &Theme, value: f64) -> Color {
     if value > 75.0 {
-        Color::Green
+        theme.running
     } else if value > 50.0 {
-        Color::Yellow
+        theme.pending
     } else {
-        Color::Red
+        theme.danger
     }
 }
 

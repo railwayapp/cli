@@ -7,10 +7,25 @@ pub mod types;
 use anyhow::Result;
 
 use crate::controllers::database::DatabaseType;
-use crate::controllers::exec::exec_in_container as exec_command_in_container;
+use crate::controllers::exec::exec_probe_in_container;
 use crate::controllers::ssh::keys::find_local_ssh_keys;
 
 pub use types::DatabaseStats;
+
+/// The engine collectors' shared exec: the retrying probe wrapper with one
+/// stats-appropriate per-attempt budget (these back `railway metrics`, so a
+/// relay blip must not blank a whole stats pane).
+async fn exec_command_in_container(
+    service_instance_id: &str,
+    command: &str,
+) -> anyhow::Result<String> {
+    exec_probe_in_container(
+        service_instance_id,
+        command,
+        std::time::Duration::from_secs(15),
+    )
+    .await
+}
 
 /// Preflight check for SSH-based DB stats collection. Runs locally only --
 /// it catches the common "no SSH key" case before we spawn the SSH process,

@@ -1,0 +1,31 @@
+query CloudAgentSessionThreads($cloudAgentId: ID!, $environmentId: ID!) {
+  cloudAgentConsoleSessions(cloudAgentId: $cloudAgentId) {
+    edges {
+      node {
+        name
+        kind
+        command
+        attached
+        createdAt
+        runState {
+          running
+          exitCode
+        }
+      }
+    }
+  }
+  cloudAgent(id: $cloudAgentId, environmentId: $environmentId) {
+    agentWsUrl
+    sessions {
+      harness
+      sessionId
+      sessionName
+      state
+      terminal
+      lastEventKind
+      updatedAt
+      prompt
+      latestPrompt
+    }
+  }
+}

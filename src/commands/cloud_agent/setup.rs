@@ -75,6 +75,12 @@ const HARNESSES: &[Harness] = &[
         config_dir: ".grok",
         bin: "grok",
     },
+    Harness {
+        slug: "opencode",
+        name: "OpenCode",
+        config_dir: ".config/opencode",
+        bin: "opencode",
+    },
 ];
 
 #[derive(Clone)]
@@ -182,7 +188,7 @@ fn reset(home: &Path) -> Result<()> {
         std::fs::remove_file(&path)
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     }
-    crate::commands::code::clear_claude_token_cache();
+    crate::commands::code::clear_claude_token_cache_in(home);
     println!("Cleared cloud agent preferences and cached tokens.");
     println!("Run {} to configure again.", "railway ca setup".cyan());
     Ok(())
@@ -239,8 +245,13 @@ async fn prompt(home: &Path, existing: Option<AgentPrefs>) -> Result<AgentPrefs>
         version: super::prefs::CURRENT_VERSION,
         agent: Some(agent),
         skills,
+        // Setup doesn't ask about MCP import or the tabs toggle; whatever was
+        // configured (or the defaults) carries through.
+        mcp: previous.mcp.clone(),
         default_project,
         theme: Some(theme),
+        hide_tabs: previous.hide_tabs,
+        sidebar_width: previous.sidebar_width,
     })
 }
 
@@ -676,7 +687,10 @@ mod tests {
             .iter()
             .map(|c| c.slug)
             .collect();
-        assert_eq!(slugs, vec!["railway", "claude", "codex", "grok"]);
+        assert_eq!(
+            slugs,
+            vec!["railway", "claude", "codex", "grok", "opencode"]
+        );
     }
 
     #[test]

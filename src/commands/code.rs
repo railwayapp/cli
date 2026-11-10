@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
@@ -6,6 +6,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
+use crate::commands::cloud_agent::mcp_sync;
 use crate::commands::cloud_agent::prefs::{AgentPrefs, DefaultProject};
 use crate::commands::cloud_agent::skills_sync;
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
@@ -14,6 +15,7 @@ use crate::commands::ssh::{
     ensure_ssh_key_quiet, probe_native_ssh, run_native_ssh_captured, run_native_ssh_with_opts,
 };
 use crate::config::Configs;
+use crate::controllers::cloud_agent as ca;
 use crate::controllers::project::get_project;
 use crate::errors::RailwayError;
 use crate::gql::{mutations, queries};
@@ -30,10 +32,9 @@ use crate::util::shell::shell_join;
 // (claude, codex, grok, cursor, droid, opencode, pi, railway-agent), and the
 // `express-agent serve --agents` entrypoint reconciles their config on every
 // boot: MCP servers (including Railway's own platform tools), hooks, the
-// onboarding/trust flags, and the autonomy posture. So this command installs
-// nothing, updates nothing, and seeds no harness config — doing any of that
-// would fight the reconciler for ownership of the same files. What is left is
-// the one thing only the user's laptop has: their credential.
+// onboarding/trust flags, and the autonomy posture. This command leaves that
+// config to the reconciler, prepares launch-time runtimes (OpenCode and Grok),
+// and carries the one thing only the user's laptop has: their credential.
 //
 // Auth shape: Codex copies the user's existing local sign-in
 // (`~/.codex/auth.json`) — the flow OpenAI documents for remote machines.
@@ -79,14 +80,145 @@ use crate::util::shell::shell_join;
 // `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
+pub(crate) mod bootstrap_setup;
+pub(crate) mod client;
 /// `railway code` is the launcher: it answers "where, and which harness"
 /// from flags and preferences, then opens that session. On a terminal it opens
 /// it inside `railway ca`'s manage screen with the tree collapsed, so the
 /// session has the whole window and the rest of the tool is one key away;
 /// everywhere else it hands the terminal straight to ssh.
-pub type Args = LaunchArgs;
+mod names;
+mod plumbing;
+pub(crate) mod railway_client;
+pub(crate) mod saved_config;
+
+pub(crate) fn clear_saved_config() {
+    if let Some(home) = dirs::home_dir() {
+        saved_config::clear_in(&home);
+    }
+}
+
+pub(crate) fn save_desktop_configuration(
+    prepared: &Prepared,
+    connection: Option<&crate::commands::cloud_agent::opencode::Connection>,
+    desktop: &Result<bool>,
+) {
+    let result = saved_config::SavedConfig::from_prepared(prepared)
+        .map(|saved| match connection {
+            Some(connection) => saved.with_opencode(connection, desktop),
+            None => saved,
+        })
+        .and_then(|saved| saved.save());
+    if let Err(error) = result {
+        eprintln!("Could not save connection details for railway code get-config: {error:#}");
+    }
+}
+
+/// Launch a coding agent on a Railway cloud agent VM
+#[derive(Parser)]
+#[clap(
+    args_conflicts_with_subcommands = true,
+    after_help = r#"Examples:
+  railway code                            # new VM with railway-agent-tui
+  railway code --codex                    # start Codex on a new VM
+  railway code --claude                   # start Claude Code on a new VM
+  railway code --codex connect my-box     # connect to an existing server
+  railway code --codex desktop-only       # configure Codex Desktop
+  railway code get-config my-box          # show saved connection details
+
+An explicit agent flag creates a new VM unless you use connect or --agent.
+Without an agent flag, opens railway-agent-tui on a new VM.
+Flags override preferences; the linked project overrides the saved project.
+
+Codex and OpenCode open a local client connected to the VM, with command
+approvals disabled. Use remote to run the client on the VM, or -- to pass
+arguments to the agent. Available local credentials are copied to the VM;
+Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
+detected Desktop installs.
+
+Disconnecting leaves the VM running. Use railway ca sleep <agent> to stop compute.
+Requires Cloud Agents access.
+Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
+)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Option<Commands>,
+
+    #[clap(flatten)]
+    launch: LaunchArgs,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Show locally saved connection details for the latest or a named agent
+    GetConfig(saved_config::Args),
+}
 
 pub async fn command(args: Args) -> Result<()> {
+    if let Some(Commands::GetConfig(args)) = args.command {
+        return saved_config::command(args);
+    }
+    let mut args = args.launch;
+    if let Some(action) = args.prepare_code_launch()? {
+        if args.client_starts_in_pane(&action, client::interactive()) {
+            if args.codex {
+                crate::commands::cloud_agent::desktop::preflight_codex_desktop()?;
+            }
+            client::pin_agent(&mut args).await?;
+            return crate::commands::cloud_agent::launch_in_pane(args).await;
+        }
+        if args.railway && !matches!(action, ClientAction::Remote) {
+            return railway_client::command(args, action).await;
+        }
+        let harness = if args.codex {
+            client::Harness::Codex
+        } else {
+            client::Harness::OpenCode
+        };
+        match action {
+            ClientAction::Local => {
+                return client::start(args, harness, client::LaunchMode::LocalClient).await;
+            }
+            ClientAction::DesktopOnly => {
+                return codex_desktop_only(args, Default::default()).await;
+            }
+            ClientAction::Connect(selector) => {
+                return client::connect(args, harness, selector).await;
+            }
+            ClientAction::Remote => {
+                args.agent_args.clear();
+                args.client_on_agent = true;
+                client::pin_agent(&mut args).await?;
+            }
+        }
+    }
+    launch_in_cloud(args).await
+}
+
+/// Canonical Codex Desktop setup, also used by `railway ca desktop --codex`.
+pub(crate) async fn codex_desktop_only(
+    mut args: LaunchArgs,
+    options: crate::commands::cloud_agent::desktop::CodexOptions,
+) -> Result<()> {
+    if args.client_action()? != Some(ClientAction::DesktopOnly) {
+        bail!("Expected railway code --codex desktop-only");
+    }
+    args.agent_args.clear();
+    client::start(
+        args,
+        client::Harness::Codex,
+        client::LaunchMode::DesktopOnly(options),
+    )
+    .await
+}
+
+/// CA's launch flags and the clients' `remote` action keep the in-agent UI.
+pub(crate) async fn launch_in_cloud(args: LaunchArgs) -> Result<()> {
+    if args.connection_json {
+        bail!(
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
+        );
+    }
     // `railway code` passes its trailing arguments to the agent, so
     // `railway code setup` would silently run `setup` inside the VM. That is
     // never what someone typing it meant, and the failure is invisible — the
@@ -113,78 +245,118 @@ pub async fn command(args: Args) -> Result<()> {
 // they would show up in `--help`.
 #[derive(Parser, Default, Clone, Debug, PartialEq, Eq)]
 #[clap(
-    after_help = "Examples:\n\n  railway ca                        # launch your configured default\n  railway ca setup                  # choose the default agent and skills\n  railway code --codex              # agent VM + your local Codex sign-in\n  railway code --claude             # agent VM + your Claude setup-token\n  railway code --grok               # agent VM + your local Grok sign-in\n  railway code --railway            # agent VM + Railway's own agent, no sign-in needed\n  railway code --codex --new        # force a fresh agent instead of reusing\n  railway code --codex --new --variable DB_URL=postgres.DATABASE_URL\n  railway code --codex --new --env-file .env\n  railway code --codex -- exec \"explain this codebase\"\n\nWith no agent flag, the default saved by `railway ca setup` is used\n(RAILWAY_CA_AGENT overrides it for one run). With no project or environment\nflag, this directory's linked project is used, and your default project when\nthe directory has no link.\n\nOn a terminal the session opens inside `railway ca`'s manage screen with the\ntree collapsed, so it has the whole window and the other agents are one key\naway — ⌥f brings the tree back, ⌥n starts another session. `--rm`, a `--`\npassthrough, and anything piped take the terminal directly instead; so does\n`railway ca start`, which never draws the TUI.\n\nAgents persist between runs and stay running when you disconnect, so your\nsessions survive to reattach to. `railway ca sleep <agent>` stops the compute\nbill; `railway code --rm` destroys it.\n\nClaude auth is minted once (`claude setup-token`), cached locally, and reused —\nincluding the copy already on a reused agent. `--refresh-auth` clears both\ncaches and re-mints.\n\nCarrying a sign-in from this machine is a convenience, not a requirement: with\nnothing local to copy or mint from, the agent still starts and the harness asks\nyou to sign in there.\n\nNote: requires the CLOUD_AGENTS feature to be enabled."
+    group(clap::ArgGroup::new("client_json_harness").args(["codex", "opencode", "railway"]).multiple(true))
 )]
 pub struct LaunchArgs {
-    /// Launch OpenAI Codex, carrying your local ChatGPT sign-in
-    /// (~/.codex/auth.json) when there is one to carry
-    #[clap(long)]
+    /// Select Codex
+    #[clap(long, help_heading = "Agent")]
     codex: bool,
 
-    /// Launch Claude Code — runs `claude setup-token` for you to mint a
-    /// token for the VM (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY env
-    /// variables skip that when set)
-    #[clap(long)]
+    /// Select OpenCode
+    #[clap(long, help_heading = "Agent")]
+    opencode: bool,
+
+    /// Return Codex/OpenCode credentials or Railway endpoint details as JSON
+    #[clap(
+        long,
+        requires = "client_json_harness",
+        help_heading = "Authentication and output"
+    )]
+    connection_json: bool,
+
+    /// Select Claude Code
+    #[clap(long, help_heading = "Agent")]
     claude: bool,
 
-    /// Launch Grok CLI, carrying your local sign-in (~/.grok/auth.json) when
-    /// there is one to carry
-    #[clap(long)]
+    /// Select Grok CLI
+    #[clap(long, help_heading = "Agent")]
     grok: bool,
 
-    /// Launch Railway's own agent — no sign-in needed; it uses credentials
-    /// already on the VM
-    #[clap(long)]
+    /// Select Railway Agent (latest local TUI connected to the VM)
+    #[clap(long, help_heading = "Agent")]
     railway: bool,
 
-    /// Always create a fresh agent instead of reusing this environment's
-    #[clap(long)]
+    /// Create a new VM
+    #[clap(long, help_heading = "VM creation")]
     pub new: bool,
+
+    /// Create from a named bootstrap instead of the local default
+    #[clap(long, conflicts_with_all = ["no_bootstrap", "remote_agent", "rm"], help_heading = "VM creation")]
+    bootstrap: Option<String>,
+
+    /// Create without the local default bootstrap
+    #[clap(long, conflicts_with_all = ["remote_agent", "rm"], help_heading = "VM creation")]
+    no_bootstrap: bool,
 
     /// Accepted for compatibility; agents now always stay running on
     /// disconnect. `railway ca sleep` stops the compute bill
     #[clap(long, hide = true)]
     keep_awake: bool,
 
-    /// Destroy this environment's agent and exit. Its disk goes with it.
-    /// Superseded by `railway ca delete`, which can name any agent and asks
-    /// before it destroys one
-    #[clap(long)]
+    /// Delete this environment's agent and disk (prefer railway ca delete)
+    #[clap(long, help_heading = "Lifecycle")]
     rm: bool,
 
-    /// Re-mint the Claude credential even if the agent already has a working
-    /// one, clearing our local token cache first. Use after revoking a token,
-    /// or when auth fails on an existing agent
-    #[clap(long)]
+    /// Replace cached Claude credentials with a new setup token
+    #[clap(long, help_heading = "Authentication and output")]
     refresh_auth: bool,
 
     /// Name for a newly created agent (defaults to a generated one)
-    #[clap(long)]
+    #[clap(long, help_heading = "VM creation")]
     name: Option<String>,
 
-    /// Set a variable on the agent (repeatable, comma-separable). Values
-    /// may reference other variables — `DB_URL=postgres.DATABASE_URL` or the
-    /// full `${{postgres.DATABASE_URL}}` form — resolved server-side at
-    /// create time. Applies to newly created agents (combine with --new)
-    #[clap(long = "variable", value_name = "KEY=VALUE[,KEY=VALUE...]")]
+    /// Set variables on a new VM; repeat or separate with commas (supports service references)
+    #[clap(
+        long = "variable",
+        value_name = "KEY=VALUE[,KEY=VALUE...]",
+        help_heading = "VM creation"
+    )]
     variables: Vec<String>,
 
-    /// Load variables from a .env file (repeatable). `--variable` flags
-    /// override file entries with the same key
-    #[clap(long = "env-file", value_name = "PATH")]
+    /// Internal create-time variables supplied by desktop setup. These are
+    /// ignored on reuse, where the desktop keeps its existing credentials.
+    #[clap(skip)]
+    pub(crate) boot_variables: std::collections::BTreeMap<String, String>,
+
+    /// Enable a code endpoint on port 4096 (requires --new; automatic for local clients)
+    #[clap(long, requires = "new", help_heading = "VM creation")]
+    pub(crate) code_endpoint: bool,
+
+    /// Enable a code endpoint on this port (requires --new)
+    #[clap(long, requires = "new", value_parser = ca::parse_code_port, help_heading = "VM creation")]
+    code_port: Option<u16>,
+
+    /// Load a .env file (repeatable; --variable overrides file values)
+    #[clap(long = "env-file", value_name = "PATH", help_heading = "VM creation")]
     env_files: Vec<std::path::PathBuf>,
 
     /// Environment name or ID (defaults to the linked environment)
-    #[clap(long, short)]
+    #[clap(long, short, help_heading = "Target")]
     pub environment: Option<String>,
 
+    /// Preserve directory-based naming when Desktop/the TUI pins a resolved target.
+    #[clap(skip)]
+    pub(crate) local_name_project: Option<String>,
+
     /// Project ID (defaults to the linked project)
-    #[clap(long, short)]
+    #[clap(long, short, help_heading = "Target")]
     pub project: Option<String>,
 
-    /// Extra arguments passed through to the agent (after `--`)
-    #[clap(trailing_var_arg = true)]
+    /// Client action: remote, connect [AGENT], desktop-only (Codex); or agent arguments after --
     agent_args: Vec<String>,
+
+    /// Remote project directory for Codex/OpenCode server mode (default: /app)
+    #[clap(long = "dir", value_name = "PATH", help_heading = "Target")]
+    remote_dir: Option<String>,
+
+    /// Existing cloud agent for a local Codex/OpenCode client, by name or ID
+    #[clap(
+        long = "agent",
+        value_name = "NAME_OR_ID",
+        conflicts_with = "new",
+        help_heading = "Target"
+    )]
+    remote_agent: Option<String>,
 
     /// A task to hand the agent as it starts. Set by the TUI's prompt box, not
     /// a flag: on the command line the same thing is `-- exec "…"`, which has
@@ -201,7 +373,7 @@ pub struct LaunchArgs {
 
     /// Launch no harness at all — just the VM's login shell. Set by the TUI's
     /// shell option, not a flag: the CLI already has a spelling for this
-    /// (`railway ca ssh <agent> -- bash`), and a second one would compete
+    /// (`railway ca ssh <agent>`), and a second one would compete
     /// with it.
     #[clap(skip)]
     pub shell: bool,
@@ -212,17 +384,177 @@ pub struct LaunchArgs {
     /// prepare an agent and then do nothing with it.
     #[clap(skip)]
     pub app_mode: bool,
+    /// Temporary bootstrap setup VMs never become remembered launch targets.
+    #[clap(skip)]
+    pub(crate) bootstrap_setup: bool,
+    /// Explicit `remote` mode keeps both client and server inside the VM.
+    #[clap(skip)]
+    pub client_on_agent: bool,
+
+    /// Resume this exact harness conversation instead of starting a new one —
+    /// the harness's own session id, from the platform's reported sessions.
+    /// Set by callers that found a resumable thread (`railway ca ssh` after a
+    /// sleep); there is no flag because the id is not something a user types.
+    /// Only Claude has a verified resume-by-id CLI today; other harnesses
+    /// launch fresh and the id is ignored.
+    #[clap(skip)]
+    pub resume_session_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClientAction {
+    Local,
+    DesktopOnly,
+    Remote,
+    Connect(Option<String>),
 }
 
 impl LaunchArgs {
+    /// Interactive starts share CA's background preparation and loading pane.
+    /// JSON, Desktop-only, and connect retain their dedicated output/lifecycle.
+    fn client_starts_in_pane(&self, action: &ClientAction, interactive: bool) -> bool {
+        interactive && !self.connection_json && matches!(action, ClientAction::Local)
+    }
+
+    /// Apply the public `railway code` launch policy before dispatch. Keep it
+    /// here rather than in clap or provisioning, which CA, Desktop, and SSH also
+    /// use when opening sessions on an existing VM.
+    fn prepare_code_launch(&mut self) -> Result<Option<ClientAction>> {
+        if !self.codex
+            && !self.opencode
+            && !self.claude
+            && !self.grok
+            && !self.railway
+            && !self.shell
+            && !self.rm
+        {
+            self.railway = true;
+        }
+        let action = self.client_action()?;
+        if matches!(action, Some(ClientAction::Connect(_)))
+            && (self.bootstrap.is_some() || self.no_bootstrap)
+        {
+            bail!("Bootstrap options create a new VM and cannot be used with connect.");
+        }
+        let harness_selected =
+            self.codex || self.opencode || self.claude || self.grok || self.railway;
+        if harness_selected
+            && !self.rm
+            && self.remote_agent.is_none()
+            && self.agent_id.is_none()
+            && !matches!(action, Some(ClientAction::Connect(_)))
+        {
+            self.new = true;
+        }
+        Ok(action)
+    }
+
+    /// Dispatch only the public local-client commands; explicit harness
+    /// arguments and CA's internal prepare/launch paths keep their VM semantics.
+    fn client_action(&self) -> Result<Option<ClientAction>> {
+        let verb = self.agent_args.first().map(String::as_str);
+        if self.connection_json
+            && ((!self.codex && !self.opencode && !self.railway)
+                || self.rm
+                || self.app_mode
+                || !(matches!(verb, None | Some("connect"))
+                    || (self.codex && verb == Some("desktop-only"))))
+        {
+            bail!(
+                "--connection-json requires railway code --codex, --opencode, or --railway [connect], or --codex desktop-only."
+            );
+        }
+        let reserved = matches!(verb, Some("remote" | "connect" | "desktop-only"));
+        let selected = self.codex || self.opencode || self.railway;
+        if !reserved && (!selected || !self.agent_args.is_empty() || self.rm || self.app_mode) {
+            if self.remote_dir.is_some() || self.remote_agent.is_some() {
+                bail!("--dir and --agent require a Codex, OpenCode, or Railway client command.");
+            }
+            return Ok(None);
+        }
+        if [self.codex, self.opencode, self.railway]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count()
+            != 1
+            || self.claude
+            || self.grok
+            || self.shell
+        {
+            bail!("Pick exactly one client: --codex, --opencode, or --railway.");
+        }
+        if self.rm || self.initial_prompt.is_some() {
+            bail!("Local-client commands cannot be combined with --rm or an initial prompt.");
+        }
+        if self
+            .remote_dir
+            .as_deref()
+            .is_some_and(|dir| dir.trim().is_empty())
+        {
+            bail!("--dir must name a directory on the agent.");
+        }
+        match verb {
+            None => Ok(Some(ClientAction::Local)),
+            Some("desktop-only") => {
+                if !self.codex || self.agent_args.len() != 1 || self.app_mode {
+                    bail!(
+                        "Use railway code --codex desktop-only [--agent NAME_OR_ID] [--dir PATH] [--new]."
+                    );
+                }
+                Ok(Some(ClientAction::DesktopOnly))
+            }
+            Some("remote") => {
+                if self.agent_args.len() != 1 || self.remote_dir.is_some() {
+                    bail!(
+                        "Use railway code --codex remote (or --opencode/--railway) to open the UI inside the cloud agent; --dir is for local clients."
+                    );
+                }
+                Ok(Some(ClientAction::Remote))
+            }
+            Some("connect") => {
+                if self.agent_args.len() > 2
+                    || self.new
+                    || self.name.is_some()
+                    || self.code_endpoint
+                    || self.code_port.is_some()
+                    || !self.variables.is_empty()
+                    || !self.env_files.is_empty()
+                    || self.refresh_auth
+                    || self.remote_dir.is_some()
+                {
+                    bail!(
+                        "connect uses an existing server. Use railway code --codex, --opencode, or --railway to set one up on a fresh VM."
+                    );
+                }
+                let positional = self.agent_args.get(1).cloned();
+                if positional.is_some() && self.remote_agent.is_some() {
+                    bail!("Name the agent after connect or with --agent, not both.");
+                }
+                let selector = positional.or_else(|| self.remote_agent.clone());
+                if selector
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    bail!("The cloud agent name cannot be empty.");
+                }
+                Ok(Some(ClientAction::Connect(selector)))
+            }
+            _ => unreachable!("other harness arguments returned above"),
+        }
+    }
+
     /// No flags, no arguments — the invocation that means "just open the
     /// front door" rather than "launch this exact thing".
     pub fn is_bare(&self) -> bool {
         !self.codex
+            && !self.opencode
+            && !self.connection_json
             && !self.claude
             && !self.grok
             && !self.railway
             && !self.new
+            && self.bootstrap.is_none()
+            && !self.no_bootstrap
             && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
@@ -230,9 +562,14 @@ impl LaunchArgs {
             && self.environment.is_none()
             && self.project.is_none()
             && self.initial_prompt.is_none()
+            && self.resume_session_id.is_none()
             && self.variables.is_empty()
+            && !self.code_endpoint
+            && self.code_port.is_none()
             && self.env_files.is_empty()
             && self.agent_args.is_empty()
+            && self.remote_dir.is_none()
+            && self.remote_agent.is_none()
             && !self.shell
     }
 
@@ -265,6 +602,9 @@ impl LaunchArgs {
     pub fn set_harness(&mut self, slug: &str) {
         self.claude = slug == "claude";
         self.codex = slug == "codex";
+        // `opencode2` is the slug older preferences, panes, and backboard
+        // records used for V2; it is the same harness now.
+        self.opencode = matches!(slug, "opencode" | "opencode2");
         self.grok = slug == "grok";
         self.railway = slug == "railway";
         self.shell = slug == "shell";
@@ -290,6 +630,11 @@ impl LaunchArgs {
             prompt,
             agent_id,
         )
+    }
+
+    pub(crate) fn set_bootstrap_choice(&mut self, name: Option<String>, none: bool) {
+        self.bootstrap = name;
+        self.no_bootstrap = none;
     }
 
     /// [`Self::for_target`] over an existing set of flags instead of an empty
@@ -342,6 +687,25 @@ impl LaunchArgs {
         args.set_harness(harness);
         args
     }
+
+    pub(crate) fn for_codex_desktop(
+        project: Option<String>,
+        environment: Option<String>,
+        agent: Option<String>,
+        directory: String,
+        new: bool,
+    ) -> Self {
+        Self {
+            codex: true,
+            project,
+            environment,
+            remote_agent: agent,
+            remote_dir: Some(directory),
+            new,
+            agent_args: vec!["desktop-only".into()],
+            ..Self::default()
+        }
+    }
 }
 
 /// The coding agent to launch, and the two things that differ between them:
@@ -353,7 +717,7 @@ impl LaunchArgs {
 /// an LLM relay credential and Railway platform tools — minted server-side at
 /// create time, the same way skills and MCP config are reconciled by
 /// express-agent. There is no local sign-in to copy or mint, so it needs none
-/// of the client-side credential machinery the other three do.
+/// of the client-side credential machinery the other harnesses do.
 ///
 /// `Shell` is not a harness at all: the session is the VM's login shell and
 /// nothing else starts. No credential, no autostart retarget — just the
@@ -361,6 +725,10 @@ impl LaunchArgs {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Agent {
     Codex,
+    /// OpenCode V2 — the image's `opencode`. OpenCode 1 is not launchable; a
+    /// VM still carrying 1.x fails its runtime seed with a recreate message
+    /// (see `cloud_agent::opencode::seed_script`).
+    OpenCode,
     Claude,
     Grok,
     Railway,
@@ -370,13 +738,14 @@ enum Agent {
 impl Agent {
     /// The remote binary name — what's actually exec'd, and what's
     /// autostarted on reconnect. Only ever used for that: anywhere this agent
-    /// needs a name a person reads, use [`Self::slug`] instead. The one
+    /// needs a name a person reads, use [`Self::display`] instead. The one
     /// exception to "identical to the slug": the interactive frontend binary
     /// is `railway-agent-tui`, not `railway-agent` (that name is the headless
     /// `run`/`serve` CLI it drives).
     fn name(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
+            Agent::OpenCode => "opencode",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway-agent-tui",
@@ -386,16 +755,14 @@ impl Agent {
         }
     }
 
-    /// The slug persisted in `agent-prefs.json`, accepted by
-    /// `RAILWAY_CA_AGENT`, and used anywhere this agent needs a short,
-    /// user-facing identifier — session name prefixes, the "get back in"
-    /// hint, launch messages. Identical to [`Self::name`] for every agent
-    /// except Railway's own: "railway" reads better than "railway-agent-tui"
-    /// in a flag, a config file, or a session name, and there is only the one
-    /// harness it could mean.
+    /// Harness identity for sessions, snapshots, and telemetry. Also accepted
+    /// by launch preferences and `RAILWAY_CA_AGENT`. Records written while V2
+    /// was a separate edition say `opencode2`; [`Self::from_slug`] still reads
+    /// them, but nothing writes that slug any more.
     fn slug(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
+            Agent::OpenCode => "opencode",
             Agent::Claude => "claude",
             Agent::Grok => "grok",
             Agent::Railway => "railway",
@@ -407,6 +774,7 @@ impl Agent {
         match slug {
             "claude" => Some(Agent::Claude),
             "codex" => Some(Agent::Codex),
+            "opencode" | "opencode2" => Some(Agent::OpenCode),
             "grok" => Some(Agent::Grok),
             "railway" => Some(Agent::Railway),
             "shell" => Some(Agent::Shell),
@@ -418,6 +786,7 @@ impl Agent {
     fn display(self) -> &'static str {
         match self {
             Agent::Codex => "Codex",
+            Agent::OpenCode => "OpenCode",
             Agent::Claude => "Claude Code",
             Agent::Grok => "Grok",
             Agent::Railway => "Railway",
@@ -431,22 +800,42 @@ impl Agent {
     fn credential_seed(self) -> &'static str {
         match self {
             Agent::Codex => CODEX_SEED,
+            Agent::OpenCode => crate::commands::cloud_agent::opencode::auth::SEED,
             Agent::Claude => CLAUDE_SEED,
             Agent::Grok => GROK_SEED,
             Agent::Railway | Agent::Shell => "",
         }
     }
 
-    /// The local sign-in file this command copies, as `$HOME`-relative
-    /// components. `None` for Claude, whose credential is minted rather than
-    /// copied — sharing the local sign-in's rotating refresh token across two
-    /// machines is the thing the setup-token exists to avoid — and for
-    /// Railway's own harness, whose credential the VM is given at create time.
-    fn local_signin_file(self) -> Option<[&'static str; 2]> {
+    /// [`credential_seed`] for a script whose stdin carries more than the
+    /// credential: reads exactly `len` bytes so the rest of the stream stays
+    /// available to the next reader (the skills tarball on a fresh agent).
+    /// Mirrors the `cat >` seeds above; the 0600 mode comes from the script's
+    /// `umask 077`, with claude's explicit chmod kept as belt-and-suspenders.
+    fn credential_seed_framed(self, len: usize) -> String {
         match self {
-            Agent::Codex => Some([".codex", "auth.json"]),
-            Agent::Grok => Some([".grok", "auth.json"]),
-            Agent::Claude | Agent::Railway | Agent::Shell => None,
+            Agent::Codex => format!("mkdir -p ~/.codex\nhead -c {len} > ~/.codex/auth.json"),
+            Agent::OpenCode => crate::commands::cloud_agent::opencode::auth::seed_framed(len),
+            Agent::Claude => {
+                format!("head -c {len} > ~/.claude-code-env\nchmod 600 ~/.claude-code-env")
+            }
+            Agent::Grok => format!("mkdir -p ~/.grok\nhead -c {len} > ~/.grok/auth.json"),
+            Agent::Railway | Agent::Shell => "true".to_string(),
+        }
+    }
+
+    /// The local sign-in file this command copies. `None` for OpenCode, whose
+    /// provider accounts are exported from its SQLite store by
+    /// `cloud_agent::opencode::auth` rather than copied as a file; for Claude,
+    /// whose credential is minted rather than copied — sharing the local
+    /// sign-in's rotating refresh token across two machines is the thing the
+    /// setup-token exists to avoid — and for Railway's own harness, whose
+    /// credential the VM is given at create time.
+    fn local_signin_path(self, home: &Path) -> Option<PathBuf> {
+        match self {
+            Agent::Codex => Some(home.join(".codex").join("auth.json")),
+            Agent::Grok => Some(home.join(".grok").join("auth.json")),
+            Agent::OpenCode | Agent::Claude | Agent::Railway | Agent::Shell => None,
         }
     }
 
@@ -460,6 +849,9 @@ impl Agent {
     fn sign_in_on_agent_hint(self) -> &'static str {
         match self {
             Agent::Codex => "sign in there with `codex login --device-auth`",
+            Agent::OpenCode => {
+                "connect a provider in OpenCode Desktop or run `opencode auth login` on the agent"
+            }
             Agent::Claude => "sign in there with `/login`",
             Agent::Grok => "sign in there when it asks",
             Agent::Railway => "no sign-in needed — the agent carries its own",
@@ -501,10 +893,11 @@ const CLAUDE_ENV_GUARD: &str =
 
 /// Grok-specific VM seed: the credential is the user's local
 /// `~/.grok/auth.json`, arriving on stdin into a 0600 file like codex. grok's
-/// always-approve posture (`permission_mode = "bypassPermissions"`) and its MCP
-/// servers are reconciled into `~/.grok/config.toml` at boot by express-agent,
-/// and the image puts `~/.grok/bin` on PATH via `/etc/environment`, so neither
-/// the old `[ui] yolo` merge nor a `/usr/local/bin` symlink is needed.
+/// MCP servers and configuration are reconciled at boot by express-agent.
+/// Launches also pass Grok's native folder-trust and tool-approval switches
+/// (see `grok_invocation`); folder trust is separate from permission mode.
+/// The image puts `~/.grok/bin` on PATH via `/etc/environment`, so neither
+/// a config merge nor a `/usr/local/bin` symlink is needed here.
 const GROK_SEED: &str = r#"mkdir -p ~/.grok
 cat > ~/.grok/auth.json"#;
 
@@ -517,12 +910,25 @@ cat > ~/.grok/auth.json"#;
 /// `ssh <target> <cmd>` session is non-interactive and non-login, so it starts
 /// from the default PATH and cannot see `~/.local/bin` — where claude and codex
 /// actually live. Without this, `command -v claude` reports missing on an image
-/// that definitely has it.
+/// that definitely has it. `~/.opencode/bin` leads because it is where the
+/// image's official `opencode` install lives.
 ///
 /// Deliberately not `. ~/.profile`: that sources `.bashrc`, whose starship/mise/
 /// zoxide init writes to stdout and would corrupt the AGENT-READY marker this
 /// command parses. Mirrors the image's own export line instead.
-const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+pub(crate) const HARNESS_PATH: &str = r#"export PATH="$HOME/.opencode/bin:$HOME/.local/bin:$HOME/.grok/bin:$HOME/.local/share/mise/shims:$PATH""#;
+
+/// Saved OpenCode conversations are resumed by the VM's `opencode`, which must
+/// be V2. A resume goes straight to the binary rather than through the runtime
+/// seed, so it checks before touching storage and prints the same recreate
+/// message instead of failing inside the harness.
+pub(crate) fn opencode_resume_guard() -> String {
+    format!(
+        "case \"$({} --version 2>/dev/null)\" in 2.*|'opencode v2.'*) ;; *) echo {} >&2; exit 1;; esac; ",
+        Agent::OpenCode.name(),
+        shell_join(&[crate::commands::cloud_agent::opencode::OLD_IMAGE_MESSAGE.to_string()])
+    )
+}
 
 /// Agent-independent seeds, all idempotent:
 /// - COLORTERM: the relay forwards TERM but not COLORTERM; without it TUIs
@@ -536,11 +942,13 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 ///   keeps scp-style and command sessions out. The trailing printf restores
 ///   terminal state a TUI can leave behind on an unclean exit (kitty keyboard
 ///   mode et al) — see `TERMINAL_RESET`.
-/// The autostart block is versioned: the v4 marker gates the append, and the
+///
+/// The autostart block is versioned: the v5 marker gates the append, and the
 /// sed strips any earlier version first (comment line through the closing
 /// `fi` at column zero), so an agent provisioned on v2/v3 (which skipped the
 /// carried token when an on-agent `/login` looked newer) picks the
 /// unconditional export back up on its next provision.
+/// v5 also applies Grok's folder-trust and tool-approval switches on reconnect.
 ///
 /// v3 added the `~/.railway-app-mode` guard. `railway ca desktop` hands the
 /// agent to an external app that bootstraps through the login shell, so an
@@ -550,11 +958,11 @@ const HARNESS_PATH: &str = r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:
 /// `~/.railway-code-agent`, because a later `railway code` on the same agent
 /// would write that file straight back.
 const COMMON_SEED: &str = r#"grep -q "^COLORTERM=" /etc/environment 2>/dev/null || echo "COLORTERM=truecolor" >> /etc/environment 2>/dev/null || true
-if ! grep -q "railway-code agent autostart v4" ~/.profile 2>/dev/null; then
+if ! grep -q "railway-code agent autostart v5" ~/.profile 2>/dev/null; then
 sed -i '/# railway-code agent autostart/,/^fi$/d' ~/.profile 2>/dev/null || true
 cat >> ~/.profile <<'PROFEOF'
 
-# railway-code agent autostart v4 (connecting drops into the agent; exit it for a shell)
+# railway-code agent autostart v5 (connecting drops into the agent; exit it for a shell)
 if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-mode" ] && [ -s "$HOME/.railway-code-agent" ]; then
   agent="$(cat "$HOME/.railway-code-agent")"
   [ -d "$HOME/.grok/bin" ] && export PATH="$HOME/.grok/bin:$PATH"
@@ -562,7 +970,11 @@ if [ -z "$RAILWAY_CODE_AUTOSTARTED" ] && [ -t 1 ] && [ ! -f "$HOME/.railway-app-
     export RAILWAY_CODE_AUTOSTARTED=1
     [ -f "$HOME/.gh-token" ] && export GH_TOKEN="$(cat "$HOME/.gh-token")"
     [ -f "$HOME/.claude-code-env" ] && set -a && . "$HOME/.claude-code-env" && set +a
-    "$agent"
+    if [ "$agent" = grok ]; then
+      "$agent" --trust --always-approve
+    else
+      "$agent"
+    fi
     printf '\033[<u\033[<u\033[=0;1u\033[?2004l\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1004l\033[?25h'
   fi
 fi
@@ -585,10 +997,10 @@ const CLAUDE_CREDENTIAL_PROBE: &str =
 /// stdout: without it a relay-level failure is indistinguishable from a VM
 /// that answered but couldn't run the script.
 ///
-/// There is no install path and no update path. `cloud-agent-base` bakes every
-/// harness and keeps them current, so a missing binary is an image problem the
-/// user cannot fix by waiting — hence AGENT-MISSING rather than an install
-/// attempt that would race the image's own copy.
+/// Standard harnesses are baked into `cloud-agent-base`. OpenCode's seed
+/// verifies the image's `opencode` is V2 (failing with a recreate message
+/// otherwise) and imports staged provider credentials. Grok updates its
+/// baked-in install before each new launch.
 ///
 /// `write_credential` is false when the agent already holds a working credential
 /// and we are reusing it. The seed must then be omitted entirely rather than run
@@ -609,31 +1021,104 @@ fn provision_script(agent: Agent, write_credential: bool, app_mode: bool) -> Str
     let name = agent.name();
     let hash_marker = skills_sync::REMOTE_HASH_MARKER;
     let hash_file = skills_sync::REMOTE_HASH_FILE;
-    // The autostart in COMMON_SEED reads both: the sentinel disables it
-    // outright, and `~/.railway-code-agent` is what it would otherwise launch.
-    //
-    // A shell launch is "give me the machine", not "retarget this VM": the
-    // recorded autostart agent stays whatever a previous launch made it, so
-    // plain reconnects keep dropping into that agent. App-mode still wins if
-    // it was asked for — desktop takes the login shell entirely.
-    let mode_seed = if app_mode {
-        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
-    } else {
-        let record = match agent {
-            Agent::Shell => "true".to_string(),
-            _ => format!("echo {name} > ~/.railway-code-agent"),
-        };
-        format!("rm -f ~/.railway-app-mode\n{record}")
-    };
+    let mcp_marker = mcp_sync::REMOTE_HASH_MARKER;
+    let mcp_file = mcp_sync::REMOTE_HASH_FILE;
+    let mode_seed = mode_seed(agent, app_mode);
+    let runtime_seed = runtime_seed(agent);
     format!(
         r#"umask 077
 {HARNESS_PATH}
 {seed}
 {COMMON_SEED}
+{runtime_seed}
 {mode_seed}
 printf '{hash_marker}%s\n' "$(cat "{hash_file}" 2>/dev/null || true)"
+printf '{mcp_marker}%s\n' "$(cat "{mcp_file}" 2>/dev/null || true)"
 if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi"#
     )
+}
+
+/// [`provision_script`] plus the skills sync, one connection, for a freshly
+/// created agent. A fresh VM cannot already hold the skills hash, so the
+/// report-then-upload dance is a wasted relay round-trip there — the tarball
+/// rides the provision stdin instead, behind the length-framed credential.
+/// The AGENT-READY check prints before the sync block because that block's
+/// degradation paths `exit 0`.
+fn provision_script_with_skills(
+    agent: Agent,
+    credential_len: Option<usize>,
+    app_mode: bool,
+    skills_hash: &str,
+) -> String {
+    let seed = match credential_len {
+        Some(len) => agent.credential_seed_framed(len),
+        None => "true".to_string(),
+    };
+    let name = agent.name();
+    let mode_seed = mode_seed(agent, app_mode);
+    let runtime_seed = runtime_seed(agent);
+    let sync = skills_sync::sync_body(skills_hash);
+    format!(
+        r#"umask 077
+{HARNESS_PATH}
+{seed}
+payload="$HOME/.railway-skills-payload.tgz"
+cat > "$payload"
+{COMMON_SEED}
+{runtime_seed}
+{mode_seed}
+if command -v {name} >/dev/null 2>&1; then echo AGENT-READY; else echo AGENT-MISSING; fi
+{sync}"#
+    )
+}
+
+fn runtime_seed(agent: Agent) -> String {
+    match agent {
+        Agent::OpenCode => crate::commands::cloud_agent::opencode::seed_script(),
+        Agent::Grok => GROK_UPDATE.to_string(),
+        _ => "true".to_string(),
+    }
+}
+
+// Use Grok's official updater and verify the installed release afterwards.
+// Never let it consume the credential/skills stream, or launch a stale binary
+// after a failed update. The VM image already includes Grok.
+const GROK_UPDATE: &str = r#"if ! grok update --stable </dev/null; then
+    printf '%s\n' 'Could not update Grok to the latest stable release. Retry the launch.' >&2
+    exit 1
+fi
+grok_update_status=$(grok update --check --json </dev/null) || exit 1
+if ! printf '%s' "$grok_update_status" | python3 -c '
+import json, sys
+status = json.load(sys.stdin)
+latest = status.get("latestVersion")
+sys.exit(not (
+    status.get("error") is None and status.get("channel") == "stable"
+    and status.get("updateAvailable") is False and isinstance(latest, str)
+    and bool(latest) and status.get("currentVersion") == latest
+))
+'; then
+    printf '%s\n' 'Grok could not confirm the latest stable release is installed. Check grok update on the agent and retry.' >&2
+    exit 1
+fi"#;
+
+/// The autostart in COMMON_SEED reads both: the sentinel disables it
+/// outright, and `~/.railway-code-agent` is what it would otherwise launch.
+///
+/// A shell launch is "give me the machine", not "retarget this VM": the
+/// recorded autostart agent stays whatever a previous launch made it, so
+/// plain reconnects keep dropping into that agent. App-mode still wins if
+/// it was asked for — desktop takes the login shell entirely.
+fn mode_seed(agent: Agent, app_mode: bool) -> String {
+    if app_mode {
+        "touch ~/.railway-app-mode\nrm -f ~/.railway-code-agent".to_string()
+    } else {
+        let record = match agent {
+            Agent::Shell => "true".to_string(),
+            _ => format!("echo {} > ~/.railway-code-agent", agent.name()),
+        };
+        format!("rm -f ~/.railway-app-mode\n{record}")
+    }
 }
 
 /// Where a prepared session's output lands, which decides what quitting the
@@ -650,6 +1135,42 @@ pub enum SessionStyle {
     /// the TUI — and leave the durable session alive as a shell nobody wants
     /// to reattach to.
     Pane,
+}
+
+/// Bypass the login-profile autostart on VMs prepared by `railway code`.
+pub(crate) const LOGIN_SHELL_COMMAND: &str = "export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l";
+
+pub(crate) fn harness_env_prefix() -> String {
+    format!(
+        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
+    )
+}
+
+/// Grok runs in an already-isolated cloud VM. Trust the actual working
+/// directory (including a resumed thread's directory) and approve tool calls
+/// without rewriting the user's config or trusting anything on their laptop.
+/// Keep explicit arguments intact, avoiding duplicate boolean flags/aliases
+/// that Grok's parser would reject. Arguments after `--` are literal text.
+pub(crate) fn grok_invocation(args: &[String]) -> Vec<String> {
+    let mut invocation = vec!["grok".into()];
+    for aliases in [
+        &["--trust", "--trust-folder"][..],
+        &[
+            "--always-approve",
+            "--yolo",
+            "--dangerously-skip-permissions",
+        ][..],
+    ] {
+        if !args
+            .iter()
+            .take_while(|arg| arg.as_str() != "--")
+            .any(|arg| aliases.contains(&arg.as_str()))
+        {
+            invocation.push(aliases[0].into());
+        }
+    }
+    invocation.extend_from_slice(args);
+    invocation
 }
 
 /// The command the launch session runs on the VM. Three shapes, and the
@@ -670,6 +1191,7 @@ fn remote_command(
     agent: Agent,
     env_prefix: &str,
     initial_prompt: Option<&str>,
+    resume_session_id: Option<&str>,
     agent_args: &[String],
     style: SessionStyle,
 ) -> String {
@@ -679,24 +1201,74 @@ fn remote_command(
     // still matters: `bash -l` sources ~/.profile, which would otherwise
     // relaunch whatever agent the VM last recorded on top of the user.
     if agent == Agent::Shell {
-        return format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; exec bash -l");
+        return format!("{env_prefix}{LOGIN_SHELL_COMMAND}");
     }
-    let name = agent.name();
+    // Railway's TUI fronts a shared daemon whose default is to join the
+    // directory's live session — every window becomes another view of the
+    // same conversation, and even a seeded prompt is steered into the run
+    // already in flight. An explicit `--session <id>` spawns (or rejoins)
+    // that exact id instead, so keying it to the durable session's own name —
+    // which vm-init stamps into every durable session's environment — makes
+    // each window its own conversation while keeping the daemon's
+    // persistence. The fallback mints an id remotely for connections that
+    // named no durable session (`railway ca start`, older vm-init): an unset
+    // var would otherwise expand to `--session ''`, and every such launch
+    // would collide on the one empty-string id — the exact shared-
+    // conversation bug the flag exists to fix. The `-- args` exec form below
+    // is left alone: its arguments are the caller's, flags included.
+    let grok = shell_join(&grok_invocation(&[]));
+    let name = match agent {
+        // A private server per terminal session: sessions on one VM must not
+        // share (or outlive each other through) V2's background service.
+        Agent::OpenCode => "opencode --standalone",
+        Agent::Grok => &grok,
+        Agent::Railway => {
+            "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\""
+        }
+        _ => agent.name(),
+    };
     let after = match style {
         SessionStyle::FullTerminal => "; exec bash -l",
-        SessionStyle::Pane => "",
+        SessionStyle::Pane => "; exit \"$railway_code_status\"",
     };
+    // Capture the harness status before resetting the terminal. Otherwise
+    // printf's success turns startup failures into clean session exits and
+    // the pane closes before the user can read the error.
+    let reset = format!("railway_code_status=$?; {}", terminal_reset_printf());
+    // Resuming reopens an existing conversation, so it takes the id instead of
+    // a prompt (the conversation already has its task). Both native harnesses
+    // accept --resume <id>; the id is quoted as a single shell argument.
+    if matches!(agent, Agent::Claude | Agent::Grok)
+        && let Some(id) = resume_session_id.map(str::trim).filter(|id| !id.is_empty())
+    {
+        return format!(
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --resume {}; {reset}{after}",
+            shell_join(std::slice::from_ref(&id.to_string())),
+        );
+    }
     match initial_prompt.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(prompt) => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {}{after}",
+        Some(prompt) if agent == Agent::OpenCode => format!(
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} --prompt {}; {reset}{after}",
             shell_join(std::slice::from_ref(&prompt.to_string())),
-            terminal_reset_printf()
         ),
-        None if agent_args.is_empty() => format!(
-            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {}{after}",
-            terminal_reset_printf()
+        Some(prompt) => format!(
+            "{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name} {}; {reset}{after}",
+            shell_join(std::slice::from_ref(&prompt.to_string())),
         ),
-        None => format!("{env_prefix}exec {name} {}", shell_join(agent_args)),
+        None if agent_args.is_empty() => {
+            format!("{env_prefix}export RAILWAY_CODE_AUTOSTARTED=1; {name}; {reset}{after}")
+        }
+        None if agent == Agent::Grok => {
+            format!(
+                "{env_prefix}exec {}",
+                shell_join(&grok_invocation(agent_args))
+            )
+        }
+        None => format!(
+            "{env_prefix}exec {} {}",
+            agent.name(),
+            shell_join(agent_args)
+        ),
     }
 }
 
@@ -712,19 +1284,84 @@ fn remote_command(
 /// routine occurrence — it covers the fleet going back to per-instance keys
 /// without pinning us to a key that would then mismatch constantly.
 ///
-/// Deliberately NOT multiplexed. ControlMaster was here to make one host-key
-/// decision per run when the fleet answered with per-instance keys, which it no
-/// longer does. It also had a failure mode worse than the problem it solved:
-/// sleeping an agent on disconnect kills the master's TCP connection while the
-/// socket file lives on for ControlPersist, so the next run rides a dead master
-/// and dies with exit 255 and no message from either stream — invisible, and
-/// immune to retries because waiting cannot revive it.
+/// These BASE options are deliberately not multiplexed, and readiness probes
+/// must never be: a probe against a not-yet-routable agent still opens a real
+/// connection (the relay falls through to the dev.new control surface instead
+/// of refusing at the transport), so a ControlMaster owned by a failed probe
+/// pins every later channel to that dead path — measured at 8/20 launch
+/// timeouts when tried on 2026-08-18. Cross-RUN persistence is the other
+/// historical trap: sleeping an agent kills the master's TCP while the socket
+/// file lives on, so the next run rides a dead master and dies with a bare
+/// exit 255.
+///
+/// What IS safe — and what [`launch_mux`] provides — is a master scoped to
+/// one launch and opened only by the provision connection, which runs after
+/// the route is verified and whose output markers prove it reached the real
+/// agent. The interactive session then rides that master (one handshake saved,
+/// ~0.35s), and a stale or dead socket falls back to a plain connection
+/// because the session never sets ControlMaster itself. The socket path is
+/// unique per launch, so nothing outlives the run that made it beyond the
+/// 30s ControlPersist grace.
 #[derive(Clone)]
 struct RelaySsh {
     opts: Vec<String>,
     known_hosts: std::path::PathBuf,
     /// known-hosts pattern for ssh-keygen -R: `host` or `[host]:port`.
     host_pattern: String,
+}
+
+/// A fresh, never-reused control socket path: OS temp dir, pid + random, so
+/// neither a recycled pid nor two sockets within one launch can collide.
+/// Uniqueness is the safety property the whole mux design leans on — a socket
+/// is only ever ridden by connections that know it was created by a
+/// marker-verified connection to the real agent (see [`RelaySsh`]).
+fn mux_socket() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "railway-cm-{}-{:08x}.sock",
+        std::process::id(),
+        rand::random::<u32>()
+    ))
+}
+
+/// Whether connection sharing can work here at all: not on Windows, whose
+/// OpenSSH has no ControlMaster support (passing the options anywhere from
+/// warns to fails), and not when the socket path would overflow the unix
+/// socket path limit (~104 bytes; a deep $TMPDIR gets there). Both cases fall
+/// back to plain connections — the launch works identically, it just pays the
+/// handshakes multiplexing would have saved.
+fn mux_usable(socket: &std::path::Path) -> bool {
+    !cfg!(windows) && socket.as_os_str().len() <= 100
+}
+
+/// Options for a connection allowed to CREATE the master on `socket`:
+/// a readiness probe (each round gets its own fresh socket; only the round
+/// whose marker round-trips is ever promoted) or the provision connection.
+/// `persist` bounds how long an idle master outlives its last client — probes
+/// use a short one so the losing rounds' masters evaporate.
+/// Empty when multiplexing is unusable here, so every caller degrades to a
+/// plain connection without carrying the platform check itself.
+fn mux_master_opts(socket: &std::path::Path, persist: &str) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
+    vec![
+        "-o".into(),
+        "ControlMaster=auto".into(),
+        "-o".into(),
+        format!("ControlPath={}", socket.display()),
+        "-o".into(),
+        format!("ControlPersist={persist}"),
+    ]
+}
+
+/// Options for a connection that may RIDE the master on `socket` but never
+/// create one: a dead or missing socket falls back to a plain connection.
+/// Empty when multiplexing is unusable here, same as [`mux_master_opts`].
+fn mux_client_opts(socket: &std::path::Path) -> Vec<String> {
+    if !mux_usable(socket) {
+        return Vec::new();
+    }
+    vec!["-o".into(), format!("ControlPath={}", socket.display())]
 }
 
 /// The known-hosts file the CLI keeps for the relay.
@@ -805,8 +1442,10 @@ fn terminal_reset_printf() -> String {
     format!("printf '{}'", TERMINAL_RESET.replace('\x1b', "\\033"))
 }
 
-/// Read a harness's local sign-in file — codex's `~/.codex/auth.json`, grok's
-/// `~/.grok/auth.json` — so the agent starts already signed in.
+/// Read a harness's local sign-in file so the agent starts already signed in.
+/// OpenCode's provider accounts live in `$XDG_DATA_HOME/opencode/opencode.db`
+/// (default `~/.local/share/opencode/opencode.db`), read by
+/// `cloud_agent::opencode::auth`.
 ///
 /// A missing or empty file is not a failure. It means this machine never had
 /// that harness signed in, so there is nothing to carry and the harness on the
@@ -815,13 +1454,39 @@ fn terminal_reset_printf() -> String {
 /// has a sign-in, and silently launching without it would look like the copy
 /// worked.
 fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
-    let Some(parts) = agent.local_signin_file() else {
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    if agent == Agent::OpenCode {
+        let database = std::env::var("OPENCODE_DB").ok();
+        return Ok(
+            match crate::commands::cloud_agent::opencode::auth::read(
+                home,
+                xdg_data_home.as_deref(),
+                database.as_deref(),
+            )? {
+                Some((line, source)) => PendingAuth::Ready {
+                    line,
+                    source: source.display().to_string(),
+                },
+                None => PendingAuth::SignInOnAgent {
+                    note: format!(
+                        "No OpenCode provider sign-in to copy from this machine; {}.",
+                        agent.sign_in_on_agent_hint()
+                    ),
+                },
+            },
+        );
+    }
+    let auth_path = agent.local_signin_path(home);
+    read_local_signin(agent, auth_path.as_deref())
+}
+
+fn read_local_signin(agent: Agent, auth_path: Option<&Path>) -> Result<PendingAuth> {
+    let Some(auth_path) = auth_path else {
         return Err(anyhow!(
             "{} has no local sign-in file to copy",
             agent.display()
         ));
     };
-    let auth_path = home.join(parts[0]).join(parts[1]);
     let missing = || PendingAuth::SignInOnAgent {
         note: format!(
             "No {} sign-in on this machine ({}) — starting {} unauthenticated; {}.",
@@ -834,7 +1499,7 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
     if !auth_path.exists() {
         return Ok(missing());
     }
-    let bytes = std::fs::read(&auth_path)
+    let bytes = std::fs::read(auth_path)
         .with_context(|| format!("Couldn't read {}", auth_path.display()))?;
     if bytes.is_empty() {
         return Ok(missing());
@@ -853,7 +1518,17 @@ fn local_signin(agent: Agent, home: &Path) -> Result<PendingAuth> {
 /// mint locally, store the result as a repository secret, and use it on remote
 /// runners. Cleared by `railway logout`, or by `--refresh-auth`.
 fn claude_token_cache_path() -> Option<std::path::PathBuf> {
-    Some(dirs::home_dir()?.join(".railway").join("claude-code-token"))
+    Some(claude_token_cache_path_in(&dirs::home_dir()?))
+}
+
+/// The cache path under an explicit home, so callers that already scope
+/// themselves to one (`railway ca setup --reset`, and the tests that drive it
+/// against a tempdir) clear the right file. Resolving `dirs::home_dir()` here
+/// regardless of the caller's home meant the suite deleted the developer's own
+/// cached setup-token every run, sending their next `--claude` launch through a
+/// browser mint.
+fn claude_token_cache_path_in(home: &Path) -> std::path::PathBuf {
+    home.join(".railway").join("claude-code-token")
 }
 
 /// Read the cached token, if one is there and still plausible.
@@ -917,9 +1592,14 @@ fn cached_token_source(age_days: Option<u64>) -> String {
 
 /// Forget the cached token. Called by `railway logout`.
 pub fn clear_claude_token_cache() {
-    if let Some(path) = claude_token_cache_path() {
-        let _ = std::fs::remove_file(path);
+    if let Some(home) = dirs::home_dir() {
+        clear_claude_token_cache_in(&home);
     }
+}
+
+/// [`clear_claude_token_cache`] scoped to an explicit home.
+pub fn clear_claude_token_cache_in(home: &Path) {
+    let _ = std::fs::remove_file(claude_token_cache_path_in(home));
 }
 
 /// The credential to push, or the knowledge that obtaining one costs a browser
@@ -1351,6 +2031,7 @@ fn ssh_plumbing(
     identity: Option<&std::path::Path>,
     stdin_payload: Option<&[u8]>,
     relay: &RelaySsh,
+    mux_socket: Option<&std::path::Path>,
 ) -> Result<Vec<u8>> {
     // A woken agent re-boots its entrypoint, and the relay refuses the session
     // until the machine's new incarnation is attachable, so the first attempts
@@ -1360,11 +2041,12 @@ fn ssh_plumbing(
     // stretching this on a hunch.
     const BACKOFF_SECS: [u64; 5] = [2, 3, 5, 5, 5];
     let attempts = BACKOFF_SECS.len() + 1;
+    let (command, payload) = plumbing::script_input(command, stdin_payload);
 
     let mut last: (i32, String) = (1, String::new());
     for attempt in 1..=attempts {
         let (code, out, err) =
-            run_native_ssh_captured(target, command, identity, stdin_payload, &relay.opts)?;
+            run_native_ssh_captured(target, &command, identity, Some(&payload), &relay.opts)?;
         if code == 0 {
             return Ok(out);
         }
@@ -1386,6 +2068,14 @@ fn ssh_plumbing(
             || stderr_text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED");
         if hostkey_mismatch {
             relay.heal_known_hosts();
+        }
+        // A failed attempt must not leave a master for the next attempt to
+        // ride: removing the socket makes ControlMaster=auto open a genuinely
+        // fresh connection instead of pinning every retry to whatever dead or
+        // misrouted path the failure created — the historical 8/20-timeouts
+        // trap, scoped here to within a single call.
+        if let Some(socket) = mux_socket {
+            let _ = std::fs::remove_file(socket);
         }
         last = (code, reason);
 
@@ -1411,44 +2101,10 @@ fn ssh_plumbing(
     bail!("SSH to the agent failed after {attempts} attempts (exit {code}):\n{reason}")
 }
 
-/// One cloud agent, reduced to what this command steers on. `pub(crate)`
-/// because [`wait_until_connectable`] returns it to the `railway ca` verbs.
-#[derive(Clone)]
-pub(crate) struct CodeAgent {
-    id: String,
-    name: String,
-    status: queries::cloud_agent::CloudAgentStatus,
-}
-
 /// How long to wait for a created or woken agent to reach RUNNING before
 /// giving up. A cold create boots a microVM and publishes routes; a wake
 /// restores a checkpoint and is much quicker.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-
-/// Read one agent by id, scoped to the environment. `None` means it is gone
-/// (deleted, or it belongs to another environment) — the caller's cue to forget
-/// its stored pointer rather than to fail.
-async fn fetch_agent(
-    client: &reqwest::Client,
-    backboard: &str,
-    environment_id: &str,
-    id: &str,
-) -> Result<Option<CodeAgent>> {
-    let res = post_graphql::<queries::CloudAgent, _>(
-        client,
-        backboard,
-        queries::cloud_agent::Variables {
-            id: id.to_owned(),
-            environment_id: environment_id.to_owned(),
-        },
-    )
-    .await?;
-    Ok(res.cloud_agent.map(|a| CodeAgent {
-        id: a.id,
-        name: a.name,
-        status: a.status,
-    }))
-}
 
 /// Wait until the agent is *connectable*, by probing the SSH route itself
 /// rather than polling status up to RUNNING. The platform routes a shell as
@@ -1457,115 +2113,248 @@ async fn fetch_agent(
 /// projection, and a poll interval. Status is still read each round, but only
 /// to catch terminal states (CRASHED/FAILED/DELETING) early instead of
 /// burning the whole timeout on a box that will never come up.
+/// The relay-side plumbing a probe or session needs, independent of which
+/// agent it points at: the local key to offer and the relay's SSH options.
+/// Built once per launch (the identity half costs an API round-trip) and
+/// threaded through, where each waiter previously rebuilt it via
+/// `connect_info` — a redundant registered-keys query at the top of every
+/// wake and create wait.
+pub(crate) struct RelayAccess {
+    pub identity: Option<std::path::PathBuf>,
+    pub relay_opts: Vec<String>,
+}
+
+/// Build [`RelayAccess`] the way `connect_info` does, for callers outside the
+/// launch flow (the `ca` verbs) that don't already hold one.
+pub(crate) async fn relay_access() -> Result<RelayAccess> {
+    let configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let identity = ensure_ssh_key_quiet(&client, &configs).await?;
+    let relay = relay_ssh()?;
+    Ok(RelayAccess {
+        identity,
+        relay_opts: relay.opts,
+    })
+}
+
+/// On success, also returns the control socket of the winning probe's master
+/// when there was one: that probe verified the marker round-trip, so its
+/// connection provably reached the real agent, and the provision + session can
+/// multiplex over it instead of paying a fresh relay handshake. `None` when
+/// the status flip won the race (no verified connection exists yet).
 pub(crate) async fn wait_until_connectable(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
-) -> Result<CodeAgent> {
-    use queries::cloud_agent::CloudAgentStatus as S;
-    let info = connect_info(environment_id, id).await?;
+    access: &RelayAccess,
+    initial_delay: std::time::Duration,
+) -> Result<(ca::Agent, Option<std::path::PathBuf>)> {
+    use ca::Status as S;
+    // Measured as one stage because this is the leg the platform owns — VM
+    // boot/restore up to a routable SSH target. Per-round detail goes to stderr
+    // under RAILWAY_STAGE_TIMING; the recorded stage is what telemetry sees.
+    let wait_started = std::time::Instant::now();
+    let diagnostics = ssh_tel::timing_diagnostics();
+    let ssh_target = format!("agent:{environment_id}:{id}");
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    // Callers that just issued the create or wake pass the physical floor of
+    // that operation (measured: a fresh VM is never routable before ~550ms, a
+    // restore before ~1.5s): probing earlier is a guaranteed miss that still
+    // opens a real relay connection into the dev.new fall-through. Callers
+    // that caught a boot already in flight pass zero — the box may be
+    // routable right now, and any delay would be a pure regression.
+    if !initial_delay.is_zero() {
+        tokio::time::sleep(initial_delay).await;
+    }
+    let mut round = 0u32;
+    // The status fetch keeps its OLD ~750ms grid even while probes run at the
+    // tight cadence: it exists only to catch rare terminal states, and letting
+    // it ride the probe cadence would triple backboard polling per launching
+    // client for nothing. Round 1 always fetches.
+    let mut last_fetch: Option<std::time::Instant> = None;
+    let mut last_agent: Option<ca::Agent> = None;
     loop {
-        let agent = fetch_agent(client, backboard, environment_id, id)
-            .await?
-            .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
-        match agent.status {
-            // RUNNING routes by definition; skip the probe round-trip.
-            S::RUNNING => return Ok(agent),
-            S::STARTING | S::SLEEPING => {}
-            S::CRASHED => bail!(
-                "Agent {} crashed while starting. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::FAILED => bail!(
-                "Agent {} failed to start. `railway code --new` for a fresh one.",
-                agent.name
-            ),
-            S::DELETING => bail!("Agent {} is being deleted.", agent.name),
-            S::Other(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+        round += 1;
+        let round_started = std::time::Instant::now();
+
+        // Every round probes as a would-be master on its own FRESH socket. A
+        // round that lands on the relay's dev.new fall-through (agent not yet
+        // routable) leaves a master nothing will ever reference — the socket
+        // name is never reused, and only the round whose marker comes back is
+        // promoted. Losers are told to exit below, with a short persist as the
+        // backstop, so they don't pile up relay connections during a slow boot.
+        let socket = mux_socket();
+        let target = ssh_target.clone();
+        let identity = access.identity.clone();
+        let mut opts = access.relay_opts.clone();
+        opts.extend(mux_master_opts(&socket, "3s"));
+        let probe = tokio::task::spawn_blocking(move || {
+            probe_native_ssh(&target, identity.as_deref(), &opts)
+        });
+
+        // Await the fetch BEFORE the probe (both are already in flight): a
+        // terminal state must bail immediately, not after a probe that can sit
+        // on its full ConnectTimeout against a box that will never answer.
+        let fetch_due = last_fetch.is_none_or(|at| at.elapsed().as_millis() >= 700);
+        if fetch_due {
+            let agent = ca::get(client, backboard, environment_id, id)
+                .await?
+                .ok_or_else(|| anyhow!("Agent {id} disappeared while starting."))?;
+            last_fetch = Some(std::time::Instant::now());
+            match agent.status {
+                S::Running | S::Starting | S::Sleeping => {}
+                S::Crashed => bail!(
+                    "Agent {} crashed while starting. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::Failed => bail!(
+                    "Agent {} failed to start. `railway code --new` for a fresh one.",
+                    agent.name
+                ),
+                S::Deleting => bail!("Agent {} is being deleted.", agent.name),
+                S::Unknown(ref s) => bail!("Agent {} is in an unknown state ({s}).", agent.name),
+            }
+            // RUNNING routes by definition, so don't spend another round on a
+            // probe that lost the race to the status flip — but there is no
+            // verified connection to promote (the in-flight probe is abandoned;
+            // its master, if any, exits on the persist backstop).
+            if agent.status == S::Running {
+                ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+                return Ok((agent, None));
+            }
+            last_agent = Some(agent);
         }
 
-        let target = info.ssh_target.clone();
-        let identity = info.identity.clone();
-        let opts = info.relay_opts.clone();
-        let routed = tokio::task::spawn_blocking(move || {
-            probe_native_ssh(&target, identity.as_deref(), &opts)
-        })
-        .await?
-        .unwrap_or(false);
-        if routed {
-            return Ok(agent);
+        let routed = probe.await?.unwrap_or(false);
+        if diagnostics {
+            eprintln!(
+                "[wait_connectable] round {round}: status={:?} round={}ms routed={routed} fetched={fetch_due}",
+                last_agent.as_ref().map(|a| &a.status),
+                round_started.elapsed().as_millis()
+            );
         }
+        if routed {
+            ssh_tel::record_stage("wait_connectable", wait_started.elapsed(), true);
+            let agent = last_agent
+                .ok_or_else(|| anyhow!("Agent {id} was never observed while starting."))?;
+            return Ok((agent, Some(socket)));
+        }
+        // This round's would-be master lost; release it now rather than
+        // letting it hold a relay connection for the persist window.
+        release_probe_master(&socket, &ssh_target);
 
         if std::time::Instant::now() >= deadline {
             bail!(
-                "Agent {} did not become connectable within {}s (last state: {:?}).",
-                agent.name,
+                "Agent {id} did not become connectable within {}s (last state: {:?}).",
                 READY_TIMEOUT.as_secs(),
-                agent.status
+                last_agent.map(|a| a.status)
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        // Pace rounds to a cadence rather than sleeping on top of the probe: a
+        // probe that already took that long IS the pacing. The cadence is
+        // tight while the box is likely to come up (a fresh VM boots in
+        // ~750ms, and a 750ms grid quantizes its discovery a full round late)
+        // and relaxes once the wait has clearly become a boot-tail wait.
+        let cadence = if wait_started.elapsed() < std::time::Duration::from_secs(4) {
+            std::time::Duration::from_millis(250)
+        } else {
+            std::time::Duration::from_millis(750)
+        };
+        if let Some(rest) = cadence.checked_sub(round_started.elapsed()) {
+            tokio::time::sleep(rest).await;
+        }
     }
 }
 
-/// Bring an agent that already exists up to RUNNING: reuse it when it is
-/// already up, wake it when it is asleep or still booting. `None` means the
-/// agent is dead and the caller should create a fresh one.
+/// Tell a losing probe round's background master to exit now instead of
+/// holding an authenticated relay connection until its persist backstop.
+/// Fire-and-forget: the master may not exist (connection never completed) or
+/// may already be gone — both are fine, and nothing waits on the result.
+fn release_probe_master(socket: &std::path::Path, target: &str) {
+    if !mux_usable(socket) {
+        return;
+    }
+    let _ = std::process::Command::new("ssh")
+        .arg("-O")
+        .arg("exit")
+        .arg("-o")
+        .arg(format!("ControlPath={}", socket.display()))
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Connect to the selected agent, waking it when needed. An unusable observation
+/// is an error on this agent, never permission to replace it with another VM.
 async fn ready_existing_agent(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
-    agent: CodeAgent,
+    agent: ca::Agent,
     progress: &dyn Progress,
-) -> Result<Option<CodeAgent>> {
-    use queries::cloud_agent::CloudAgentStatus as S;
+    access: &RelayAccess,
+) -> Result<(ca::Agent, Option<std::path::PathBuf>)> {
+    use ca::Status as S;
 
     match agent.status {
-        S::RUNNING => {
+        S::Running => {
             progress.note(&format!(
                 "Using agent {} (--new for a fresh one)",
                 agent.name
             ));
-            Ok(Some(agent))
+            Ok((agent, None))
         }
         // STARTING means a previous run is still booting it, so a re-run seconds
         // after a ctrl-c waits rather than minting a duplicate. SLEEPING is the
         // resting state this command leaves behind.
-        S::SLEEPING | S::STARTING => {
+        S::Sleeping | S::Starting => {
             progress.step(&format!("Waking agent {}", agent.name));
-            if agent.status == S::SLEEPING
-                && let Err(e) = post_graphql::<mutations::CloudAgentWake, _>(
+            // The delay below is the wake's physical floor; a STARTING agent
+            // caught mid-boot gets none — it may be routable right now.
+            let mut probe_delay = std::time::Duration::ZERO;
+            if agent.status == S::Sleeping {
+                let wake_started = std::time::Instant::now();
+                let wake = post_graphql::<mutations::CloudAgentWake, _>(
                     client,
                     backboard,
                     mutations::cloud_agent_wake::Variables {
                         id: agent.id.clone(),
                     },
                 )
-                .await
-            {
-                return Err(e.into());
+                .await;
+                ssh_tel::record_stage("wake_mutation", wake_started.elapsed(), wake.is_ok());
+                if let Err(e) = wake {
+                    return Err(e.into());
+                }
+                probe_delay = std::time::Duration::from_millis(350);
             }
-            let running =
-                wait_until_connectable(client, backboard, environment_id, &agent.id).await?;
+            let (running, probe_master) = wait_until_connectable(
+                client,
+                backboard,
+                environment_id,
+                &agent.id,
+                access,
+                probe_delay,
+            )
+            .await?;
             progress.note(&format!(
                 "Woke agent {} — your work is on its disk",
                 running.name
             ));
-            Ok(Some(running))
+            Ok((running, probe_master))
         }
-        S::CRASHED | S::FAILED | S::DELETING | S::Other(_) => {
-            progress.note(&format!(
-                "Agent {} is {:?}; creating a fresh one.",
-                agent.name, agent.status
-            ));
-            Ok(None)
-        }
+        S::Crashed | S::Failed | S::Deleting | S::Unknown(_) => bail!(
+            "Agent {} is reported as {} and cannot be connected to. Check `railway ca list` and retry, or use `railway code --new` to create a separate agent.",
+            agent.name,
+            agent.status.label()
+        ),
     }
 }
 
-/// The caller's own live agent in this environment, when there is exactly one.
+/// The caller's own agent in this environment, when there is exactly one.
 ///
 /// `mine` is load-bearing rather than tidiness: agents authorize per
 /// environment, so an unfiltered list includes teammates' — and adopting one
@@ -1575,23 +2364,11 @@ async fn sole_owned_agent_id(
     backboard: &str,
     environment_id: &str,
 ) -> Result<Option<String>> {
-    use queries::cloud_agents::CloudAgentStatus as S;
+    // A failed or unknown observation still names an existing VM. Filtering it
+    // out would turn an inconclusive lookup into a new billed agent.
+    let agents = ca::list_in_environment(client, backboard, environment_id, true).await?;
 
-    let live: Vec<_> = post_graphql::<queries::CloudAgents, _>(
-        client,
-        backboard,
-        queries::cloud_agents::Variables {
-            environment_id: environment_id.to_owned(),
-            mine: Some(true),
-        },
-    )
-    .await?
-    .cloud_agents
-    .into_iter()
-    .filter(|a| matches!(a.status, S::RUNNING | S::SLEEPING | S::STARTING))
-    .collect();
-
-    match live.as_slice() {
+    match agents.as_slice() {
         [] => Ok(None),
         [only] => Ok(Some(only.id.clone())),
         many => bail!(
@@ -1627,13 +2404,13 @@ async fn sole_owned_agent_id(
 /// With nothing to go on, this runs `railway ca setup` rather than the
 /// workspace → project → environment picker. The picker answers one launch; the
 /// setup flow answers every launch after it, and asks the same question.
-async fn resolve_target(
+pub(crate) async fn resolve_target(
     configs: &mut Configs,
     client: &reqwest::Client,
     args: &LaunchArgs,
     prefs: &mut AgentPrefs,
     home: &Path,
-) -> Result<(String, String)> {
+) -> Result<names::Target> {
     // The link is only consulted when nothing better is available, and reading
     // it can fail for reasons that are not this run's problem (no link at all,
     // the RAILWAY_ENVIRONMENT_ID-without-PROJECT_ID guard).
@@ -1687,20 +2464,39 @@ async fn resolve_target(
         None => None,
     };
 
-    match choose_target(args, prefs.default_project.as_ref(), linked) {
+    let mut target = match choose_target(args, prefs.default_project.as_ref(), linked) {
         // Either flag means the caller is targeting deliberately; hand both to
         // the shared resolver so `-p` alone still finds an environment.
         TargetSource::Flags => {
-            resolve_project_and_env(
-                configs,
-                client,
-                args.project.clone(),
-                args.environment.clone(),
-            )
-            .await
+            // Two UUIDs need no resolving — the TUI retargets launches with
+            // ids it already resolved, and the shared resolver was spending a
+            // round-trip re-answering a known question on every TUI launch.
+            // Trusting them is safe: the create/wake mutations validate the
+            // environment (and the caller's access to it) authoritatively.
+            if let (Some(project), Some(environment)) = (&args.project, &args.environment)
+                && is_uuid(project)
+                && is_uuid(environment)
+            {
+                names::Target::new((project.clone(), environment.clone()), false)
+            } else {
+                names::Target::new(
+                    resolve_project_and_env(
+                        configs,
+                        client,
+                        args.project.clone(),
+                        args.environment.clone(),
+                    )
+                    .await?,
+                    false,
+                )
+            }
         }
-        TargetSource::Configured(project_id, environment_id)
-        | TargetSource::Linked(project_id, environment_id) => Ok((project_id, environment_id)),
+        TargetSource::Configured(project_id, environment_id) => {
+            names::Target::new((project_id, environment_id), true)
+        }
+        TargetSource::Linked(project_id, environment_id) => {
+            names::Target::new((project_id, environment_id), false)
+        }
         TargetSource::Setup => {
             println!(
                 "{}",
@@ -1710,14 +2506,57 @@ async fn resolve_target(
             *prefs = AgentPrefs::load_in(home).unwrap_or_default();
 
             match prefs.default_project.clone() {
-                Some(default) => Ok((default.project_id, default.environment_id)),
+                Some(default) => {
+                    names::Target::new((default.project_id, default.environment_id), true)
+                }
                 // They skipped the question. Fall back to the one-off picker so
                 // the launch they asked for still happens.
-                None => resolve_project_and_env(configs, client, None, None).await,
+                None => names::Target::new(
+                    resolve_project_and_env(configs, client, None, None).await?,
+                    false,
+                ),
             }
         }
-        TargetSource::Ask => resolve_project_and_env(configs, client, None, None).await,
+        TargetSource::Ask => names::Target::new(
+            resolve_project_and_env(configs, client, None, None).await?,
+            false,
+        ),
+    };
+    target.use_local_name |= args.local_name_project.as_deref() == Some(target.project_id.as_str());
+    Ok(target)
+}
+
+/// The single stdin stream `provision_script_with_skills` reads: the
+/// credential (exactly `len` bytes, which the script consumes via `head -c`)
+/// followed by the skills tarball. The framing length and the written bytes
+/// MUST come from the same buffer — this function is the only place both are
+/// produced, which is the contract the byte-framing test pins.
+fn combined_provision_payload(
+    credential: Option<&[u8]>,
+    tarball: &[u8],
+) -> (Vec<u8>, Option<usize>) {
+    let len = credential.map(<[u8]>::len);
+    let mut payload = Vec::with_capacity(len.unwrap_or(0) + tarball.len());
+    if let Some(credential) = credential {
+        payload.extend_from_slice(credential);
     }
+    payload.extend_from_slice(tarball);
+    (payload, len)
+}
+
+/// A canonical 8-4-4-4-12 lowercase-or-uppercase hex UUID, the only shape
+/// Railway ids take. Names can't collide with it in practice, and a
+/// pathological UUID-shaped name merely skips a convenience resolution — the
+/// mutation that follows still validates the id.
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, b)| match i {
+        8 | 13 | 18 | 23 => *b == b'-',
+        _ => b.is_ascii_hexdigit(),
+    })
 }
 
 /// Which answer wins, given what is available. Separated from the I/O so the
@@ -1794,15 +2633,26 @@ async fn resolve_agent(
     configs: &mut Configs,
     client: &reqwest::Client,
     args: &LaunchArgs,
-    environment_id: &str,
+    target: &names::Target,
+    harness: Agent,
     progress: &dyn Progress,
-) -> Result<(CodeAgent, bool)> {
+    access: &RelayAccess,
+) -> Result<(ca::Agent, bool, Option<std::path::PathBuf>)> {
+    let environment_id = target.environment_id.as_str();
     let backboard = configs.get_backboard();
 
     // An explicit agent wins over everything: the caller is looking at the one
     // it means. Inferring from the stored pointer instead is how "new session
     // on this agent" turned into a second VM.
-    let candidate = match (&args.agent_id, args.new) {
+    if args.agent_id.is_some() && (args.bootstrap.is_some() || args.no_bootstrap) {
+        bail!(
+            "Bootstrap options create a new VM and cannot be used when connecting to an existing agent."
+        );
+    }
+    let candidate = match (
+        &args.agent_id,
+        args.new || args.bootstrap.is_some() || args.no_bootstrap,
+    ) {
         (Some(id), _) => Some(id.clone()),
         (None, true) => None,
         (None, false) => match configs.get_code_agent(environment_id) {
@@ -1810,41 +2660,65 @@ async fn resolve_agent(
             None => sole_owned_agent_id(client, &backboard, environment_id).await?,
         },
     };
-    // Re-read by id either way, so both paths carry the same shape and the
-    // stale-pointer case (agent deleted elsewhere) collapses into `None`.
-    let existing = match candidate {
-        Some(id) => fetch_agent(client, &backboard, environment_id, &id).await?,
-        None => None,
-    };
-    if let Some(agent) = existing {
-        if let Some(ready) =
-            ready_existing_agent(client, &backboard, environment_id, agent, progress).await?
-        {
-            warn_ignored_variables(args, progress);
+    // Once a target is selected, keep it even when its observation is missing
+    // or unusable. Creating is reserved for an empty inventory or explicit --new.
+    if let Some(id) = candidate {
+        let agent = ca::get(client, &backboard, environment_id, &id)
+            .await?
+            .ok_or_else(|| anyhow!(
+                "Agent {id} is unavailable in this environment. Check `railway ca list`, or use `railway code --new` to create a separate agent."
+            ))?;
+        let (ready, probe_master) =
+            ready_existing_agent(client, &backboard, environment_id, agent, progress, access)
+                .await?;
+        warn_ignored_variables(args, progress);
+        if !args.bootstrap_setup {
             configs.set_code_agent(environment_id, &ready.id);
             configs.write()?;
-            return Ok((ready, false));
         }
-        configs.remove_code_agent(environment_id);
+        return Ok((ready, false, probe_master));
     }
 
-    let variables = variables_to_input(&args.env_files, &args.variables)?
-        .map(serde_json::to_value)
-        .transpose()?;
-    progress.step("Creating a cloud agent");
-    let created = match post_graphql::<mutations::CloudAgentCreate, _>(
+    if args.connection_json && args.agent_id.is_some() {
+        bail!(
+            "The selected cloud agent is unavailable. Refresh the agent list before reconnecting."
+        );
+    }
+
+    let bootstrap = crate::controllers::agent_bootstrap::resolve_for_create(
+        configs,
         client,
         &backboard,
+        environment_id,
+        args.bootstrap.as_deref(),
+        args.no_bootstrap,
+    )
+    .await?;
+    let variables = create_variables(args)?;
+    let name = names::for_launch(client, configs, args, harness, target).await?;
+    if let Some(b) = &bootstrap {
+        progress.step(&format!("Restoring bootstrap '{}'", b.name));
+    } else {
+        progress.step("Creating a cloud agent");
+    }
+    let create_started = std::time::Instant::now();
+    let create = post_graphql::<mutations::CloudAgentCreate, _>(
+        client,
+        crate::controllers::agent_bootstrap::internal_url(&backboard),
         mutations::cloud_agent_create::Variables {
             input: mutations::cloud_agent_create::CloudAgentCreateInput {
                 environment_id: environment_id.to_owned(),
-                name: args.name.clone(),
+                name,
                 variables,
+                code_endpoint: create_code_endpoint(args),
+                cloud_agent_checkpoint_id: None,
+                agent_bootstrap_id: bootstrap.map(|b| b.id),
             },
         },
     )
-    .await
-    {
+    .await;
+    ssh_tel::record_stage("create_mutation", create_started.elapsed(), create.is_ok());
+    let created = match create {
         Ok(res) => res.cloud_agent_create,
         Err(e) => return Err(e.into()),
     };
@@ -1855,16 +2729,45 @@ async fn resolve_agent(
     configs.set_code_agent(environment_id, &created.id);
     configs.write()?;
 
-    match wait_until_connectable(client, &backboard, environment_id, &created.id).await {
-        Ok(running) => {
+    match wait_until_connectable(
+        client,
+        &backboard,
+        environment_id,
+        &created.id,
+        access,
+        // A created VM's measured routability floor; see the wait's doc.
+        std::time::Duration::from_millis(350),
+    )
+    .await
+    {
+        Ok((running, probe_master)) => {
             progress.note(&format!("Created agent {}", running.name));
-            Ok((running, true))
+            Ok((running, true, probe_master))
         }
         Err(e) => {
             progress.finish();
             Err(e)
         }
     }
+}
+
+fn create_code_endpoint(
+    args: &LaunchArgs,
+) -> Option<mutations::cloud_agent_create::CloudAgentCodeEndpointInput> {
+    (args.code_endpoint || args.code_port.is_some()).then(|| {
+        mutations::cloud_agent_create::CloudAgentCodeEndpointInput {
+            port: args.code_port.map(i64::from),
+        }
+    })
+}
+
+/// User variables and internal credential seeds sent at creation.
+fn create_variables(args: &LaunchArgs) -> Result<Option<serde_json::Value>> {
+    let mut variables = variables_to_input(&args.env_files, &args.variables)?.unwrap_or_default();
+    variables.extend(args.boot_variables.clone());
+    Ok(ca::with_default_variables(Some(serde_json::to_value(
+        variables,
+    )?)))
 }
 
 /// `--variable`/`--env-file` only reach the VM spec at create time, so say so
@@ -1905,7 +2808,7 @@ async fn destroy_agent(
         println!("No agent recorded for this environment.");
         return Ok(());
     };
-    let name = fetch_agent(client, &backboard, environment_id, &id)
+    let name = ca::get(client, &backboard, environment_id, &id)
         .await?
         .map(|a| a.name);
     // Forget the pointer either way: a delete that reports failure on an
@@ -1958,6 +2861,7 @@ const AGENT_ENV_VAR: &str = "RAILWAY_CA_AGENT";
 fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) -> Result<Agent> {
     let flagged: Vec<Agent> = [
         (args.codex, Agent::Codex),
+        (args.opencode, Agent::OpenCode),
         (args.claude, Agent::Claude),
         (args.grok, Agent::Grok),
         (args.railway, Agent::Railway),
@@ -1969,7 +2873,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
     match flagged.as_slice() {
         [agent] => return Ok(*agent),
         [] => {}
-        _ => bail!("Pick one agent: --codex, --claude, --grok, or --railway."),
+        _ => bail!("Pick one agent: --codex, --claude, --opencode, --grok, or --railway."),
     }
 
     if let Ok(slug) = std::env::var(AGENT_ENV_VAR) {
@@ -1977,7 +2881,7 @@ fn resolve_agent_choice(args: &LaunchArgs, prefs: &mut AgentPrefs, home: &Path) 
         if !slug.is_empty() {
             let agent = Agent::from_slug(&slug).ok_or_else(|| {
                 anyhow!(
-                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, grok, railway, or shell)."
+                    "{AGENT_ENV_VAR}={slug} is not a known agent (claude, codex, opencode, grok, railway, or shell)."
                 )
             })?;
             return Ok(agent);
@@ -2091,6 +2995,7 @@ pub struct Prepared {
 pub struct ResolvedLaunch {
     pub project_id: String,
     pub environment_id: String,
+    pub(crate) local_name_project: Option<String>,
     /// The harness slug, matching [`Agent::slug`].
     pub harness: &'static str,
 }
@@ -2112,18 +3017,24 @@ pub async fn resolve_launch(
 ) -> Result<ResolvedLaunch> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Unable to get home directory"))?;
     let mut prefs = AgentPrefs::load_in(&home).unwrap_or_default();
-    let (project_id, environment_id) =
-        resolve_target(configs, client, args, &mut prefs, &home).await?;
+    let target = resolve_target(configs, client, args, &mut prefs, &home).await?;
     let harness = resolve_agent_choice(args, &mut prefs, &home)?.slug();
     Ok(ResolvedLaunch {
-        project_id,
-        environment_id,
+        local_name_project: target.local_name_project(),
+        project_id: target.project_id,
+        environment_id: target.environment_id,
         harness,
     })
 }
 
 pub async fn launch(args: LaunchArgs) -> Result<()> {
     use colored::Colorize;
+
+    if args.connection_json {
+        bail!(
+            "--connection-json requires railway code --codex, --opencode, or --railway [connect]."
+        );
+    }
 
     // `--rm` is a lifecycle action, not a launch: it needs no agent choice and
     // no credential, so it resolves the environment and returns.
@@ -2135,15 +3046,6 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         return destroy_agent(&mut configs, &client, &environment_id).await;
     }
 
-    // Before anything is resolved, minted or provisioned: without the flag the
-    // create at the end of all that is refused, and the work up to it — a
-    // credential, possibly a browser round-trip — is spent for nothing.
-    {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await?;
-    }
-
     eprintln!(
         "{}",
         "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
@@ -2151,11 +3053,40 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     );
 
     let progress = CliProgress::default();
-    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
+    // The flag check races prepare instead of preceding it: an un-flagged user
+    // is still stopped the moment the check answers — before any mint or
+    // create completes — while everyone else no longer pays a serialized
+    // round-trip for a question whose answer is almost always yes. If prepare
+    // somehow finishes first, the gate is still enforced before anything runs.
+    let ensure_fut = async {
+        let configs = Configs::new()?;
+        let client = GQLClient::new_authorized(&configs)?;
+        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
+    };
+    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
+    tokio::pin!(ensure_fut);
+    tokio::pin!(prepare_fut);
+    let prepared = tokio::select! {
+        enabled = &mut ensure_fut => {
+            enabled?;
+            prepare_fut.await?
+        }
+        prepared = &mut prepare_fut => {
+            ensure_fut.await?;
+            prepared?
+        }
+    };
     progress.finish();
 
-    println!("Launching {}…", prepared.harness);
+    let harness = crate::commands::cloud_agent::harness_label(prepared.harness);
+    println!("Launching {harness}…");
     let exit_code = run_session(&prepared)?;
+
+    // The user's work is done; give detached telemetry a bounded window so a
+    // short exec launch (`railway code -- <cmd>`) doesn't exit before its
+    // outcome event leaves the machine. Interactive sessions resolve this
+    // instantly — their sends finished minutes ago.
+    ssh_tel::drain_detached(std::time::Duration::from_secs(2)).await;
 
     // Belt-and-suspenders for the remote reset: when the connection drops
     // mid-TUI the remote printf never reaches us, so scrub locally too before
@@ -2191,7 +3122,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     } else {
         println!(
             "  railway code --{}   # wakes it and drops back into {}",
-            prepared.harness, prepared.harness
+            prepared.harness, harness
         );
     }
     println!(
@@ -2266,13 +3197,42 @@ pub async fn prepare(
     };
 
     let result = prepare_inner(args, progress, agent, prefs, &home, style).await;
-    crate::commands::cloud_agent::telemetry::track_launch_outcome(
-        agent.slug(),
-        result.as_ref().ok().map(|p| p.created),
-        start.elapsed(),
-        result.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
-    )
-    .await;
+    // App-mode callers finish their HTTP/Desktop setup after prepare returns.
+    // Do not replace the last usable record with an incomplete setup.
+    if !args.app_mode
+        && let Ok(prepared) = &result
+        && let Err(error) =
+            saved_config::SavedConfig::from_prepared(prepared).and_then(|saved| saved.save())
+    {
+        progress.note(&format!(
+            "Could not save connection details for railway code get-config: {error:#}"
+        ));
+    }
+    // After the outcome, and detached: the stages are already measured, and
+    // reporting them must not extend the launch they describe.
+    ssh_tel::flush_stages("cloud_agent_launch");
+    match &result {
+        // Detached on success for the same reason as the stage flush: the
+        // outcome event is an HTTP round-trip, and awaiting it sat between
+        // "provisioned" and "session opens" on every launch. The session that
+        // follows gives the send minutes of runway.
+        Ok(prepared) => crate::commands::cloud_agent::telemetry::track_launch_outcome_detached(
+            agent.slug(),
+            Some(prepared.created),
+            start.elapsed(),
+        ),
+        // Still awaited: the process is about to exit with this error, and a
+        // spawned task would be dropped before the failure ever reported.
+        Err(e) => {
+            crate::commands::cloud_agent::telemetry::track_launch_outcome(
+                agent.slug(),
+                None,
+                start.elapsed(),
+                Some(&format!("{e:#}")),
+            )
+            .await
+        }
+    }
     result
 }
 
@@ -2292,26 +3252,27 @@ async fn prepare_inner(
     // know whether the agent already holds a credential from a previous run —
     // see `PendingAuth`.
     let pending = match agent {
-        Agent::Codex | Agent::Grok => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                local_signin(agent, home),
-            )
+        Agent::Codex | Agent::Grok | Agent::OpenCode => {
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                local_signin(agent, home)
+            })
             .await?
         }
         Agent::Claude => {
-            ssh_tel::track_for(
-                "cloud_agent_launch",
-                "credential",
-                claude_credentials_cheap(args.refresh_auth),
-            )
+            ssh_tel::timed_for("cloud_agent_launch", "credential", async {
+                claude_credentials_cheap(args.refresh_auth)
+            })
             .await?
         }
         // Nothing to read or mint — the VM already carries its own, and a
         // plain shell has nothing to sign in to.
         Agent::Railway | Agent::Shell => PendingAuth::None,
     };
+    if args.bootstrap_setup && matches!(pending, PendingAuth::MintClaude) {
+        bail!(
+            "Claude sign-in was not cached. Sign in with `railway code --claude`, then retry bootstrap setup."
+        );
+    }
     match pending {
         PendingAuth::Ready { ref source, .. } => progress.note(&format!(
             "Using your {} credential ({source}) on the agent",
@@ -2329,11 +3290,9 @@ async fn prepare_inner(
     // Pack the user's skills before spending a VM: a skills directory that has
     // grown into something unshippable should fail here, not after a create.
     // The upload itself is decided later, against the hash the agent reports.
-    let packed_skills = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "skills_pack",
-        skills_sync::pack(&prefs, home),
-    )
+    let packed_skills = ssh_tel::timed_for("cloud_agent_launch", "skills_pack", async {
+        skills_sync::pack(&prefs, home, &|note| progress.note(note))
+    })
     .await?;
     if let Some(packed) = &packed_skills {
         progress.note(&format!(
@@ -2342,39 +3301,101 @@ async fn prepare_inner(
             packed.source_dir.display()
         ));
     }
+    // The launch directory's project MCP servers travel too — the `.mcp.json`
+    // the repo committed is what "the servers this project's people get"
+    // means. A broken file is said out loud but never blocks the launch: the
+    // file is usually a teammate's commit, and one bad merge upstream must
+    // not take everyone's `railway ca` down with it.
+    let packed_mcp = match std::env::current_dir().map(|cwd| mcp_sync::pack(&prefs, &cwd)) {
+        Ok(Ok(packed)) => packed,
+        Ok(Err(err)) => {
+            if args.bootstrap_setup {
+                return Err(err.context("Could not copy project MCP configuration"));
+            }
+            progress.note(&format!("Skipping MCP import: {err:#}"));
+            None
+        }
+        Err(_) => None,
+    };
+    if let Some(packed) = &packed_mcp {
+        progress.note(&format!(
+            "Including {} MCP servers from the project ({})",
+            packed.names.len(),
+            packed.source_path.display()
+        ));
+    }
 
     // --- Resolve where the agent lives.
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
+    // The SSH key check is independent of where the agent lives, and the waits
+    // inside resolve_agent need its result to probe with — so it runs alongside
+    // target resolution instead of after the agent is already up, where its
+    // round-trip (registered-keys query, plus a register mutation on first run)
+    // was pure added latency. Its own `Configs` because resolve_target holds
+    // the mutable borrow.
     // The project is no longer carried on `Prepared` — its only reader was the
     // launcher's exit hint, which now names the agent instead.
-    let (_project_id, environment_id) = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "resolve_target",
-        resolve_target(&mut configs, &client, args, &mut prefs, home).await,
-    )
-    .await?;
+    let (target_res, identity) = tokio::join!(
+        ssh_tel::timed_for(
+            "cloud_agent_launch",
+            "resolve_target",
+            resolve_target(&mut configs, &client, args, &mut prefs, home),
+        ),
+        ssh_tel::timed_for("cloud_agent_launch", "ssh_key", async {
+            let key_configs = Configs::new()?;
+            // Non-interactive inside the join: resolve_target can be running
+            // its own picker/setup prompts concurrently, and two prompt flows
+            // interleaved on one terminal are gibberish. The rare
+            // needs-registration case retries interactively below, after the
+            // join, when the terminal is free again.
+            crate::commands::ssh::native::ensure_ssh_key_noninteractive(&client, &key_configs).await
+        }),
+    );
+    let launch_target = target_res?;
+    let environment_id = launch_target.environment_id.clone();
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(err) if args.bootstrap_setup => return Err(err),
+        Err(_) => {
+            let key_configs = Configs::new()?;
+            ssh_tel::timed_for(
+                "cloud_agent_launch",
+                "ssh_key_interactive",
+                ensure_ssh_key_quiet(&client, &key_configs),
+            )
+            .await?
+        }
+    };
 
-    let (cloud_agent, created) = ssh_tel::track_for(
+    let relay = ssh_tel::timed_for("cloud_agent_launch", "relay", async { relay_ssh() }).await?;
+    let access = RelayAccess {
+        identity: identity.clone(),
+        relay_opts: relay.opts.clone(),
+    };
+
+    let (cloud_agent, created, probe_master) = ssh_tel::timed_for(
         "cloud_agent_launch",
         "resolve_agent",
-        resolve_agent(&mut configs, &client, args, &environment_id, progress).await,
+        resolve_agent(
+            &mut configs,
+            &client,
+            args,
+            &launch_target,
+            agent,
+            progress,
+            &access,
+        ),
     )
     .await?;
-    configs.set_code_agent(&environment_id, &cloud_agent.id);
-    configs.write()?;
+    if !args.bootstrap_setup {
+        configs.set_code_agent(&environment_id, &cloud_agent.id);
+        configs.write()?;
+    }
 
-    let identity = ssh_tel::track_for(
-        "cloud_agent_launch",
-        "ssh_key",
-        ensure_ssh_key_quiet(&client, &configs).await,
-    )
-    .await?;
     // The relay's cloud-agent grammar; by id rather than name because names are
     // not unique within an environment.
     let target = format!("agent:{environment_id}:{}", cloud_agent.id);
-
-    let relay = ssh_tel::track_for("cloud_agent_launch", "relay", relay_ssh()).await?;
 
     // --- Deferred Claude mint. A setup-token lasts a year and the agent's disk
     // survives sleep, so a reused agent is normally still authenticated; minting
@@ -2388,17 +3409,16 @@ async fn prepare_inner(
             // explicit request to replace whatever is there; neither needs a probe.
             let needs_probe = !created && !args.refresh_auth;
             let inherit = if needs_probe {
-                let probe = ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_probe",
+                let probe = ssh_tel::timed_for("cloud_agent_launch", "claude_probe", async {
                     ssh_plumbing(
                         &target,
                         CLAUDE_CREDENTIAL_PROBE,
                         identity.as_deref(),
                         None,
                         &relay,
-                    ),
-                )
+                        None,
+                    )
+                })
                 .await?;
                 String::from_utf8_lossy(&probe).contains("CRED-PRESENT")
             } else {
@@ -2410,11 +3430,9 @@ async fn prepare_inner(
                 );
                 None
             } else {
-                match ssh_tel::track_for(
-                    "cloud_agent_launch",
-                    "claude_mint",
-                    mint_claude_credentials(),
-                )
+                match ssh_tel::timed_for("cloud_agent_launch", "claude_mint", async {
+                    mint_claude_credentials()
+                })
                 .await?
                 {
                     Some((line, source)) => {
@@ -2435,11 +3453,42 @@ async fn prepare_inner(
     };
 
     // --- Provision: credential (stdin) + reconnect seeds, one script.
-    progress.step("Finalizing Configuration...");
-    let provision = {
+    progress.step(if agent == Agent::Grok {
+        "Updating Grok to the latest stable release"
+    } else {
+        "Finalizing Configuration..."
+    });
+    // One relay handshake per launch: when a readiness probe won the wait, its
+    // marker-verified connection is already a master and both the provision
+    // and the session ride it. When no probe ran (agent already RUNNING, or
+    // the status flip won the race), the provision opens the master instead.
+    // That one is verified only after the fact — the master exists from
+    // connect time, and a marker failure does not tear it down — which is why
+    // ssh_plumbing removes the socket on every failed attempt: no retry (and
+    // no session) can ride a connection whose attempt didn't produce the
+    // marker. See the RelaySsh doc for the history this guards against.
+    let (master_socket, mux_provision) = match probe_master {
+        Some(socket) => {
+            let client_opts = mux_client_opts(&socket);
+            (socket, client_opts)
+        }
+        None => {
+            let socket = mux_socket();
+            let master_opts = mux_master_opts(&socket, "30s");
+            (socket, master_opts)
+        }
+    };
+    let mux_client = mux_client_opts(&master_socket);
+    let provision_relay = {
+        let mut r = relay.clone();
+        r.opts.extend(mux_provision);
+        r
+    };
+    let provision = async {
         let target = target.clone();
         let identity = identity.clone();
-        let relay = relay.clone();
+        let relay = provision_relay.clone();
+        let master_socket = master_socket.clone();
         // Copied out of `args`, which is a borrow the 'static closure can't take.
         let app_mode = args.app_mode;
         let skills_note = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -2450,26 +3499,108 @@ async fn prepare_inner(
                     n.push(line);
                 }
             };
+            let skills_note = |out: &str| {
+                let reason = if out.contains("SKILLS-NO-TAR") {
+                    "the agent has no `tar`"
+                } else if out.contains("SKILLS-EXTRACT-FAILED") {
+                    "the transfer did not unpack"
+                } else {
+                    "the sync did not report success"
+                };
+                format!(
+                    "Couldn't sync your skills onto the agent ({reason}); continuing without them."
+                )
+            };
+            let mcp_note = |out: &str| {
+                let reason = if out.contains("MCP-NO-JQ") {
+                    "the agent has no `jq`"
+                } else if out.contains("MCP-BAD-JSON") {
+                    "the payload did not survive the trip"
+                } else if out.contains("MCP-MERGE-FAILED") {
+                    "a harness config would not merge"
+                } else {
+                    "the sync did not report success"
+                };
+                format!(
+                    "Couldn't sync the project's MCP servers ({reason}); continuing without them."
+                )
+            };
+            // The project's MCP servers, merged add-only into the harness
+            // configs on the agent. Never fatal, same trade as skills: the
+            // agent is fully usable without them.
+            let sync_mcp = |packed: &mcp_sync::PackedMcp| -> Result<()> {
+                let out = ssh_plumbing(
+                    &target,
+                    &mcp_sync::provision_script(&packed.hash),
+                    identity.as_deref(),
+                    Some(&packed.payload),
+                    &relay,
+                    Some(&master_socket),
+                )?;
+                let out = String::from_utf8_lossy(&out);
+                if !out.contains("MCP-OK") {
+                    push(mcp_note(&out));
+                }
+                Ok(())
+            };
+            let check_ready = |out: &str| -> Result<()> {
+                if out.contains("AGENT-READY") {
+                    Ok(())
+                } else if out.contains("AGENT-MISSING") {
+                    bail!(
+                        "`{}` was not found on the agent (PATH: ~/.opencode/bin, ~/.local/bin, ~/.grok/bin, mise shims). The harness could not be prepared; report this with the agent id.",
+                        agent.name()
+                    )
+                } else {
+                    bail!(
+                        "Provisioning produced no status marker — the connection likely dropped mid-script."
+                    )
+                }
+            };
+
+            // A fresh agent cannot already hold the skills, so the two-step
+            // report-then-upload costs a relay round-trip that answers a known
+            // question. Send everything in one connection: the credential
+            // (length-framed) and the tarball share the provision stdin.
+            if created && let Some(packed) = &packed_skills {
+                let (payload, credential_len) = combined_provision_payload(
+                    auth.as_ref().map(|(line, _)| line.as_slice()),
+                    &packed.tarball,
+                );
+                let out = ssh_plumbing(
+                    &target,
+                    &provision_script_with_skills(agent, credential_len, app_mode, &packed.hash),
+                    identity.as_deref(),
+                    Some(&payload),
+                    &relay,
+                    Some(&master_socket),
+                )?;
+                let out = String::from_utf8_lossy(&out);
+                check_ready(&out)?;
+                // Never fatal: the agent is fully usable without skills, and
+                // losing a session over a skills copy would be a worse trade
+                // than launching without one.
+                if !out.contains("SKILLS-OK") {
+                    push(skills_note(&out));
+                }
+                // A fresh agent cannot already hold the MCP set either.
+                if let Some(packed) = &packed_mcp {
+                    sync_mcp(packed)?;
+                }
+                return Ok(());
+            }
+
             let out = ssh_plumbing(
                 &target,
                 &provision_script(agent, auth.is_some(), app_mode),
                 identity.as_deref(),
                 auth.as_ref().map(|(line, _)| line.as_slice()),
                 &relay,
+
+                Some(&master_socket),
             )?;
             let out = String::from_utf8_lossy(&out);
-            if out.contains("AGENT-READY") {
-                // ok
-            } else if out.contains("AGENT-MISSING") {
-                bail!(
-                    "`{}` was not found on the agent (PATH: ~/.local/bin, ~/.opencode/bin, ~/.grok/bin, mise shims). Cloud agents bake every harness, so report this with the agent id rather than retrying.",
-                    agent.name()
-                )
-            } else {
-                bail!(
-                    "Provisioning produced no status marker — the connection likely dropped mid-script."
-                )
-            }
+            check_ready(&out)?;
             // Skills, when the set on the agent isn't already the set on this
             // machine. The hash rides the script above, so an unchanged set
             // costs nothing beyond the round-trip we already made.
@@ -2482,45 +3613,48 @@ async fn prepare_inner(
                         identity.as_deref(),
                         Some(&packed.tarball),
                         &relay,
+
+                        Some(&master_socket),
                     )?;
                     let out = String::from_utf8_lossy(&out);
-                    // Never fatal: the agent is fully usable without them, and
-                    // losing a session over a skills copy would be a worse
-                    // trade than launching without one. Name the marker so a
-                    // report says which step gave up.
                     if !out.contains("SKILLS-OK") {
-                        let reason = if out.contains("SKILLS-NO-TAR") {
-                            "the agent has no `tar`"
-                        } else if out.contains("SKILLS-EXTRACT-FAILED") {
-                            "the transfer did not unpack"
-                        } else {
-                            "the sync did not report success"
-                        };
-                        push(format!(
-                            "Couldn't sync your skills onto the agent ({reason}); continuing without them."
-                        ));
+                        push(skills_note(&out));
                     }
                 }
+            }
+            // MCP by the same hash dance: the marker rode the script above,
+            // so an unchanged `.mcp.json` costs nothing beyond the round-trip
+            // already made.
+            if let Some(packed) = &packed_mcp
+                && mcp_sync::parse_remote_hash(&out).as_deref() != Some(packed.hash.as_str())
+            {
+                sync_mcp(packed)?;
             }
             Ok(())
         })
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
-        for line in skills_note.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let notes = skills_note.lock().unwrap_or_else(|e| e.into_inner());
+        for line in notes.iter() {
             progress.note(line);
+        }
+        if args.bootstrap_setup && !notes.is_empty() {
+            bail!(
+                "Bootstrap configuration sync was incomplete: {}",
+                notes.join("; ")
+            );
         }
         result
     };
-    ssh_tel::track_for("cloud_agent_launch", "provision", provision).await?;
+    ssh_tel::timed_for("cloud_agent_launch", "provision", provision).await?;
 
-    let env_prefix = format!(
-        "{HARNESS_PATH}; [ -f ~/.gh-token ] && export GH_TOKEN=\"$(cat ~/.gh-token)\"; {CLAUDE_ENV_GUARD}; "
-    );
+    let env_prefix = harness_env_prefix();
     let remote_cmd = remote_command(
         agent,
         &env_prefix,
         args.initial_prompt.as_deref(),
+        args.resume_session_id.as_deref(),
         &args.agent_args,
         style,
     );
@@ -2529,7 +3663,14 @@ async fn prepare_inner(
         remote_cmd,
         ssh_target: target,
         identity,
-        relay_opts: relay.opts,
+        relay_opts: {
+            // The session tries the provision connection's master first and
+            // falls back to a plain connection if it's gone (it never sets
+            // ControlMaster, so it can't create one).
+            let mut opts = relay.opts;
+            opts.extend(mux_client);
+            opts
+        },
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
         environment_id,
@@ -2632,6 +3773,7 @@ pub async fn kill_session(environment_id: &str, agent_id: &str, session_name: &s
             info.identity.as_deref(),
             None,
             &relay,
+            None,
         )
     })
     .await??;
@@ -2712,7 +3854,266 @@ pub fn ensure_claude_credential_cached(harness: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::MockBackboard;
     use clap::Parser;
+    use serde_json::json;
+
+    #[test]
+    fn bootstrap_flags_require_a_new_vm_and_survive_tui_retargeting() {
+        let args = LaunchArgs::try_parse_from(["code", "--codex", "--bootstrap", "dev"]).unwrap();
+        assert!(!args.is_bare());
+        let args = args.retargeted("project".into(), "env".into(), "codex", true, None, None);
+        assert_eq!(args.bootstrap.as_deref(), Some("dev"));
+        let mut connect = LaunchArgs::try_parse_from([
+            "code",
+            "--codex",
+            "--bootstrap",
+            "dev",
+            "connect",
+            "existing",
+        ])
+        .unwrap();
+        assert!(
+            connect
+                .prepare_code_launch()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used with connect")
+        );
+        for flags in [
+            vec!["code", "--bootstrap", "dev", "--no-bootstrap"],
+            vec![
+                "code",
+                "--codex",
+                "--agent",
+                "existing",
+                "--bootstrap",
+                "dev",
+            ],
+            vec!["code", "--codex", "--agent", "existing", "--no-bootstrap"],
+        ] {
+            assert!(LaunchArgs::try_parse_from(flags).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_launch_passes_selected_bootstrap_to_create() {
+        for harness in [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::Claude,
+            Agent::Grok,
+            Agent::Railway,
+            Agent::Shell,
+        ] {
+            for (override_name, clean, expected) in [
+                (None, false, Some("default")),
+                (Some("dev"), false, Some("dev")),
+                (None, true, None),
+            ] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                let row = |name| {
+                    json!({"id": name, "name": name, "environmentId": "env", "status": "READY",
+                "failureReason": null, "updatedAt": "2026-09-11T00:00:00Z",
+                "activeVersion": {"sourceCloudAgentId": "codex-source", "checkpoint": {"id": "disk-checkpoint"}}})
+                };
+                configs
+                    .set_agent_bootstrap_default("env", "default", false)
+                    .await
+                    .unwrap();
+                server.stub(
+                    "AgentBootstraps",
+                    json!({"agentBootstraps": [row("default"), row("dev")]}),
+                );
+                server.stub_graphql_error("CloudAgentCreate", "creation reached");
+                let args = LaunchArgs {
+                    new: true,
+                    name: Some("fresh".into()),
+                    bootstrap: override_name.map(str::to_owned),
+                    no_bootstrap: clean,
+                    ..Default::default()
+                }
+                .retargeted(
+                    "project".into(),
+                    "env".into(),
+                    harness.slug(),
+                    true,
+                    None,
+                    None,
+                );
+                let error = resolve_agent(
+                    &mut configs,
+                    &reqwest::Client::new(),
+                    &args,
+                    &names::Target::new(("project".into(), "env".into()), false),
+                    harness,
+                    &CliProgress::default(),
+                    &RelayAccess {
+                        identity: None,
+                        relay_opts: vec![],
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(error.to_string().contains("creation reached"), "{error}");
+                let request = &server.variables_for("CloudAgentCreate")[0]["input"];
+                assert_eq!(request["agentBootstrapId"].as_str(), expected);
+                assert_eq!(request["environmentId"], "env");
+                if clean {
+                    assert!(server.variables_for("AgentBootstraps").is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_setup_does_not_remember_its_temporary_vm() {
+        let server = MockBackboard::spawn();
+        let dir = tempfile::tempdir().unwrap();
+        let mut configs = server.configs(&dir);
+        configs.set_code_agent("env", "existing");
+        configs.write().unwrap();
+        server.stub("CloudAgent", json!({"cloudAgent": {"id": "setup", "name": "setup", "status": "RUNNING", "projectId": "project", "environmentId": "env", "createdAt": "2026-09-11T00:00:00Z"}}));
+        let args = LaunchArgs {
+            agent_id: Some("setup".into()),
+            bootstrap_setup: true,
+            app_mode: true,
+            ..Default::default()
+        };
+        let (agent, created, _) = resolve_agent(
+            &mut configs,
+            &reqwest::Client::new(),
+            &args,
+            &names::Target::new(("project".into(), "env".into()), false),
+            Agent::Railway,
+            &CliProgress::default(),
+            &RelayAccess {
+                identity: None,
+                relay_opts: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent.id, "setup");
+        assert!(!created);
+        configs.reload().unwrap();
+        assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+    }
+
+    #[tokio::test]
+    async fn an_unusable_selected_vm_is_never_replaced() {
+        for selection in ["explicit", "remembered", "sole"] {
+            for status in [
+                "FAILED",
+                "CRASHED",
+                "DELETING",
+                "FUTURE_STATE",
+                "missing",
+                "lookup_error",
+            ] {
+                let server = MockBackboard::spawn();
+                let dir = tempfile::tempdir().unwrap();
+                let mut configs = server.configs(&dir);
+                let mut args = LaunchArgs::default();
+                if selection == "explicit" {
+                    args.agent_id = Some("existing".into());
+                } else if selection == "remembered" {
+                    configs.set_code_agent("env", "existing");
+                }
+                configs.write().unwrap();
+                let saved = std::fs::read(dir.path().join("config.json")).unwrap();
+                let node = json!({
+                    "id": "existing", "name": "my-agent", "status": status,
+                    "projectId": "project", "environmentId": "env",
+                    "createdAt": "2026-09-10T00:00:00Z"
+                });
+                server.stub("CloudAgents", json!({"cloudAgents": [node.clone()]}));
+                match status {
+                    "missing" => server.stub("CloudAgent", json!({"cloudAgent": null})),
+                    "lookup_error" => {
+                        server.stub_graphql_error("CloudAgent", "temporarily unavailable")
+                    }
+                    _ => server.stub("CloudAgent", json!({"cloudAgent": node})),
+                }
+                let error = resolve_agent(
+                    &mut configs,
+                    &reqwest::Client::new(),
+                    &args,
+                    &names::Target::new(("project".into(), "env".into()), false),
+                    Agent::Claude,
+                    &CliProgress::default(),
+                    &RelayAccess {
+                        identity: None,
+                        relay_opts: vec![],
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    !error.to_string().contains("no scripted response"),
+                    "{selection}/{status}: {error}"
+                );
+                let operations: Vec<_> = server
+                    .requests()
+                    .iter()
+                    .map(|r| r["operationName"].as_str().unwrap().to_owned())
+                    .collect();
+                let expected = if selection == "sole" {
+                    vec!["CloudAgents", "CloudAgent"]
+                } else {
+                    vec!["CloudAgent"]
+                };
+                assert_eq!(operations, expected, "{selection}/{status}");
+                assert_eq!(
+                    std::fs::read(dir.path().join("config.json")).unwrap(),
+                    saved
+                );
+                if selection == "remembered" {
+                    assert_eq!(configs.get_code_agent("env").as_deref(), Some("existing"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_is_reached_only_for_new_or_an_empty_inventory() {
+        for new in [false, true] {
+            let server = MockBackboard::spawn();
+            let dir = tempfile::tempdir().unwrap();
+            let mut configs = server.configs(&dir);
+            if new {
+                configs.set_code_agent("env", "existing");
+            }
+            server.stub("CloudAgents", json!({"cloudAgents": []}));
+            // Stop at creation so the test never opens SSH or provisions a VM.
+            server.stub_graphql_error("CloudAgentCreate", "creation reached");
+            let args = LaunchArgs {
+                new,
+                name: Some("fresh-agent".into()),
+                ..Default::default()
+            };
+            let error = resolve_agent(
+                &mut configs,
+                &reqwest::Client::new(),
+                &args,
+                &names::Target::new(("project".into(), "env".into()), false),
+                Agent::Claude,
+                &CliProgress::default(),
+                &RelayAccess {
+                    identity: None,
+                    relay_opts: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("creation reached"), "{error}");
+            assert_eq!(server.variables_for("CloudAgentCreate").len(), 1);
+            assert!(server.variables_for("CloudAgent").is_empty());
+            assert_eq!(server.variables_for("CloudAgents").len(), usize::from(!new));
+        }
+    }
 
     /// The shapes someone types at a prompt open in the pane. Nothing about a
     /// target, a harness or a variable changes that — they all describe a
@@ -2836,11 +4237,525 @@ mod tests {
     }
 
     #[test]
+    fn interactive_client_starts_use_the_loading_pane() {
+        for flag in ["--codex", "--opencode", "--railway"] {
+            for extra in [vec![], vec!["--agent", "my-box", "--dir", "/app/project"]] {
+                let mut args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                let action = args.prepare_code_launch().unwrap().unwrap();
+                assert!(args.client_starts_in_pane(&action, true), "{flag}");
+                assert!(!args.client_starts_in_pane(&action, false), "piped {flag}");
+                assert!(!args.client_starts_in_pane(&ClientAction::Connect(None), true));
+                assert!(!args.client_starts_in_pane(&ClientAction::DesktopOnly, true));
+                assert!(!args.client_starts_in_pane(&ClientAction::Remote, true));
+                args.connection_json = true;
+                assert!(!args.client_starts_in_pane(&action, true), "JSON {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn code_harness_launches_create_new_agents_by_default() {
+        for flag in ["--codex", "--opencode", "--claude", "--grok", "--railway"] {
+            for extra in [
+                vec![],
+                vec!["--new"],
+                vec![
+                    "--name",
+                    "my-box",
+                    "--variable",
+                    "K=V",
+                    "--env-file",
+                    ".env",
+                ],
+                vec!["--", "exec", "explain this codebase"],
+            ] {
+                let argv = [vec!["code", flag], extra].concat();
+                let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+                args.prepare_code_launch().unwrap();
+                assert!(args.new, "{argv:?} must create a fresh VM");
+            }
+        }
+        for argv in [
+            vec!["code", "--codex", "remote"],
+            vec!["code", "--opencode", "remote"],
+            vec!["code", "--codex", "desktop-only"],
+            vec!["code", "--codex", "--connection-json"],
+            vec!["code", "--opencode", "--connection-json"],
+            vec!["code", "--codex", "desktop-only", "--connection-json"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert!(args.prepare_code_launch().unwrap().is_some());
+            assert!(args.new, "{argv:?} must create a fresh VM");
+        }
+    }
+
+    #[test]
+    fn code_connect_and_explicit_targets_do_not_request_new_agents() {
+        for flag in ["--codex", "--opencode", "--railway"] {
+            for (extra, selector) in [
+                (vec!["connect"], None),
+                (vec!["connect", "my-box"], Some("my-box".to_string())),
+                (
+                    vec!["connect", "--agent", "my-box"],
+                    Some("my-box".to_string()),
+                ),
+            ] {
+                let mut args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                assert_eq!(
+                    args.prepare_code_launch().unwrap(),
+                    Some(ClientAction::Connect(selector))
+                );
+                assert!(!args.new, "connect must never create a VM");
+            }
+            for extra in [vec![], vec!["remote"]] {
+                let mut args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--agent", "my-box"], extra].concat(),
+                )
+                .unwrap();
+                args.prepare_code_launch().unwrap();
+                assert!(!args.new);
+                assert_eq!(args.remote_agent.as_deref(), Some("my-box"));
+            }
+            let mut args = LaunchArgs::try_parse_from(["code", flag, "connect", "--new"]).unwrap();
+            assert!(args.prepare_code_launch().is_err());
+        }
+        let mut args =
+            LaunchArgs::try_parse_from(["code", "--codex", "desktop-only", "--agent", "my-box"])
+                .unwrap();
+        assert_eq!(
+            args.prepare_code_launch().unwrap(),
+            Some(ClientAction::DesktopOnly)
+        );
+        assert!(!args.new);
+    }
+
+    #[test]
+    fn bare_code_creates_a_new_vm_with_the_railway_client() {
+        for argv in [
+            vec!["code"],
+            vec!["code", "--new"],
+            vec!["code", "--project", "demo"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert_eq!(
+                args.prepare_code_launch().unwrap(),
+                Some(ClientAction::Local)
+            );
+            assert!(args.railway);
+            assert!(args.new);
+        }
+        for argv in [
+            vec!["code", "connect", "my-box"],
+            vec!["code", "--agent", "my-box"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            args.prepare_code_launch().unwrap();
+            assert!(args.railway);
+            assert!(!args.new);
+        }
+    }
+
+    #[test]
+    fn code_creation_default_preserves_removal_and_ca_launches() {
+        for argv in [
+            vec!["code", "--rm"],
+            vec!["code", "--codex", "--rm"],
+            vec!["code", "--claude", "--rm"],
+        ] {
+            let mut args = LaunchArgs::try_parse_from(&argv).unwrap();
+            assert_eq!(args.prepare_code_launch().unwrap(), None);
+            assert!(!args.new, "{argv:?} must retain its existing behavior");
+        }
+        let mut args = LaunchArgs::try_parse_from(["code", "--new"]).unwrap();
+        args.prepare_code_launch().unwrap();
+        assert!(args.new);
+
+        // CA's shared flags and targeted session launches bypass the public
+        // code command policy, so an existing machine remains the target.
+        let args = LaunchArgs::try_parse_from(["ca", "--codex"]).unwrap();
+        assert!(!args.new);
+        let args = LaunchArgs::for_target(
+            "project".into(),
+            "environment".into(),
+            "codex",
+            false,
+            None,
+            Some("existing-agent".into()),
+        );
+        assert!(!args.new);
+        assert_eq!(args.agent_id.as_deref(), Some("existing-agent"));
+    }
+
+    #[test]
+    fn connection_json_only_accepts_server_connection_actions() {
+        for flag in ["--codex", "--opencode", "--railway"] {
+            for extra in [vec![], vec!["connect", "box"], vec!["--new"]] {
+                let args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--connection-json"], extra].concat(),
+                )
+                .unwrap();
+                assert!(args.connection_json);
+                assert!(args.client_action().unwrap().is_some());
+            }
+            for extra in [vec!["remote"], vec!["--rm"], vec!["--", "run", "hello"]] {
+                let args = LaunchArgs::try_parse_from(
+                    [vec!["code", flag, "--connection-json"], extra].concat(),
+                )
+                .unwrap();
+                assert!(args.client_action().is_err());
+            }
+        }
+        assert!(LaunchArgs::try_parse_from(["code", "--connection-json"]).is_err());
+    }
+
+    #[test]
+    fn codex_desktop_only_accepts_backend_setup_flags_and_json() {
+        for argv in [
+            vec!["code", "--codex", "desktop-only"],
+            vec![
+                "code",
+                "--codex",
+                "desktop-only",
+                "--agent",
+                "box",
+                "--dir",
+                "/app/project",
+            ],
+            vec![
+                "code",
+                "--codex",
+                "--new",
+                "desktop-only",
+                "--name",
+                "desktop-box",
+                "--variable",
+                "A=B",
+                "--env-file",
+                ".env",
+            ],
+            vec![
+                "code",
+                "--codex",
+                "--connection-json",
+                "desktop-only",
+                "-p",
+                "project",
+                "-e",
+                "env",
+            ],
+        ] {
+            let args = LaunchArgs::try_parse_from(argv).unwrap();
+            assert_eq!(
+                args.client_action().unwrap(),
+                Some(ClientAction::DesktopOnly)
+            );
+            assert!(!args.pane_shaped());
+        }
+    }
+
+    #[test]
+    fn desktop_only_rejects_other_harnesses_and_session_arguments() {
+        for argv in [
+            vec!["code", "desktop-only"],
+            vec!["code", "--opencode", "desktop-only"],
+            vec!["code", "--grok", "desktop-only"],
+            vec!["code", "--claude", "desktop-only"],
+            vec!["code", "--codex", "--claude", "desktop-only"],
+            vec!["code", "--codex", "desktop-only", "box"],
+            vec!["code", "--codex", "desktop-only", "connect"],
+            vec!["code", "--codex", "desktop-only", "--rm"],
+            vec!["code", "--codex", "desktop-only", "--dir", " "],
+        ] {
+            let args = LaunchArgs::try_parse_from(argv).unwrap();
+            assert!(args.client_action().is_err(), "{args:?}");
+        }
+        let mut args = LaunchArgs::try_parse_from(["code", "--codex", "desktop-only"]).unwrap();
+        args.initial_prompt = Some("run tests".into());
+        assert!(args.client_action().is_err());
+    }
+
+    #[test]
+    fn client_actions_separate_local_clients_from_cloud_terminal_sessions() {
+        for flag in ["--codex", "--opencode", "--railway"] {
+            let local =
+                LaunchArgs::try_parse_from(["code", flag, "--new", "--dir", "/app/project"])
+                    .unwrap();
+            assert_eq!(local.client_action().unwrap(), Some(ClientAction::Local));
+            for argv in [
+                vec!["code", flag, "remote", "--new"],
+                vec!["code", flag, "--new", "remote"],
+            ] {
+                let mut remote = LaunchArgs::try_parse_from(argv).unwrap();
+                assert_eq!(remote.client_action().unwrap(), Some(ClientAction::Remote));
+                remote.agent_args.clear();
+                assert!(remote.pane_shaped());
+            }
+            for (extra, expected) in [
+                (vec!["connect"], None),
+                (vec!["connect", "my-box"], Some("my-box".to_string())),
+                (
+                    vec!["connect", "--agent", "my-box"],
+                    Some("my-box".to_string()),
+                ),
+            ] {
+                let args =
+                    LaunchArgs::try_parse_from([vec!["code", flag], extra].concat()).unwrap();
+                assert_eq!(
+                    args.client_action().unwrap(),
+                    Some(ClientAction::Connect(expected))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_rejects_ambiguous_or_destructive_client_actions() {
+        for argv in [
+            vec!["code", "--codex", "--opencode", "connect"],
+            vec!["code", "--codex", "connect", "--new"],
+            vec!["code", "--codex", "remote", "--dir", "/app"],
+            vec!["code", "remote"],
+            vec!["code", "--opencode", "remote", "extra"],
+            vec!["code", "--opencode", "remote", "--rm"],
+            vec!["code", "--opencode", "remote", "--dir", "/app"],
+            vec!["code", "--opencode", "connect", "--new"],
+            vec!["code", "--opencode", "connect", "box", "--agent", "other"],
+            vec!["code", "--opencode", "connect", "box", "extra"],
+            vec!["code", "--opencode", "connect", "--variable", "A=B"],
+            vec!["code", "--opencode", "--dir", " "],
+        ] {
+            assert!(
+                LaunchArgs::try_parse_from(argv)
+                    .unwrap()
+                    .client_action()
+                    .is_err()
+            );
+        }
+        assert!(
+            LaunchArgs::try_parse_from(["code", "--opencode", "--new", "--agent", "box"]).is_err()
+        );
+        // The old `--opencode2` edition flag no longer exists.
+        assert!(LaunchArgs::try_parse_from(["code", "--opencode2"]).is_err());
+        assert_eq!(
+            LaunchArgs::try_parse_from(["code", "--opencode", "--rm"])
+                .unwrap()
+                .client_action()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_is_one_v2_harness_without_an_upgrade_verb() {
+        let home = tempfile::tempdir().unwrap();
+        let mut prefs = AgentPrefs::default();
+        let args = LaunchArgs::try_parse_from(["code", "--opencode", "--connection-json"]).unwrap();
+        assert_eq!(
+            resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
+            Agent::OpenCode
+        );
+        assert_eq!(args.client_action().unwrap(), Some(ClientAction::Local));
+        // `upgrade` was the V1-to-V2 migration verb; it is now an ordinary
+        // agent argument, so it is not a client action.
+        let upgrade =
+            LaunchArgs::try_parse_from(["code", "--opencode", "upgrade", "old-box"]).unwrap();
+        assert_eq!(upgrade.client_action().unwrap(), None);
+    }
+
+    #[test]
+    fn code_endpoint_creation_is_typed_and_ports_are_validated() {
+        let mut args = LaunchArgs::try_parse_from(["code", "--opencode", "--new"]).unwrap();
+        // Merely selecting a harness (e.g. for an SSH session) does not expose it.
+        assert!(create_code_endpoint(&args).is_none());
+        args.code_endpoint = true;
+        assert!(create_code_endpoint(&args).unwrap().port.is_none());
+        args.code_port = Some(5000);
+        assert_eq!(create_code_endpoint(&args).unwrap().port, Some(5000));
+        args.boot_variables
+            .insert("OPENCODE_SERVER_USERNAME".into(), "opencode".into());
+        let variables = create_variables(&args).unwrap().unwrap();
+        assert!(variables.get("RAILWAY_CODE_PORT").is_none());
+        assert_eq!(variables["OPENCODE_SERVER_USERNAME"], "opencode");
+        assert_eq!(variables["SHELL"], "/bin/bash");
+        for port in ["0", "1023", "8080", "8790", "65536", "nope"] {
+            assert!(LaunchArgs::try_parse_from(["code", "--new", "--code-port", port]).is_err());
+        }
+        assert!(LaunchArgs::try_parse_from(["code", "--new", "--code-port", "5000"]).is_ok());
+        assert!(LaunchArgs::try_parse_from(["code", "--code-port", "5000"]).is_err());
+    }
+
+    #[test]
+    fn explicit_harness_passthrough_keeps_flags_owned_by_the_harness() {
+        let args = LaunchArgs::try_parse_from([
+            "code",
+            "--opencode",
+            "--",
+            "run",
+            "--server",
+            "https://server.example",
+            "--dir",
+            "/project",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.agent_args,
+            [
+                "run",
+                "--server",
+                "https://server.example",
+                "--dir",
+                "/project"
+            ]
+        );
+        assert_eq!(args.client_action().unwrap(), None);
+        assert_eq!(args.remote_dir, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn grok_update_verifies_success_and_blocks_stale_or_failed_launches() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let current = r#"{"currentVersion":"1.2.3","latestVersion":"1.2.3","channel":"stable","updateAvailable":false,"error":null}"#;
+        for (exit_code, status, success) in [
+            (0, current, true),
+            (1, current, false),
+            (
+                0,
+                r#"{"currentVersion":"1.2.2","latestVersion":"1.2.3","channel":"stable","updateAvailable":false}"#,
+                false,
+            ),
+            (
+                0,
+                r#"{"currentVersion":"1.2.3","latestVersion":null,"channel":"stable","updateAvailable":false}"#,
+                false,
+            ),
+            (0, "not json", false),
+        ] {
+            // A shell function supplies the official CLI's responses without
+            // downloading or modifying any real runtime/configuration.
+            let script = format!(
+                r#"
+grok() {{
+    [ -z "$(cat)" ] || return 90
+    case "$*" in
+        'update --stable') return {exit_code} ;;
+        'update --check --json') printf '%s' "$TEST_GROK_STATUS" ;;
+        *) return 91 ;;
+    esac
+}}
+{GROK_UPDATE}
+printf 'AGENT-READY\n'
+cat
+"#
+            );
+            let mut child = Command::new("sh")
+                .args(["-c", &script])
+                .env("TEST_GROK_STATUS", status)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"untouched input")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if success {
+                assert_eq!(output.stdout, b"AGENT-READY\nuntouched input");
+            } else {
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("AGENT-READY"));
+            }
+        }
+        for script in [
+            provision_script(Agent::Grok, true, false),
+            provision_script(Agent::Grok, false, false),
+            provision_script_with_skills(Agent::Grok, Some(42), false, "hash"),
+            provision_script_with_skills(Agent::Grok, None, false, "hash"),
+        ] {
+            assert!(script.find(GROK_UPDATE).unwrap() < script.find("echo AGENT-READY").unwrap());
+        }
+    }
+
+    #[test]
+    fn opencode_launch_uses_the_image_runtime_and_retires_the_shim() {
+        // The historical `opencode2` slug still selects the one OpenCode.
+        let args = LaunchArgs::for_app_mode("opencode2", None, None);
+        assert!(args.opencode);
+        assert_eq!(
+            resolve_agent_choice(&args, &mut AgentPrefs::default(), Path::new("/tmp")).unwrap(),
+            Agent::OpenCode
+        );
+        let script = provision_script(Agent::OpenCode, false, true);
+        assert!(script.contains("command -v opencode >/dev/null"));
+        assert!(!script.contains("command -v opencode2"));
+        // No shim is written; the one earlier releases seeded is removed.
+        assert!(!script.contains("> ~/.local/bin/opencode2"));
+        assert!(script.contains("rm -f ~/.local/bin/opencode2"));
+        // Nothing is installed on the VM: an old image fails with the message.
+        assert!(!script.contains("opencode.ai"));
+        assert!(script.contains(crate::commands::cloud_agent::opencode::OLD_IMAGE_MESSAGE));
+        let command = remote_command(
+            Agent::OpenCode,
+            "",
+            Some("explain this project"),
+            None,
+            &[],
+            SessionStyle::Pane,
+        );
+        assert!(command.contains("opencode --standalone --prompt 'explain this project'"));
+        assert!(!command.contains("opencode2"));
+    }
+
+    #[test]
+    fn opencode_desktop_provisioning_overrides_a_saved_default() {
+        let home = tempfile::tempdir().unwrap();
+        let args = LaunchArgs::for_app_mode("opencode", None, None);
+        let mut prefs = AgentPrefs {
+            agent: Some("claude".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_agent_choice(&args, &mut prefs, home.path()).unwrap(),
+            Agent::OpenCode
+        );
+        assert!(!args.is_bare());
+        let script = provision_script(Agent::OpenCode, false, args.app_mode);
+        assert!(script.contains("touch ~/.railway-app-mode"));
+        assert!(script.contains("command -v opencode"));
+        assert!(!script.contains("$opencode_data/auth.json"));
+        let command = remote_command(
+            Agent::OpenCode,
+            "",
+            Some("explain this project"),
+            None,
+            &[],
+            SessionStyle::Pane,
+        );
+        assert!(
+            command.contains("opencode --standalone --prompt 'explain this project'"),
+            "{command}"
+        );
+    }
+
+    #[test]
     fn an_unauthenticated_launch_still_provisions_the_agent() {
         // The credential seed is the only thing the fallback drops: no
         // `cat >` truncating a file we have nothing to write to, and every
         // reconnect seed and readiness marker still there.
-        for agent in [Agent::Codex, Agent::Claude, Agent::Grok] {
+        for agent in [Agent::Codex, Agent::Claude, Agent::Grok, Agent::OpenCode] {
             let script = provision_script(agent, false, false);
             assert!(!script.contains("cat > ~/"), "{script}");
             assert!(script.contains("railway-code agent autostart"));
@@ -2892,11 +4807,8 @@ mod tests {
             assert!(!script.contains("cd \"$HOME\""));
             assert!(!script.contains("cd ~"));
 
-            // Cloud agent VMs bake every harness and reconcile its config at
-            // boot, so this script must install nothing and configure nothing:
-            // touching those files fights express-agent for ownership, and
-            // installing races the image's own copy. These assertions are the
-            // guard on that boundary, not incidental.
+            // Updates use the harness's own updater. Configuration and system
+            // package installation stay owned by the image/reconciler.
             assert!(!script.contains("npm install"));
             assert!(!script.contains("install.sh"));
             assert!(!script.contains("apt-get"));
@@ -2920,8 +4832,73 @@ mod tests {
             );
             assert!(guard.contains(".claude-code-env"), "{guard}");
         }
-        assert!(COMMON_SEED.contains("railway-code agent autostart v4"));
+        assert!(COMMON_SEED.contains("railway-code agent autostart v5"));
         assert!(COMMON_SEED.contains("sed -i '/# railway-code agent autostart/,/^fi$/d'"));
+    }
+
+    // Provisioning runs on Linux VMs and uses GNU sed's `-i` syntax.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autostart_upgrades_existing_profiles_and_trusts_only_grok() {
+        let home = tempfile::tempdir().unwrap();
+        let profile_path = home.path().join(".profile");
+        let before = "# user profile before\n";
+        let after = "# user profile after\n";
+        std::fs::write(
+            &profile_path,
+            format!(
+                "{before}# railway-code agent autostart v4\nif true; then\n  old-agent\nfi\n{after}"
+            ),
+        )
+        .unwrap();
+        // Skip only the system COLORTERM seed; exercise the actual profile
+        // migration against an isolated home, never this machine's config.
+        let seed = COMMON_SEED.split_once('\n').unwrap().1;
+        let mut profile = String::new();
+        for attempt in 0..2 {
+            let output = std::process::Command::new("sh")
+                .args(["-c", seed])
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let updated = std::fs::read_to_string(&profile_path).unwrap();
+            assert!(updated.starts_with(&format!("{before}{after}")));
+            assert!(!updated.contains("old-agent"));
+            assert!(!updated.contains("autostart v4"));
+            assert_eq!(updated.matches("autostart v5").count(), 1);
+            if attempt > 0 {
+                assert_eq!(updated, profile, "re-provisioning must be idempotent");
+            }
+            profile = updated;
+        }
+
+        // Simulate the interactive terminal check, keeping the actual agent
+        // selection, app-mode guard, and launch arguments unchanged.
+        let profile = profile.replace("[ -t 1 ]", "true");
+        for agent in ["grok", "claude"] {
+            std::fs::write(home.path().join(".railway-code-agent"), agent).unwrap();
+            for disabled in [false, true] {
+                let script = format!(
+                    "{agent}() {{ printf 'START:{agent}'; for arg do printf '<%s>' \"$arg\"; done; printf '\\n'; }};\n{profile}"
+                );
+                let output = std::process::Command::new("sh")
+                    .args(["-c", &script])
+                    .env("HOME", home.path())
+                    .env("RAILWAY_CODE_AUTOSTARTED", if disabled { "1" } else { "" })
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                if disabled {
+                    assert!(stdout.is_empty());
+                } else if agent == "grok" {
+                    assert!(stdout.starts_with("START:grok<--trust><--always-approve>\n"));
+                } else {
+                    assert!(stdout.starts_with("START:claude\n"));
+                }
+            }
+        }
     }
 
     /// `railway ca desktop` hands the login shell to an external app, so the
@@ -3003,6 +4980,97 @@ mod tests {
         assert!(script.contains("AGENT-READY"));
     }
 
+    /// The combined fresh-agent script shares one stdin between the credential
+    /// and the skills tarball, so the credential read must be length-framed —
+    /// a `cat >` seed would swallow the tarball too.
+    #[test]
+    fn combined_provision_frames_the_credential() {
+        let script = provision_script_with_skills(Agent::Claude, Some(42), false, "abc123");
+        assert!(
+            script.contains("head -c 42 > ~/.claude-code-env"),
+            "{script}"
+        );
+        assert!(!script.contains("cat > ~/.claude-code-env"), "{script}");
+        // The tarball is the rest of the stream, saved before anything can bail.
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("'abc123'"), "{script}");
+    }
+
+    /// The sync block's degradation paths `exit 0`, so the launch's own status
+    /// marker must already be printed by the time it runs — AGENT-READY before
+    /// the tar check, or a skills failure would read as a dropped connection.
+    #[test]
+    fn combined_provision_reports_ready_before_skills() {
+        let script = provision_script_with_skills(Agent::Claude, Some(10), false, "h");
+        let ready = script.find("AGENT-READY").expect("ready marker");
+        let sync = script.find("command -v tar").expect("sync block");
+        assert!(ready < sync, "{script}");
+        // The credential must be consumed before the payload drain, or the
+        // tarball's first bytes land in the credential file.
+        let cred = script.find("head -c 10").expect("framed credential");
+        let drain = script.find(r#"cat > "$payload""#).expect("payload drain");
+        assert!(cred < drain, "{script}");
+    }
+
+    /// No credential to write (sign-in deferred to the agent): stdin is the
+    /// tarball alone, and nothing tries to read a credential off it.
+    #[test]
+    fn combined_provision_without_credential_reads_only_the_tarball() {
+        let script = provision_script_with_skills(Agent::Claude, None, false, "h");
+        assert!(!script.contains("head -c"), "{script}");
+        assert!(script.contains(r#"cat > "$payload""#), "{script}");
+        assert!(script.contains("AGENT-READY"), "{script}");
+    }
+
+    /// The byte-framing contract behind `head -c`: the length the script reads
+    /// must be exactly the credential bytes at the front of the stream, with
+    /// the tarball intact behind them. Anyone who re-encodes the credential or
+    /// appends a newline breaks both at once — this test is what catches them.
+    #[test]
+    fn combined_payload_framing_splits_back_exactly() {
+        let credential = b"CLAUDE_CODE_OAUTH_TOKEN=tok-123\n";
+        let tarball = [0x1f, 0x8b, 0x08, 0x00, 0x42];
+        let (payload, len) = combined_provision_payload(Some(credential), &tarball);
+        let len = len.expect("credential present");
+        assert_eq!(&payload[..len], credential);
+        assert_eq!(&payload[len..], &tarball);
+        // And the script consumes exactly that many bytes.
+        let script = provision_script_with_skills(Agent::Claude, Some(len), false, "h");
+        assert!(script.contains(&format!("head -c {len} ")), "{script}");
+
+        let (payload, len) = combined_provision_payload(None, &tarball);
+        assert!(len.is_none());
+        assert_eq!(payload, tarball);
+    }
+
+    /// UUIDs are trusted as launch targets; anything else still resolves.
+    #[test]
+    fn uuid_shapes() {
+        assert!(is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf0356"));
+        assert!(is_uuid("DDCBA2F8-A773-4929-BFBD-52450CDF0356"));
+        assert!(!is_uuid("production"));
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035")); // 35 chars
+        assert!(!is_uuid("ddcba2f8-a773-4929-bfbd-52450cdf035g")); // non-hex
+        assert!(!is_uuid("ddcba2f8_a773_4929_bfbd_52450cdf0356")); // separators
+    }
+
+    /// Multiplexing degrades to plain connections rather than erroring where
+    /// it cannot work: Windows, and socket paths past the unix limit.
+    #[test]
+    fn mux_gating() {
+        let short = std::path::Path::new("/tmp/railway-cm-1-abc.sock");
+        if cfg!(windows) {
+            assert!(mux_master_opts(short, "10s").is_empty());
+            assert!(mux_client_opts(short).is_empty());
+        } else {
+            assert!(!mux_master_opts(short, "10s").is_empty());
+            assert!(!mux_client_opts(short).is_empty());
+            let long = std::path::PathBuf::from(format!("/{}/cm.sock", "x".repeat(120)));
+            assert!(mux_master_opts(&long, "10s").is_empty());
+            assert!(mux_client_opts(&long).is_empty());
+        }
+    }
+
     /// The shell option starts nothing and changes nothing: no credential, no
     /// autostart retarget — reconnects keep dropping into whatever agent a
     /// previous launch recorded — and the session is one login shell, with any
@@ -3018,6 +5086,7 @@ mod tests {
                 Agent::Shell,
                 "P; ",
                 prompt,
+                None,
                 &args,
                 SessionStyle::FullTerminal,
             );
@@ -3054,6 +5123,7 @@ mod tests {
             Agent::Claude,
             Agent::Codex,
             Agent::Grok,
+            Agent::OpenCode,
             Agent::Railway,
             Agent::Shell,
         ] {
@@ -3076,9 +5146,75 @@ mod tests {
         let script = provision_script(Agent::Claude, true, false);
         assert!(script.contains(skills_sync::REMOTE_HASH_MARKER));
         assert!(script.contains(skills_sync::REMOTE_HASH_FILE));
+        // The MCP set rides the same connection, by the same dance.
+        assert!(script.contains(mcp_sync::REMOTE_HASH_MARKER));
+        assert!(script.contains(mcp_sync::REMOTE_HASH_FILE));
         // An agent that has never synced prints an empty value rather than
         // failing the script — the marker parser treats that as "no hash".
         assert!(script.contains("2>/dev/null || true"));
+    }
+
+    /// Every generated provision script is valid POSIX shell. `sh -n` parses
+    /// without executing, so this catches a broken heredoc, an unbalanced
+    /// quote, or a mangled format! escape in ANY variant before a VM does —
+    /// including the skills and MCP follow-up scripts.
+    #[cfg(unix)]
+    #[test]
+    fn every_generated_provision_script_parses_as_shell() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut scripts: Vec<(String, String)> = Vec::new();
+        for agent in [
+            Agent::Codex,
+            Agent::Claude,
+            Agent::Grok,
+            Agent::OpenCode,
+            Agent::Railway,
+            Agent::Shell,
+        ] {
+            for write_credential in [true, false] {
+                for app_mode in [true, false] {
+                    scripts.push((
+                        format!("provision {agent:?} cred={write_credential} app={app_mode}"),
+                        provision_script(agent, write_credential, app_mode),
+                    ));
+                }
+            }
+            scripts.push((
+                format!("provision+skills {agent:?}"),
+                provision_script_with_skills(agent, Some(42), false, "deadbeef"),
+            ));
+        }
+        scripts.push((
+            "skills follow-up".into(),
+            skills_sync::provision_script("deadbeef"),
+        ));
+        scripts.push((
+            "mcp follow-up".into(),
+            mcp_sync::provision_script("deadbeef"),
+        ));
+
+        for (label, script) in scripts {
+            let mut child = Command::new("sh")
+                .arg("-n")
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "`{label}` is not valid shell:\n{}\n--- script ---\n{script}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     /// The TUI's prompt box and `-- exec …` must not collapse into the same
@@ -3093,6 +5229,7 @@ mod tests {
             Agent::Claude,
             "P; ",
             Some("fix the tests"),
+            None,
             &[],
             FullTerminal,
         );
@@ -3100,13 +5237,14 @@ mod tests {
         assert!(seeded.ends_with("exec bash -l"));
         assert!(!seeded.contains("exec claude"));
 
-        let interactive = remote_command(Agent::Claude, "P; ", None, &[], FullTerminal);
+        let interactive = remote_command(Agent::Claude, "P; ", None, None, &[], FullTerminal);
         assert!(interactive.contains("claude;"), "{interactive}");
         assert!(interactive.ends_with("exec bash -l"));
 
         let scripted = remote_command(
             Agent::Codex,
             "P; ",
+            None,
             None,
             &["exec".into(), "explain this".into()],
             FullTerminal,
@@ -3118,10 +5256,178 @@ mod tests {
         assert!(!scripted.contains("bash -l"));
 
         // A prompt of only whitespace is not a prompt.
-        let blank = remote_command(Agent::Grok, "P; ", Some("   "), &[], FullTerminal);
+        let blank = remote_command(Agent::Grok, "P; ", Some("   "), None, &[], FullTerminal);
         assert_eq!(
             blank,
-            remote_command(Agent::Grok, "P; ", None, &[], FullTerminal)
+            remote_command(Agent::Grok, "P; ", None, None, &[], FullTerminal)
+        );
+
+        // Railway's TUI runs in-process, or the shared daemon would join
+        // every new session onto the directory's live conversation — and
+        // steer a seeded prompt into it.
+        let railway = remote_command(
+            Agent::Railway,
+            "P; ",
+            Some("fix the tests"),
+            None,
+            &[],
+            FullTerminal,
+        );
+        assert!(
+            railway.contains(
+                "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\" 'fix the tests';"
+            ),
+            "{railway}"
+        );
+        let railway_bare = remote_command(Agent::Railway, "P; ", None, None, &[], FullTerminal);
+        assert!(
+            railway_bare.contains(
+                "railway-agent-tui --session \"${RAILWAY_DURABLE_SESSION_NAME:-railway-adhoc-$$}\";"
+            ),
+            "{railway_bare}"
+        );
+        // The exec form's args are the caller's, flags included.
+        let railway_exec = remote_command(
+            Agent::Railway,
+            "P; ",
+            None,
+            None,
+            &["--continue".into()],
+            FullTerminal,
+        );
+        assert!(
+            railway_exec.contains("exec railway-agent-tui --continue"),
+            "{railway_exec}"
+        );
+        assert!(!railway_exec.contains("--session"), "{railway_exec}");
+    }
+
+    #[test]
+    fn grok_trust_flags_preserve_explicit_arguments_and_aliases() {
+        for trust in ["--trust", "--trust-folder"] {
+            for approval in [
+                "--always-approve",
+                "--yolo",
+                "--dangerously-skip-permissions",
+            ] {
+                let args = vec![
+                    trust.into(),
+                    approval.into(),
+                    "--resume".into(),
+                    "id".into(),
+                ];
+                let mut expected = vec!["grok".to_string()];
+                expected.extend_from_slice(&args);
+                assert_eq!(grok_invocation(&args), expected);
+            }
+        }
+        // Flag-looking text after the separator is a prompt, not an option.
+        let args = vec!["--".into(), "--trust".into()];
+        assert_eq!(
+            grok_invocation(&args),
+            ["grok", "--trust", "--always-approve", "--", "--trust"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_grok_launch_trusts_the_workspace_and_approves_tools() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let executable = bin.path().join("grok");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 42\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let text = "keep 'quotes'; $(not-a-command)";
+        for style in [SessionStyle::FullTerminal, SessionStyle::Pane] {
+            for (prompt, resume, args, expected) in [
+                (None, None, vec![], vec![]),
+                (Some(text), None, vec![], vec![text]),
+                (None, Some(text), vec![], vec!["--resume", text]),
+                (None, None, vec!["-p", text], vec!["-p", text]),
+            ] {
+                let args = args
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>();
+                let command = remote_command(Agent::Grok, "", prompt, resume, &args, style);
+                // Full-terminal sessions intentionally open a login shell on
+                // exit. Verify that suffix, then stub it out for this test.
+                let command = if args.is_empty() && matches!(style, SessionStyle::FullTerminal) {
+                    assert!(command.ends_with("; exec bash -l"));
+                    command.replace("; exec bash -l", "; exit \"$railway_code_status\"")
+                } else {
+                    command
+                };
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-c", &command])
+                    .env("PATH", bin.path())
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(42), "{command}: {output:?}");
+                let mut expected_args = vec!["--trust", "--always-approve"];
+                expected_args.extend(expected);
+                let mut expected = format!("{}\n", expected_args.join("\n"));
+                if args.is_empty() {
+                    expected.push_str(TERMINAL_RESET);
+                }
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    expected,
+                    "{command}"
+                );
+            }
+        }
+    }
+
+    /// Resuming reopens a specific conversation: the id must be quoted, the
+    /// session must survive the harness exiting, and a harness with no
+    /// verified resume-by-id CLI must launch fresh rather than guess flags.
+    #[test]
+    fn remote_command_resume_shapes() {
+        use SessionStyle::FullTerminal;
+
+        let resumed = remote_command(
+            Agent::Claude,
+            "P; ",
+            None,
+            Some("abc-123"),
+            &[],
+            FullTerminal,
+        );
+        assert!(resumed.contains("claude --resume abc-123;"), "{resumed}");
+        assert!(resumed.ends_with("exec bash -l"));
+
+        // The id is platform-reported text: a quote inside must not escape.
+        let hostile = remote_command(
+            Agent::Claude,
+            "P; ",
+            None,
+            Some("a'; rm -rf /'"),
+            &[],
+            FullTerminal,
+        );
+        assert!(
+            hostile.contains(r"claude --resume 'a'\''; rm -rf /'\''';"),
+            "{hostile}"
+        );
+
+        // A resume id on a harness without a verified resume CLI is ignored.
+        let codex = remote_command(
+            Agent::Codex,
+            "P; ",
+            None,
+            Some("abc-123"),
+            &[],
+            FullTerminal,
+        );
+        assert!(!codex.contains("--resume"), "{codex}");
+
+        // A blank id is not an id.
+        let blank = remote_command(Agent::Claude, "P; ", None, Some("  "), &[], FullTerminal);
+        assert_eq!(
+            blank,
+            remote_command(Agent::Claude, "P; ", None, None, &[], FullTerminal)
         );
     }
 
@@ -3132,11 +5438,36 @@ mod tests {
     #[test]
     fn a_pane_session_ends_with_the_harness() {
         for prompt in [None, Some("fix the tests")] {
-            let pane = remote_command(Agent::Claude, "P; ", prompt, &[], SessionStyle::Pane);
+            let pane = remote_command(Agent::Claude, "P; ", prompt, None, &[], SessionStyle::Pane);
             assert!(!pane.contains("bash -l"), "{pane}");
             // The reset still runs — the pane's emulator swallows it, and a
             // full-screen takeover of the same session needs it.
-            assert!(pane.ends_with("\\033[?25h'"), "{pane}");
+            assert!(pane.contains("\\033[?25h'"), "{pane}");
+            assert!(pane.ends_with("exit \"$railway_code_status\""), "{pane}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pane_preserves_the_harness_exit_status_after_resetting_the_terminal() {
+        for agent in [Agent::Railway, Agent::Claude, Agent::OpenCode] {
+            for prompt in [None, Some("fix the tests")] {
+                for status in [0, 1, 42, 127] {
+                    let prefix = format!(
+                        "{}() {{ echo harness-output; return {status}; }}; ",
+                        agent.name()
+                    );
+                    let command =
+                        remote_command(agent, &prefix, prompt, None, &[], SessionStyle::Pane);
+                    let output = std::process::Command::new("bash")
+                        .args(["--noprofile", "--norc", "-c", &command])
+                        .output()
+                        .unwrap();
+                    assert_eq!(output.status.code(), Some(status), "{command}");
+                    assert!(output.stdout.starts_with(b"harness-output\n"));
+                    assert!(output.stdout.ends_with(TERMINAL_RESET.as_bytes()));
+                }
+            }
         }
     }
 
@@ -3148,6 +5479,7 @@ mod tests {
             Agent::Claude,
             "P; ",
             Some("'; rm -rf / #"),
+            None,
             &[],
             SessionStyle::FullTerminal,
         );

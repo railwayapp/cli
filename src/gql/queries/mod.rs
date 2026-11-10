@@ -75,6 +75,20 @@ pub struct TwoFactorInfo;
 )]
 pub struct UserProjects;
 
+/// The favorited project ids for one workspace, for `railway list`.
+///
+/// Its own query rather than a field on `UserProjects`: favorites hang off
+/// `Query`, not off a workspace, so they cannot be selected inside that
+/// document — and they are optional decoration, which lets the caller drop
+/// them when the API refuses without losing the project list itself.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ProjectFavorites.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ProjectFavorites;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -87,10 +101,27 @@ pub struct VariablesForServiceDeployment;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceVariablesForEdit.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceVariablesForEdit;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/queries/strings/Deployments.graphql",
     response_derives = "Debug, Serialize, Clone, PartialEq"
 )]
 pub struct Deployments;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/DeploymentInstanceExecutions.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct DeploymentInstanceExecutions;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -103,10 +134,10 @@ pub struct DeploymentStatus;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
-    query_path = "src/gql/queries/strings/BuildLogs.graphql",
+    query_path = "src/gql/queries/strings/EnvironmentLogs.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
-pub struct BuildLogs;
+pub struct EnvironmentLogs;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -390,6 +421,18 @@ pub struct MyCloudAgents;
 )]
 pub struct CloudAgentConsoleSessions;
 
+/// Console sessions and reported harness snapshots in one request — the
+/// manage TUI's thread list, which labels each console session with what the
+/// harness inside it is doing.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentSessionThreads.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct CloudAgentSessionThreads;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -533,3 +576,37 @@ pub struct VolumeInstanceBackupList;
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct VolumeInstanceBackupScheduleList;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentHarnessEndpoint.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CloudAgentHarnessEndpoint;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/TracingStatus.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TracingStatus;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Traces.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Traces;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/Trace.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Trace;

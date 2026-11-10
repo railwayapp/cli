@@ -15,17 +15,26 @@
 //! hands the terminal back for that and the caller re-enters with the same
 //! request.
 
+mod activity;
 pub mod app;
+pub(crate) mod bootstrap_setup;
+mod cache;
 pub mod session;
 pub mod settings;
-pub mod theme;
+mod terminal_palette;
+/// `Theme` now lives at [`crate::tui_theme`] — shared by every ratatui
+/// screen, not just this one — but the ~5 files under `cloud_agent/tui/`
+/// that do `use super::theme::{Theme, THEMES}` keep working unchanged.
+pub use crate::tui_theme as theme;
 mod ui;
 pub mod wizard;
 
 use std::io::{Write, stdout};
 use std::panic;
 
-use anyhow::Result;
+use super::client_sessions::{self, Connection as ClientConnection, Thread as ClientThread};
+use super::remote_threads::{self, RemoteThread};
+use anyhow::{Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -102,15 +111,24 @@ fn save_setup(
             source: outcome.skills_source.clone(),
             exclude: Vec::new(),
         },
+        // The wizard doesn't ask about MCP import; keep what the file has (or
+        // the on-by-default for a first run).
+        mcp: AgentPrefs::load_in(&home)
+            .map(|p| p.mcp)
+            .unwrap_or_default(),
         default_project: outcome.project.as_ref().map(|p| DefaultProject {
             project_id: p.project_id.clone(),
             project_name: p.project_name.clone(),
             environment_id: p.environment_id.clone(),
             environment_name: p.environment_name.clone(),
         }),
-        theme: Some(outcome.theme.clone()),
+        // The theme lives in the shared `tui-prefs.json` now (see
+        // `crate::tui_theme`), not here — every ratatui screen reads it, not
+        // just this one.
+        theme: None,
+        hide_tabs: outcome.hide_tabs,
+        sidebar_width: app.sidebar_width,
     };
-    let _ = app;
     prefs.save_in(&home)?;
     Ok(prefs)
 }
@@ -137,7 +155,8 @@ fn save_settings(
         environment_id: p.environment_id.clone(),
         environment_name: p.environment_name.clone(),
     });
-    prefs.theme = Some(outcome.theme.clone());
+    // See `save_setup`: the theme is shared state now, not cloud-agent's own.
+    prefs.hide_tabs = outcome.hide_tabs;
     prefs.save_in(&home)?;
     Ok(prefs)
 }
@@ -155,7 +174,9 @@ fn apply_settings(app: &mut App, outcome: &wizard::Outcome) {
     }
     app.set_harness(Some(&outcome.agent));
     app.set_theme(Some(&outcome.theme));
+    let _ = app.theme.save_preference();
     app.skills_enabled = outcome.skills;
+    app.hide_tabs = outcome.hide_tabs;
     match &outcome.project {
         Some(project) => {
             app.default_project = Some(project.project_id.clone());
@@ -198,25 +219,32 @@ fn save_default_project(target: &Target) -> Result<()> {
     prefs.save_in(&home)
 }
 
-/// The `ssh` command that reaches one session from any terminal.
-///
-/// The same shape the dashboard hands out: the relay target is a username, the
-/// session is named through `SetEnv`, and the port only appears when the relay
-/// is not on 22.
-fn ssh_command_for(environment_id: &str, agent_id: &str, session_name: &str) -> String {
-    let (host, port) = Configs::get_ssh_relay();
-    let port = match port {
-        Some(port) if port != 22 => format!("-p {port} "),
-        _ => String::new(),
-    };
-    format!(
-        "ssh {port}-o SetEnv=RAILWAY_DURABLE_SESSION_NAME={session_name} agent:{environment_id}:{agent_id}@{host}"
-    )
+/// Open a new login shell on this VM, bypassing any harness autostart.
+fn ssh_command_for(environment_id: &str, agent_id: &str) -> String {
+    use crate::commands::ssh::native;
+    let mut args = vec!["ssh".to_string(), "-t".to_string()];
+    args.extend(native::relay_port_args());
+    args.push(native::relay_destination(&format!(
+        "agent:{environment_id}:{agent_id}"
+    )));
+    args.push(code::LOGIN_SHELL_COMMAND.to_string());
+    crate::util::shell::shell_join(&args)
 }
 
 /// How often the loading spinner advances. Fast enough to read as motion,
 /// slow enough that a launch does not redraw the screen hundreds of times.
 const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(110);
+
+/// The frame budget while messages are still queued. Session output wakes the
+/// loop once per read — a reattach replaying a long session's recording is
+/// thousands of wakes in a burst, and painting a full frame for each turned
+/// the replay into a visible slideshow. Worse than cosmetic: every frame takes
+/// the emulator lock the pty reader needs, and a starved reader stops draining
+/// ssh — the far side backs up until the keepalive replies stop arriving and
+/// ssh kills the connection mid-replay. While the queue is non-empty, frames
+/// are capped at ~30/s; the moment it drains the next frame is immediate, so
+/// interactive latency is untouched.
+const FLOOD_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 /// Why the TUI gave the terminal back.
 pub enum Outcome {
@@ -225,6 +253,11 @@ pub enum Outcome {
     NeedsCredential(LaunchRequest),
     /// Give the whole terminal to one session, then come back.
     FullScreen(FullScreenRequest),
+    /// Open a new shell on an existing VM, then return to the same panes.
+    OpenShell {
+        agent_id: String,
+        agent_name: String,
+    },
     Quit,
 }
 
@@ -239,9 +272,24 @@ pub struct FullScreenRequest {
 
 /// Everything the loop reacts to besides keystrokes.
 enum Message {
+    RemoteThreadReady {
+        connect: app::AutoConnect,
+        info: Box<code::ConnectInfo>,
+        thread: Box<RemoteThread>,
+    },
+    ClientThreadSelected {
+        client_id: String,
+        thread: ClientThread,
+    },
+    ClientReady {
+        pane: Box<ClientPane>,
+        background: bool,
+    },
     AgentsLoaded {
         path: (usize, usize, usize),
+        environment_id: String,
         result: Result<Vec<Agent>, String>,
+        asked_at: std::time::Instant,
     },
     /// The whole account's agents in one request, keyed by environment — or
     /// why that wasn't possible, in which case startup degrades to the
@@ -264,8 +312,19 @@ enum Message {
         /// environment can be refetched while sessions are in flight, and a
         /// new agent shifting the list would attach these to the wrong row.
         agent_id: String,
-        result: Result<Vec<ConsoleSession>, String>,
+        result: Result<SessionInventory, String>,
     },
+    BootstrapDefaultLoaded(String, bootstrap_setup::DefaultState),
+    BootstrapStep(String),
+    BootstrapDone(
+        String,
+        Result<crate::controllers::agent_bootstrap::Bootstrap, String>,
+    ),
+    BootstrapsLoaded(
+        String,
+        Result<Vec<crate::controllers::agent_bootstrap::Bootstrap>, String>,
+    ),
+    BootstrapSelected(String, Result<(), String>),
     LaunchStep(String),
     LaunchReady(Box<Prepared>, Box<LaunchRequest>),
     LaunchFailed(String),
@@ -282,6 +341,41 @@ enum Message {
         agent_name: String,
         session_name: String,
         info: Box<code::ConnectInfo>,
+    },
+    /// A foreground reattach's ssh info didn't come back. Carries the name so
+    /// the row's spinner comes off before the failure is announced.
+    ReattachFailed {
+        session_name: String,
+        error: String,
+    },
+    /// A reconnect found its target session no longer exists on the agent —
+    /// it closed, or the machine went away and came back without it.
+    /// Connecting was the ask, so the answer is a fresh session, not an
+    /// error.
+    ReattachTargetGone {
+        agent_id: String,
+        agent_name: String,
+        session_name: String,
+    },
+    /// A background auto-connect resolved its ssh info; the pane opens
+    /// quietly — no focus steal, no screen change.
+    AutoReattachReady {
+        agent_id: String,
+        agent_name: String,
+        session_name: String,
+        info: Box<code::ConnectInfo>,
+    },
+    /// The harness server on an agent woken after being slept under a local
+    /// client pane was asked to start again. See [`Effect::RespawnServer`].
+    ServerRespawned {
+        agent_id: String,
+        error: Option<String>,
+    },
+    /// A background auto-connect failed. Quiet too: the spinner comes off and
+    /// the reason rides the status line, not a toast.
+    AutoConnectFailed {
+        session_name: String,
+        error: String,
     },
     SessionKilled {
         agent_id: String,
@@ -301,23 +395,432 @@ enum Message {
         ok: bool,
         req: Box<LaunchRequest>,
     },
-    /// Ask again for one agent's sessions.
-    RefreshAgentSessions(String),
     /// The session produced output, so the screen needs redrawing.
-    SessionOutput,
+    SessionOutput(String),
+    ReportsLoaded {
+        agent_id: String,
+        result: Result<Vec<activity::Report>, String>,
+    },
 }
 
 /// Forwards launch-pipeline steps into the loading screen.
 struct ChannelProgress(mpsc::UnboundedSender<Message>);
 
+/// A local client of a remote conversation, never an SSH console session.
+pub(crate) struct ClientPane {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub environment_id: String,
+    pub binary: std::path::PathBuf,
+    pub connection: ClientConnection,
+    pub thread: Option<ClientThread>,
+    pub prompt: Option<String>,
+}
+
+impl ClientPane {
+    fn name(&self) -> String {
+        client_sessions::name(
+            self.connection.harness(),
+            &self.agent_id,
+            self.thread.as_ref().map(|t| t.id.as_str()),
+        )
+    }
+}
+
+fn open_client(
+    app: &mut App,
+    pane: ClientPane,
+    background: bool,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<()> {
+    let name = pane.name();
+    if app.deleted_threads.contains(&name) {
+        app.connecting.remove(&name);
+        return Ok(());
+    }
+    if pane.thread.is_some()
+        && let Some(index) = app
+            .sessions
+            .iter()
+            .position(|s| s.durable_name == name && !s.ended())
+    {
+        app.connecting.remove(&name);
+        if !background {
+            app.active = Some(index);
+            app.focus = app::ManageFocus::Session;
+        }
+        return Ok(());
+    }
+    let notify = tx.clone();
+    let client_id = super::opencode::generate_password();
+    let bridge = if let ClientConnection::Codex(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        let bridge = super::codex::bridge::Bridge::start(connection.clone(), move |thread| {
+            let _ = updates.send(Message::ClientThreadSelected {
+                client_id: id.clone(),
+                thread,
+            });
+        })?;
+        Some(bridge)
+    } else {
+        None
+    };
+    let opencode_bridge = if let ClientConnection::OpenCode(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        Some(super::opencode::bridge::Bridge::start(
+            connection.clone(),
+            move |thread| {
+                let _ = updates.send(Message::ClientThreadSelected {
+                    client_id: id.clone(),
+                    thread,
+                });
+            },
+        )?)
+    } else {
+        None
+    };
+    let railway_bridge = if let ClientConnection::Railway(connection) = &pane.connection {
+        let id = client_id.clone();
+        let updates = tx.clone();
+        Some(connection.bridge(move |thread| {
+            let _ = updates.send(Message::ClientThreadSelected {
+                client_id: id.clone(),
+                thread,
+            });
+        })?)
+    } else {
+        None
+    };
+    let mut session = session::Session::spawn_client(
+        pane.agent_id.clone(),
+        pane.agent_name,
+        &pane.binary,
+        &pane.connection,
+        bridge
+            .as_ref()
+            .map(|bridge| bridge.url.as_str())
+            .or_else(|| opencode_bridge.as_ref().map(|bridge| bridge.url.as_str()))
+            .or_else(|| railway_bridge.as_ref().map(|bridge| bridge.url.as_str())),
+        pane.thread.as_ref().map(|t| t.id.as_str()),
+        pane.prompt.as_deref(),
+        24,
+        80,
+        move || {
+            let _ = notify.send(Message::SessionOutput(String::new()));
+        },
+    )?;
+    // Keep the VM identity for reconnect/sleep actions. The local process uses
+    // the provider's authenticated API, not the SSH console transport.
+    session.ssh_target = format!("agent:{}:{}", pane.environment_id, pane.agent_id);
+    if pane.thread.is_none() {
+        session.durable_name =
+            client_sessions::draft_name(pane.connection.harness(), &pane.agent_id, &client_id);
+    }
+    session.client_id = Some(client_id);
+    session.client_thread = pane.thread;
+    session.client_bridge = bridge;
+    session.opencode_bridge = opencode_bridge;
+    session.railway_bridge = railway_bridge;
+    if background {
+        app.attach_session_background(session, pane.agent_id.clone());
+    } else {
+        app.attach_session(session, pane.agent_id.clone());
+        app.expand_agent_after_load(pane.agent_id.clone());
+    }
+    Ok(())
+}
+
+fn reconnect_client(
+    connect: app::AutoConnect,
+    background: bool,
+    tx: &mpsc::UnboundedSender<Message>,
+) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let (harness, _, thread_id) = client_sessions::parse_name(&connect.session_name)
+                .ok_or_else(|| anyhow::anyhow!("Invalid client conversation identity"))?;
+            let mut connection = if harness == "railway" {
+                ClientConnection::Railway(
+                    code::railway_client::reconnect(&connect.agent_id, &connect.environment_id)
+                        .await?,
+                )
+            } else {
+                let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+                if harness == "codex" {
+                    ClientConnection::Codex(super::codex::reconnect(&info).await?)
+                } else {
+                    ClientConnection::OpenCode(super::opencode::reconnect(&info).await?)
+                }
+            };
+            let binary = match &connection {
+                ClientConnection::Codex(c) => {
+                    super::codex::local::ensure_client(&c.version).await?
+                }
+                ClientConnection::OpenCode(c) => {
+                    super::opencode::local::ensure_client_quiet(c).await?
+                }
+                ClientConnection::Railway(_) => {
+                    code::railway_client::installer::ensure_client(&ChannelProgress(tx.clone()))
+                        .await?
+                        .binary
+                }
+            };
+            let thread = if let Some(id) = thread_id {
+                Some(connection.thread(id).await?)
+            } else {
+                None
+            };
+            if let Some(thread) = &thread {
+                if let ClientConnection::Codex(c) = &connection {
+                    super::codex::trust_directory(c, &thread.directory).await?;
+                }
+                connection.set_directory(&thread.directory);
+            }
+            Ok::<_, anyhow::Error>(ClientPane {
+                agent_id: connect.agent_id,
+                agent_name: connect.agent_name,
+                environment_id: connect.environment_id,
+                binary,
+                connection,
+                thread,
+                prompt: None,
+            })
+        }
+        .await;
+        let message = match result {
+            Ok(pane) => Message::ClientReady {
+                pane: Box::new(pane),
+                background,
+            },
+            Err(error) if background => Message::AutoConnectFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+            Err(error) => Message::ReattachFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(message);
+    });
+}
+
+fn reconnect_remote_thread(
+    connect: app::AutoConnect,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_owned();
+    tokio::spawn(async move {
+        let result = async {
+            let inventory = fetch_sessions(
+                &client,
+                &backboard,
+                &connect.agent_id,
+                &connect.environment_id,
+            )
+            .await?;
+            let thread = inventory
+                .remote
+                .into_iter()
+                .find(|row| row.name(&connect.agent_id) == connect.session_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Conversation is no longer available on this VM{}",
+                        if inventory.warnings.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", inventory.warnings.join("; "))
+                        }
+                    )
+                })?;
+            let info = code::connect_info(&connect.environment_id, &connect.agent_id).await?;
+            Ok::<_, anyhow::Error>((info, thread))
+        }
+        .await;
+        let message = match result {
+            Ok((info, thread)) => Message::RemoteThreadReady {
+                connect,
+                info: Box::new(info),
+                thread: Box::new(thread),
+            },
+            Err(error) => Message::ReattachFailed {
+                session_name: connect.session_name,
+                error: format!("{error:#}"),
+            },
+        };
+        let _ = tx.send(message);
+    });
+}
+
+#[derive(Default)]
+struct SessionInventory {
+    primary_harness: Option<String>,
+    rows: Vec<ConsoleSession>,
+    remote: Vec<RemoteThread>,
+    warnings: Vec<String>,
+    failed: Vec<String>,
+}
+
 impl Progress for ChannelProgress {
     fn step(&self, text: &str) {
         let _ = self.0.send(Message::LaunchStep(text.to_string()));
     }
-    fn note(&self, text: &str) {
-        let _ = self.0.send(Message::LaunchStep(text.to_string()));
-    }
+    fn note(&self, _text: &str) {}
     fn finish(&self) {}
+}
+
+/// A launch pipeline already running before the TUI took the screen, plus the
+/// request that started it. `railway code` starts the pipeline beside the
+/// tree load instead of after it — the tree is for drawing the manage screen,
+/// not something the launch consumes — and the loop adopts this on frame one
+/// exactly where it would otherwise have dispatched the autostart.
+pub(crate) struct InflightLaunch {
+    pub(crate) req: LaunchRequest,
+    rx: mpsc::UnboundedReceiver<Message>,
+}
+
+impl InflightLaunch {
+    /// Wait (bounded) for the running pipeline to settle, for a caller that is
+    /// about to abort with an error: the pipeline may already have CREATED an
+    /// agent, and exiting without saying so would orphan a billing VM with no
+    /// user-visible record. Returns the line to print when there is one.
+    pub(crate) async fn settle_for_abort(mut self, limit: std::time::Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
+                Ok(Some(Message::LaunchReady(prepared, _))) => {
+                    return Some(format!(
+                        "A launch was already in flight and created agent {} — `railway ca ssh {}` reattaches it, `railway ca delete {}` removes it.",
+                        prepared.agent_name, prepared.agent_name, prepared.agent_name
+                    ));
+                }
+                Ok(Some(Message::ClientReady { pane, .. })) => {
+                    return Some(format!(
+                        "Agent {} is ready — `railway code --{} connect {}` reconnects it.",
+                        pane.agent_name,
+                        pane.connection.harness(),
+                        pane.agent_name
+                    ));
+                }
+                // Failed before creating anything worth reporting.
+                Ok(Some(Message::LaunchFailed(_))) => return None,
+                Ok(Some(_)) => continue,
+                // Pipeline gone or still running at the deadline: point at the
+                // list rather than guessing.
+                Ok(None) => return None,
+                Err(_) => {
+                    return Some(
+                        "A launch was still in flight — check `railway ca list` for an agent it may have created.".to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct BootstrapProgress(mpsc::UnboundedSender<Message>);
+impl Progress for BootstrapProgress {
+    fn finish(&self) {}
+    fn step(&self, text: &str) {
+        let _ = self.0.send(Message::BootstrapStep(text.into()));
+    }
+    fn note(&self, _text: &str) {}
+}
+
+fn load_bootstrap_default(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let targets = [
+        app.target.clone(),
+        app.bootstrap_target(),
+        app.harness_pick_target.clone(),
+    ];
+    for target in targets.into_iter().flatten() {
+        let env = target.environment_id;
+        if app.bootstrap_defaults.contains_key(&env) {
+            continue;
+        }
+        app.bootstrap_defaults
+            .insert(env.clone(), bootstrap_setup::DefaultState::Loading);
+        let (tx, client, url) = (tx.clone(), client.clone(), backboard.to_owned());
+        tokio::spawn(async move {
+            use crate::controllers::agent_bootstrap as bootstrap;
+            use bootstrap_setup::DefaultState;
+            let result = async {
+                let configs = Configs::new()?;
+                let rows = bootstrap::list(&configs, &client, &url, &env).await?;
+                if rows.is_empty() {
+                    return Ok(DefaultState::Missing);
+                }
+                Ok(
+                    match rows
+                        .into_iter()
+                        .find(|b| b.is_default && b.status == "READY")
+                    {
+                        Some(b) => DefaultState::Ready(b.name),
+                        None => DefaultState::Available,
+                    },
+                )
+            }
+            .await;
+            let state =
+                result.unwrap_or_else(|e: anyhow::Error| DefaultState::Failed(format!("{e:#}")));
+            let _ = tx.send(Message::BootstrapDefaultLoaded(env, state));
+        });
+    }
+}
+
+/// Run the prepare pipeline for `req`, streaming progress and the outcome into
+/// `sink` as loop messages. Shared by [`start_launch`] (sink = the loop's own
+/// channel) and [`begin_launch_early`] (sink = a buffer the loop adopts later).
+fn spawn_prepare(req: LaunchRequest, sink: mpsc::UnboundedSender<Message>) {
+    tokio::spawn(async move {
+        let req = req;
+        let args = launch_args_for(&req);
+        let progress = ChannelProgress(sink.clone());
+        if !args.client_on_agent
+            && matches!(
+                req.harness.as_str(),
+                "codex" | "opencode" | "opencode2" | "railway"
+            )
+        {
+            let message = match code::client::prepare_pane(args, &req.harness, &progress).await {
+                Ok(pane) => Message::ClientReady {
+                    pane: Box::new(pane),
+                    background: false,
+                },
+                Err(err) => Message::LaunchFailed(format!("{err:#}")),
+            };
+            let _ = sink.send(message);
+            return;
+        }
+        let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
+            Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
+            Err(err) => Message::LaunchFailed(format!("{err:#}")),
+        };
+        let _ = sink.send(message);
+    });
+}
+
+/// Start `req`'s pipeline now, before the TUI exists, buffering its messages
+/// until the loop adopts them. ONLY for launches every dispatch gate would
+/// wave through — the caller must have verified the SSH key is registered and
+/// no interactive Claude mint is needed, because a pipeline started here has
+/// no frame to raise those questions in and would surface them as failures.
+pub(crate) fn begin_launch_early(req: LaunchRequest) -> InflightLaunch {
+    let (tx, rx) = mpsc::unbounded_channel();
+    spawn_prepare(req.clone(), tx);
+    InflightLaunch { req, rx }
 }
 
 /// Build the tree from the workspace listing. Deleted projects are dropped, and
@@ -383,7 +886,7 @@ async fn fetch_agents(
         .map(|a| Agent {
             id: a.id,
             name: a.name,
-            status: format!("{:?}", a.status).to_lowercase(),
+            status: crate::controllers::cloud_agent::Status::from(a.status).label(),
             sessions: LoadSessions::NotLoaded,
             expanded: false,
         })
@@ -415,7 +918,7 @@ async fn fetch_my_agents(
                 Agent {
                     id: a.id,
                     name: a.name,
-                    status: format!("{:?}", a.status).to_lowercase(),
+                    status: crate::controllers::cloud_agent::Status::from(a.status).label(),
                     sessions: LoadSessions::NotLoaded,
                     expanded: false,
                 },
@@ -424,8 +927,7 @@ async fn fetch_my_agents(
         .collect())
 }
 
-/// Ask for the whole account's agents in the background: at startup, on ⌥r, and
-/// on every automatic refresh.
+/// Ask for the account's agents at startup and on explicit refresh gestures.
 fn spawn_my_agents_fetch(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
@@ -468,9 +970,8 @@ fn spawn_my_agents_fetch(
 ///
 /// One request for the whole account (see [`fetch_my_agents`]), and the sessions
 /// of the agents someone is looking at once it lands — not a sweep. Every
-/// refresh in the TUI comes through here: ⌥r, the automatic tick, the re-entry
-/// after the terminal was handed back, and `shift+r` on an account that is
-/// already fully loaded.
+/// refresh in the TUI comes through here: ⌥r, revealing the sidebar, the re-entry
+/// after the terminal was handed back.
 ///
 /// Coalesced on [`App::refreshing`], so holding the chord or having three
 /// actions finish at once cannot stack account-wide queries.
@@ -485,12 +986,11 @@ fn start_refresh(
     }
     app.refresh_started();
     // Without `myCloudAgents` there is no account-wide question to ask, so the
-    // refresh asks per environment — but only about the ones that already have
-    // an answer or are open, never the whole account. Finding agents in
-    // environments that have never loaded stays `shift+r`, a deliberate act,
-    // because that is the one that costs a request each.
+    // refresh asks per environment. An explicit ⌥r includes unopened ones;
+    // incidental refreshes remain scoped to environments already loaded.
     if app.account_query_unavailable {
-        let effects = app.environments_to_refresh();
+        let discover_unloaded = std::mem::take(&mut app.refresh_announce);
+        let effects = app.environments_to_refresh(discover_unloaded);
         // Each environment answers with its own `AgentsLoaded`, so there is no
         // one reply to close the refresh out on: it is done being started, and
         // the sweep's own limiter bounds what is in flight from here.
@@ -503,39 +1003,310 @@ fn start_refresh(
     spawn_my_agents_fetch(tx, client, backboard);
 }
 
-/// The reattachable shell and exec sessions on one agent's VM.
-///
-/// These are the platform's own record of what is running in there, so they
-/// survive our disconnects — and each other's. Attaching is by name, which the
-/// relay resolves.
+/// Real conversations on the VM, plus directly reattachable VM shells.
 async fn fetch_sessions(
     client: &reqwest::Client,
     backboard: &str,
     cloud_agent_id: &str,
-) -> Result<Vec<ConsoleSession>> {
-    let res = post_graphql::<queries::CloudAgentConsoleSessions, _>(
+    environment_id: &str,
+) -> Result<SessionInventory> {
+    // Sidebar state may be old. Verify machine state in the control plane
+    // before any provider/console/SSH request that could keep it awake.
+    let machine = post_graphql::<queries::CloudAgent, _>(
         client,
         backboard,
-        queries::cloud_agent_console_sessions::Variables {
-            cloud_agent_id: cloud_agent_id.to_owned(),
+        queries::cloud_agent::Variables {
+            id: cloud_agent_id.into(),
+            environment_id: environment_id.into(),
         },
     )
     .await?;
-    Ok(res
+    anyhow::ensure!(
+        machine
+            .cloud_agent
+            .is_some_and(
+                |agent| crate::controllers::cloud_agent::Status::from(agent.status).label()
+                    == "running"
+            ),
+        "Machine is not running; showing cached conversations"
+    );
+    let discovery = async {
+        let info = code::connect_info(environment_id, cloud_agent_id).await?;
+        remote_threads::discover(&info).await
+    };
+    let native = async {
+        let Some(connection) =
+            code::saved_config::client_connection(cloud_agent_id, environment_id)
+        else {
+            return (None, Ok(Vec::new()));
+        };
+        (Some(connection.harness()), connection.list().await)
+    };
+    let platform = post_graphql::<queries::CloudAgentSessionThreads, _>(
+        client,
+        backboard,
+        queries::cloud_agent_session_threads::Variables {
+            cloud_agent_id: cloud_agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    );
+    let (res, discovery, (native_harness, native)) = tokio::join!(platform, discovery, native);
+    let res = res?;
+    // The harness snapshots that label the console sessions, joined by the
+    // durable session name a report carries. Newest per name wins: one
+    // console session can host several runs over its life.
+    let ws_url = res
+        .cloud_agent
+        .as_ref()
+        .and_then(|a| a.agent_ws_url.clone());
+    let mut snapshots: std::collections::HashMap<String, app::ThreadSnapshot> =
+        std::collections::HashMap::new();
+    for snapshot in res.cloud_agent.map(|a| a.sessions).unwrap_or_default() {
+        let Some(name) = snapshot.session_name else {
+            continue;
+        };
+        let candidate = app::ThreadSnapshot {
+            harness: snapshot.harness,
+            session_id: snapshot.session_id,
+            state: snapshot.state,
+            prompt: snapshot.prompt,
+            latest_prompt: snapshot.latest_prompt,
+            last_reply: None,
+            updated_at: snapshot.updated_at,
+        };
+        match snapshots.entry(name) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if candidate.updated_at > slot.get().updated_at {
+                    slot.insert(candidate);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+        }
+    }
+    fill_daemon_replies(
+        client,
+        backboard,
+        cloud_agent_id,
+        environment_id,
+        ws_url,
+        &mut snapshots,
+    )
+    .await;
+    let sessions: Vec<ConsoleSession> = res
         .cloud_agent_console_sessions
         .map(|conn| {
             conn.edges
                 .into_iter()
                 .map(|edge| ConsoleSession {
+                    snapshot: snapshots.remove(&edge.node.name),
                     name: edge.node.name,
                     kind: format!("{:?}", edge.node.kind),
                     command: Some(edge.node.command),
                     running: edge.node.run_state.running,
                     attached: edge.node.attached,
+                    created_at: edge.node.created_at,
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let discovery = discovery.unwrap_or_else(|error| remote_threads::Discovery {
+        warnings: vec![format!("Couldn't read VM conversation history: {error:#}")],
+        failed: ["claude", "grok", "codex", "opencode"]
+            .map(str::to_owned)
+            .to_vec(),
+        ..Default::default()
+    });
+    let mut inventory = merge_remote_threads(cloud_agent_id, sessions, discovery);
+    if let Some(harness) = native_harness {
+        merge_native_threads(&mut inventory, cloud_agent_id, harness, native);
+        if inventory.primary_harness.is_none()
+            && inventory
+                .rows
+                .iter()
+                .all(|row| row.harness_slug().is_none_or(|h| h == harness))
+        {
+            inventory.primary_harness = Some(harness.into());
+        }
+    }
+    inventory.rows.sort_by(|a, b| {
+        b.snapshot
+            .as_ref()
+            .map(|s| &s.updated_at)
+            .cmp(&a.snapshot.as_ref().map(|s| &s.updated_at))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(inventory)
+}
+
+fn merge_native_threads(
+    inventory: &mut SessionInventory,
+    agent_id: &str,
+    harness: &str,
+    native: Result<Vec<ClientThread>>,
+) {
+    match native {
+        Ok(threads) => {
+            for thread in &threads {
+                let row = ConsoleSession::client_thread(agent_id, harness, Some(thread));
+                if let Some(previous) = inventory.rows.iter_mut().find(|r| r.name == row.name) {
+                    *previous = row;
+                } else {
+                    inventory.rows.push(row);
+                }
+            }
+        }
+        // A saved public endpoint can outlive its server (for example after
+        // sleep/wake). VM metadata is authoritative even when it is empty;
+        // live status is only enrichment. Marking this as failed would also
+        // resurrect deleted conversations from the sidebar's stale cache.
+        Err(_)
+            if matches!(harness, "codex" | "opencode" | "opencode2")
+                && !inventory.failed.iter().any(|failed| failed == harness) => {}
+        Err(error) => {
+            if !inventory.failed.iter().any(|failed| failed == harness) {
+                inventory.failed.push(harness.into());
+            }
+            inventory.warnings.push(format!(
+                "Couldn't read {} history: {error:#}",
+                app::harness_label(harness)
+            ));
+        }
+    }
+}
+
+fn merge_remote_threads(
+    agent_id: &str,
+    mut consoles: Vec<ConsoleSession>,
+    discovery: remote_threads::Discovery,
+) -> SessionInventory {
+    let mut remote = discovery.threads;
+    // Railway's hook uses the daemon's real conversation ID. Its console is
+    // only a transport, just as for the other harnesses.
+    for console in &consoles {
+        let Some(snapshot) = &console.snapshot else {
+            continue;
+        };
+        if snapshot.harness != "railway-agent" || snapshot.session_id.is_empty() {
+            continue;
+        }
+        remote.push(RemoteThread {
+            harness: "railway".into(),
+            config_dir: "/app".into(),
+            active: console.running,
+            pane_id: None,
+            console_name: console.running.then(|| console.name.clone()),
+            background_id: None,
+            database: None,
+            thread: ClientThread {
+                id: snapshot.session_id.clone(),
+                title: snapshot
+                    .prompt
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| client_sessions::NEW_THREAD.into()),
+                directory: "/app".into(),
+                created_at: console.created_at,
+                updated_at: snapshot.updated_at.clone(),
+                state: snapshot.state.clone(),
+            },
+        });
+    }
+    let mut claimed = std::collections::HashSet::new();
+    for console in &consoles {
+        if !console.running {
+            continue;
+        }
+        // SSH-hosted clients report their native ID through the hook. The
+        // pane marker can promote its draft even when that harness has no
+        // live-process registry; it does not authorize console reattachment.
+        if let Some(snapshot) = &console.snapshot
+            && let Some(marker) = console
+                .command
+                .as_deref()
+                .and_then(|c| c.split_once("RAILWAY_THREAD_PANE_ID="))
+                .map(|(_, tail)| tail.split(';').next().unwrap_or("").trim())
+            && client_sessions::validate_id(marker).is_ok()
+            && !remote.iter().any(|row| {
+                row.active
+                    && (row.pane_id.as_deref() == Some(marker)
+                        || row.console_name.as_deref() == Some(console.name.as_str()))
+            })
+            && let Some(row) = remote
+                .iter_mut()
+                .find(|row| row.harness == snapshot.harness && row.thread.id == snapshot.session_id)
+            && row.pane_id.is_none()
+        {
+            row.pane_id = Some(marker.into());
+        }
+        // A process's pane marker outranks an older hook report after /resume.
+        let direct: Vec<_> = remote
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.active
+                    && (row.console_name.as_deref() == Some(console.name.as_str())
+                        || row.pane_id.as_ref().is_some_and(|id| {
+                            console.command.as_ref().is_some_and(|cmd| {
+                                cmd.contains(&format!("RAILWAY_THREAD_PANE_ID={id};"))
+                            })
+                        }))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let selected = if direct.len() == 1 {
+            direct.first().copied()
+        } else if direct.is_empty() {
+            console.snapshot.as_ref().and_then(|snapshot| {
+                remote.iter().position(|row| {
+                    // A durable terminal can survive as a shell after its
+                    // harness exits. A historical hook alone cannot prove
+                    // that attaching it will reopen this conversation.
+                    row.active
+                        && row.harness == snapshot.harness
+                        && row.thread.id == snapshot.session_id
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(index) = selected {
+            let row = &mut remote[index];
+            row.console_name = Some(console.name.clone());
+            if let Some(snapshot) = &console.snapshot
+                && snapshot.session_id == row.thread.id
+                && snapshot.harness == row.harness
+                && (!row.active || row.harness == "grok")
+            {
+                row.thread.state = snapshot.state.clone();
+            }
+            claimed.insert(console.name.clone());
+        }
+    }
+    // Only a currently running, verified console may be reattached by name.
+    for row in &mut remote {
+        if row
+            .console_name
+            .as_ref()
+            .is_some_and(|name| !claimed.contains(name))
+        {
+            row.console_name = None;
+        }
+    }
+    consoles.retain(|row| !claimed.contains(&row.name) && row.is_shell());
+    consoles.extend(
+        remote
+            .iter()
+            .map(|row| ConsoleSession::client_thread(agent_id, &row.harness, Some(&row.thread))),
+    );
+    SessionInventory {
+        primary_harness: discovery.primary_harness,
+        rows: consoles,
+        remote,
+        warnings: discovery.warnings,
+        failed: discovery.failed,
+    }
 }
 
 pub async fn run(
@@ -554,6 +1325,17 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    // Re-entry has a new reply channel; requests owned by the previous loop
+    // cannot finish into this one. Keep their cached rows, release their locks.
+    app.bootstrap_defaults.clear();
+    app.refreshing = false;
+    app.thread_polls.clear();
+    app.activity = Default::default();
+    app.thread_cache = cache::Cache::open(&backboard);
+    app.restore_cached_threads();
+    if let Some(pane) = app.autostart_client.take() {
+        open_client(app, pane, false, &tx)?;
+    }
 
     // A launch the caller had to step outside for (a Claude mint) resumes here.
     if let Some(req) = pending {
@@ -574,19 +1356,56 @@ pub async fn run(
     let stop_fetching: StopFlag = Default::default();
     start_refresh(app, &tx, &client, &backboard);
 
+    // When the previous frame was painted, for the flood cap below.
+    let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
+
     loop {
-        let mut rects = app.panes;
-        let mut copied: Option<String> = None;
-        terminal.draw(|f| {
-            let (r, text) = ui::render_with_layout(app, f);
-            rects = r;
-            copied = text;
-        })?;
-        app.panes = rects;
-        if app.pending_copy.take().is_some() {
-            finish_copy(app, copied);
+        load_bootstrap_default(app, &tx, &client, &backboard);
+        // Coalesce frames under load: with more messages already waiting,
+        // painting now just repeats a screen that is about to change again.
+        // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown
+        // is still in the emulator; the frame after the burst shows it all.
+        if rx.is_empty() || last_frame.elapsed() >= FLOOD_FRAME {
+            let mut rects = app.panes;
+            let mut copied: Option<String> = None;
+            terminal.draw(|f| {
+                let (r, text) = ui::render_with_layout(app, f);
+                rects = r;
+                copied = text;
+            })?;
+            last_frame = std::time::Instant::now();
+            app.panes = rects;
+            if app.pending_copy.take().is_some() {
+                finish_copy(app, copied);
+            }
+            sync_session_size(app, &terminal);
         }
-        sync_session_size(app, &terminal);
+
+        // A pipeline `railway code` already started beside the tree load:
+        // adopt it — the same screen moves as a dispatched launch, minus the
+        // gates, which were verified before it was allowed to start (see
+        // `begin_launch_early`).
+        if let Some(inflight) = app.autostart_inflight.take() {
+            let InflightLaunch { req, mut rx } = inflight;
+            app.screen = Screen::Manage;
+            if let Some(Effect::LoadAgents {
+                environment_id,
+                path,
+            }) = app.reveal_environment(&req.environment_id)
+            {
+                spawn_env_agents_fetch(environment_id, path, &tx, &client, &backboard);
+            }
+            app.start_loading(&req);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(message) = rx.recv().await {
+                    if tx.send(message).is_err() {
+                        break;
+                    }
+                }
+            });
+            continue;
+        }
 
         // A launch the caller arrived with, started once the first frame is on
         // screen so the terminal is already in the state the loading pane will
@@ -598,15 +1417,50 @@ pub async fn run(
             continue;
         }
 
+        let activity_in = app.activity.next(std::time::Instant::now()).map(|delay| {
+            delay.max(
+                app.refresh_paused_until
+                    .map(|at| at.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_default(),
+            )
+        });
+        let toast_remaining = app.toast_remaining();
+        let stall_remaining = app
+            .stall_check_remaining()
+            .unwrap_or(std::time::Duration::MAX);
         let effect = tokio::select! {
+            Some((name, error)) = app.deletion_rx.recv() => {
+                app.thread_deleted(&name, error);
+                None
+            }
+            _ = tokio::time::sleep(activity_in.unwrap_or(std::time::Duration::MAX)), if activity_in.is_some() => {
+                for agent_id in app.activity.take_due(std::time::Instant::now()) {
+                    let environment = app.sessions.iter().find(|pane| pane.agent_id == agent_id && !pane.ended())
+                        .and_then(|pane| pane.ssh_target.strip_prefix("agent:")?.split_once(':').map(|(env, _)| env.to_owned()));
+                    if let Some(environment) = environment {
+                        let tx = tx.clone(); let client = client.clone(); let backboard = backboard.clone();
+                        tokio::spawn(async move {
+                            let result = activity::fetch(&client, &backboard, &agent_id, &environment).await;
+                            if let Err(error) = &result && let Some(retry_after_secs) = rate_limit_from(error) {
+                                let _ = tx.send(Message::RateLimited { retry_after_secs });
+                            }
+                            let _ = tx.send(Message::ReportsLoaded { agent_id, result: result.map_err(|e| e.to_string()) });
+                        });
+                    } else { app.activity.finished(&agent_id); }
+                }
+                None
+            }
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
             Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
             // The wizard and settings borrow the same tick for their
-            // "creating…" spinners.
+            // "creating…" spinners, and the tree's connecting rows too.
             _ = tokio::time::sleep(SPINNER_TICK), if app.loading.active
+                || !app.connecting.is_empty()
+                || app.bootstrap_form.as_ref().is_some_and(|f| f.running)
+                || app.bootstrap_picker.as_ref().is_some_and(|p| p.loading || p.saving)
                 || app.wizard.as_ref().is_some_and(|w| w.busy.is_some())
                 || app.settings.as_ref().is_some_and(|s| s.busy.is_some()) => {
                 app.tick();
@@ -615,7 +1469,7 @@ pub async fn run(
             // A toast fades on its own, so the loop has to wake for it — an
             // idle TUI blocks on the keyboard and would otherwise leave it on
             // screen until the next keypress.
-            _ = tokio::time::sleep(app.toast_remaining()), if app.toast.is_some() => {
+            _ = tokio::time::sleep(toast_remaining), if app.toast.is_some() => {
                 app.expire_toast();
                 None
             }
@@ -625,24 +1479,10 @@ pub async fn run(
             _ = tokio::time::sleep(app::WATCH_TICK), if app.watching_agents() => {
                 app.watch_tick()
             }
-            // Everything else that changes an agent happens outside this
-            // process: another terminal, the dashboard, a teammate. One
-            // account-wide request every [`app::AUTO_REFRESH_EVERY`] is what
-            // keeps the tree from being a snapshot of when it opened. Armed only
-            // when a refresh would be right — see [`App::auto_refresh_in`] — so
-            // an idle TUI still blocks on the keyboard, and the remainder is
-            // recomputed each pass so an early wake just re-arms.
-            _ = tokio::time::sleep(app.auto_refresh_in().unwrap_or(std::time::Duration::MAX)),
-                if app.auto_refresh_in().is_some() => {
-                if app.auto_refresh_due() {
-                    start_refresh(app, &tx, &client, &backboard);
-                }
-                None
-            }
             // A reattach that stays silent gets its "no response" notice drawn
             // once the stall clock runs out; nothing else would redraw, since
             // a silent pane by definition sends no output to wake the loop.
-            _ = tokio::time::sleep(app.stall_check_remaining().unwrap_or(std::time::Duration::MAX)),
+            _ = tokio::time::sleep(stall_remaining),
                 if app.stall_check_remaining().is_some() => None,
             // An ended pane whose finished/dropped call is still waiting on
             // ssh's exit status: the EOF that woke the loop can beat waitpid,
@@ -677,6 +1517,15 @@ pub async fn run(
             },
         };
 
+        // Background auto-connect: every listed session on a running agent
+        // gets a pane without being asked for one, so the tree comes up
+        // green instead of waiting to be clicked through. Checked each pass —
+        // candidates only exist once loads land — and each session is tried
+        // once per run, so a failure or a deliberate close stays closed.
+        for connect in app.take_auto_connects() {
+            spawn_auto_connect(connect, &tx);
+        }
+
         match effect {
             None => {}
             Some(Effect::Quit) => {
@@ -695,6 +1544,11 @@ pub async fn run(
                 session_name,
                 agent_name,
             }) => {
+                if client_sessions::is_client(&session_name) {
+                    app.activate_session(&agent_id);
+                    app.maximized = true;
+                    continue;
+                }
                 // The pane's ssh has to go first: two clients attached to one
                 // durable session would fight over its screen.
                 let Some(index) = app.sessions.iter().position(|s| s.agent_id == agent_id) else {
@@ -710,6 +1564,21 @@ pub async fn run(
                     session_name,
                     agent_name,
                 }));
+            }
+            Some(Effect::OpenShell {
+                agent_id,
+                agent_name,
+            }) => {
+                if app.hold_for_ssh_key(HeldConnect::OpenShell {
+                    agent_id: agent_id.clone(),
+                    agent_name: agent_name.clone(),
+                }) {
+                    continue;
+                }
+                return Ok(Outcome::OpenShell {
+                    agent_id,
+                    agent_name,
+                });
             }
             Some(Effect::Reattach {
                 agent_id,
@@ -728,9 +1597,81 @@ pub async fn run(
                 }) {
                     continue;
                 }
+                // The spinner goes on now — connect_info takes a beat, and a
+                // row that does nothing for it reads as a dead key.
+                app.connecting.insert(session_name.clone());
+                if client_sessions::parse_name(&session_name).is_some_and(|(h, _, _)| {
+                    matches!(h, "claude" | "grok")
+                        || code::saved_config::client_connection(&agent_id, &environment_id)
+                            .is_none_or(|c| c.harness() != h)
+                }) {
+                    reconnect_remote_thread(
+                        app::AutoConnect {
+                            agent_id,
+                            agent_name,
+                            environment_id,
+                            session_name,
+                        },
+                        &tx,
+                        &client,
+                        &backboard,
+                    );
+                    continue;
+                }
+                if client_sessions::is_client(&session_name) {
+                    reconnect_client(
+                        app::AutoConnect {
+                            agent_id,
+                            agent_name,
+                            environment_id,
+                            session_name,
+                        },
+                        false,
+                        &tx,
+                    );
+                    continue;
+                }
                 let tx = tx.clone();
+                let client = client.clone();
+                let backboard = backboard.clone();
                 tokio::spawn(async move {
-                    let message = match code::connect_info(&environment_id, &agent_id).await {
+                    // The row the reconnect came from can be stale: the
+                    // session may have closed, or the machine died and came
+                    // back without it. Asking the platform rides alongside
+                    // connect_info, so a live session pays no extra latency —
+                    // and a dead one gets a replacement instead of a blank
+                    // pane. Only a definitive answer diverts; a listing error
+                    // attaches anyway, the benefit of the doubt.
+                    let (info, listed) = tokio::join!(
+                        code::connect_info(&environment_id, &agent_id),
+                        post_graphql::<queries::CloudAgentSessionThreads, _>(
+                            &client,
+                            &backboard,
+                            queries::cloud_agent_session_threads::Variables {
+                                cloud_agent_id: agent_id.clone(),
+                                environment_id: environment_id.clone(),
+                            },
+                        ),
+                    );
+                    // This is a console transport check. Thread discovery can
+                    // hide its row and need first-time SDK setup; neither says
+                    // whether the relay can still attach this console.
+                    let gone = matches!(
+                        &listed,
+                        Ok(sessions) if !sessions.cloud_agent_console_sessions.as_ref()
+                            .is_some_and(|sessions| sessions.edges.iter()
+                                .any(|s| s.node.name == session_name && s.node.run_state.running))
+                    );
+                    let message = match info {
+                        Ok(_) if gone => {
+                            super::telemetry::track_session_event("reattach_target_gone", None)
+                                .await;
+                            Message::ReattachTargetGone {
+                                agent_id,
+                                agent_name,
+                                session_name,
+                            }
+                        }
                         Ok(info) => Message::ReattachReady {
                             agent_id,
                             agent_name,
@@ -738,13 +1679,16 @@ pub async fn run(
                             info: Box::new(info),
                         },
                         Err(err) => {
-                            let message = format!("{err:#}");
+                            let error = format!("{err:#}");
                             super::telemetry::track_session_event(
                                 "reattach_connect_failed",
-                                Some(message.as_str()),
+                                Some(error.as_str()),
                             )
                             .await;
-                            Message::LaunchFailed(message)
+                            Message::ReattachFailed {
+                                session_name,
+                                error,
+                            }
                         }
                     };
                     let _ = tx.send(message);
@@ -806,6 +1750,7 @@ pub async fn run(
                 // would still offer the harness they replaced.
                 app.set_harness(Some(&outcome.agent));
                 app.set_theme(Some(&outcome.theme));
+                let _ = app.theme.save_preference();
                 // A default project is a target, and the tree now leads with it.
                 if let Some(project) = outcome.project {
                     app.default_project = Some(project.project_id.clone());
@@ -817,33 +1762,25 @@ pub async fn run(
                     });
                 }
             }
+            Some(Effect::SaveSidebarWidth(width)) => {
+                let result = dirs::home_dir()
+                    .context("No home directory")
+                    .and_then(|home| super::prefs::AgentPrefs::save_sidebar_width_in(&home, width));
+                if let Err(error) = result {
+                    app.toast_error(format!("Couldn't save sidebar width: {error:#}"));
+                }
+            }
             Some(Effect::SaveSettings(outcome)) => {
                 apply_settings(app, &outcome);
             }
-            Some(Effect::ScanEverywhere) => {
-                // A deliberate scan clears a previous rate-limit stop: the user
-                // is asking again, and by now the window may have passed.
-                stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
-                let effects = app.scan_environments();
-                match effects.len() {
-                    // Nothing left to discover — the account-wide query answers
-                    // for every environment at once, so this is the normal case
-                    // rather than an edge one. "Every project is already loaded"
-                    // was a true sentence that did nothing, and it was the reply
-                    // anyone reaching for shift+r to see a new agent got.
-                    0 => {
-                        app.status = "Refreshing…".into();
-                        app.refresh_announce = true;
-                        start_refresh(app, &tx, &client, &backboard);
-                    }
-                    n => {
-                        app.status =
-                            format!("Looking for agents in {n} more environment{}…", plural(n));
-                        spawn_sweep(effects, &tx, &client, &backboard, stop_fetching.clone());
-                    }
+            Some(Effect::RefreshAll) => {
+                if app.refresh_announce {
+                    // A deliberate refresh retries a previous rate-limit stop.
+                    stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
+                app.bootstrap_defaults.clear();
+                start_refresh(app, &tx, &client, &backboard);
             }
-            Some(Effect::RefreshAll) => start_refresh(app, &tx, &client, &backboard),
             Some(Effect::OpenUrl(url)) => {
                 // Best-effort: a machine with no browser is a normal way to run
                 // this, and the ssh command in the toast is still copyable.
@@ -861,13 +1798,80 @@ pub async fn run(
             Some(Effect::CopySsh {
                 agent_id,
                 environment_id,
-                session_name,
             }) => {
-                let command = ssh_command_for(&environment_id, &agent_id, &session_name);
-                match arboard::Clipboard::new().and_then(|mut c| c.set_text(command)) {
-                    Ok(()) => app.toast("Copied the ssh command"),
+                let command = ssh_command_for(&environment_id, &agent_id);
+                match crate::util::clipboard::copy(&command) {
+                    Ok(()) => app.toast("Copied the SSH shell command"),
                     Err(err) => app.toast_error(format!("Couldn't copy: {err}")),
                 }
+            }
+            Some(Effect::DeleteThread {
+                agent_id,
+                environment_id,
+                session_name,
+            }) => {
+                // All panes of this exact thread go; other threads on the VM
+                // remain attached. Preserve the reply channel across TUI re-entry.
+                let mut consoles = std::collections::HashSet::new();
+                let mut panes = Vec::new();
+                for index in (0..app.sessions.len()).rev() {
+                    if app.sessions[index].agent_id != agent_id
+                        || app.sessions[index].durable_name != session_name
+                    {
+                        continue;
+                    }
+                    if let Some(mut pane) = app.take_session(index) {
+                        pane.sync_console_name();
+                        if pane.client_bridge.is_none()
+                            && pane.opencode_bridge.is_none()
+                            && let Some(console) = &pane.console_name
+                        {
+                            consoles.insert(console.clone());
+                        }
+                        panes.push(pane);
+                    }
+                }
+                let tx = app.deletion_tx.clone();
+                tokio::spawn(async move {
+                    let result: Result<()> =
+                        tokio::time::timeout(std::time::Duration::from_secs(150), async {
+                            let (harness, scoped_agent, id) =
+                                client_sessions::parse_name(&session_name)
+                                    .context("Invalid conversation identity")?;
+                            anyhow::ensure!(
+                                scoped_agent == agent_id,
+                                "Conversation belongs to another VM"
+                            );
+                            let id = id.context("Conversation has no native thread yet")?;
+                            client_sessions::validate_id(id)?;
+                            tokio::task::spawn_blocking(move || {
+                                for mut pane in panes {
+                                    pane.detach();
+                                }
+                            })
+                            .await?;
+                            if let Some(connection) =
+                                code::saved_config::client_connection(&agent_id, &environment_id)
+                                    .filter(|c| c.harness() == harness && consoles.is_empty())
+                            {
+                                connection.delete_thread(id).await
+                            } else {
+                                let info = code::connect_info(&environment_id, &agent_id).await?;
+                                remote_threads::delete(
+                                    &info,
+                                    harness,
+                                    id,
+                                    &consoles.into_iter().collect::<Vec<_>>(),
+                                )
+                                .await
+                            }
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("Conversation deletion timed out"))
+                        });
+                    let _ = tx.send((session_name, result.err().map(|e| format!("{e:#}"))));
+                });
             }
             Some(Effect::KillSession {
                 agent_id,
@@ -899,6 +1903,9 @@ pub async fn run(
             Some(Effect::CloseSession { index }) => {
                 close_session(app, index, &client, &backboard).await
             }
+            Some(effect @ Effect::RespawnServer { .. }) => {
+                spawn_server_respawns(vec![effect], &tx);
+            }
             Some(Effect::Agent {
                 op,
                 agent_id,
@@ -928,9 +1935,88 @@ pub async fn run(
                     });
                 });
             }
+            Some(Effect::LoadBootstraps { environment_id }) => {
+                let (tx, client, url) = (tx.clone(), client.clone(), backboard.clone());
+                tokio::spawn(async move {
+                    let result = async {
+                        let configs = Configs::new()?;
+                        crate::controllers::agent_bootstrap::list(
+                            &configs,
+                            &client,
+                            &url,
+                            &environment_id,
+                        )
+                        .await
+                    }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapsLoaded(environment_id, result));
+                });
+            }
+            Some(Effect::SelectBootstrap { environment_id, id }) => {
+                let (tx, client, url) = (tx.clone(), client.clone(), backboard.clone());
+                tokio::spawn(async move {
+                    let result = async {
+                        let mut configs = Configs::new()?;
+                        if let Some(id) = id {
+                            let rows = crate::controllers::agent_bootstrap::list(
+                                &configs,
+                                &client,
+                                &url,
+                                &environment_id,
+                            )
+                            .await?;
+                            let b = rows.iter().find(|b| b.id == id).context(
+                                "This bootstrap is no longer available. Refresh the list.",
+                            )?;
+                            b.require_ready()?;
+                            configs
+                                .set_agent_bootstrap_default(&environment_id, &id, false)
+                                .await?;
+                        } else {
+                            configs
+                                .clear_agent_bootstrap_default(&environment_id)
+                                .await?;
+                        }
+                        Ok(())
+                    }
+                    .await
+                    .map_err(|e: anyhow::Error| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapSelected(environment_id, result));
+                });
+            }
+            Some(Effect::CreateBootstrap(req)) => {
+                if req.snapshot.is_none()
+                    && app.hold_for_ssh_key(HeldConnect::Bootstrap(req.clone()))
+                {
+                    if app.ssh_gate.is_none()
+                        && let Some(form) = app.bootstrap_form.as_mut()
+                    {
+                        form.running = false;
+                        form.error = Some(
+                            "No SSH key found. Run `ssh-keygen -t ed25519`, then retry setup."
+                                .into(),
+                        );
+                    }
+                    continue;
+                }
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let env = req.target.environment_id.clone();
+                    let result = code::bootstrap_setup::create(req, &BootstrapProgress(tx.clone()))
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Message::BootstrapDone(env, result));
+                });
+            }
             Some(Effect::Launch(req)) => dispatch_launch(app, req, &tx, &client, &backboard),
-            Some(Effect::LoadSessions { agent_id, path }) => {
-                spawn_session_fetch(agent_id, path, &tx, &client, &backboard);
+            Some(Effect::LoadSessions {
+                agent_id,
+                environment_id,
+                path,
+            }) => {
+                app.mark_thread_refresh(&agent_id);
+                spawn_session_fetch(agent_id, environment_id, path, &tx, &client, &backboard);
             }
             Some(Effect::LoadAgents {
                 environment_id,
@@ -942,8 +2028,218 @@ pub async fn run(
     }
 }
 
+/// Fill each railway-agent thread's `last_reply` from the daemon's catchup
+/// transcript, read over the harness gate (`agentWsUrl` + a freshly minted
+/// gate token). Only the daemon harness has a transcript to serve: every
+/// other harness's responses exist solely inside the VM, since the hook
+/// pipeline deliberately never carries assistant text.
+///
+/// Best-effort throughout — a sleeping gate, a stale token, or a slow VM
+/// degrades to prompt-only labels, never to a failed session fetch.
+async fn fill_daemon_replies(
+    client: &reqwest::Client,
+    backboard: &str,
+    cloud_agent_id: &str,
+    environment_id: &str,
+    ws_url: Option<String>,
+    snapshots: &mut std::collections::HashMap<String, app::ThreadSnapshot>,
+) {
+    /// One dial per conversation; bound how many a refresh pays for.
+    const MAX_DIALS: usize = 4;
+    let Some(ws_url) = ws_url else { return };
+    // Newest conversations first, deduped: several console sessions can be
+    // windows onto one daemon conversation.
+    let mut targets: Vec<(String, String)> = snapshots
+        .values()
+        .filter(|snapshot| snapshot.harness == "railway-agent")
+        .map(|snapshot| (snapshot.updated_at.clone(), snapshot.session_id.clone()))
+        .collect();
+    targets.sort_by(|a, b| b.0.cmp(&a.0));
+    targets.dedup_by(|a, b| a.1 == b.1);
+    targets.truncate(MAX_DIALS);
+    if targets.is_empty() {
+        return;
+    }
+    // A conversation only changes when a new report bumps its `updated_at`,
+    // so a transcript read once is good until then. This is what lets the
+    // fast poll tick every few seconds without a WebSocket dial per tick.
+    let (cached, to_dial): (Vec<_>, Vec<_>) = {
+        let cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+        targets.into_iter().partition(|(updated_at, session_id)| {
+            cache
+                .get(session_id)
+                .is_some_and(|(at, _)| at == updated_at)
+        })
+    };
+    for (_, session_id) in &cached {
+        let reply = {
+            let cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+            cache.get(session_id).and_then(|(_, reply)| reply.clone())
+        };
+        if let Some(reply) = reply {
+            apply_reply(snapshots, session_id, reply);
+        }
+    }
+    if to_dial.is_empty() {
+        return;
+    }
+    let Ok(res) = post_graphql::<mutations::CloudAgentHarnessToken, _>(
+        client,
+        backboard,
+        mutations::cloud_agent_harness_token::Variables {
+            id: cloud_agent_id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    let token = res.cloud_agent_harness_token;
+    for (updated_at, session_id) in to_dial {
+        let reply = gate_last_reply(&ws_url, &token, &session_id).await;
+        {
+            let mut cache = reply_cache().lock().unwrap_or_else(|e| e.into_inner());
+            // Bounded: the cache only ever holds what an account's live
+            // threads produce, but a very long TUI run shouldn't grow it
+            // forever.
+            if cache.len() > 256 {
+                cache.clear();
+            }
+            cache.insert(session_id.clone(), (updated_at, reply.clone()));
+        }
+        if let Some(reply) = reply {
+            apply_reply(snapshots, &session_id, reply);
+        }
+    }
+}
+
+/// Last-reply cache across fetches: session id → (updated_at it was read at,
+/// the reply). Process-wide by design — fetches run on detached tasks.
+fn reply_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, Option<String>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Stamp one conversation's reply onto every console session windowing it.
+fn apply_reply(
+    snapshots: &mut std::collections::HashMap<String, app::ThreadSnapshot>,
+    session_id: &str,
+    reply: String,
+) {
+    for snapshot in snapshots.values_mut() {
+        if snapshot.session_id == session_id {
+            snapshot.last_reply = Some(reply.clone());
+        }
+    }
+}
+
+/// The newest assistant text of one daemon conversation, from the `catchup`
+/// frame the gate pushes first on attach. `None` for an empty session, a
+/// gate that won't dial, or a transcript with no assistant text yet.
+async fn gate_last_reply(ws_url: &str, token: &str, session_id: &str) -> Option<String> {
+    use futures_util::StreamExt;
+    use reqwest_websocket::{Message as WsMessage, RequestBuilderExt};
+    // Session ids are `[A-Za-z0-9._-]` and the token is a JWT; both are
+    // URL-safe as-is.
+    let url = format!("{ws_url}?session_id={session_id}&token={token}");
+    let response = reqwest::Client::default()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .upgrade()
+        .send()
+        .await
+        .ok()?;
+    let mut ws = response.into_websocket().await.ok()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next()).await.ok()??;
+        let Ok(WsMessage::Text(text)) = frame else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("catchup") => return last_assistant_text(&value),
+            // Catchup is the FIRST frame when there is history; the session
+            // lifecycle starting without one means an empty session.
+            Some("ready" | "session_start") => return None,
+            _ => {}
+        }
+    }
+}
+
+/// The last assistant message's text blocks from a catchup payload, joined.
+fn last_assistant_text(catchup: &serde_json::Value) -> Option<String> {
+    let messages = catchup.get("data")?.get("messages")?.as_array()?;
+    for message in messages.iter().rev() {
+        if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = message.get("content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        let text = blocks
+            .iter()
+            .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() {
+            // Bounded for storage; the row truncates further for display.
+            return Some(text.chars().take(400).collect());
+        }
+    }
+    None
+}
+
 /// Fetch one environment's agents in the background, delivering the answer —
 /// or its rate-limit classification — as a message.
+/// Resolve one background auto-connect's ssh info off the loop. The same
+/// shape as a keyed reattach, but its outcome lands as the quiet messages —
+/// success must not steal focus and failure must not toast.
+fn spawn_auto_connect(connect: app::AutoConnect, tx: &mpsc::UnboundedSender<Message>) {
+    if client_sessions::is_client(&connect.session_name) {
+        reconnect_client(connect, true, tx);
+        return;
+    }
+    let app::AutoConnect {
+        agent_id,
+        agent_name,
+        environment_id,
+        session_name,
+    } = connect;
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let message = match code::connect_info(&environment_id, &agent_id).await {
+            Ok(info) => Message::AutoReattachReady {
+                agent_id,
+                agent_name,
+                session_name,
+                info: Box::new(info),
+            },
+            Err(err) => {
+                let error = format!("{err:#}");
+                super::telemetry::track_session_event(
+                    "auto_reattach_connect_failed",
+                    Some(error.as_str()),
+                )
+                .await;
+                Message::AutoConnectFailed {
+                    session_name,
+                    error,
+                }
+            }
+        };
+        let _ = tx.send(message);
+    });
+}
+
 fn spawn_env_agents_fetch(
     environment_id: String,
     path: (usize, usize, usize),
@@ -957,11 +2253,14 @@ fn spawn_env_agents_fetch(
     tokio::spawn(async move {
         // A closed receiver just means the TUI already handed back;
         // the next entry re-requests, so the drop is harmless.
+        let asked_at = std::time::Instant::now();
         match fetch_agents(&client, &backboard, &environment_id).await {
             Ok(agents) => {
                 let _ = tx.send(Message::AgentsLoaded {
                     path,
+                    environment_id,
                     result: Ok(agents),
+                    asked_at,
                 });
             }
             // The same classification the background fetches do:
@@ -975,7 +2274,9 @@ fn spawn_env_agents_fetch(
                 None => {
                     let _ = tx.send(Message::AgentsLoaded {
                         path,
+                        environment_id,
                         result: Err(err.to_string()),
+                        asked_at,
                     });
                 }
             },
@@ -992,12 +2293,93 @@ fn handle_message(
     stop_fetching: &StopFlag,
 ) -> Option<Effect> {
     match message {
+        Message::RemoteThreadReady {
+            connect,
+            info,
+            thread,
+        } => {
+            app.connecting.remove(&connect.session_name);
+            if app.deleted_threads.contains(&connect.session_name) {
+                return None;
+            }
+            let pane_id = super::opencode::generate_password();
+            let result = thread.resume_command(&pane_id).and_then(|command| {
+                let console_name = thread
+                    .console_name
+                    .clone()
+                    .unwrap_or_else(|| session::durable_name(&thread.harness));
+                let notify = tx.clone();
+                let output_agent = connect.agent_id.clone();
+                let mut pane = session::Session::spawn(
+                    connect.agent_id.clone(),
+                    connect.agent_name,
+                    thread.harness.clone(),
+                    &info.ssh_target,
+                    info.identity.as_deref(),
+                    &info.relay_opts,
+                    &command,
+                    thread.console_name.is_some(),
+                    &console_name,
+                    24,
+                    80,
+                    move || {
+                        let _ = notify.send(Message::SessionOutput(output_agent.clone()));
+                    },
+                )?;
+                pane.console_name = Some(console_name);
+                pane.client_id = Some(if thread.console_name.is_some() {
+                    thread.pane_id.clone().unwrap_or(pane_id)
+                } else {
+                    pane_id
+                });
+                pane.durable_name = connect.session_name.clone();
+                pane.client_thread = Some(thread.thread.clone());
+                Ok::<_, anyhow::Error>(pane)
+            });
+            match result {
+                Ok(pane) => {
+                    app.attach_session(pane, connect.agent_id.clone());
+                }
+                Err(error) => app.toast_error(format!("Couldn't open conversation: {error:#}")),
+            }
+            None
+        }
+        Message::ClientThreadSelected { client_id, thread } => {
+            if let Some(agent_id) = app.client_thread_selected(&client_id, thread) {
+                app.persist_threads(&agent_id);
+            }
+            None
+        }
+        Message::ClientReady { pane, background } => {
+            let name = pane.name();
+            let environment_id = pane.environment_id.clone();
+            if let Err(error) = open_client(app, *pane, background, tx) {
+                app.connecting.remove(&name);
+                if background {
+                    app.auto_connect_failed(&name, &format!("{error:#}"));
+                } else {
+                    app.launch_failed(format!("Could not open local client: {error:#}"));
+                }
+            }
+            app.reveal_environment(&environment_id)
+        }
         Message::RateLimited { retry_after_secs } => {
             app.rate_limited(retry_after_secs);
             None
         }
-        Message::AgentsLoaded { path, result } => {
-            app.agents_loaded(path, result);
+        Message::ServerRespawned { agent_id, error } => {
+            app.server_respawned(&agent_id, error);
+            None
+        }
+        Message::AgentsLoaded {
+            path,
+            environment_id,
+            result,
+            asked_at,
+        } => {
+            app.agents_loaded_at(path, &environment_id, result, asked_at);
+            spawn_server_respawns(app.take_pending_respawns(), tx);
+            app.restore_cached_threads();
             // Fill in each running agent's session count without waiting for
             // someone to expand it. Bounded: one environment usually holds a
             // handful of agents, but nothing guarantees it.
@@ -1014,6 +2396,8 @@ fn handle_message(
                 let count = agents.len();
                 app.refresh_finished();
                 app.my_agents_loaded(agents, asked_at);
+                spawn_server_respawns(app.take_pending_respawns(), tx);
+                app.restore_cached_threads();
                 let prefetch = app.sessions_to_prefetch();
                 if !prefetch.is_empty() {
                     spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
@@ -1021,7 +2405,7 @@ fn handle_message(
                 // What someone is looking at, asked about again — the counts and
                 // session rows are as able to go stale as the agents are. Narrow
                 // by design: see [`App::sessions_to_refresh`].
-                let watched = app.sessions_to_refresh();
+                let watched = app.threads_to_refresh();
                 if !watched.is_empty() {
                     spawn_session_prefetch(watched, tx, client, backboard, stop_fetching.clone());
                 }
@@ -1040,7 +2424,7 @@ fn handle_message(
                 // The per-environment fallback below is the answer to whatever
                 // asked, and the rows are its report; a pending "up to date"
                 // line must not be claimed by the next refresh to succeed.
-                app.refresh_announce = false;
+                let discover_unloaded = std::mem::take(&mut app.refresh_announce);
                 // Asking again every tick would fail again every tick: a caller
                 // this field refuses — a workspace-scoped token, or a backboard
                 // without it — is refused permanently, so refreshes switch to
@@ -1050,14 +2434,18 @@ fn handle_message(
                 // These are fresh requests; a stop left over from an earlier
                 // 429 would strand them as spinners that never resolve.
                 stop_fetching.store(false, std::sync::atomic::Ordering::Relaxed);
-                let mut sweep = app.initial_environments();
+                let mut sweep = if discover_unloaded {
+                    app.environments_to_refresh(true)
+                } else {
+                    app.initial_environments()
+                };
                 if sweep.is_empty() {
                     // Nothing left to load for the first time, so this was a
                     // refresh rather than startup — and it still has to refresh
                     // something. Without this, the ⌥r that discovered the field
                     // was unavailable would change nothing and only the next one
                     // would work.
-                    sweep = app.environments_to_refresh();
+                    sweep = app.environments_to_refresh(false);
                 }
                 if !sweep.is_empty() {
                     spawn_sweep(sweep, tx, client, backboard, stop_fetching.clone());
@@ -1076,7 +2464,116 @@ fn handle_message(
             agent_id,
             result,
         } => {
-            app.sessions_loaded(path, &agent_id, result);
+            match result {
+                Ok(mut inventory) => {
+                    if let Some(harness) = inventory.primary_harness.take() {
+                        app.primary_harnesses.insert(agent_id.clone(), harness);
+                    } else {
+                        app.primary_harnesses.remove(&agent_id);
+                    }
+                    app.remote_threads_loaded(&agent_id, &inventory.remote);
+                    app.preserve_failed_threads(&agent_id, &inventory.failed, &mut inventory.rows);
+                    app.sessions_loaded(path, &agent_id, Ok(inventory.rows));
+                    if !inventory.warnings.is_empty() {
+                        app.status = inventory.warnings.join("; ");
+                    }
+                }
+                Err(error) => app.sessions_loaded(path, &agent_id, Err(error)),
+            }
+            app.finish_agent_connect(&agent_id)
+        }
+        Message::BootstrapDefaultLoaded(env, state) => {
+            app.bootstrap_defaults.insert(env, state);
+            None
+        }
+        Message::BootstrapsLoaded(env, result) => {
+            if let Some(picker) = app
+                .bootstrap_picker
+                .as_mut()
+                .filter(|p| p.target.environment_id == env && p.loading)
+            {
+                picker.loaded(result.clone());
+                if picker.for_launch {
+                    use bootstrap_setup::LaunchChoice;
+                    picker.cursor = match &app.harness_bootstrap {
+                        LaunchChoice::Named(name) => picker
+                            .entries
+                            .iter()
+                            .position(|b| b.name == *name)
+                            .map_or(0, |i| i + 1),
+                        LaunchChoice::None => picker.entries.len() + 1,
+                        LaunchChoice::Default => 0,
+                    };
+                }
+            }
+            if let Some(form) = app
+                .bootstrap_form
+                .as_mut()
+                .filter(|f| f.target.environment_id == env && f.defaults_loading)
+            {
+                match result {
+                    Ok(entries) => {
+                        form.make_default = !entries.iter().any(|b| b.is_default);
+                        form.defaults_loading = false;
+                    }
+                    Err(error) => {
+                        // Keep submission disabled until the user retries with a fresh form.
+                        form.error = Some(format!(
+                            "Could not load the current default: {error}. Press Esc and try again."
+                        ));
+                    }
+                }
+            }
+            None
+        }
+        Message::BootstrapSelected(env, result) => {
+            app.bootstrap_defaults.remove(&env);
+            if let Some(picker) = app
+                .bootstrap_picker
+                .as_mut()
+                .filter(|p| p.target.environment_id == env)
+            {
+                picker.saving = false;
+                match result {
+                    Ok(()) => {
+                        app.bootstrap_picker = None;
+                        app.screen = Screen::Manage;
+                        app.toast("Bootstrap default updated");
+                    }
+                    Err(error) => picker.error = Some(error),
+                }
+            }
+            None
+        }
+        Message::BootstrapStep(text) => {
+            if let Some(form) = app.bootstrap_form.as_mut() {
+                if form.steps.last() != Some(&text) {
+                    form.steps.push(text);
+                }
+            }
+            None
+        }
+        Message::BootstrapDone(env, result) => {
+            app.bootstrap_defaults.remove(&env);
+            if let Some(form) = app
+                .bootstrap_form
+                .as_mut()
+                .filter(|f| f.target.environment_id == env)
+            {
+                form.running = false;
+                match result {
+                    Ok(b) => {
+                        form.finished = true;
+                        form.steps = vec![if b.is_default {
+                            format!("'{}' is your default for new Cloud Agents.", b.name)
+                        } else {
+                            format!("'{}' is ready to use. Your default is unchanged.", b.name)
+                        }];
+                    }
+                    Err(error) => form.error = Some(error),
+                }
+            }
+            start_refresh(app, tx, client, backboard);
             None
         }
         Message::LaunchStep(text) => {
@@ -1107,6 +2604,7 @@ fn handle_message(
             info,
         } => {
             let notify_tx = tx.clone();
+            let output_agent = agent_id.clone();
             match session::Session::spawn(
                 agent_id.clone(),
                 agent_name,
@@ -1122,7 +2620,7 @@ fn handle_message(
                 24,
                 80,
                 move || {
-                    let _ = notify_tx.send(Message::SessionOutput);
+                    let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
                 },
             ) {
                 Ok(session) => {
@@ -1131,6 +2629,7 @@ fn handle_message(
                     None
                 }
                 Err(err) => {
+                    app.connecting.remove(&session_name);
                     let message = format!("couldn't reattach: {err}");
                     let telemetry_message = message.clone();
                     tokio::spawn(async move {
@@ -1144,6 +2643,71 @@ fn handle_message(
                     None
                 }
             }
+        }
+        Message::ReattachFailed {
+            session_name,
+            error,
+        } => {
+            app.connecting.remove(&session_name);
+            app.launch_failed(error);
+            None
+        }
+        Message::ReattachTargetGone {
+            agent_id,
+            agent_name,
+            session_name,
+        } => app.reattach_target_gone(&agent_id, &agent_name, &session_name),
+        Message::AutoReattachReady {
+            agent_id,
+            agent_name,
+            session_name,
+            info,
+        } => {
+            let notify_tx = tx.clone();
+            let output_agent = agent_id.clone();
+            match session::Session::spawn(
+                agent_id.clone(),
+                agent_name,
+                "session".to_string(),
+                &info.ssh_target,
+                info.identity.as_deref(),
+                &info.relay_opts,
+                // Reattaching runs nothing: the relay hands back the screen
+                // the session already has.
+                "",
+                true,
+                &session_name,
+                24,
+                80,
+                move || {
+                    let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
+                },
+            ) {
+                Ok(session) => {
+                    app.attach_session_background(session, agent_id);
+                    tokio::spawn(super::telemetry::track_session_event("auto_reattach", None));
+                }
+                Err(err) => {
+                    let error = format!("{err:#}");
+                    let telemetry_error = error.clone();
+                    tokio::spawn(async move {
+                        super::telemetry::track_session_event(
+                            "auto_reattach_open_failed",
+                            Some(telemetry_error.as_str()),
+                        )
+                        .await;
+                    });
+                    app.auto_connect_failed(&session_name, &error);
+                }
+            }
+            None
+        }
+        Message::AutoConnectFailed {
+            session_name,
+            error,
+        } => {
+            app.auto_connect_failed(&session_name, &error);
+            None
         }
         Message::ProjectCreated(result) => {
             if let Some(w) = app.wizard.as_mut() {
@@ -1181,6 +2745,12 @@ fn handle_message(
                 then.map(HeldConnect::into_effect)
             }
             Err(message) => {
+                if matches!(then, Some(HeldConnect::Bootstrap(_)))
+                    && let Some(form) = app.bootstrap_form.as_mut()
+                {
+                    form.running = false;
+                    form.error = Some(format!("SSH key registration failed: {message}"));
+                }
                 // Still unregistered: the next connect raises the gate again.
                 // The toast gets the first line; register_ssh_key already maps
                 // the duplicate-fingerprint rejection to something actionable.
@@ -1204,11 +2774,31 @@ fn handle_message(
             // asserting it did.
             app.refresh_agent_sessions(&agent_id)
         }
-        Message::RefreshAgentSessions(agent_id) => app.refresh_agent_sessions(&agent_id),
         // The draw at the top of the loop is the response.
         // Output also carries the end: the reader thread flips `ended` and
         // sends one last wake, which is when a finished pane gets closed.
-        Message::SessionOutput => app.reap_ended_sessions(),
+        Message::ReportsLoaded { agent_id, result } => {
+            app.activity.finished(&agent_id);
+            if let Ok(reports) = result {
+                activity::apply(app, &agent_id, &reports);
+            }
+            None
+        }
+        Message::SessionOutput(agent_id) => {
+            for pane in &mut app.sessions {
+                pane.sync_console_name();
+            }
+            if app.sessions.iter().any(|pane| {
+                pane.agent_id == agent_id
+                    && !pane.ended()
+                    && pane.client_id.is_some()
+                    && pane.client_bridge.is_none()
+                    && pane.opencode_bridge.is_none()
+            }) {
+                app.activity.changed(&agent_id, std::time::Instant::now());
+            }
+            app.reap_ended_sessions()
+        }
     }
 }
 
@@ -1239,9 +2829,18 @@ fn open_session(
         .unwrap_or_else(|| session::durable_name(prepared.harness));
 
     let notify_tx = tx.clone();
+    let output_agent = prepared.agent_id.clone();
     // A placeholder size: the next frame measures the real pane and resizes
     // both the pty and the emulator before anything is drawn from it.
     let (rows, cols) = (24u16, 80u16);
+    let pane_id = (prepared.harness != "shell").then(super::opencode::generate_password);
+    let remote_cmd = match &pane_id {
+        Some(id) => format!(
+            "export RAILWAY_THREAD_PANE_ID={id}; {}",
+            prepared.remote_cmd
+        ),
+        None => prepared.remote_cmd.clone(),
+    };
     match session::Session::spawn(
         prepared.agent_id.clone(),
         prepared.agent_name.clone(),
@@ -1249,18 +2848,23 @@ fn open_session(
         &prepared.ssh_target,
         prepared.identity.as_deref(),
         &prepared.relay_opts,
-        &prepared.remote_cmd,
+        &remote_cmd,
         req.session_name.is_some(),
         &durable_session,
         rows,
         cols,
         move || {
-            let _ = notify_tx.send(Message::SessionOutput);
+            let _ = notify_tx.send(Message::SessionOutput(output_agent.clone()));
         },
     ) {
-        Ok(session) => {
+        Ok(mut session) => {
+            if let Some(id) = pane_id {
+                session.durable_name =
+                    client_sessions::draft_name(prepared.harness, &prepared.agent_id, &id);
+                session.client_id = Some(id);
+                session.console_name = Some(durable_session);
+            }
             app.attach_session(session, prepared.agent_id.clone());
-            schedule_session_refresh(prepared.agent_id.clone(), tx);
             // Refetch the environment so a newly created agent appears, and
             // remember to open it: the session we just started is one of its
             // children now, and that is where it should be visible.
@@ -1283,22 +2887,8 @@ fn open_session(
     }
 }
 
-/// How long after opening a session to re-ask the platform for the agent's
-/// session list, and again after that.
-///
-/// The relay registers a session a moment after ssh connects, so the refresh
-/// that fires with the launch usually misses it — which is why a newly started
-/// session only appeared after closing and reopening the agent. Two cheap
-/// retries cover the gap without polling forever.
-const SESSION_SETTLE: [u64; 2] = [900, 2600];
-
 /// How many count queries are allowed in flight at once.
 const SWEEP_CONCURRENCY: usize = 5;
-
-/// `s` when there is more than one of something.
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
 
 /// A 429 seen by any background fetch. Shared so the rest of a batch stops
 /// rather than spending the caller's remaining budget on requests that will be
@@ -1355,11 +2945,14 @@ fn spawn_sweep(
             let backboard = backboard.clone();
             let stop = stop.clone();
             tokio::spawn(async move {
+                let asked_at = std::time::Instant::now();
                 match fetch_agents(&client, &backboard, &environment_id).await {
                     Ok(agents) => {
                         let _ = tx.send(Message::AgentsLoaded {
                             path,
+                            environment_id,
                             result: Ok(agents),
+                            asked_at,
                         });
                     }
                     Err(err) => match rate_limit_from(&err) {
@@ -1370,7 +2963,9 @@ fn spawn_sweep(
                         None => {
                             let _ = tx.send(Message::AgentsLoaded {
                                 path,
+                                environment_id,
                                 result: Err(err.to_string()),
+                                asked_at,
                             });
                         }
                     },
@@ -1384,6 +2979,7 @@ fn spawn_sweep(
 /// Fetch one agent's sessions in the background.
 fn spawn_session_fetch(
     agent_id: String,
+    environment_id: String,
     path: (usize, usize, usize, usize),
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
@@ -1393,7 +2989,7 @@ fn spawn_session_fetch(
     let client = client.clone();
     let backboard = backboard.to_string();
     tokio::spawn(async move {
-        let result = match fetch_sessions(&client, &backboard, &agent_id).await {
+        let result = match fetch_sessions(&client, &backboard, &agent_id, &environment_id).await {
             Ok(sessions) => Ok(sessions),
             Err(err) => {
                 // Reported as a rate limit rather than as this agent's failure,
@@ -1418,6 +3014,44 @@ fn spawn_session_fetch(
 /// Same discipline as [`spawn_sweep`]: the account-wide settle can name every
 /// running agent at once, and firing one request per agent simultaneously is
 /// the burst this TUI exists to avoid. The first 429 abandons the rest.
+/// Bring a harness server back on an agent that was slept under a local
+/// client pane and has since woken. `reconnect` reuses the saved port and
+/// credentials, so the client that has been retrying the old address needs no
+/// restart of its own; it lands on the next try.
+fn spawn_server_respawns(effects: Vec<Effect>, tx: &mpsc::UnboundedSender<Message>) {
+    for effect in effects {
+        let Effect::RespawnServer {
+            agent_id,
+            environment_id,
+            harness,
+        } = effect
+        else {
+            continue;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let result: Result<()> = async {
+                let info = code::connect_info(&environment_id, &agent_id).await?;
+                match harness.as_str() {
+                    "codex" => {
+                        super::codex::reconnect(&info).await?;
+                    }
+                    "opencode" | "opencode2" => {
+                        super::opencode::reconnect(&info).await?;
+                    }
+                    other => anyhow::bail!("no managed server to restart for {other}"),
+                }
+                Ok(())
+            }
+            .await;
+            let _ = tx.send(Message::ServerRespawned {
+                agent_id,
+                error: result.err().map(|e| format!("{e:#}")),
+            });
+        });
+    }
+}
+
 fn spawn_session_prefetch(
     effects: Vec<Effect>,
     tx: &mpsc::UnboundedSender<Message>,
@@ -1433,7 +3067,12 @@ fn spawn_session_prefetch(
     tokio::spawn(async move {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(SWEEP_CONCURRENCY));
         for effect in effects {
-            let Effect::LoadSessions { agent_id, path } = effect else {
+            let Effect::LoadSessions {
+                agent_id,
+                environment_id,
+                path,
+            } = effect
+            else {
                 continue;
             };
             if stop.load(Ordering::Relaxed) {
@@ -1447,7 +3086,7 @@ fn spawn_session_prefetch(
             let backboard = backboard.clone();
             let stop = stop.clone();
             tokio::spawn(async move {
-                match fetch_sessions(&client, &backboard, &agent_id).await {
+                match fetch_sessions(&client, &backboard, &agent_id, &environment_id).await {
                     Ok(sessions) => {
                         let _ = tx.send(Message::SessionsLoaded {
                             path,
@@ -1492,22 +3131,6 @@ async fn register_gate_key(client: &reqwest::Client, offer: &SshKeyOffer) -> Res
     .map_err(|e| format!("{e:#}"))
 }
 
-/// Re-ask for an agent's sessions shortly after one is opened.
-fn schedule_session_refresh(agent_id: String, tx: &mpsc::UnboundedSender<Message>) {
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        for delay in SESSION_SETTLE {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-            if tx
-                .send(Message::RefreshAgentSessions(agent_id.clone()))
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
-}
-
 /// Translate a request from the TUI into the launcher's arguments.
 ///
 /// Its own function because this mapping is where "new session on this agent"
@@ -1543,7 +3166,7 @@ fn dispatch_launch(
 ) {
     // The launch lives on the manage screen — the tree the agent will land in —
     // so go there first and reveal its environment. The ssh gate's question
-    // then hangs over the place the answer matters, not over the menu it
+    // then hangs over the place the answer matters, not over wherever it
     // happened to be asked from.
     app.screen = Screen::Manage;
     if let Some(Effect::LoadAgents {
@@ -1583,17 +3206,7 @@ fn dispatch_launch(
 /// Kick off a launch in the background and show the loading screen.
 fn start_launch(app: &mut App, req: LaunchRequest, tx: &mpsc::UnboundedSender<Message>) {
     app.start_loading(&req);
-    let tx = tx.clone();
-    tokio::spawn(async move {
-        let req = req;
-        let args = launch_args_for(&req);
-        let progress = ChannelProgress(tx.clone());
-        let message = match code::prepare(&args, &progress, code::SessionStyle::Pane).await {
-            Ok(prepared) => Message::LaunchReady(Box::new(prepared), Box::new(req)),
-            Err(err) => Message::LaunchFailed(format!("{err:#}")),
-        };
-        let _ = tx.send(message);
-    });
+    spawn_prepare(req, tx.clone());
 }
 
 /// One lifecycle mutation. Kept next to the loop rather than in the app so the
@@ -1651,7 +3264,9 @@ async fn close_session(app: &mut App, index: usize, _client: &reqwest::Client, _
 /// draw, when the layout that produced the pane is known. A mismatch here is
 /// what makes a remote TUI wrap in the wrong place.
 fn sync_session_size(app: &mut App, terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) {
-    let Some((rows, cols)) = ui::session_pane_size(terminal.size().ok(), app.pane_is_full()) else {
+    let Some((rows, cols)) =
+        ui::session_pane_size(terminal.size().ok(), app.pane_is_full(), app.sidebar_width)
+    else {
         return;
     };
     // Every session gets the pane's shape, not just the visible one: a
@@ -1672,7 +3287,7 @@ fn finish_copy(app: &mut App, text: Option<String>) {
     // In the corner rather than the header: a drag ends wherever the pointer
     // is, and the only other evidence that it worked is the clipboard, which
     // is not on the screen.
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+    match crate::util::clipboard::copy(&text) {
         Ok(()) => app.toast(format!(
             "Copied {lines} line{}",
             if lines == 1 { "" } else { "s" }
@@ -1682,6 +3297,7 @@ fn finish_copy(app: &mut App, text: Option<String>) {
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+    terminal_palette::capture();
     enable_raw_mode()?;
     // While the TUI holds the terminal, no inquire prompt can work — the event
     // loop would eat its keystrokes and the next frame would paint over it.
@@ -1761,6 +3377,296 @@ fn restore_terminal() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bootstrap_default_loading_and_selection_stay_in_the_tui() {
+        let target = Target {
+            project_id: "project".into(),
+            project_name: "Demo".into(),
+            environment_id: "env".into(),
+            environment_name: "production".into(),
+        };
+        let mut app = App::new(
+            vec![],
+            Some(target.clone()),
+            Some("claude"),
+            None,
+            None,
+            true,
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = reqwest::Client::new();
+        let stop = StopFlag::default();
+        for has_default in [false, true] {
+            let mut form = bootstrap_setup::Form::new(target.clone(), 0);
+            form.snapshot = Some(bootstrap_setup::Snapshot {
+                agent_id: "vm".into(),
+                agent_name: "selected".into(),
+            });
+            form.defaults_loading = true;
+            app.bootstrap_form = Some(form);
+            app.screen = Screen::BootstrapSetup;
+            let entries = if has_default {
+                vec![crate::controllers::agent_bootstrap::Bootstrap {
+                    id: "saved".into(),
+                    name: "dev".into(),
+                    environment_id: "env".into(),
+                    status: "READY".into(),
+                    failure_reason: None,
+                    updated_at: chrono::Utc::now(),
+                    is_default: true,
+                    source_agent_id: None,
+                    checkpoint_id: None,
+                }]
+            } else {
+                vec![]
+            };
+            handle_message(
+                &mut app,
+                Message::BootstrapsLoaded("env".into(), Ok(entries)),
+                &tx,
+                &client,
+                "unused",
+                &stop,
+            );
+            let form = app.bootstrap_form.as_ref().unwrap();
+            assert_eq!(form.make_default, !has_default);
+            assert!(!form.defaults_loading);
+            assert_eq!(app.screen, Screen::BootstrapSetup);
+        }
+        app.bootstrap_form = None;
+        app.bootstrap_picker = Some(bootstrap_setup::Picker::new(target, false));
+        app.screen = Screen::BootstrapPick;
+        handle_message(
+            &mut app,
+            Message::BootstrapSelected("env".into(), Err("cannot save".into())),
+            &tx,
+            &client,
+            "unused",
+            &stop,
+        );
+        assert_eq!(app.screen, Screen::BootstrapPick);
+        assert_eq!(
+            app.bootstrap_picker.as_ref().unwrap().error.as_deref(),
+            Some("cannot save")
+        );
+        handle_message(
+            &mut app,
+            Message::BootstrapSelected("env".into(), Ok(())),
+            &tx,
+            &client,
+            "unused",
+            &stop,
+        );
+        assert_eq!(app.screen, Screen::Manage);
+        assert!(app.bootstrap_picker.is_none());
+    }
+
+    #[test]
+    fn bootstrap_and_launch_progress_send_stages_without_detail_notes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let progress = ChannelProgress(tx.clone());
+        progress.note("Using bootstrap 'dev'");
+        progress.step("Creating a cloud agent");
+        assert!(
+            matches!(rx.try_recv(), Ok(Message::LaunchStep(s)) if s == "Creating a cloud agent")
+        );
+        assert!(rx.try_recv().is_err());
+        let progress = BootstrapProgress(tx);
+        progress.note("Copied the selected coding agent settings");
+        progress.step("Saving checkpoint");
+        assert!(matches!(rx.try_recv(), Ok(Message::BootstrapStep(s)) if s == "Saving checkpoint"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn saved_vm_history_survives_an_unavailable_native_server() {
+        for harness in ["codex", "opencode", "opencode2"] {
+            for populated in [false, true] {
+                let threads = if populated {
+                    vec![remote_threads::tests::thread(harness, "saved")]
+                } else {
+                    vec![]
+                };
+                let mut inventory = merge_remote_threads(
+                    "vm",
+                    vec![],
+                    remote_threads::Discovery {
+                        threads,
+                        ..Default::default()
+                    },
+                );
+                merge_native_threads(
+                    &mut inventory,
+                    "vm",
+                    harness,
+                    Err(anyhow::anyhow!("502 Bad Gateway")),
+                );
+                assert_eq!(inventory.rows.len(), usize::from(populated));
+                assert!(inventory.warnings.is_empty());
+                assert!(inventory.failed.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn history_errors_remain_visible_without_a_successful_vm_fallback() {
+        for harness in ["codex", "opencode", "opencode2", "railway"] {
+            let failed = if harness == "railway" {
+                vec![] // Railway has no disk-history reader.
+            } else {
+                vec![harness.into()]
+            };
+            let mut inventory = merge_remote_threads(
+                "vm",
+                vec![],
+                remote_threads::Discovery {
+                    failed,
+                    ..Default::default()
+                },
+            );
+            merge_native_threads(
+                &mut inventory,
+                "vm",
+                harness,
+                Err(anyhow::anyhow!("502 Bad Gateway")),
+            );
+            assert_eq!(inventory.failed, [harness]);
+            assert!(inventory.warnings[0].contains("502 Bad Gateway"));
+        }
+    }
+
+    #[test]
+    fn native_history_enriches_saved_vm_threads_without_duplicates() {
+        let saved = remote_threads::tests::thread("codex", "saved");
+        let mut live = saved.thread.clone();
+        live.state = "working".into();
+        let mut inventory = merge_remote_threads(
+            "vm",
+            vec![],
+            remote_threads::Discovery {
+                threads: vec![saved],
+                ..Default::default()
+            },
+        );
+        merge_native_threads(&mut inventory, "vm", "codex", Ok(vec![live]));
+        assert_eq!(inventory.rows.len(), 1);
+        assert_eq!(
+            inventory.rows[0].snapshot.as_ref().unwrap().state,
+            "working"
+        );
+        assert_eq!(inventory.remote.len(), 1);
+    }
+
+    #[test]
+    fn history_survives_console_exit_and_native_switches_replace_the_console_row() {
+        let old = remote_threads::tests::thread("claude", "old");
+        let mut current = remote_threads::tests::thread("claude", "current");
+        current.active = true;
+        current.pane_id = Some("pane-id".into());
+        let console = ConsoleSession {
+            name: "relay-name".into(),
+            kind: "SHELL".into(),
+            running: true,
+            attached: true,
+            created_at: None,
+            command: Some("export RAILWAY_THREAD_PANE_ID=pane-id; claude".into()),
+            snapshot: Some(app::ThreadSnapshot {
+                harness: "claude".into(),
+                session_id: "old".into(),
+                state: "working".into(),
+                prompt: Some("stale prompt".into()),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: "2026-09-10T09:00:00Z".into(),
+            }),
+        };
+        let stale = merge_remote_threads(
+            "vm",
+            vec![console.clone()],
+            remote_threads::Discovery {
+                threads: vec![old.clone()],
+                ..Default::default()
+            },
+        );
+        assert!(
+            stale.remote[0].console_name.is_none(),
+            "a stale hook on a running shell must resume by ID"
+        );
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![console.clone()],
+            remote_threads::Discovery {
+                threads: vec![old.clone(), current.clone()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(inventory.rows.len(), 2);
+        assert!(inventory.rows.iter().all(|row| row.kind == "THREAD"));
+        assert!(
+            inventory.remote[0].console_name.is_none(),
+            "old hook must not attach the wrong conversation"
+        );
+        assert_eq!(
+            inventory.remote[1].console_name.as_deref(),
+            Some("relay-name")
+        );
+        let mut exited = console;
+        exited.running = false;
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![exited],
+            remote_threads::Discovery {
+                threads: vec![old, current],
+                ..Default::default()
+            },
+        );
+        assert!(
+            inventory
+                .remote
+                .iter()
+                .all(|row| row.console_name.is_none())
+        );
+        assert_eq!(
+            inventory
+                .rows
+                .iter()
+                .filter(|row| row.is_interesting())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn multiple_grok_tabs_in_one_process_do_not_guess_the_focused_conversation() {
+        let mut first = remote_threads::tests::thread("grok", "first");
+        first.active = true;
+        first.console_name = Some("relay".into());
+        let mut second = first.clone();
+        second.thread.id = "second".into();
+        let inventory = merge_remote_threads(
+            "vm",
+            vec![ConsoleSession {
+                name: "relay".into(),
+                kind: "SHELL".into(),
+                running: true,
+                attached: true,
+                created_at: None,
+                command: Some("grok".into()),
+                snapshot: None,
+            }],
+            remote_threads::Discovery {
+                threads: vec![first, second],
+                ..Default::default()
+            },
+        );
+        assert!(
+            inventory
+                .remote
+                .iter()
+                .all(|row| row.console_name.is_none())
+        );
+    }
+
     fn request() -> LaunchRequest {
         LaunchRequest {
             project_id: "proj_1".into(),
@@ -1802,16 +3708,18 @@ mod tests {
         assert_eq!(args.agent_id, None);
     }
 
-    /// The copied command has to be the one that reaches *this* session: the
-    /// relay target is a username, and the session is named through SetEnv.
+    /// Copying SSH opens a shell on the exact VM, bypassing both the durable
+    /// agent session and the login profile's harness autostart.
     #[test]
-    fn the_copied_ssh_command_names_the_session_and_the_relay() {
-        let command = ssh_command_for("env_1", "ca_1", "claude-3s9r89");
-        assert!(command.starts_with("ssh "), "{command}");
-        assert!(
-            command.contains("-o SetEnv=RAILWAY_DURABLE_SESSION_NAME=claude-3s9r89"),
-            "{command}"
+    fn the_copied_ssh_command_opens_a_shell_on_the_vm() {
+        let command = ssh_command_for("env_1", "ca_1");
+        let args = shlex::split(&command).unwrap();
+        assert_eq!(&args[..2], &["ssh", "-t"]);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(code::LOGIN_SHELL_COMMAND)
         );
+        assert!(!command.contains("RAILWAY_DURABLE_SESSION_NAME"));
         assert!(command.contains("agent:env_1:ca_1@"), "{command}");
         // The target is a username on the relay, not a host of its own.
         assert!(!command.contains(" agent:env_1:ca_1 "), "{command}");

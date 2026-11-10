@@ -1,0 +1,443 @@
+"""Hermetic tests of the actual remote bootstrap, including detached children."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+BOOTSTRAP = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode.py'
+# Production uses /proc PID start times. macOS CI exercises the same lifecycle
+# using ps, keeping the production bootstrap Linux-specific.
+WRAPPER = '''
+import importlib.util,json,sys,subprocess
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('bootstrap', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.LEGACY_PORT = int(sys.argv[3])
+m.CODE_PORT = int(sys.argv[4])
+if sys.platform == 'darwin':
+    def process_start(pid):
+        result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=', '-o', 'lstart='], capture_output=True, text=True)
+        fields = result.stdout.strip().split(None, 1)
+        # Process status changes between probes; only start time identifies it.
+        return fields[1] if result.returncode == 0 and len(fields) == 2 and not fields[0].startswith('Z') else None
+    m.process_start = process_start
+try:
+    print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]))))
+except Exception as error:
+    print(str(error), file=sys.stderr)
+    sys.exit(1)
+'''
+FAKE = '''
+import base64,json,os,socket,sys,sqlite3
+from pathlib import Path
+from urllib.parse import urlparse
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+# HTTPServer.server_bind does reverse DNS, which can stall on macOS CI.
+# The fake server must use loopback only, including hostname resolution.
+socket.getfqdn = lambda host: 'localhost'
+VERSION = '2.0.8'
+if sys.argv[1:] == ['--version']:
+    print('opencode v' + VERSION)
+    sys.exit(0)
+if VERSION.startswith('2.'):
+    database = Path(os.environ['HOME']) / '.local/share/opencode/opencode.db'
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS credential (id TEXT)')
+class Handler(BaseHTTPRequestHandler):
+    def authenticated(self):
+        expected = 'Basic ' + base64.b64encode((os.environ['OPENCODE_SERVER_USERNAME'] + ':' + os.environ['OPENCODE_SERVER_PASSWORD']).encode()).decode()
+        if not os.environ.get('TEST_DISABLE_AUTH') and self.headers.get('Authorization') != expected:
+            self.send_response(401)
+            self.end_headers()
+            return False
+        return True
+    def config_path(self):
+        return Path(os.environ['HOME']) / '.config/opencode/opencode.json'
+    def do_GET(self):
+        if not self.authenticated(): return
+        path = urlparse(self.path).path
+        health = '/api/info' if VERSION.startswith('2.') else '/global/health'
+        if path not in (health, '/config', '/global/config'):
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.end_headers()
+        if path == '/api/info':
+            self.wfile.write(json.dumps({'version': VERSION, 'pid': os.getpid(), 'urls': []}).encode())
+        elif path in ('/config', '/global/config'):
+            path = self.config_path()
+            self.wfile.write(path.read_bytes() if path.exists() else b'{}')
+        else:
+            self.wfile.write(json.dumps({'healthy': True, 'directory': os.getcwd(), 'version': VERSION}).encode())
+    def do_PATCH(self):
+        if not self.authenticated(): return
+        path = self.config_path()
+        config = json.loads(path.read_text()) if path.exists() else {}
+        updates = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        def merge(original, updates):
+            for key, value in updates.items():
+                if isinstance(value, dict) and isinstance(original.get(key), dict):
+                    merge(original[key], value)
+                else:
+                    original[key] = value
+        if not os.environ.get('TEST_IGNORE_PERMISSIONS'):
+            merge(config, updates)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(config))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps(config).encode())
+    def log_message(self,*args): pass
+port = int(sys.argv[sys.argv.index('--port') + 1])
+ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
+'''
+
+
+class BootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.directory = self.home / "project ' with $(touch INJECTED)"
+        self.directory.mkdir()
+        # The image's official OpenCode V2 install location.
+        (self.home / '.opencode/bin').mkdir(parents=True)
+        self.write_runtime('2.0.8')
+        self.harness = 'opencode'
+        with socket.socket() as sock, socket.socket() as code, socket.socket() as custom:
+            sock.bind(('127.0.0.1', 0))
+            code.bind(('127.0.0.1', 0))
+            custom.bind(('127.0.0.1', 0))
+            self.port = sock.getsockname()[1]
+            self.code_port = code.getsockname()[1]
+            self.custom_port = custom.getsockname()[1]
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('OPENCODE_', 'RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_CODE_PORT', 'XDG_DATA_HOME'))}
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.port}'] = 'app-test.up.railway.app'
+        self.state = self.home / '.railway/desktop/opencode/server.json'
+
+    def run_bootstrap(self, request=None, check=True):
+        request = dict(request or {'directory': str(self.directory), 'password': 'test-password'})
+        request.setdefault('harness', self.harness)
+        result = subprocess.run(
+            [sys.executable, '-c', WRAPPER, str(BOOTSTRAP), str(self.home), str(self.port), str(self.code_port)],
+            input=json.dumps(request),
+            capture_output=True, text=True, timeout=15, env=self.env,
+        )
+        if check:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        return result
+
+    def tearDown(self):
+        try:
+            self.run_bootstrap({'action': 'stop'})
+        finally:
+            self.tmp.cleanup()
+
+    def test_detaches_reuses_credentials_and_restarts(self):
+        first = self.run_bootstrap()
+        self.assertFalse(first['reused'])
+        self.assertEqual(first['url'], 'https://app-test.up.railway.app')
+        self.assertEqual(first['directory'], str(self.directory.resolve()))
+        initial_state = json.loads(self.state.read_text())
+        # The subprocess capturing stdout has exited: an inherited SSH output
+        # descriptor would have kept communicate() above blocked until timeout.
+        again = self.run_bootstrap({'directory': str(self.directory), 'password': 'different'})
+        self.assertTrue(again['reused'])
+        self.assertEqual(again['password'], first['password'])
+        self.assertEqual(json.loads(self.state.read_text())['pid'], initial_state['pid'])
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.state.parent.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.home / 'INJECTED').exists())
+        self.run_bootstrap({'action': 'stop'})
+        restarted = self.run_bootstrap({'directory': str(self.directory), 'password': 'different'})
+        self.assertFalse(restarted['reused'])
+        self.assertEqual(restarted['password'], first['password'])
+
+    def write_runtime(self, version):
+        """The image's opencode."""
+        binary = self.home / '.opencode/bin/opencode'
+        binary.write_text('#!' + sys.executable + '\n' + FAKE.replace("VERSION = '2.0.8'", "VERSION = " + repr(version)))
+        binary.chmod(0o700)
+        return binary
+
+    def test_old_image_without_v2_fails_fast_with_the_recreate_message(self):
+        self.write_runtime('1.18.29')
+        result = self.run_bootstrap(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('older image whose OpenCode is not V2', result.stderr)
+        self.assertIn('railway code --opencode --new', result.stderr)
+        self.assertFalse(self.state.exists())
+        self.assertFalse((self.home / '.local/share/opencode/opencode.db').exists())
+
+    def test_saved_v1_server_is_refused_but_can_still_be_stopped(self):
+        # A record written by an older CLI for an OpenCode 1 server.
+        self.state.parent.mkdir(parents=True)
+        self.state.write_text(json.dumps({'username': 'opencode', 'password': 'old', 'harness': 'opencode',
+                                          'directory': str(self.directory), 'port': self.port}))
+        for request in ({'action': 'connect'}, {'directory': str(self.directory), 'password': 'new'}):
+            result = self.run_bootstrap(request, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('started as OpenCode 1', result.stderr)
+            self.assertIn('railway code --opencode --new', result.stderr)
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+        self.assertEqual(self.run_bootstrap({'action': 'stop'}), {'stopped': True})
+
+    def test_image_behind_the_saved_release_is_not_reopened(self):
+        first = self.run_bootstrap()
+        self.assertEqual(json.loads(self.state.read_text())['version'], '2.0.8')
+        self.run_bootstrap({'action': 'stop'})
+        self.write_runtime('2.0.4')
+        rejected = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('older image', rejected.stderr)
+        self.write_runtime('2.0.9')
+        restarted = self.run_bootstrap({'action': 'connect'})
+        self.assertFalse(restarted['reused'])
+        self.assertEqual(restarted['password'], first['password'])
+        self.assertEqual(restarted['version'], '2.0.9')
+
+    def test_v1_storage_on_disk_is_left_for_v2_to_migrate(self):
+        database = self.home / '.local/share/opencode/opencode.db'
+        database.parent.mkdir(parents=True)
+        with sqlite3.connect(database) as db:
+            db.execute('CREATE TABLE session (id TEXT)')
+        result = self.run_bootstrap()
+        self.assertFalse(result['reused'])
+        self.assertFalse(list(self.state.parent.glob('opencode-before-upgrade-*')))
+
+    def test_v2_records_one_harness_and_old_opencode2_records_reconnect(self):
+        self.harness = 'opencode2'
+        first = self.run_bootstrap()
+        self.assertFalse(first['reused'])
+        self.assertTrue(self.run_bootstrap()['reused'])
+        state = json.loads(self.state.read_text())
+        self.assertEqual((state['harness'], state['protocol']), ('opencode', 'v2'))
+        # A record from an older CLI that still says opencode2 is a V2 server.
+        state['harness'] = 'opencode2'
+        del state['protocol']
+        self.state.write_text(json.dumps(state))
+        result = self.run_bootstrap({'harness': 'opencode', 'action': 'connect'})
+        self.assertTrue(result['reused'])
+        self.assertEqual(json.loads(self.state.read_text())['protocol'], 'v2')
+        self.run_bootstrap({'harness': 'opencode', 'action': 'stop'})
+
+    def test_discovery_is_read_only_and_returns_no_password(self):
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+        self.assertFalse(self.state.parent.exists())
+        self.run_bootstrap()
+        before = self.state.read_bytes()
+        result = self.run_bootstrap({'action': 'inspect'})
+        self.assertEqual(result, {'directory': str(self.directory.resolve())})
+        self.assertEqual(before, self.state.read_bytes())
+        self.assertEqual(self.run_bootstrap({'action': 'inspect', 'harness': 'opencode2'}), result)
+        self.run_bootstrap({'action': 'stop'})
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+
+    def test_connect_reuses_or_restarts_only_a_saved_server(self):
+        missing = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertFalse(self.state.parent.exists())
+        first = self.run_bootstrap()
+        again = self.run_bootstrap({'action': 'connect'})
+        self.assertTrue(again['reused'])
+        self.assertEqual(again['password'], first['password'])
+        self.assertEqual(again['directory'], first['directory'])
+        self.run_bootstrap({'action': 'stop'})
+        wrong = self.run_bootstrap({'action': 'connect', 'protocol': 'v1'}, check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        restarted = self.run_bootstrap({'action': 'connect'})
+        self.assertFalse(restarted['reused'])
+        self.assertEqual(restarted['password'], first['password'])
+        self.assertEqual(restarted['directory'], first['directory'])
+
+    def test_new_servers_use_the_fixed_username_and_boot_password(self):
+        self.env['OPENCODE_SERVER_USERNAME'] = 'boot-user'
+        self.env['OPENCODE_SERVER_PASSWORD'] = 'boot-password'
+        first = self.run_bootstrap()
+        self.assertEqual(first['username'], 'opencode')
+        self.assertEqual(first['password'], 'boot-password')
+
+    def test_setup_and_reconnect_never_rewrite_opencode_config(self):
+        # V2 clients get --auto from the CLI; the VM's config file is left alone.
+        path = self.home / '.config/opencode/opencode.json'
+        path.parent.mkdir(parents=True)
+        original = json.dumps({'model': 'openai/test', 'permission': {'edit': 'ask'}})
+        path.write_text(original)
+        self.run_bootstrap()
+        self.assertTrue(self.run_bootstrap({'action': 'connect'})['reused'])
+        self.assertEqual(path.read_text(), original)
+
+    def test_custom_code_endpoint_coexists_with_app_and_survives_reconnect_and_restart(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-test.up.railway.app'
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'app-test.up.railway.app'
+        with socket.socket() as app:
+            app.bind(('0.0.0.0', self.port))
+            app.listen()
+            for harness in ('opencode', 'opencode2'):
+                with self.subTest(harness=harness):
+                    self.harness = harness
+                    first = self.run_bootstrap()
+                    self.assertEqual(first['url'], 'https://code-test.up.railway.app')
+                    self.assertEqual(json.loads(self.state.read_text())['port'], self.custom_port)
+                    self.assertIsNotNone(self.run_bootstrap({'action': 'inspect'}))
+                    self.assertTrue(self.run_bootstrap({'action': 'connect'})['reused'])
+                    self.run_bootstrap({'action': 'stop'})
+                    restarted = self.run_bootstrap({'action': 'connect'})
+                    self.assertFalse(restarted['reused'])
+                    self.assertEqual(restarted['url'], first['url'])
+                    self.assertEqual(restarted['password'], first['password'])
+                    self.run_bootstrap({'action': 'stop'})
+                    self.state.unlink()
+
+    def test_legacy_state_without_port_keeps_its_endpoint_when_code_domain_exists(self):
+        first = self.run_bootstrap()
+        state = json.loads(self.state.read_text())
+        state.pop('port')
+        self.state.write_text(json.dumps(state))
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        self.assertIsNotNone(self.run_bootstrap({'action': 'inspect'}))
+        reused = self.run_bootstrap({'action': 'connect'})
+        self.assertTrue(reused['reused'])
+        self.assertEqual(reused['url'], first['url'])
+        self.run_bootstrap({'action': 'stop'})
+        restarted = self.run_bootstrap({'action': 'connect'})
+        self.assertEqual(restarted['url'], first['url'])
+        self.assertEqual(restarted['password'], first['password'])
+        self.assertEqual(json.loads(self.state.read_text())['port'], self.port)
+
+    def test_saved_code_endpoint_never_falls_back_to_app_domain(self):
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'app-test.up.railway.app'
+        self.run_bootstrap()
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}')
+        result = self.run_bootstrap({'action': 'connect'}, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f'no public address for port {self.code_port}', result.stderr)
+
+    def test_checkpoint_restore_adopts_new_port_including_pre_port_state(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+                self.env.pop('RAILWAY_CODE_PORT', None)
+                first = self.run_bootstrap()
+                saved = json.loads(self.state.read_text())
+                self.run_bootstrap({'action': 'stop'})
+                if legacy:
+                    saved.pop('port')
+                    saved.pop('vm_id')
+                self.state.write_text(json.dumps(saved))
+                self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+                self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+                self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-restored.up.railway.app'
+                with socket.socket() as app:
+                    app.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    app.bind(('0.0.0.0', self.port))
+                    app.listen()
+                    restored = self.run_bootstrap({'action': 'connect'})
+                    self.assertEqual(restored['url'], 'https://code-restored.up.railway.app')
+                    self.assertEqual(restored['password'], first['password'])
+                    self.assertEqual(restored['directory'], first['directory'])
+                    self.assertFalse(restored['reused'])
+                    state = json.loads(self.state.read_text())
+                    self.assertEqual((state['port'], state['vm_id']), (self.custom_port, 'vm-restored'))
+                    self.run_bootstrap({'action': 'stop'})
+                self.state.unlink()
+
+    def test_restoring_without_endpoint_does_not_keep_source_code_port(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}'] = 'code-source.up.railway.app'
+        self.run_bootstrap()
+        self.run_bootstrap({'action': 'stop'})
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        self.env.pop('RAILWAY_CODE_PORT')
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.custom_port}')
+        self.assertEqual(self.run_bootstrap({'action': 'connect'})['url'], 'https://app-test.up.railway.app')
+
+    def test_configured_port_requires_its_own_domain_and_rejects_invalid_ports(self):
+        self.env['RAILWAY_CODE_PORT'] = str(self.custom_port)
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-other.up.railway.app'
+        result = self.run_bootstrap(check=False)
+        self.assertIn(f'no public address for port {self.custom_port}', result.stderr)
+        for port in ('0', '1023', '8080', '8790', '65536', 'nope'):
+            # LEGACY_PORT is remapped by the test wrapper.
+            self.env['RAILWAY_CODE_PORT'] = str(self.port) if port == '8080' else port
+            result = self.run_bootstrap(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('RAILWAY_CODE_PORT', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def test_restored_pid_is_never_adopted_or_stopped(self):
+        self.run_bootstrap()
+        saved = self.state.read_text()
+        self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-restored'
+        try:
+            self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+            self.run_bootstrap({'action': 'stop'})
+        finally:
+            self.env['RAILWAY_FACTORY_VM_ID'] = 'vm-source'
+            self.state.write_text(saved)
+        self.assertTrue(self.run_bootstrap()['reused'])
+
+    def test_legacy_agent_can_use_the_unqualified_domain(self):
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.port}')
+        self.env['RAILWAY_PUBLIC_DOMAIN'] = 'legacy.up.railway.app'
+        self.assertEqual(self.run_bootstrap()['url'], 'https://legacy.up.railway.app')
+
+    def test_occupied_port_is_not_replaced(self):
+        with socket.socket() as other:
+            other.bind(('0.0.0.0', self.port))
+            other.listen()
+            result = self.run_bootstrap(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('occupied', result.stderr)
+            self.assertFalse(self.state.exists())
+
+    def test_busy_code_port_does_not_fall_back_to_the_free_app_port(self):
+        self.env[f'RAILWAY_PUBLIC_DOMAIN_{self.code_port}'] = 'code-test.up.railway.app'
+        with socket.socket() as other:
+            other.bind(('0.0.0.0', self.code_port))
+            other.listen()
+            result = self.run_bootstrap(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f'Port {self.code_port} is occupied', result.stderr)
+            self.assertFalse(self.state.exists())
+
+    def test_missing_domain_does_not_launch(self):
+        self.env.pop(f'RAILWAY_PUBLIC_DOMAIN_{self.port}')
+        result = self.run_bootstrap(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no public address', result.stderr)
+        self.assertFalse(self.state.exists())
+
+    def test_unprotected_server_is_stopped(self):
+        self.env['TEST_DISABLE_AUTH'] = '1'
+        result = self.run_bootstrap(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not enforcing password', result.stderr)
+
+    def test_stop_does_not_signal_reused_pid(self):
+        self.run_bootstrap()
+        real_state = json.loads(self.state.read_text())
+        altered = dict(real_state, pid=os.getpid(), start='wrong-start-time')
+        self.state.write_text(json.dumps(altered))
+        self.run_bootstrap({'action': 'stop'})
+        self.state.write_text(json.dumps(real_state))
+        # Reaching this assertion proves stop did not signal our process group.
+        self.assertTrue(self.run_bootstrap()['reused'])
+
+
+if __name__ == '__main__':
+    unittest.main()

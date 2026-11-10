@@ -560,6 +560,7 @@ fn apply_staged_update() -> Result<String> {
 
     let current_exe = std::env::current_exe().context("Failed to get current exe path")?;
     replace_binary(&staged_binary, &current_exe)?;
+    super::update_status::record_installed(&staged.version);
 
     let version = staged.version.clone();
     StagedUpdate::clean()?;
@@ -646,11 +647,6 @@ pub fn try_apply_staged() -> Option<String> {
             #[cfg(windows)]
             clean_old_binary();
 
-            eprintln!(
-                "{} v{} (active on next run)",
-                "Auto-updated Railway CLI to".green().bold(),
-                version,
-            );
             Some(version)
         }
         Err(e) => {
@@ -666,7 +662,9 @@ pub fn try_apply_staged() -> Option<String> {
     result
 }
 
-pub async fn self_update_interactive() -> Result<()> {
+pub async fn self_update_interactive() -> Result<String> {
+    use super::progress::UpdateStep;
+    let checking = UpdateStep::start("Checking for updates");
     // Try the network check first.  If it fails and an update is already
     // staged on disk, apply that instead of surfacing a network error.
     let (latest_version, update_check_failed) =
@@ -678,35 +676,56 @@ pub async fn self_update_interactive() -> Result<()> {
                 (None, true)
             }
         };
+    if update_check_failed {
+        checking.finish("·", "Release check unavailable; checking staged update");
+    } else {
+        checking.finish("✓", "Update check complete");
+    }
 
     let lock_path = update_lock_path()?;
     let busy_message = shell_update_busy_message();
     let lock_file = acquire_update_lock(&lock_path, false, &busy_message)?;
 
     if let Some(ref version) = latest_version {
-        println!("{} v{}...", "Downloading".green().bold(), version);
-        download_and_stage_inner(version, 120).await?;
+        eprintln!("  v{} → v{}\n", env!("CARGO_PKG_VERSION"), version);
+        let downloading = UpdateStep::start("Downloading CLI");
+        if let Err(error) = download_and_stage_inner(version, 120).await {
+            downloading.finish("✗", "CLI download failed");
+            return Err(error);
+        }
+        downloading.finish("✓", "CLI downloaded");
     } else {
         match finalize_explicit_upgrade_fallback(validate_staged(), update_check_failed)? {
             Some(staged) => {
-                println!("Applying previously downloaded v{}...", staged.version);
+                eprintln!(
+                    "  v{} → v{} (previously downloaded)\n",
+                    env!("CARGO_PKG_VERSION"),
+                    staged.version
+                );
             }
             None => {
-                println!("{}", "Railway CLI is already up to date.".green());
-                return Ok(());
+                eprintln!("  ✓ CLI already up to date");
+                return Ok(env!("CARGO_PKG_VERSION").to_string());
             }
         }
     }
 
-    let version = apply_staged_update()?;
+    let installing = UpdateStep::start("Installing CLI");
+    let version = match apply_staged_update() {
+        Ok(version) => version,
+        Err(error) => {
+            installing.finish("✗", "CLI installation failed");
+            return Err(error);
+        }
+    };
 
     crate::util::check_update::UpdateCheck::clear_after_update();
 
     drop(lock_file);
 
-    println!("{} v{}", "Successfully updated to".green().bold(), version);
+    installing.finish("✓", "CLI installed");
 
-    Ok(())
+    Ok(version)
 }
 
 fn finalize_explicit_upgrade_fallback(
@@ -817,6 +836,8 @@ pub fn rollback(non_interactive: bool) -> Result<()> {
     drop(lock_file);
 
     println!("{} v{}", "Rolled back to".green().bold(), version);
+    super::update_status::record_installed(&version);
+    super::update_status::mark_presented(&version);
     println!(
         "Auto-updates will skip v{}. Run {} to disable all auto-updates.",
         current_version,

@@ -1,0 +1,1050 @@
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::time::sleep;
+
+use crate::{
+    client::{GQLClient, post_graphql_raw},
+    config::{Configs, LinkedProject},
+};
+
+use super::change_set::{
+    BranchFollow, ChangeSetTelemetry, DiffOptions, diff_graphs_following,
+    needs_default_branch_lookup, preserve_resolved_create_branches, render_change_set,
+    variable_policy_report,
+};
+use super::compiler::{EnvironmentConfigToGraphOptions, environment_config_to_graph};
+use super::eval::{EvalContext, PrContext, evaluate_file_with_context};
+use super::graph::{VariablePolicyReport, validate_graph};
+use super::partial::needs_partial_claim_apply;
+
+#[derive(Debug, Deserialize)]
+struct EnvQuery {
+    environment: EnvNode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvNode {
+    id: String,
+    name: Option<String>,
+    project_id: Option<String>,
+    config: Value,
+    config_etag: Option<String>,
+    canvas_group_refs: Option<Value>,
+    iac_partials: Option<Value>,
+    #[serde(default)]
+    is_ephemeral: bool,
+    #[serde(default)]
+    meta: Option<EnvMeta>,
+    #[serde(default)]
+    source_environment: Option<SourceEnvironment>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EnvMeta {
+    branch: Option<String>,
+    pr_number: Option<i64>,
+    #[serde(default)]
+    pr_repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SourceEnvironment {
+    name: Option<String>,
+}
+
+impl EnvNode {
+    fn pr_context(&self) -> Option<PrContext> {
+        if !self.is_ephemeral {
+            return None;
+        }
+        let number = self.meta.as_ref().and_then(|meta| meta.pr_number)?;
+        Some(PrContext {
+            number,
+            branch: self.meta.as_ref().and_then(|meta| meta.branch.clone()),
+            base: self
+                .source_environment
+                .as_ref()
+                .and_then(|source| source.name.clone()),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NameQuery {
+    project: Option<NameNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NameNode {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectServicesQuery {
+    project: Option<ProjectServices>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectServices {
+    #[serde(default)]
+    services: Connection<Named>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVolumesQuery {
+    project: Option<ProjectVolumes>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVolumes {
+    #[serde(default)]
+    volumes: Connection<Named>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectBucketsQuery {
+    project: Option<ProjectBuckets>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectBuckets {
+    #[serde(default)]
+    buckets: Connection<Named>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Connection<T> {
+    edges: Vec<Edge<T>>,
+}
+
+impl<T> Default for Connection<T> {
+    fn default() -> Self {
+        Self { edges: Vec::new() }
+    }
+}
+
+impl Default for ProjectServices {
+    fn default() -> Self {
+        Self {
+            services: Connection::default(),
+        }
+    }
+}
+
+impl Default for ProjectVolumes {
+    fn default() -> Self {
+        Self {
+            volumes: Connection::default(),
+        }
+    }
+}
+
+impl Default for ProjectBuckets {
+    fn default() -> Self {
+        Self {
+            buckets: Connection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Edge<T> {
+    node: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Named {
+    id: String,
+    name: Option<String>,
+    #[serde(default)]
+    group_id: Option<String>,
+    #[serde(default)]
+    template_service_id: Option<String>,
+}
+
+pub struct NativeRun {
+    pub file: Option<std::path::PathBuf>,
+    pub decrypt_variables: bool,
+    pub show_values: bool,
+}
+
+fn authoring_language(file: &std::path::Path) -> &'static str {
+    match file
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "py" => "python",
+        "go" => "go",
+        _ => "typescript",
+    }
+}
+
+pub async fn run(
+    args: &NativeRun,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+    command: &str,
+) -> Result<Value> {
+    if command == "current" {
+        return import_current_environment(args, configs, linked_project).await;
+    }
+
+    let cwd = std::env::current_dir()?;
+    let file = args
+        .file
+        .clone()
+        .or_else(|| find_authoring_file(&cwd))
+        .context("Could not find .railway/railway.ts, railway.py, or railway.go")?;
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let environment_id = linked_project.environment_id()?;
+    let current =
+        fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
+            .await?;
+    let mut ctx = EvalContext::from_linked_project(linked_project, command);
+    ctx.pr = current.pr_context();
+    let evaluated = evaluate_file_with_context(&file, &ctx)?;
+    let mut diagnostics: Vec<Value> = evaluated
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            json!({
+                "severity": diagnostic.severity,
+                "path": diagnostic.path,
+                "message": diagnostic.message,
+            })
+        })
+        .collect();
+    diagnostics.extend(
+        validate_graph(&evaluated.graph)
+            .into_iter()
+            .map(|message| json!({ "severity": "error", "path": "graph", "message": message })),
+    );
+
+    let mut options = EnvironmentConfigToGraphOptions {
+        project_name: linked_project
+            .name
+            .clone()
+            .or_else(|| Some(evaluated.graph.project.name.clone())),
+        ..Default::default()
+    };
+    if let Some(project_id) = current
+        .project_id
+        .clone()
+        .or_else(|| Some(linked_project.project.clone()))
+    {
+        fill_name_maps(
+            &client,
+            &endpoint,
+            &project_id,
+            current.id.as_str(),
+            &current,
+            &mut options,
+        )
+        .await?;
+    }
+    let current_graph = environment_config_to_graph(&current.config, &options);
+    let owners = parse_owners(current.iac_partials.as_ref());
+    let pr_branch = current
+        .pr_context()
+        .as_ref()
+        .and_then(|pr| pr.branch.clone());
+    let pr_repo = current.meta.as_ref().and_then(|meta| meta.pr_repo.clone());
+    let in_pr_environment = current.pr_context().is_some();
+    let default_branches = if needs_default_branch_lookup(
+        &current_graph,
+        &evaluated.graph,
+        in_pr_environment,
+        pr_branch.as_deref(),
+        pr_repo.as_deref(),
+    ) {
+        github_default_branches(&client, &endpoint)
+            .await
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    let follow = BranchFollow {
+        in_pr_environment,
+        pr_branch: pr_branch.as_deref(),
+        pr_repo: pr_repo.as_deref(),
+        default_branches: &default_branches,
+    };
+    let mut change_set = diff_graphs_following(
+        DiffOptions {
+            current: &current_graph,
+            desired: &evaluated.graph,
+            reveal_values: args.show_values,
+            partial: evaluated.partial.as_deref(),
+            owners: owners.as_ref(),
+        },
+        Some(&follow),
+    );
+    change_set.telemetry = Some(ChangeSetTelemetry {
+        language: authoring_language(&evaluated.file).to_string(),
+    });
+    let mut all_diagnostics = diagnostics;
+    for diagnostic in &change_set.diagnostics {
+        all_diagnostics.push(json!({
+            "severity": diagnostic.severity,
+            "path": diagnostic.path,
+            "message": diagnostic.message,
+        }));
+    }
+    let mut ok = all_diagnostics
+        .iter()
+        .all(|d| d.get("severity").and_then(Value::as_str) != Some("error"));
+
+    // Environment config reads mask variable values unless decryption was
+    // requested, so the local diff can report phantom variable updates (the
+    // current value looks like preserve()). Backboard's preview compares the
+    // change set against decrypted state server-side and drops those no-ops;
+    // plan/apply must use the previewed changes or variables never converge.
+    let mut preview = None;
+    if ok && !change_set.changes.is_empty() {
+        let previewed = preview_change_set(&client, &endpoint, &current.id, &change_set).await?;
+        if let Some(changes) = previewed
+            .get("changeSet")
+            .and_then(|set| set.get("changes"))
+            .and_then(Value::as_array)
+        {
+            let mut changes = changes.clone();
+            preserve_resolved_create_branches(&change_set.changes, &mut changes);
+            change_set.changes = changes;
+        }
+        preview = Some(previewed);
+    }
+
+    let claim = needs_partial_claim_apply(
+        &change_set.declared,
+        owners.as_ref(),
+        evaluated.partial.as_deref(),
+    );
+
+    let mut apply_result = None;
+    if command == "apply" && ok && (!change_set.changes.is_empty() || claim) {
+        let result = apply_change_set(
+            &client,
+            &endpoint,
+            &current.id,
+            &change_set,
+            current.config_etag.as_deref(),
+        )
+        .await?;
+        ok = record_apply_outcome(&result, &mut all_diagnostics);
+        apply_result = Some(result);
+    }
+
+    let variable_policy = variable_policy_report(&current_graph, &evaluated.graph);
+    let serialized = serde_json::to_value(RunnerWire {
+        ok,
+        command: command.to_string(),
+        file: evaluated.file.to_string_lossy().to_string(),
+        current_environment: Some(current_environment_value(
+            &current,
+            options.project_name.as_deref(),
+        )),
+        change_set: Some(change_set.clone()),
+        diff: Some(render_change_set(&change_set)),
+        diagnostics: all_diagnostics,
+        current_graph: Some(current_graph),
+        desired_graph: Some(evaluated.graph),
+        apply_result,
+        claim,
+        preview,
+        variable_policy: Some(variable_policy),
+    })?;
+    Ok(serialized)
+}
+
+/// Import live environment state without evaluating an authoring file.
+///
+/// `railway config pull` only needs the current graph. Evaluating a stub
+/// `service("web")` file was colliding with Config as Code ownership checks
+/// and required the `railway` npm package to be installed.
+async fn import_current_environment(
+    args: &NativeRun,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+) -> Result<Value> {
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let environment_id = linked_project.environment_id()?;
+    let current =
+        fetch_current_environment(&client, &endpoint, environment_id, args.decrypt_variables)
+            .await?;
+    let mut options = EnvironmentConfigToGraphOptions {
+        project_name: linked_project.name.clone(),
+        ..Default::default()
+    };
+    if let Some(project_id) = current
+        .project_id
+        .clone()
+        .or_else(|| Some(linked_project.project.clone()))
+    {
+        fill_name_maps(
+            &client,
+            &endpoint,
+            &project_id,
+            current.id.as_str(),
+            &current,
+            &mut options,
+        )
+        .await?;
+    }
+    let current_graph = environment_config_to_graph(&current.config, &options);
+    Ok(serde_json::to_value(RunnerWire {
+        ok: true,
+        command: "current".to_string(),
+        file: args
+            .file
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        current_environment: Some(current_environment_value(
+            &current,
+            options.project_name.as_deref(),
+        )),
+        change_set: None,
+        diff: None,
+        diagnostics: Vec::new(),
+        current_graph: Some(current_graph),
+        desired_graph: None,
+        apply_result: None,
+        claim: false,
+        preview: None,
+        variable_policy: None,
+    })?)
+}
+
+/// Backboard reports a failed apply through `status` (top-level or per change)
+/// rather than through an error. Fold that into `ok` and a diagnostic so JSON
+/// consumers and the exit code see the failure instead of `ok: true`.
+/// Status vocabulary is backboard's ChangeSetApplyResultShape:
+/// `staged | applying | applied | partially_applied | failed`.
+fn record_apply_outcome(apply_result: &Value, diagnostics: &mut Vec<Value>) -> bool {
+    let status = apply_result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let changes = apply_result
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let failed_changes = changes
+        .iter()
+        .filter(|change| change.get("status").and_then(Value::as_str) == Some("failed"))
+        .map(|change| {
+            change
+                .get("summary")
+                .or_else(|| change.get("path"))
+                .or_else(|| change.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("change")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let succeeded = matches!(status, "applied" | "staged") && failed_changes.is_empty();
+    if succeeded {
+        return true;
+    }
+    let message = if failed_changes.is_empty() {
+        format!("Apply finished with status {status}")
+    } else {
+        format!(
+            "Apply finished with status {status}; failed changes: {}",
+            failed_changes.join(", ")
+        )
+    };
+    diagnostics.push(json!({
+        "severity": "error",
+        "code": "APPLY_FAILED",
+        "path": "",
+        "message": message,
+    }));
+    false
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerWire {
+    ok: bool,
+    command: String,
+    file: String,
+    current_environment: Option<Value>,
+    change_set: Option<super::change_set::ChangeSet>,
+    diff: Option<String>,
+    diagnostics: Vec<Value>,
+    current_graph: Option<super::graph::RailwayGraph>,
+    desired_graph: Option<super::graph::RailwayGraph>,
+    apply_result: Option<Value>,
+    claim: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variable_policy: Option<VariablePolicyReport>,
+}
+
+fn current_environment_value(current: &EnvNode, project_name: Option<&str>) -> Value {
+    let mut value = json!({
+        "projectId": current.project_id,
+        "projectName": project_name,
+        "environmentId": current.id,
+        "environmentName": current.name,
+        "configEtag": current.config_etag,
+    });
+    if current.pr_context().is_some() {
+        value["pr"] = json!({
+            "repo": current.meta.as_ref().and_then(|meta| meta.pr_repo.clone()),
+        });
+    }
+    value
+}
+
+async fn github_default_branches(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let repos = crate::client::post_graphql::<crate::gql::queries::GitHubRepos, _>(
+        client,
+        endpoint,
+        crate::gql::queries::git_hub_repos::Variables {},
+    )
+    .await?
+    .github_repos;
+    Ok(repos
+        .into_iter()
+        .map(|repo| (repo.full_name.to_ascii_lowercase(), repo.default_branch))
+        .collect())
+}
+
+async fn fetch_current_environment(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    decrypt_variables: bool,
+) -> Result<EnvNode> {
+    let query_with_partials = r#"
+      query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
+        environment(id: $environmentId) {
+          id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
+        }
+      }
+    "#;
+    let vars = json!({ "environmentId": environment_id, "decryptVariables": decrypt_variables });
+    match post_graphql_raw::<EnvQuery, _>(client, endpoint, query_with_partials, vars.clone()).await
+    {
+        Ok(data) => Ok(data.environment),
+        Err(err) if err.to_string().contains("iacPartials") => {
+            let query = r#"
+              query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
+                environment(id: $environmentId) {
+                  id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
+                }
+              }
+            "#;
+            Ok(
+                post_graphql_raw::<EnvQuery, _>(client, endpoint, query, vars)
+                    .await?
+                    .environment,
+            )
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn fill_name_maps(
+    client: &reqwest::Client,
+    endpoint: &str,
+    project_id: &str,
+    environment_id: &str,
+    current: &EnvNode,
+    options: &mut EnvironmentConfigToGraphOptions,
+) -> Result<()> {
+    if let Ok(data) = post_graphql_raw::<NameQuery, _>(
+        client,
+        endpoint,
+        "query IacProjectName($projectId: String!) { project(id: $projectId) { name } }",
+        json!({ "projectId": project_id }),
+    )
+    .await
+    {
+        if let Some(name) = data.project.and_then(|p| p.name) {
+            options.project_name = Some(name);
+        }
+    }
+    let services = post_graphql_raw::<ProjectServicesQuery, _>(
+        client,
+        endpoint,
+        "query IacProjectServices($projectId: String!) { project(id: $projectId) { services(first: 1000) { edges { node { id name templateServiceId } } } } }",
+        json!({ "projectId": project_id }),
+    )
+    .await
+    .context("Failed to load project services for IaC name maps")?;
+    for edge in services.project.unwrap_or_default().services.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .service_names_by_id
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(template_service_id) = edge.node.template_service_id {
+            options
+                .template_service_ids_by_id
+                .insert(edge.node.id, json!(template_service_id));
+        }
+    }
+
+    let volumes = post_graphql_raw::<ProjectVolumesQuery, _>(
+        client,
+        endpoint,
+        "query IacProjectVolumes($projectId: String!) { project(id: $projectId) { volumes(first: 1000) { edges { node { id name } } } } }",
+        json!({ "projectId": project_id }),
+    )
+    .await
+    .context("Failed to load project volumes for IaC name maps")?;
+    for edge in volumes.project.unwrap_or_default().volumes.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .volume_names_by_id
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(refs) = current
+            .canvas_group_refs
+            .as_ref()
+            .and_then(Value::as_object)
+        {
+            if let Some(group_id) = refs.get(&edge.node.id) {
+                options
+                    .volume_group_ids_by_id
+                    .insert(edge.node.id, group_id.clone());
+            }
+        }
+    }
+
+    let buckets = post_graphql_raw::<ProjectBucketsQuery, _>(
+        client,
+        endpoint,
+        "query IacProjectBuckets($projectId: String!) { project(id: $projectId) { buckets(first: 1000) { edges { node { id name groupId } } } } }",
+        json!({ "projectId": project_id }),
+    )
+    .await
+    .context("Failed to load project buckets for IaC name maps")?;
+    for edge in buckets.project.unwrap_or_default().buckets.edges {
+        if let Some(name) = edge.node.name {
+            options
+                .bucket_names_by_id
+                .insert(edge.node.id.clone(), json!(name));
+        }
+        if let Some(group_id) = edge.node.group_id {
+            options
+                .bucket_group_ids_by_id
+                .insert(edge.node.id, json!(group_id));
+        }
+    }
+    let _ = environment_id;
+    Ok(())
+}
+
+fn find_authoring_file(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    const NAMES: &[&str] = &["railway.ts", "railway.py", "railway.go"];
+    for directory in start.ancestors() {
+        let railway_dir =
+            if directory.file_name().and_then(|name| name.to_str()) == Some(".railway") {
+                directory.to_path_buf()
+            } else {
+                directory.join(".railway")
+            };
+        for name in NAMES {
+            let candidate = railway_dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn parse_owners(value: Option<&Value>) -> Option<super::partial::IacPartials> {
+    let object = value.and_then(Value::as_object)?;
+    let mut out = super::partial::IacPartials::new();
+    for (key, value) in object {
+        if let Some(owner) = value.as_str() {
+            out.insert(key.clone(), owner.to_string());
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+async fn preview_change_set(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    change_set: &super::change_set::ChangeSet,
+) -> Result<Value> {
+    let mutation = r#"
+      mutation IacPreviewChangeSet($environmentId: String!, $input: JSON!) {
+        environmentPreviewChangeSet(environmentId: $environmentId, input: $input) {
+          changeSet diagnostics effects
+        }
+      }
+    "#;
+    #[derive(Deserialize)]
+    struct PreviewQuery {
+        #[serde(rename = "environmentPreviewChangeSet")]
+        result: Value,
+    }
+    let data = post_graphql_raw::<PreviewQuery, _>(
+        client,
+        endpoint,
+        mutation,
+        json!({ "environmentId": environment_id, "input": change_set }),
+    )
+    .await
+    .context("Failed to preview change set")?;
+    Ok(data.result)
+}
+
+pub(crate) async fn fetch_config_etag(
+    configs: &Configs,
+    environment_id: &str,
+) -> Result<Option<String>> {
+    let client = GQLClient::new_authorized(configs)?;
+    let endpoint = configs.get_backboard();
+    let current = fetch_current_environment(&client, &endpoint, environment_id, false).await?;
+    Ok(current.config_etag)
+}
+
+pub(crate) async fn apply_change_set(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    change_set: &impl serde::Serialize,
+    base_etag: Option<&str>,
+) -> Result<Value> {
+    let mut variables = json!({
+        "environmentId": environment_id,
+        "input": change_set,
+        "commitMessage": "Apply Railway configuration",
+        "waitForCompletion": false,
+    });
+    if let Some(etag) = base_etag {
+        variables["baseConfigEtag"] = json!(etag);
+    }
+    let mutation = r#"
+      mutation IacApplyChangeSet($environmentId: String!, $input: JSON!, $commitMessage: String, $baseConfigEtag: String, $waitForCompletion: Boolean) {
+        environmentApplyChangeSet(environmentId: $environmentId, input: $input, commitMessage: $commitMessage, baseConfigEtag: $baseConfigEtag, waitForCompletion: $waitForCompletion) {
+          id status deploymentId stagedPatchId diagnostics changes { kind path summary status outputs }
+        }
+      }
+    "#;
+    #[derive(Deserialize)]
+    struct ApplyQuery {
+        #[serde(rename = "environmentApplyChangeSet")]
+        result: ApplyResult,
+    }
+    #[derive(Deserialize)]
+    struct ApplyResult {
+        id: String,
+        status: String,
+        #[serde(flatten)]
+        rest: Value,
+    }
+    let applied = post_graphql_raw::<ApplyQuery, _>(client, endpoint, mutation, variables).await?;
+    if applied.result.status != "applying" {
+        let mut value = serde_json::to_value(&applied.result.rest)?;
+        value["id"] = json!(applied.result.id);
+        value["status"] = json!(applied.result.status);
+        return Ok(value);
+    }
+    wait_for_apply(client, endpoint, environment_id, &applied.result.id).await
+}
+
+async fn wait_for_apply(
+    client: &reqwest::Client,
+    endpoint: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Value> {
+    let query = r#"
+      query IacChangeSetApplyStatus($environmentId: String!, $id: String!) {
+        environmentChangeSetApply(environmentId: $environmentId, id: $id) {
+          id status deploymentId stagedPatchId diagnostics changes { kind path summary status outputs }
+        }
+      }
+    "#;
+    #[derive(Deserialize)]
+    struct StatusQuery {
+        #[serde(rename = "environmentChangeSetApply")]
+        result: Value,
+    }
+    for _ in 0..120 {
+        let data = post_graphql_raw::<StatusQuery, _>(
+            client,
+            endpoint,
+            query,
+            json!({ "environmentId": environment_id, "id": id }),
+        )
+        .await?;
+        if data.result.get("status").and_then(Value::as_str) != Some("applying") {
+            return Ok(data.result);
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+    bail!("Timed out waiting for Railway ChangeSet apply {id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_node(value: Value) -> EnvNode {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn pr_context_from_pull_request_environment() {
+        let node = env_node(json!({
+            "id": "env",
+            "name": "railway-cli-pr-123",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/x", "prNumber": 123 },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        let pr = node.pr_context().unwrap();
+        assert_eq!(pr.number, 123);
+        assert_eq!(pr.branch.as_deref(), Some("feat/x"));
+        assert_eq!(pr.base.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn current_environment_includes_pr_repo_for_pull() {
+        let node = env_node(json!({
+            "id": "env",
+            "name": "pr",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/login", "prNumber": 7, "prRepo": "acme/api" },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        let value = current_environment_value(&node, Some("app"));
+        assert_eq!(value["pr"]["repo"], "acme/api");
+
+        let production = env_node(json!({
+            "id": "env",
+            "isEphemeral": false,
+            "config": {}
+        }));
+        assert!(
+            current_environment_value(&production, None)
+                .get("pr")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pr_context_is_null_without_a_pr_number() {
+        let ephemeral = env_node(json!({
+            "id": "env",
+            "isEphemeral": true,
+            "meta": { "branch": "feat/x" },
+            "sourceEnvironment": { "name": "dev" },
+            "config": {}
+        }));
+        assert!(ephemeral.pr_context().is_none());
+
+        let production = env_node(json!({
+            "id": "env",
+            "isEphemeral": false,
+            "config": {}
+        }));
+        assert!(production.pr_context().is_none());
+    }
+
+    fn wire_after_apply(ok_before: bool, apply_result: Value) -> Value {
+        let mut diagnostics = if ok_before {
+            Vec::new()
+        } else {
+            vec![json!({ "severity": "error", "path": "", "message": "boom" })]
+        };
+        let ok = ok_before && record_apply_outcome(&apply_result, &mut diagnostics);
+        serde_json::to_value(RunnerWire {
+            ok,
+            command: "apply".to_string(),
+            file: String::new(),
+            current_environment: None,
+            change_set: None,
+            diff: None,
+            diagnostics,
+            current_graph: None,
+            desired_graph: None,
+            apply_result: Some(apply_result),
+            claim: false,
+            preview: None,
+            variable_policy: None,
+        })
+        .unwrap()
+    }
+
+    fn has_apply_failed_diagnostic(wire: &Value) -> bool {
+        wire["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "APPLY_FAILED" && d["severity"] == "error")
+    }
+
+    #[test]
+    fn failed_apply_result_sets_ok_false_with_diagnostic() {
+        let wire = wire_after_apply(
+            true,
+            json!({
+                "id": "cs-1",
+                "status": "failed",
+                "changes": [
+                    { "kind": "service.create", "summary": "Create web", "status": "applied" },
+                    { "kind": "volume.create", "summary": "Create data", "status": "failed" }
+                ]
+            }),
+        );
+        assert_eq!(wire["ok"], false);
+        assert!(has_apply_failed_diagnostic(&wire));
+        let message = wire["diagnostics"][0]["message"].as_str().unwrap();
+        assert!(message.contains("Create data"), "{message}");
+        assert!(!message.contains("Create web"), "{message}");
+
+        // Backboard may report an overall success status while a change failed.
+        let wire = wire_after_apply(
+            true,
+            json!({ "status": "applied", "changes": [{ "kind": "x", "status": "failed" }] }),
+        );
+        assert_eq!(wire["ok"], false);
+        assert!(has_apply_failed_diagnostic(&wire));
+    }
+
+    #[test]
+    fn partially_applied_or_missing_status_sets_ok_false() {
+        for result in [
+            json!({ "status": "partially_applied", "changes": [] }),
+            json!({ "status": "applying", "changes": [] }),
+            json!({ "changes": [] }),
+        ] {
+            let wire = wire_after_apply(true, result.clone());
+            assert_eq!(wire["ok"], false, "{result}");
+            assert!(has_apply_failed_diagnostic(&wire), "{result}");
+        }
+    }
+
+    #[test]
+    fn successful_apply_result_keeps_ok_true() {
+        for status in ["applied", "staged"] {
+            let wire = wire_after_apply(
+                true,
+                json!({ "status": status, "changes": [{ "kind": "x", "status": "applied" }] }),
+            );
+            assert_eq!(wire["ok"], true, "{status}");
+            assert!(wire["diagnostics"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_apply_with_existing_error_stays_not_ok() {
+        let wire = wire_after_apply(false, json!({ "status": "failed", "changes": [] }));
+        assert_eq!(wire["ok"], false);
+        assert_eq!(wire["diagnostics"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn project_services_query_reads_nested_connection() {
+        let data: ProjectServicesQuery = serde_json::from_value(json!({
+            "project": {
+                "services": {
+                    "edges": [
+                        { "node": { "id": "svc-1", "name": "eu-api" } }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let edges = data.project.unwrap().services.edges;
+        assert_eq!(edges[0].node.id, "svc-1");
+        assert_eq!(edges[0].node.name.as_deref(), Some("eu-api"));
+    }
+
+    #[test]
+    fn project_volumes_and_buckets_query_read_nested_connections() {
+        let volumes: ProjectVolumesQuery = serde_json::from_value(json!({
+            "project": {
+                "volumes": { "edges": [{ "node": { "id": "vol-1", "name": "data" } }] }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            volumes.project.unwrap().volumes.edges[0]
+                .node
+                .name
+                .as_deref(),
+            Some("data")
+        );
+
+        let buckets: ProjectBucketsQuery = serde_json::from_value(json!({
+            "project": {
+                "buckets": {
+                    "edges": [{ "node": { "id": "bkt-1", "name": "uploads", "groupId": "grp-1" } }]
+                }
+            }
+        }))
+        .unwrap();
+        let node = &buckets.project.unwrap().buckets.edges[0].node;
+        assert_eq!(node.name.as_deref(), Some("uploads"));
+        assert_eq!(node.group_id.as_deref(), Some("grp-1"));
+    }
+
+    #[test]
+    fn leftover_edges_query_shape_cannot_read_services() {
+        // The previous deserializer expected { project: { edges } }. The API
+        // returns { project: { services: { edges } } }, so that shape dropped
+        // every name map and plan treated live services as UUID deletes.
+        #[derive(Deserialize)]
+        struct Broken {
+            project: Option<Connection<Named>>,
+        }
+        let broken = serde_json::from_value::<Broken>(json!({
+            "project": {
+                "services": {
+                    "edges": [{ "node": { "id": "svc-1", "name": "eu-api" } }]
+                }
+            }
+        }));
+        assert!(
+            broken.is_err(),
+            "the live GraphQL payload is not {{ project: {{ edges }} }}"
+        );
+    }
+
+    #[test]
+    fn authoring_language_normalizes_supported_extensions() {
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.ts")),
+            "typescript"
+        );
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.py")),
+            "python"
+        );
+        assert_eq!(
+            authoring_language(std::path::Path::new(".railway/railway.go")),
+            "go"
+        );
+    }
+}

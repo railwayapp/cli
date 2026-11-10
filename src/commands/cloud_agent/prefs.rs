@@ -35,15 +35,29 @@ pub struct AgentPrefs {
     #[serde(default)]
     pub skills: SkillsPrefs,
 
+    #[serde(default)]
+    pub mcp: McpPrefs,
+
     /// Where cloud agents go unless told otherwise. Chosen in setup, and the
     /// target a new agent is created in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_project: Option<DefaultProject>,
 
-    /// TUI colour theme slug. `None` means the default; an unknown value is
-    /// ignored rather than treated as an error.
+    /// Legacy TUI colour theme slug. No longer written: the theme choice now
+    /// lives in the shared `~/.railway/tui-prefs.json` (see
+    /// [`crate::tui_theme`]), which every ratatui screen reads, not just this
+    /// one. Kept here, and still read once, so a file from before that file
+    /// existed migrates its theme instead of silently resetting it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+
+    /// Hide the maximized layout's header tabs — ⌥⇧[ / ⌥⇧] stay the way
+    /// between sessions. A settings-card choice; the wizard never asks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide_tabs: bool,
+    /// Sidebar width in terminal columns, including its border.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_width: Option<u16>,
 }
 
 impl Default for AgentPrefs {
@@ -52,10 +66,42 @@ impl Default for AgentPrefs {
             version: CURRENT_VERSION,
             agent: None,
             skills: SkillsPrefs::default(),
+            mcp: McpPrefs::default(),
             default_project: None,
             theme: None,
+            hide_tabs: false,
+            sidebar_width: None,
         }
     }
+}
+
+/// Project MCP import — the launch directory's `.mcp.json`, carried onto the
+/// agent. See [`super::mcp_sync`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPrefs {
+    /// On by default, unlike skills: the source is a file the project chose
+    /// to commit, so bringing it is what launching from that directory means.
+    /// `"mcp": {"enabled": false}` opts out.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Server names never shipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
+}
+
+impl Default for McpPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The project and environment new agents are created in by default.
@@ -103,7 +149,19 @@ impl AgentPrefs {
     /// worst it can do is send the user back through setup.
     pub fn load_in(home: &Path) -> Option<Self> {
         let raw = std::fs::read_to_string(Self::path_in(home)).ok()?;
-        serde_json::from_str(&raw).ok()
+        let mut prefs: Self = serde_json::from_str(&raw).ok()?;
+        if prefs.agent.as_deref() == Some("opencode2") {
+            prefs.agent = Some("opencode".into());
+        }
+        Some(prefs)
+    }
+
+    /// Reload before changing one layout preference so settings saved by
+    /// another screen or CLI process are preserved.
+    pub fn save_sidebar_width_in(home: &Path, width: u16) -> Result<()> {
+        let mut prefs = Self::load_in(home).unwrap_or_default();
+        prefs.sidebar_width = Some(width);
+        prefs.save_in(home)
     }
 
     pub fn save_in(&self, home: &Path) -> Result<()> {
@@ -145,11 +203,42 @@ mod tests {
                 source: Some("claude".into()),
                 exclude: vec!["use-railway".into()],
             },
+            mcp: McpPrefs {
+                enabled: false,
+                exclude: vec!["notion".into()],
+            },
             default_project: None,
             theme: Some("ember".into()),
+            hide_tabs: true,
+            sidebar_width: Some(46),
         };
         prefs.save_in(home.path()).unwrap();
         assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), prefs);
+    }
+
+    #[test]
+    fn sidebar_width_persists_and_preserves_other_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let path = AgentPrefs::path_in(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version":1,"agent":"codex","theme":"ember","hideTabs":true,"mcp":{"enabled":false,"exclude":["local"]}}"#).unwrap();
+        let mut expected = AgentPrefs::load_in(home.path()).unwrap();
+        assert_eq!(
+            expected.sidebar_width, None,
+            "older preferences retain the original width"
+        );
+        AgentPrefs::save_sidebar_width_in(home.path(), 58).unwrap();
+        expected.sidebar_width = Some(58);
+        assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), expected);
+        expected.agent = Some("claude".into());
+        expected.save_in(home.path()).unwrap();
+        AgentPrefs::save_sidebar_width_in(home.path(), 42).unwrap();
+        expected.sidebar_width = Some(42);
+        assert_eq!(
+            AgentPrefs::load_in(home.path()).unwrap(),
+            expected,
+            "resize reloads newer agent settings before saving"
+        );
     }
 
     #[test]
@@ -182,6 +271,29 @@ mod tests {
         let prefs = AgentPrefs::load_in(home.path()).unwrap();
         assert_eq!(prefs.agent.as_deref(), Some("codex"));
         assert!(!prefs.skills.enabled);
+    }
+
+    /// A prefs file written before the MCP field existed imports by default —
+    /// the source is the project's own committed config, and requiring
+    /// everyone to re-run setup to get it would make the feature invisible.
+    #[test]
+    fn mcp_import_defaults_on_for_older_prefs_files() {
+        let home = tempfile::tempdir().unwrap();
+        let path = AgentPrefs::path_in(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"version": 1, "agent": "claude"}"#).unwrap();
+        let prefs = AgentPrefs::load_in(home.path()).unwrap();
+        assert!(prefs.mcp.enabled);
+
+        // And the opt-out parses.
+        std::fs::write(
+            &path,
+            r#"{"version": 1, "mcp": {"enabled": false, "exclude": ["notion"]}}"#,
+        )
+        .unwrap();
+        let prefs = AgentPrefs::load_in(home.path()).unwrap();
+        assert!(!prefs.mcp.enabled);
+        assert_eq!(prefs.mcp.exclude, vec!["notion".to_string()]);
     }
 
     /// The launcher reads `agent` as a harness slug; setup must never write a

@@ -98,3 +98,34 @@ pub fn success_spinner(spinner: &mut ProgressBar, message: String) {
     );
     spinner.finish_with_message(format!("✓ {message}"));
 }
+
+/// A real upgrade stage, rendered on stderr. Piped invocations receive plain
+/// lines; terminal invocations get a spinner without any artificial delay.
+pub struct UpdateStep(Option<ProgressBar>);
+
+impl UpdateStep {
+    pub fn start(message: &str) -> Self {
+        use is_terminal::IsTerminal;
+        if std::io::stderr().is_terminal() && std::io::stdout().is_terminal() {
+            Self(Some(create_spinner(format!("  {message}"))))
+        } else {
+            eprintln!("  … {message}");
+            Self(None)
+        }
+    }
+
+    pub fn finish(self, symbol: &str, message: &str) {
+        if let Some(spinner) = &self.0 {
+            spinner.finish_and_clear();
+        }
+        eprintln!("  {symbol} {message}");
+    }
+}
+
+impl Drop for UpdateStep {
+    fn drop(&mut self) {
+        if let Some(spinner) = &self.0 {
+            spinner.finish_and_clear();
+        }
+    }
+}

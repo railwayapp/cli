@@ -13,6 +13,7 @@ use crate::controllers::metrics::{
 };
 use crate::controllers::project::find_service_instance;
 use crate::resources::is_database_service;
+use crate::tui_theme::Theme;
 use crate::util::time::parse_time;
 
 use tokio::task::JoinHandle;
@@ -198,6 +199,7 @@ pub struct MetricsApp {
     pub show_help: bool,
     pub force_refresh: bool,
     pub refreshing: bool,
+    pub theme: &'static Theme,
 }
 
 impl MetricsApp {
@@ -248,6 +250,7 @@ impl MetricsApp {
             show_help: false,
             force_refresh: false,
             refreshing: false,
+            theme: Theme::load_preference(),
         }
     }
 
@@ -458,6 +461,10 @@ impl MetricsApp {
                 }
             }
             KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('v') => {
+                self.theme = self.theme.next();
+                let _ = self.theme.save_preference();
+            }
             _ => {}
         }
         false
@@ -618,6 +625,7 @@ pub struct ProjectApp {
     pub show_help: bool,
     pub force_refresh: bool,
     pub refreshing: bool,
+    pub theme: &'static Theme,
 }
 
 impl ProjectApp {
@@ -658,6 +666,7 @@ impl ProjectApp {
             show_help: false,
             force_refresh: false,
             refreshing: false,
+            theme: Theme::load_preference(),
         }
     }
 
@@ -918,6 +927,10 @@ impl ProjectApp {
                 }
             }
             KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('v') => {
+                self.theme = self.theme.next();
+                let _ = self.theme.save_preference();
+            }
             _ => {}
         }
         false
@@ -1231,6 +1244,7 @@ mod tests {
             show_help: false,
             force_refresh: false,
             refreshing: true,
+            theme: Theme::default_theme(),
         }
     }
 
