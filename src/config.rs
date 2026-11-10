@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use colored::Colorize;
 use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
 use serde::{Deserialize, Serialize};
 
@@ -100,13 +99,30 @@ pub struct RailwayConfig {
     /// Sandbox template recipes the CLI has built (id is server-side hash;
     /// instructions kept locally because sandboxCreate needs the full recipe).
     pub sandbox_templates: Option<Vec<StoredSandboxTemplate>>,
+    /// The cloud agent `railway code` last used, per environment. Unlike a
+    /// sandbox this is a durable box the user comes back to, so the pointer is
+    /// keyed by environment rather than being a single global "active" slot:
+    /// switching projects must not make `railway code` reach for a box in a
+    /// different environment.
+    pub code_agents: Option<BTreeMap<String, String>>,
+    /// Local default bootstrap IDs, keyed by Railway host and environment UUID.
+    /// Environment IDs also identify their project; never shared with teammates.
+    pub agent_bootstrap_defaults: Option<BTreeMap<String, String>>,
 }
 
+// NOTE: no serde derives -- `Configs` itself is never (de)serialized, only
+// its `root_config` is. (A stray `skip_serializing_none` used to sit here;
+// it was inert without serde derives and breaks compilation once the struct
+// has an `Option` field.)
 #[derive(Debug)]
-#[serde_with::skip_serializing_none]
 pub struct Configs {
     pub root_config: RailwayConfig,
     root_config_path: PathBuf,
+    /// Per-instance snapshot of the `RAILWAY_BACKBOARD_URL` debug-build
+    /// escape hatch, taken at construction (see
+    /// [`Configs::backboard_url_override_from_env`]). Always `None` in
+    /// release builds.
+    backboard_url_override: Option<String>,
 }
 
 pub enum Environment {
@@ -125,13 +141,18 @@ impl Configs {
 
             let root_config: RailwayConfig = serde_json::from_slice(&serialized_config)
                 .unwrap_or_else(|_| {
-                    eprintln!("{}", "Unable to parse config file, regenerating".yellow());
+                    crate::util::reporter::warn(
+                        "CONFIG_UNPARSEABLE",
+                        "Unable to parse config file, regenerating",
+                        None,
+                    );
                     RailwayConfig::default()
                 });
 
             let config = Self {
                 root_config,
                 root_config_path,
+                backboard_url_override: Self::backboard_url_override_from_env(),
             };
 
             return Ok(config);
@@ -140,7 +161,30 @@ impl Configs {
         Ok(Self {
             root_config_path,
             root_config: RailwayConfig::default(),
+            backboard_url_override: Self::backboard_url_override_from_env(),
         })
+    }
+
+    /// Debug-build-only escape hatch so a locally-built binary (or an
+    /// in-process test) can point every GraphQL call at a scripted backboard
+    /// (see `testkit::MockBackboard`). Snapshotted per instance at
+    /// construction, so parallel tests only need to serialize the env write
+    /// around building their `Configs`, not around using it. Deliberately
+    /// compiled out of release builds: unlike RAILWAY_ENV (which only picks
+    /// between the three fixed Railway hosts), an arbitrary URL override in
+    /// a shipped binary would let a hostile environment redirect
+    /// authenticated traffic.
+    fn backboard_url_override_from_env() -> Option<String> {
+        #[cfg(debug_assertions)]
+        {
+            std::env::var("RAILWAY_BACKBOARD_URL")
+                .ok()
+                .filter(|url| !url.is_empty())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
     }
 
     /// Absolute path to the root config file for the current environment.
@@ -314,7 +358,15 @@ impl Configs {
         Self {
             root_config: RailwayConfig::default(),
             root_config_path,
+            backboard_url_override: Self::backboard_url_override_from_env(),
         }
+    }
+
+    /// The config file this instance reads and writes. Identifies the
+    /// credentials being operated on, which the refresh path uses to keep its
+    /// per-config bookkeeping from colliding across configs.
+    pub(crate) fn config_path(&self) -> &std::path::Path {
+        &self.root_config_path
     }
 
     /// Take the exclusive config lock covering this config file, without
@@ -361,17 +413,18 @@ impl Configs {
     }
 
     pub fn get_backboard(&self) -> String {
+        if let Some(url) = &self.backboard_url_override {
+            return url.clone();
+        }
         format!("https://backboard.{}/graphql/v2", self.get_host())
     }
 
     /// SSH relay host and non-default port for the current environment.
-    /// Mirrors backboard's `controllers/ssh` mapping: only the develop relay
-    /// is separate (and listens on 2222); staging falls through to the
-    /// production relay, same as backboard's IS_DEV-only branch.
     pub fn get_ssh_relay() -> (&'static str, Option<u16>) {
         match Self::get_environment_id() {
             Environment::Dev => ("ssh.railway-develop.com", Some(2222)),
-            Environment::Production | Environment::Staging => ("ssh.railway.com", None),
+            Environment::Staging => ("ssh.railway-staging.com", Some(2222)),
+            Environment::Production => ("ssh.railway.com", None),
         }
     }
 
@@ -563,6 +616,86 @@ impl Configs {
         }
         if self.root_config.active_sandbox.as_deref() == Some(id) {
             self.root_config.active_sandbox = None;
+        }
+    }
+
+    /// The cloud agent `railway code` last used in this environment, if any.
+    pub fn get_code_agent(&self, environment_id: &str) -> Option<String> {
+        self.root_config
+            .code_agents
+            .as_ref()?
+            .get(environment_id)
+            .cloned()
+    }
+
+    pub fn get_agent_bootstrap_default(&self, environment_id: &str) -> Option<&str> {
+        self.root_config
+            .agent_bootstrap_defaults
+            .as_ref()?
+            .get(&format!("{}:{environment_id}", self.get_host()))
+            .map(String::as_str)
+    }
+
+    pub async fn clear_agent_bootstrap_default(&mut self, environment_id: &str) -> Result<()> {
+        let _lock = self.acquire_lock().await;
+        self.reload()?;
+        let key = format!("{}:{environment_id}", self.get_host());
+        if let Some(defaults) = self.root_config.agent_bootstrap_defaults.as_mut() {
+            defaults.remove(&key);
+        }
+        self.write_value(&serde_json::to_value(&self.root_config)?)
+    }
+
+    /// Persist just this preference against the latest config snapshot.
+    pub async fn set_agent_bootstrap_default(
+        &mut self,
+        environment_id: &str,
+        id: &str,
+        only_if_unset: bool,
+    ) -> Result<bool> {
+        let _lock = self.acquire_lock().await;
+        self.reload()?;
+        let key = format!("{}:{environment_id}", self.get_host());
+        let defaults = self
+            .root_config
+            .agent_bootstrap_defaults
+            .get_or_insert_with(BTreeMap::new);
+        if !only_if_unset || !defaults.contains_key(&key) {
+            defaults.insert(key.clone(), id.to_owned());
+        }
+        let selected = defaults.get(&key).is_some_and(|value| value == id);
+        // This snapshot was reloaded under the lock, including credentials.
+        self.write_value(&serde_json::to_value(&self.root_config)?)?;
+        Ok(selected)
+    }
+
+    /// Every environment this machine has launched a cloud agent in.
+    ///
+    /// Local knowledge, so it misses agents made from another machine or the
+    /// dashboard, but it is free and it covers the common case of coming back
+    /// to your own work in a project that isn't the default one.
+    pub fn code_agent_environments(&self) -> Vec<String> {
+        self.root_config
+            .code_agents
+            .as_ref()
+            .map(|agents| agents.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remember the cloud agent `railway code` is using in this environment.
+    /// Caller persists with `write()`.
+    pub fn set_code_agent(&mut self, environment_id: &str, id: &str) {
+        self.root_config
+            .code_agents
+            .get_or_insert_with(BTreeMap::new)
+            .insert(environment_id.to_string(), id.to_string());
+    }
+
+    /// Forget the cloud agent pointer for an environment (the agent was deleted
+    /// or has gone unreachable). Caller persists with `write()`.
+    pub fn remove_code_agent(&mut self, environment_id: &str) {
+        if let Some(agents) = self.root_config.code_agents.as_mut() {
+            agents.remove(environment_id);
         }
     }
 
@@ -764,6 +897,11 @@ impl Configs {
         // concurrent refresh could be lost is microseconds rather than the
         // lifetime of this `Configs`.
         if let Some(disk) = Self::read_root_config(&self.root_config_path) {
+            // A TUI can keep an older config alive while its bootstrap form
+            // saves a preference through a separate instance. Only the
+            // dedicated setter owns this field.
+            to_write["agentBootstrapDefaults"] =
+                serde_json::to_value(disk.agent_bootstrap_defaults)?;
             // Merge on the typed struct so the field set is checked by the
             // compiler: a new credential field on `RailwayUser` is picked up
             // automatically instead of being silently dropped. Everything that
@@ -903,6 +1041,7 @@ mod tests {
         Configs {
             root_config_path: std::path::PathBuf::new(),
             root_config: RailwayConfig::default(),
+            backboard_url_override: None,
         }
     }
 
@@ -988,9 +1127,10 @@ impl ConfigLock {
                 return Self { file: Some(file) };
             }
             if std::time::Instant::now() >= deadline {
-                eprintln!(
-                    "{}",
-                    "Warning: timed out waiting for config lock; proceeding without it".yellow()
+                crate::util::reporter::warn(
+                    "CONFIG_LOCK_TIMEOUT",
+                    "timed out waiting for config lock; proceeding without it",
+                    None,
                 );
                 return Self { file: None };
             }

@@ -1,0 +1,5 @@
+mutation DeploymentInstanceExecutionCreate(
+  $input: DeploymentInstanceExecutionCreateInput!
+) {
+  deploymentInstanceExecutionCreate(input: $input)
+}

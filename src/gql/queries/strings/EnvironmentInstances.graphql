@@ -59,6 +59,8 @@ query EnvironmentInstances(
           cronSchedule
           nextCronRunAt
           startCommand
+          tracingEnabled
+          autoInstrumentationEnabled
         }
       }
       pageInfo {
@@ -69,6 +71,7 @@ query EnvironmentInstances(
     volumeInstances(first: $volumeInstancesFirst, after: $volumeInstancesAfter) {
       edges {
         node {
+          id
           serviceId
           mountPath
           environmentId

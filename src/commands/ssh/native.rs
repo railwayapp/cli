@@ -46,6 +46,26 @@ fn base_ssh_command(ssh_target: &str, identity_file: Option<&Path>) -> (Command,
     (cmd, format!("{ssh_target}@{host}"))
 }
 
+/// The relay destination for a target: `<target>@<relay-host>`.
+///
+/// A relay target (`agent:<env>:<id>`, `service:…`) is a *username* on the
+/// relay host, not a hostname. Handing the bare target to ssh asks the resolver
+/// to look it up as a host, which fails with "Could not resolve hostname" —
+/// exposed here so callers that build their own invocation, like the TUI's pty
+/// session, cannot rediscover that the hard way.
+pub fn relay_destination(ssh_target: &str) -> String {
+    let (host, _) = ssh_relay();
+    format!("{ssh_target}@{host}")
+}
+
+/// `-p <port>` when the relay listens somewhere other than 22, empty otherwise.
+pub fn relay_port_args() -> Vec<String> {
+    match ssh_relay() {
+        (_, Some(port)) => vec!["-p".to_string(), port.to_string()],
+        (_, None) => Vec::new(),
+    }
+}
+
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
     client: &Client,
@@ -72,6 +92,34 @@ pub async fn get_service_instance_id(
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
 pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, true, true).await
+}
+
+/// `ensure_ssh_key` without the "Using SSH key from ..." announcement when a
+/// registered key is already in place — for flows like `railway code` where
+/// ssh is plumbing, not the product. First-run registration still prompts
+/// and prints normally.
+pub async fn ensure_ssh_key_quiet(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false, true).await
+}
+
+/// [`ensure_ssh_key_quiet`] that never prompts: the registration path errors
+/// with the recipe instead. For callers running concurrently with another
+/// interactive flow — two prompt sequences interleaved on one terminal are
+/// gibberish — which retry interactively afterwards if they want the prompt.
+pub async fn ensure_ssh_key_noninteractive(
+    client: &Client,
+    configs: &Configs,
+) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false, false).await
+}
+
+async fn ensure_ssh_key_impl(
+    client: &Client,
+    configs: &Configs,
+    announce: bool,
+    interactive: bool,
+) -> Result<Option<PathBuf>> {
     let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
@@ -93,19 +141,26 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option
     });
 
     if let Some(key) = registered_local {
-        match &key.source {
-            SshKeySource::File(path) => eprintln!(
-                "Using SSH key from file {}: {}",
-                path.display(),
-                key.key_name()
-            ),
-            SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+        if announce {
+            match &key.source {
+                SshKeySource::File(path) => eprintln!(
+                    "Using SSH key from file {}: {}",
+                    path.display(),
+                    key.key_name()
+                ),
+                SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+            }
         }
         return Ok(identity_for(key));
     }
 
-    // No local key is registered - need to register one
-    if !std::io::stdin().is_terminal() {
+    // No local key is registered - need to register one. A TUI that owns the
+    // terminal can't host the registration prompt any more than a pipe can —
+    // its event loop consumes the keystrokes and repaints over the output —
+    // so both get the recipe instead. `railway ca` runs this same function as
+    // a preflight before taking the screen, so inside its TUI this path only
+    // fires if the key disappeared mid-session.
+    if !interactive || !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
         bail!(
             "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
             Or import from GitHub:\n  railway ssh keys github"
@@ -274,10 +329,71 @@ pub fn run_native_ssh(
     identity_file: Option<&Path>,
     durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
+    run_native_ssh_with_opts(service_instance_id, command, identity_file, durable, &[])
+}
+
+/// `run_native_ssh` with extra `ssh` options (each element one argv entry,
+/// e.g. `["-o", "ControlMaster=auto"]`). Lets callers opt into connection
+/// multiplexing without changing the shared default path.
+/// Turn off mouse tracking after an interactive session.
+///
+/// An agent or editor on the far side enables it for its own use. Exiting
+/// cleanly turns it off again; being detached from — which is the normal way to
+/// leave a durable session — does not, and the modes stay set on the terminal
+/// that gets handed back. The symptom is unmistakable and cannot be cleared
+/// from the shell: every pointer movement arrives at the prompt as `35;21;32M`.
+pub fn clear_mouse_tracking() {
+    use std::io::Write;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = std::io::stdout().flush();
+}
+
+/// Prepare the remote command words for OpenSSH.
+///
+/// ssh(1) concatenates every remote-command word with single spaces into ONE
+/// string and hands that to the remote login shell — argv boundaries do not
+/// survive the trip. Passed through raw, a multi-arg invocation like
+/// `railway ssh sh -c 'redis-cli -a "$PW" PING && echo ok'` reaches the
+/// remote shell as `sh -c redis-cli -a "$PW" PING && echo ok`, so `sh -c`
+/// takes only `redis-cli` as its script and the rest leaks into `$0`/`$1`
+/// and a second `&&` command.
+///
+/// Quoting each word when the caller passed MORE than one makes the remote
+/// shell re-split back to exactly the caller's argv (`docker exec` /
+/// `kubectl exec` semantics). A single word keeps passing through raw: it IS
+/// the remote shell line — today's documented usage — and quoting it would
+/// collapse the whole line into one command word.
+fn quote_remote_command(args: &[String]) -> Vec<String> {
+    if args.len() <= 1 {
+        return args.to_vec();
+    }
+    args.iter()
+        .map(|arg| match shlex::try_quote(arg) {
+            Ok(quoted) => quoted.into_owned(),
+            // try_quote only fails on interior NUL bytes, which cannot occur
+            // in OS-provided argv; keep the raw word rather than dying.
+            Err(_) => arg.clone(),
+        })
+        .collect()
+}
+
+pub fn run_native_ssh_with_opts(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
+    extra_opts: &[String],
+) -> Result<i32> {
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
     let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
 
     if let Some(durable) = durable {
         // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
@@ -308,7 +424,7 @@ pub fn run_native_ssh(
     ssh_cmd.arg(&target);
 
     if let Some(cmd_args) = command {
-        for arg in cmd_args {
+        for arg in quote_remote_command(cmd_args) {
             ssh_cmd.arg(arg);
         }
     }
@@ -319,6 +435,38 @@ pub fn run_native_ssh(
 
     let status = ssh_cmd.status().context("Failed to execute ssh command")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Marker a readiness probe asks the guest to echo back. Success is this
+/// string round-tripping, never the exit code: the relay answers a session
+/// against a target it cannot route yet with a status JSON and a clean exit
+/// 0, so `ssh <target> true` reports success seconds before a command can
+/// actually run (verified against prod, 2026-08-13).
+const PROBE_MARKER: &str = "RAILWAY_CONNECT_PROBE_OK";
+
+/// Silently test whether a target is connectable yet: ask it to echo a
+/// marker, with success defined as the marker coming back. Failure carries no
+/// diagnosis (a booting agent and a typo'd target look the same), so callers
+/// only ever use this inside a loop that also watches status.
+pub fn probe_native_ssh(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    extra_opts: &[String],
+) -> Result<bool> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    // Bound the probe so one blackholed connection can't eat the caller's
+    // whole readiness budget; the loop retries anyway.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(format!("echo {PROBE_MARKER}"));
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stderr(Stdio::null());
+    let output = ssh_cmd.output().context("Failed to execute ssh command")?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
 }
 
 /// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`
@@ -510,5 +658,143 @@ fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) ->
             bail!("Timed out waiting for the SSH tunnel to become ready on 127.0.0.1");
         }
         sleep(Duration::from_millis(150));
+    }
+}
+
+/// Run a non-interactive command on the target with optional bytes fed to its
+/// stdin, and stdout + stderr captured. Built for agent-launcher plumbing
+/// (`railway code`): secret payloads (credentials) ride stdin so they never
+/// appear in an argv, small reads come back on stdout, and stderr comes back
+/// so callers can tell transport failures (host key, relay refusal) apart
+/// from remote-command failures instead of showing a bare exit code.
+pub fn run_native_ssh_captured(
+    ssh_target: &str,
+    command: &str,
+    identity_file: Option<&Path>,
+    stdin_payload: Option<&[u8]>,
+    extra_opts: &[String],
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    // Bound the connect the same way `probe_native_ssh` does. Without it a
+    // blackholed connection hangs forever: `ServerAliveInterval` only polices a
+    // session that is already established, and `ssh_plumbing`'s retry budget is
+    // fiction if a single attempt never returns. Observed in the wild as a
+    // launch parked on "Finalizing Configuration..." with no error and no
+    // timeout, on a VM that was up and billing.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(command);
+    capture_command(ssh_cmd, stdin_payload)
+}
+
+fn capture_command(
+    mut ssh_cmd: Command,
+    stdin_payload: Option<&[u8]>,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use std::io::Write;
+
+    ssh_cmd.stdin(if stdin_payload.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::piped());
+
+    let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
+    let input_result = if let Some(payload) = stdin_payload {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        // Drop closes the pipe so the remote `cat` sees EOF.
+        stdin.write_all(payload)
+    } else {
+        Ok(())
+    };
+    let output = child.wait_with_output()?;
+    // A refused connection can close stdin before the script/payload fits in
+    // the pipe. Preserve SSH's status and diagnostic so callers can retry the
+    // transport failure, instead of masking it with a local BrokenPipe error.
+    // Always reap the child, including when writing stdin failed.
+    if output.status.success() {
+        input_result.context("Failed to send SSH input")?;
+    }
+    Ok((
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    ))
+}
+
+#[cfg(all(test, unix))]
+mod captured_command_tests {
+    use super::*;
+
+    #[test]
+    fn early_connection_failure_preserves_status_and_diagnostic() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'connection refused' >&2; exit 255"]);
+        let (status, stdout, stderr) = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap();
+        assert_eq!(status, 255);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"connection refused");
+    }
+
+    #[test]
+    fn successful_exit_cannot_hide_incomplete_input() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let error = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap_err();
+        assert!(error.to_string().contains("Failed to send SSH input"));
+    }
+}
+
+#[cfg(test)]
+mod quote_remote_command_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The invariant that matters: after ssh joins the words with spaces and
+    /// the remote shell re-splits them, the original argv comes back.
+    fn remote_shell_split(quoted: &[String]) -> Vec<String> {
+        shlex::split(&quoted.join(" ")).expect("quoted words must re-split")
+    }
+
+    #[test]
+    fn a_single_word_is_the_remote_shell_line_and_passes_through_raw() {
+        let input = args(&["redis-cli -a \"$PW\" PING && echo ok"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn plain_words_survive_unchanged() {
+        let input = args(&["ls", "-la", "/data"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn argv_boundaries_survive_the_join_and_remote_resplit() {
+        let input = args(&["sh", "-c", "redis-cli -a \"$PW\" PING && echo ok"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn spaces_quotes_and_dollars_stay_inside_their_word() {
+        let input = args(&["echo", "a b", "it's", "$HOME", "x;y|z"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn empty_words_are_preserved_as_empty_words() {
+        let input = args(&["printf", "%s", ""]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
     }
 }

@@ -232,8 +232,29 @@ pub async fn register_ssh_key(
         },
     };
 
-    let response =
-        post_graphql::<SshPublicKeyCreate, _>(client, configs.get_backboard(), vars).await?;
+    let response = post_graphql::<SshPublicKeyCreate, _>(client, configs.get_backboard(), vars)
+        .await
+        .map_err(|err| {
+            // Fingerprints are unique across all of Railway, so a key that is
+            // registered anywhere else — another account, or a workspace this
+            // query context doesn't list — is rejected outright. Without the
+            // owner in hand the only working fix is a fresh key, so say that
+            // instead of surfacing the raw API error.
+            if format!("{err:#}")
+                .to_lowercase()
+                .contains("already registered")
+            {
+                anyhow::anyhow!(
+                    "This SSH key is already registered to a different Railway account \
+                    or workspace, and a key can only be registered once.\n\n\
+                    Generate a separate key for this account:\n  \
+                    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_railway\n\n\
+                    Then run this command again."
+                )
+            } else {
+                anyhow::Error::new(err)
+            }
+        })?;
 
     Ok(response.ssh_public_key_create)
 }

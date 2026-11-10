@@ -508,6 +508,11 @@ async fn plain_write_cannot_erase_credentials() {
 /// The local `railway mcp` defect, isolated: `GQLClient::new_authorized` bakes
 /// the bearer into the client's default headers, so a client built at process
 /// start keeps sending the startup token no matter what happens on disk.
+///
+/// Still true of the client itself, and still the reason `post_graphql` sets
+/// the bearer per request rather than trusting the one it was built with — see
+/// `a_long_lived_client_sends_the_current_bearer_not_its_startup_one`, which
+/// covers the same staleness through the real send path.
 #[tokio::test]
 async fn baked_in_bearer_ignores_new_credentials_on_disk() {
     let backboard = MockEndpoint::spawn(vec![ok_empty()]);
@@ -613,4 +618,317 @@ async fn dead_grant_in_a_long_session_refreshes_once_not_per_tool_call() {
         1,
         "a dead grant must be discovered once per session, not once per tool call"
     );
+}
+
+// ---------------------------------------------------------------------------
+// "Not Authorized" disambiguation (client::post_graphql_value)
+//
+// The server renders a dead session and a resource-authorization denial
+// identically. These experiments drive the REAL GraphQL send + probe + retry
+// pipeline against a scripted backboard and a scripted token endpoint, and
+// assert which story the user is told for each underlying truth.
+// ---------------------------------------------------------------------------
+
+/// A config fixture holding a LIVE session: valid access token, refresh token.
+struct LiveFixture {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl LiveFixture {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut configs = Configs::for_test(path.clone());
+        configs
+            .save_oauth_tokens("live-access", Some("live-refresh"), 3600)
+            .unwrap();
+        Self { path, _dir: dir }
+    }
+
+    fn load(&self) -> Configs {
+        let mut configs = Configs::for_test(self.path.clone());
+        configs.reload().unwrap();
+        configs
+    }
+}
+
+fn user_meta_body() -> serde_json::Value {
+    serde_json::json!({
+        "operationName": "UserMeta",
+        "query": "query UserMeta { me { id } }",
+        "variables": {},
+    })
+}
+
+async fn send_user_meta(
+    configs: &mut Configs,
+    backboard: &crate::testkit::MockBackboard,
+    token_url: &str,
+) -> Result<serde_json::Value, crate::errors::RailwayError> {
+    let client = crate::client::GQLClient::new_authorized(configs).unwrap();
+    crate::client::post_graphql_value(
+        &client,
+        reqwest::Url::parse(&backboard.url()).unwrap(),
+        &user_meta_body(),
+        Some((configs, token_url)),
+    )
+    .await
+}
+
+/// The Erik shape: the session is alive (refresh succeeds) but the server
+/// keeps refusing the resource. The user must hear "insufficient access",
+/// not "log in again" — re-login can never fix a partially-scoped grant.
+#[tokio::test]
+async fn live_session_with_persistent_denial_reports_insufficient_grant() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::OAuthInsufficientGrant)
+        ),
+        "expected OAuthInsufficientGrant, got {result:?}"
+    );
+    // Exactly one probe, exactly one retry.
+    assert_eq!(token_endpoint.hits(), 1, "one liveness probe");
+    assert_eq!(backboard.hits(), 2, "original request + one retry");
+    // The live credentials survive; nothing tells the user to relogin.
+    let after = fixture.load();
+    assert!(after.has_oauth_token());
+    assert!(after.get_refresh_token().is_some());
+}
+
+/// A genuinely dead grant: the probe comes back invalid_grant, so the
+/// re-login prompt stands and the dead credentials are cleared — the
+/// pre-existing behavior, now backed by evidence instead of assumption.
+#[tokio::test]
+async fn dead_session_keeps_the_relogin_prompt_and_clears_credentials() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![dead_grant()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::Unauthorized
+                | crate::errors::RailwayError::UnauthorizedLogin)
+        ),
+        "a dead session keeps the relogin story, got {result:?}"
+    );
+    // No retry: a dead session cannot be healed by resending.
+    assert_eq!(backboard.hits(), 1);
+    let after = fixture.load();
+    assert!(!after.has_oauth_token(), "dead credentials are cleared");
+    assert_eq!(after.get_refresh_token(), None);
+}
+
+/// The access token died server-side while still looking fresh locally
+/// (e.g. revoked tokens with a surviving grant). The probe mints a fresh
+/// bearer and the retry succeeds: the user sees nothing at all. Previously
+/// every command failed until the local expiry timestamp passed.
+#[tokio::test]
+async fn server_side_expired_access_token_heals_transparently() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    backboard.stub("UserMeta", serde_json::json!({ "me": { "id": "user-1" } }));
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(result.is_ok(), "the retry should succeed, got {result:?}");
+    assert_eq!(token_endpoint.hits(), 1);
+    assert_eq!(backboard.hits(), 2);
+    // The refreshed credentials were persisted for the next invocation.
+    let after = fixture.load();
+    assert_eq!(after.get_refresh_token(), Some("new-refresh"));
+}
+
+/// `railway ca` builds one authorized client and keeps it for the whole
+/// session — hours. The bearer baked into that client's default headers is the
+/// one that existed at startup, so once anything rotates the access token,
+/// every request it sends carries a dead one: a 401, a probe, a token
+/// rotation and a retry each time, with the client no fresher afterwards than
+/// before. Setting the bearer per request from the config on disk is what
+/// stops a long-lived client from going permanently stale.
+#[tokio::test]
+async fn a_long_lived_client_sends_the_current_bearer_not_its_startup_one() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub("UserMeta", serde_json::json!({ "me": { "id": "user-1" } }));
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+
+    // The client the TUI built at startup, from the credentials of that moment.
+    let at_startup = fixture.load();
+    let client = crate::client::GQLClient::new_authorized(&at_startup).unwrap();
+
+    // Time passes and the access token is rotated — by this process, by another
+    // terminal, by the dashboard. The client knows nothing about it.
+    fixture
+        .load()
+        .save_oauth_tokens("rotated-access", Some("rotated-refresh"), 3600)
+        .unwrap();
+
+    // Every request re-reads the config (see `post_graphql_for_current_session`),
+    // so this is the `Configs` the real send would be holding.
+    let mut per_request = fixture.load();
+    let result = crate::client::post_graphql_value::<serde_json::Value>(
+        &client,
+        reqwest::Url::parse(&backboard.url()).unwrap(),
+        &user_meta_body(),
+        Some((&mut per_request, &token_endpoint.base_url)),
+    )
+    .await;
+
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(
+        backboard.auth_headers(),
+        vec![Some("Bearer rotated-access".to_string())],
+        "the stale client must not send the token it was built with"
+    );
+    assert_eq!(
+        token_endpoint.hits(),
+        0,
+        "the stored token is live, so nothing should have been refreshed"
+    );
+}
+
+/// A burst of requests refused at the same moment — the shape a TUI produces,
+/// where a timer refresh, a watch tick and a sweep are all in flight — must
+/// cost one token rotation between them, not one each. Every extra rotation is
+/// another chance for backboard's reuse detection to see a consumed refresh
+/// token and revoke the whole grant.
+#[tokio::test]
+async fn a_second_refusal_reuses_the_refresh_the_first_one_just_performed() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+    let mut configs = fixture.load();
+
+    let first = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+    let second = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    // The story each caller is told is unchanged: the grant is alive, so the
+    // refusal is about the resource.
+    for result in [&first, &second] {
+        assert!(
+            matches!(
+                result,
+                Err(crate::errors::RailwayError::OAuthInsufficientGrant)
+            ),
+            "got {result:?}"
+        );
+    }
+    assert_eq!(
+        token_endpoint.hits(),
+        1,
+        "the second refusal should adopt the first refresh, not rotate again"
+    );
+    // Both requests still went out and were still retried once each.
+    assert_eq!(backboard.hits(), 4);
+}
+
+/// The `railway ca` burst, at full concurrency: an hour in, the access token
+/// is dead and the timer refresh, the watch tick and a sweep are all refused
+/// at the same instant.
+///
+/// Each refusal forces a refresh, and backboard rotates and reuse-detects the
+/// refresh token on every one — so N simultaneous refusals rotating N times
+/// means N-1 of them present an already-consumed token, and the server revokes
+/// the entire grant. That is a hard logout produced by nothing but the CLI's
+/// own concurrency. One rotation between them is the whole point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_simultaneous_refusals_rotates_the_token_exactly_once() {
+    const BURST: usize = 8;
+
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+    let fixture = LiveFixture::new();
+
+    let mut tasks = Vec::new();
+    for _ in 0..BURST {
+        // Every request builds its own `Configs` from the same file, exactly as
+        // `post_graphql_for_current_session` does on each send.
+        let path = fixture.path.clone();
+        let url = backboard.url();
+        let token_url = token_endpoint.base_url.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut configs = Configs::for_test(path);
+            configs.reload().unwrap();
+            let client = crate::client::GQLClient::new_authorized(&configs).unwrap();
+            crate::client::post_graphql_value::<serde_json::Value>(
+                &client,
+                reqwest::Url::parse(&url).unwrap(),
+                &user_meta_body(),
+                Some((&mut configs, &token_url)),
+            )
+            .await
+        }));
+    }
+
+    let mut results = Vec::new();
+    for task in tasks {
+        results.push(task.await.unwrap());
+    }
+
+    assert_eq!(
+        token_endpoint.hits(),
+        1,
+        "the burst must cost one token rotation between them, not {BURST}"
+    );
+    // Every caller still gets the right story: the grant is alive, so the
+    // refusal is about the resource. None of them is left holding an error
+    // caused by the coalescing itself.
+    for result in &results {
+        assert!(
+            matches!(
+                result,
+                Err(crate::errors::RailwayError::OAuthInsufficientGrant)
+            ),
+            "got {result:?}"
+        );
+    }
+    // The one refresh that did happen was persisted for everyone else.
+    assert_eq!(fixture.load().get_refresh_token(), Some("new-refresh"));
+}
+
+/// Nothing to probe with (legacy token, no refresh token): the original
+/// error stands untouched and the token endpoint is never contacted.
+#[tokio::test]
+async fn no_refresh_token_leaves_the_original_error_untouched() {
+    let backboard = crate::testkit::MockBackboard::spawn();
+    backboard.stub_graphql_error("UserMeta", "Not Authorized");
+    let token_endpoint = MockEndpoint::spawn(vec![fresh_tokens()]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut configs = Configs::for_test(dir.path().join("config.json"));
+    configs.root_config.user.token = Some("legacy-token".to_string());
+    configs.write_credentials().unwrap();
+
+    let result = send_user_meta(&mut configs, &backboard, &token_endpoint.base_url).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(crate::errors::RailwayError::Unauthorized
+                | crate::errors::RailwayError::UnauthorizedLogin)
+        ),
+        "got {result:?}"
+    );
+    assert_eq!(token_endpoint.hits(), 0, "nothing to probe with");
+    assert_eq!(backboard.hits(), 1, "no retry without a live probe");
 }
