@@ -18,6 +18,7 @@ pub mod code;
 pub mod completion;
 pub mod config;
 pub mod connect;
+pub mod cron;
 pub mod database;
 pub mod delete;
 pub mod deploy;

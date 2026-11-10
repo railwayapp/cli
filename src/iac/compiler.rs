@@ -43,6 +43,7 @@ pub const IAC_RESOURCE_FIELDS: &[&str] = &[
     "replicaConfig",
     "clusterDisplay",
     "tracing",
+    "cdn",
     "engine",
     "image",
     "env",
@@ -653,6 +654,7 @@ fn service_to_environment_config(
         "replicaConfig",
         "clusterDisplay",
         "tracing",
+        "cdn",
     ] {
         if let Some(value) = field(service, key) {
             config[key] = value.clone();
@@ -872,6 +874,12 @@ pub fn environment_config_to_graph(
 
             let kind = if service.get("source").and_then(|s| s.get("repo")).is_some() {
                 "github"
+            } else if service
+                .get("source")
+                .and_then(|s| field_str(s, "image"))
+                .is_some_and(super::functions::is_function_image)
+            {
+                "function"
             } else if service.get("source").and_then(|s| s.get("image")).is_some() {
                 "docker-image"
             } else if service
@@ -931,6 +939,12 @@ pub fn environment_config_to_graph(
             // ones that are on, so an untraced service has no block at all.
             if let Some(tracing) = service.get("tracing").filter(|t| t.is_object()) {
                 node["tracing"] = tracing.clone();
+            }
+            // Per-environment CDN caching. Railway serialises the block only
+            // while caching is on, and only the knobs that differ from the
+            // edge defaults.
+            if let Some(cdn) = service.get("cdn").filter(|c| c.is_object()) {
+                node["cdn"] = cdn.clone();
             }
             if let Some(group_id) = field_str(service, "groupId") {
                 node["groupId"] = json!(

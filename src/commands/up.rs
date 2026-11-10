@@ -13,7 +13,7 @@ use crate::{
         environment::get_matched_environment,
         project::get_project,
         service::get_or_prompt_service,
-        upload::{create_deploy_tarball, upload_deploy_tarball},
+        upload::{DeployTarball, create_deploy_tarball, upload_deploy_tarball},
     },
     subscriptions::deployment::DeploymentStatus,
     util::{
@@ -224,7 +224,10 @@ pub async fn command(args: Args) -> Result<()> {
     };
 
     let mut progress_bar: Option<ProgressBar> = None;
-    let body = create_deploy_tarball(
+    let DeployTarball {
+        bytes: body,
+        skipped_symlinks,
+    } = create_deploy_tarball(
         &deploy_paths.project_path,
         &deploy_paths.archive_prefix_path,
         args.no_gitignore,
@@ -258,6 +261,7 @@ pub async fn command(args: Args) -> Result<()> {
 
     // Ensure progress bar finishes if no entries were processed
     drop(progress_bar);
+    warn_skipped_symlinks(&skipped_symlinks);
 
     if args.verbose {
         println!("railway up");
@@ -570,6 +574,28 @@ async fn poll_deployment_verdict(
     }
 }
 
+/// Tell the user which symlinks were left out of the upload because they
+/// resolve outside the project. Written to stderr so `--json` output on
+/// stdout stays machine-readable.
+fn warn_skipped_symlinks(skipped: &[PathBuf]) {
+    if skipped.is_empty() {
+        return;
+    }
+    let noun = if skipped.len() == 1 {
+        "symlink"
+    } else {
+        "symlinks"
+    };
+    eprintln!(
+        "  {} Skipped {} {noun} pointing outside the project (not uploaded):",
+        "!".yellow().bold(),
+        skipped.len(),
+    );
+    for path in skipped {
+        eprintln!("      {}", path.display());
+    }
+}
+
 struct DeployPaths {
     project_path: PathBuf,
     archive_prefix_path: PathBuf,
@@ -854,10 +880,14 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
 
     // Bundle the directory.
     let bundle_spinner = step_spinner(args.json, "Bundling project");
-    let tarball = create_deploy_tarball(&cwd_path, &cwd_path, args.no_gitignore, |_, _| {})?;
+    let DeployTarball {
+        bytes: tarball,
+        skipped_symlinks,
+    } = create_deploy_tarball(&cwd_path, &cwd_path, args.no_gitignore, |_, _| {})?;
     if let Some(spinner) = bundle_spinner {
         spinner.finish_and_clear();
     }
+    warn_skipped_symlinks(&skipped_symlinks);
     if !args.json {
         println!("  {} Bundled ({} bytes)", "✓".green(), tarball.len());
     }

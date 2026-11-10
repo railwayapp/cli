@@ -58,6 +58,157 @@ struct ProxyState {
     /// Resolved once at startup: the proxy's working directory is fixed for
     /// the life of the process, so the link cannot change under it.
     link: LinkContext,
+    /// The harness that spawned the proxy, resolved once at startup from the
+    /// environment and process tree. Sent upstream so traffic stays
+    /// attributed when the harness's `clientInfo.name` is missing or generic.
+    harness: HarnessAttribution,
+    /// Upstream failures not yet followed by a success. Never held across an
+    /// await, so a plain mutex is enough.
+    health: std::sync::Mutex<SessionHealth>,
+}
+
+/// Why an upstream exchange failed, reduced to a handful of low-cardinality
+/// categories for the process-level `cli_mcp` telemetry row.
+///
+/// Before this existed `serve_proxy` returned `Ok(())` however the session
+/// went: every error was answered to the harness as JSON-RPC and then
+/// forgotten, so all ~274k proxy rows a week reported `success=true` and the
+/// CLI side carried no failure signal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamFailure {
+    /// No usable CLI login, so nothing was forwarded (e.g. a project-token-only
+    /// environment, or a login that expired and could not be refreshed).
+    NotLoggedIn,
+    /// mcp.railway.com answered 401/403.
+    Rejected(u16),
+    /// Could not connect or send the request (DNS, refused, TLS, …).
+    Unreachable,
+    /// Connect or response timeout.
+    TimedOut,
+    /// The connection dropped while the response was being read.
+    ConnectionLost,
+    /// HTTP 429.
+    RateLimited,
+    /// Any other non-success HTTP status (5xx, unexpected 4xx).
+    Http(u16),
+    /// Anything else the proxy could not classify.
+    Other,
+}
+
+impl UpstreamFailure {
+    fn from_status(status: u16) -> Self {
+        match status {
+            401 | 403 => Self::Rejected(status),
+            429 => Self::RateLimited,
+            _ => Self::Http(status),
+        }
+    }
+
+    fn from_error(err: &anyhow::Error) -> Self {
+        for cause in err.chain() {
+            if let Some(upstream) = cause.downcast_ref::<UpstreamStatusError>() {
+                return Self::from_status(upstream.status);
+            }
+            if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
+                return if err.is_timeout() {
+                    Self::TimedOut
+                } else if err.is_body() || err.is_decode() {
+                    Self::ConnectionLost
+                } else {
+                    Self::Unreachable
+                };
+            }
+        }
+        Self::Other
+    }
+
+    /// Which failure to report when several are outstanding: the one a user
+    /// most needs to act on.
+    fn severity(self) -> u8 {
+        match self {
+            Self::Rejected(_) => 7,
+            Self::NotLoggedIn => 6,
+            Self::Unreachable => 5,
+            Self::TimedOut => 4,
+            Self::Http(status) if status >= 500 => 3,
+            Self::ConnectionLost => 2,
+            Self::RateLimited => 1,
+            Self::Http(_) | Self::Other => 0,
+        }
+    }
+
+    /// Fixed wording per category (the HTTP status is the only variable), so
+    /// `error_message` stays groupable and carries no ids, URLs or bodies.
+    /// Each phrase is chosen to land in the matching `telemetry::error_class`
+    /// bucket.
+    fn telemetry_message(self) -> String {
+        let detail = match self {
+            Self::NotLoggedIn => "mcp upstream not reached: the proxy has no railway login".into(),
+            Self::Rejected(401) => "mcp upstream rejected the railway login (HTTP 401)".into(),
+            Self::Rejected(status) => format!("mcp upstream forbidden (HTTP {status})"),
+            Self::Unreachable => "mcp upstream unreachable: could not connect".into(),
+            Self::TimedOut => "mcp upstream timed out".into(),
+            Self::ConnectionLost => "mcp upstream unreachable: connection lost mid-response".into(),
+            Self::RateLimited => "mcp upstream rate limit hit (HTTP 429)".into(),
+            Self::Http(status) => format!("mcp upstream http error (HTTP {status})"),
+            Self::Other => "mcp upstream request failed".into(),
+        };
+        format!("Railway MCP proxy session ended with an unrecovered upstream failure: {detail}")
+    }
+}
+
+/// Tracks whether the session ended healthy. A failure stays outstanding until
+/// a later upstream exchange succeeds, so a transient 502 (or a `railway login`
+/// mid-session) does not mark the whole session failed; one that never
+/// recovers does.
+#[derive(Default)]
+struct SessionHealth {
+    unrecovered: Option<UpstreamFailure>,
+}
+
+impl SessionHealth {
+    fn record_success(&mut self) {
+        self.unrecovered = None;
+    }
+
+    fn record_failure(&mut self, failure: UpstreamFailure) {
+        if self
+            .unrecovered
+            .is_none_or(|current| failure.severity() >= current.severity())
+        {
+            self.unrecovered = Some(failure);
+        }
+    }
+}
+
+/// A non-success HTTP status from the upstream, kept typed so session health
+/// can classify it. Displays exactly as the old string error did, so what the
+/// harness sees is unchanged.
+#[derive(Debug)]
+struct UpstreamStatusError {
+    status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for UpstreamStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UpstreamStatusError {}
+
+fn upstream_status_error(status: reqwest::StatusCode, message: String) -> anyhow::Error {
+    anyhow::Error::new(UpstreamStatusError {
+        status: status.as_u16(),
+        message,
+    })
+}
+
+impl ProxyState {
+    fn health(&self) -> std::sync::MutexGuard<'_, SessionHealth> {
+        self.health.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 #[derive(Default)]
@@ -98,6 +249,27 @@ struct SessionMeta {
 /// Deliberately NOT covered: resolving a project from a RAILWAY_TOKEN, which
 /// costs a GraphQL round trip and would put a network call (and a 15s connect
 /// timeout on a bad one) in front of proxy startup while the harness waits.
+/// Who is driving the proxy, as env/process detection sees it. Empty when the
+/// proxy runs from a human terminal or CI (the same gate the deploy upload
+/// uses), so those requests carry no caller header.
+#[derive(Clone, Default)]
+struct HarnessAttribution {
+    caller: Option<String>,
+    agent_session_id: Option<String>,
+}
+
+impl HarnessAttribution {
+    fn detect() -> Self {
+        match telemetry::deploy_attribution() {
+            Some((caller, agent_session_id)) => Self {
+                caller: Some(caller),
+                agent_session_id,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct LinkContext {
     project_id: Option<String>,
@@ -124,6 +296,12 @@ const SCOPING_PARAMS: [&str; 4] = ["projectId", "environmentId", "serviceId", "d
 const MCP_TRANSPORT_HEADER: &str = "x-railway-mcp-transport";
 const MCP_TRANSPORT_VALUE: &str = "cli-proxy";
 const MCP_CLIENT_HEADER: &str = "x-railway-mcp-client";
+/// Agent attribution, named as backboard reads them
+/// (helpers/agentAttribution.ts). Backboard prefers `x-railway-caller` over
+/// `x-railway-mcp-client`, so the proxy sends the best identity it has in
+/// both.
+const RAILWAY_CALLER_HEADER: &str = "x-railway-caller";
+const RAILWAY_AGENT_SESSION_HEADER: &str = "x-railway-agent-session";
 /// Names the context the proxy filled in on this call. Injection is otherwise
 /// invisible — the server cannot tell an injected projectId from one the
 /// caller chose — so without this there is no way to measure how often it
@@ -170,6 +348,8 @@ pub async fn serve_proxy() -> Result<()> {
         session: Mutex::new(SessionMeta::default()),
         recovery: Mutex::new(()),
         link,
+        harness: HarnessAttribution::detect(),
+        health: std::sync::Mutex::new(SessionHealth::default()),
     });
 
     // All stdout writes go through one task so concurrent responses can't
@@ -238,7 +418,20 @@ pub async fn serve_proxy() -> Result<()> {
     end_session(&state).await;
     drop(tx);
     let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
-    Ok(())
+
+    // Only now, with the harness already gone, does an unrecovered upstream
+    // failure become the process result. Returning it any earlier would end a
+    // session that might still recover; returning it here cannot disturb the
+    // stdio client, and it is what lets the dispatch macro's `cli_mcp` row
+    // report success=false with a classifiable error_message.
+    session_result(&state)
+}
+
+fn session_result(state: &ProxyState) -> Result<()> {
+    match state.health().unrecovered {
+        Some(failure) => Err(anyhow::anyhow!(failure.telemetry_message())),
+        None => Ok(()),
+    }
 }
 
 fn method_of(msg: &JsonValue) -> Option<&str> {
@@ -402,11 +595,15 @@ async fn handle_message(state: &ProxyState, msg: JsonValue, out: &Out) {
     let ids = ids_of(&msg);
 
     let Some(token) = fresh_token(state).await else {
+        state.health().record_failure(UpstreamFailure::NotLoggedIn);
         respond_unauthenticated(&msg, &ids, out);
         return;
     };
 
     if let Err(e) = forward(state, &msg, &token, out).await {
+        state
+            .health()
+            .record_failure(UpstreamFailure::from_error(&e));
         if ids.is_empty() {
             eprintln!("railway mcp proxy: {e:#}");
         }
@@ -544,9 +741,7 @@ async fn post_message(
         .header("accept", "application/json, text/event-stream")
         .header("x-source", consts::get_user_agent())
         .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE);
-    if let Some(client) = metadata.client_name.as_deref() {
-        req = req.header(MCP_CLIENT_HEADER, client);
-    }
+    req = with_attribution(req, metadata.client_name.as_deref(), &state.harness);
     if metadata.injected {
         req = req.header(MCP_INJECTED_HEADER, "projectId");
     }
@@ -571,6 +766,37 @@ async fn post_message(
         .send()
         .await
         .context("failed to reach the remote MCP server")
+}
+
+/// Attach agent attribution to an upstream request. The client name from the
+/// harness's `initialize` handshake is the stronger identity and wins for
+/// `x-railway-caller`; the env/process-detected harness covers a handshake
+/// with no usable name (and any request whose metadata lacks one), which
+/// previously reached backboard with no caller at all. Warehouse 2026-10-16:
+/// ~13k users/wk of proxied connect events arrived caller-less, 99% of them
+/// users whose other proxied events were attributed.
+fn with_attribution(
+    mut req: reqwest::RequestBuilder,
+    client_name: Option<&str>,
+    harness: &HarnessAttribution,
+) -> reqwest::RequestBuilder {
+    if let Some(client) = client_name {
+        req = req.header(MCP_CLIENT_HEADER, client);
+    }
+    if let Some(caller) = client_name
+        .or(harness.caller.as_deref())
+        .filter(|c| header_safe(c))
+    {
+        req = req.header(RAILWAY_CALLER_HEADER, caller);
+    }
+    if let Some(session) = harness
+        .agent_session_id
+        .as_deref()
+        .filter(|s| header_safe(s))
+    {
+        req = req.header(RAILWAY_AGENT_SESSION_HEADER, session);
+    }
+    req
 }
 
 /// A header may only carry visible ASCII; a value that cannot restate the body
@@ -613,11 +839,12 @@ async fn reinitialize(state: &ProxyState, token: &str, failed_generation: u64) -
     };
 
     let resp = post_message(state, &init, token, None, &metadata).await?;
-    anyhow::ensure!(
-        resp.status().is_success(),
-        "re-initialize failed with HTTP {}",
-        resp.status()
-    );
+    if !resp.status().is_success() {
+        return Err(upstream_status_error(
+            resp.status(),
+            format!("re-initialize failed with HTTP {}", resp.status()),
+        ));
+    }
     let session_id = resp
         .headers()
         .get("mcp-session-id")
@@ -627,11 +854,15 @@ async fn reinitialize(state: &ProxyState, token: &str, failed_generation: u64) -
 
     let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
     let resp = post_message(state, &initialized, token, session_id.as_deref(), &metadata).await?;
-    anyhow::ensure!(
-        resp.status().is_success(),
-        "re-initialize notification failed with HTTP {}",
-        resp.status()
-    );
+    if !resp.status().is_success() {
+        return Err(upstream_status_error(
+            resp.status(),
+            format!(
+                "re-initialize notification failed with HTTP {}",
+                resp.status()
+            ),
+        ));
+    }
     read_body_capped(resp).await?;
 
     let mut session = state.session.lock().await;
@@ -660,6 +891,11 @@ async fn consume_response(
     }
 
     if status == 401 || status == 403 {
+        // Answered to the harness below rather than returned as an error, so
+        // record it here; it stays outstanding unless a later call succeeds.
+        state
+            .health()
+            .record_failure(UpstreamFailure::Rejected(status.as_u16()));
         let _ = resp.bytes().await;
         for id in &ids_of(msg) {
             send_error(
@@ -672,17 +908,24 @@ async fn consume_response(
         return Ok(());
     }
 
+    if !status.is_success() {
+        let body = read_body_capped(resp).await.unwrap_or_default();
+        return Err(upstream_status_error(
+            status,
+            format!(
+                "remote MCP server returned HTTP {status}: {}",
+                truncate(&body, 300)
+            ),
+        ));
+    }
+
+    // The upstream accepted the request. A stream that breaks after this
+    // point is recorded as a failure on top of it, by the caller.
+    state.health().record_success();
+
     // Accepted notification/response with no body.
     if status == 202 || status == 204 {
         return Ok(());
-    }
-
-    if !status.is_success() {
-        let body = read_body_capped(resp).await.unwrap_or_default();
-        anyhow::bail!(
-            "remote MCP server returned HTTP {status}: {}",
-            truncate(&body, 300)
-        );
     }
 
     let content_type = resp
@@ -840,9 +1083,7 @@ async fn end_session(state: &ProxyState) {
         .header("mcp-session-id", session_id)
         .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE)
         .timeout(Duration::from_secs(5));
-    if let Some(client) = client_name.as_deref() {
-        req = req.header(MCP_CLIENT_HEADER, client);
-    }
+    req = with_attribution(req, client_name.as_deref(), &state.harness);
     let _ = req.send().await;
 }
 
@@ -1027,6 +1268,62 @@ mod tests {
             "params": { "protocolVersion": "2025-03-26" }
         });
         assert_eq!(extract_mcp_client_header(&msg), None);
+    }
+
+    fn attribution_headers(
+        client_name: Option<&str>,
+        harness: &HarnessAttribution,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let req = with_attribution(
+            reqwest::Client::new().post("http://127.0.0.1/mcp"),
+            client_name,
+            harness,
+        )
+        .build()
+        .unwrap();
+        let get = |name: &str| {
+            req.headers()
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        (
+            get(MCP_CLIENT_HEADER),
+            get(RAILWAY_CALLER_HEADER),
+            get(RAILWAY_AGENT_SESSION_HEADER),
+        )
+    }
+
+    #[test]
+    fn harness_attribution_covers_a_missing_client_name() {
+        let harness = HarnessAttribution {
+            caller: Some("codex".to_string()),
+            agent_session_id: Some("0199f0c2-thread".to_string()),
+        };
+        // No usable clientInfo name: the detected harness still names the
+        // caller, where the request previously carried no attribution.
+        assert_eq!(
+            attribution_headers(None, &harness),
+            (
+                None,
+                Some("codex".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A handshake name wins for the caller and is still sent as the
+        // client header.
+        assert_eq!(
+            attribution_headers(Some("mcp_unknown:totally-new-ide"), &harness),
+            (
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A human or CI launch detects nothing and sends nothing extra.
+        assert_eq!(
+            attribution_headers(None, &HarnessAttribution::default()),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -1360,6 +1657,9 @@ mod recovery_tests {
                             assert_eq!(headers["authorization"], "Bearer test-token");
                             assert_eq!(headers[MCP_METHOD_HEADER], method);
                             assert_eq!(headers[MCP_CLIENT_HEADER], "claude_code");
+                            // The handshake name beats the detected harness.
+                            assert_eq!(headers[RAILWAY_CALLER_HEADER], "claude_code");
+                            assert_eq!(headers[RAILWAY_AGENT_SESSION_HEADER], "agent-session-1");
                             assert_eq!(headers[MCP_TRANSPORT_HEADER], MCP_TRANSPORT_VALUE);
                             let (status, session_header) = match method {
                                 "initialize" => {
@@ -1474,6 +1774,11 @@ mod recovery_tests {
             }),
             recovery: Mutex::new(()),
             link: LinkContext::default(),
+            harness: HarnessAttribution {
+                caller: Some("codex".to_string()),
+                agent_session_id: Some("agent-session-1".to_string()),
+            },
+            health: std::sync::Mutex::new(SessionHealth::default()),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let requests = (1..=callers).map(|id| {
@@ -1505,14 +1810,29 @@ mod recovery_tests {
             .expect("recovery deadlocked");
         for result in results {
             if let Some(method) = handshake_failure {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains("500"), "{method}: {error}");
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("500"), "{method}: {error}");
+                assert_eq!(
+                    UpstreamFailure::from_error(&error),
+                    UpstreamFailure::Http(500)
+                );
             } else if retry_fails {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains(&rejection.to_string()), "{error}");
+                let error = result.unwrap_err();
+                assert!(
+                    error.to_string().contains(&rejection.to_string()),
+                    "{error}"
+                );
+                assert_eq!(
+                    UpstreamFailure::from_error(&error),
+                    UpstreamFailure::Http(rejection)
+                );
             } else {
                 result.unwrap();
             }
+        }
+        // A rejection the proxy recovered from transparently is not a failure.
+        if !retry_fails && handshake_failure.is_none() {
+            assert!(session_result(&state).is_ok());
         }
         assert_eq!(fixture.initialize_count.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1565,5 +1885,194 @@ mod recovery_tests {
                 exercise_recovery(status, 2, stateful, false, None).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_health_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// An upstream that answers each POST with the next status in `statuses`
+    /// (the last one repeats). 2xx answers carry a JSON-RPC result body.
+    async fn upstream(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let statuses = Arc::new(Mutex::new(VecDeque::from(statuses)));
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let statuses = statuses.clone();
+                tokio::spawn(async move {
+                    let mut socket = BufReader::new(socket);
+                    let mut line = String::new();
+                    let mut len = 0usize;
+                    loop {
+                        line.clear();
+                        socket.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.trim().split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            len = value.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; len];
+                    socket.read_exact(&mut body).await.unwrap();
+                    let status = {
+                        let mut statuses = statuses.lock().await;
+                        if statuses.len() > 1 {
+                            statuses.pop_front().unwrap()
+                        } else {
+                            statuses[0]
+                        }
+                    };
+                    let body = if (200..300).contains(&status) {
+                        r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
+                    } else {
+                        r#"{"error":"upstream failed for proj_123"}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        (url, server)
+    }
+
+    fn state(url: String, config_dir: &std::path::Path) -> ProxyState {
+        ProxyState {
+            http: reqwest::Client::new(),
+            url,
+            configs: Mutex::new(Configs::for_test(config_dir.join("config.json"))),
+            session: Mutex::new(SessionMeta::default()),
+            recovery: Mutex::new(()),
+            link: LinkContext::default(),
+            harness: HarnessAttribution::default(),
+            health: std::sync::Mutex::new(SessionHealth::default()),
+        }
+    }
+
+    /// What `handle_message` does with a forwarded request, minus the token
+    /// lookup (tests have no stored login).
+    async fn call(state: &ProxyState, id: u64) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let msg = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        if let Err(e) = forward(state, &msg, "test-token", &tx).await {
+            state
+                .health()
+                .record_failure(UpstreamFailure::from_error(&e));
+        }
+    }
+
+    fn session_error(state: &ProxyState) -> String {
+        format!("{:#}", session_result(state).unwrap_err())
+    }
+
+    #[test]
+    fn a_later_success_clears_an_outstanding_failure() {
+        let mut health = SessionHealth::default();
+        health.record_failure(UpstreamFailure::Http(502));
+        health.record_success();
+        assert_eq!(health.unrecovered, None);
+    }
+
+    #[test]
+    fn the_most_severe_outstanding_failure_is_reported() {
+        let mut health = SessionHealth::default();
+        health.record_failure(UpstreamFailure::Rejected(401));
+        health.record_failure(UpstreamFailure::Http(502));
+        assert_eq!(health.unrecovered, Some(UpstreamFailure::Rejected(401)));
+        // Equal severity: the newer one wins.
+        health.record_failure(UpstreamFailure::Rejected(403));
+        assert_eq!(health.unrecovered, Some(UpstreamFailure::Rejected(403)));
+    }
+
+    #[tokio::test]
+    async fn a_clean_session_still_succeeds() {
+        let (url, server) = upstream(vec![200]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        assert!(session_result(&state).is_ok());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unrecovered_5xx_fails_the_session() {
+        let (url, server) = upstream(vec![200, 502]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        let error = session_error(&state);
+        assert!(error.contains("(HTTP 502)"), "{error}");
+        // The upstream body (which can carry ids) never reaches telemetry.
+        assert!(!error.contains("proj_123"), "{error}");
+        assert_eq!(telemetry::error_class(Some(&error)), "UPSTREAM");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_transient_5xx_that_recovers_does_not_fail_the_session() {
+        let (url, server) = upstream(vec![503, 200]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        assert!(session_result(&state).is_ok());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn auth_rejection_that_never_recovers_fails_the_session() {
+        for (status, class) in [(401, "AUTHENTICATION"), (403, "AUTHORIZATION")] {
+            let (url, server) = upstream(vec![status]).await;
+            let dir = tempfile::tempdir().unwrap();
+            let state = state(url, dir.path());
+            call(&state, 1).await;
+            let error = session_error(&state);
+            assert!(error.contains(&format!("(HTTP {status})")), "{error}");
+            assert_eq!(telemetry::error_class(Some(&error)), class, "{error}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_upstream_fails_the_session() {
+        // Bind then drop, so the port refuses connections.
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(format!("http://{addr}"), dir.path());
+        call(&state, 1).await;
+        assert_eq!(
+            state.health().unrecovered,
+            Some(UpstreamFailure::Unreachable)
+        );
+        let error = session_error(&state);
+        assert!(!error.contains(&addr.port().to_string()), "{error}");
+        assert_eq!(telemetry::error_class(Some(&error)), "NETWORK");
+    }
+
+    #[test]
+    fn not_logged_in_and_rate_limits_land_in_existing_classes() {
+        let class = |f: UpstreamFailure| telemetry::error_class(Some(&f.telemetry_message()));
+        assert_eq!(class(UpstreamFailure::NotLoggedIn), "AUTHENTICATION");
+        assert_eq!(class(UpstreamFailure::TimedOut), "TIMEOUT");
+        assert_eq!(class(UpstreamFailure::RateLimited), "RATE_LIMITED");
+        assert_eq!(class(UpstreamFailure::ConnectionLost), "NETWORK");
+        assert_eq!(class(UpstreamFailure::Http(400)), "UPSTREAM");
     }
 }

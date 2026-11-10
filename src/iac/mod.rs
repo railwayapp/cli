@@ -9,6 +9,7 @@ mod compiler;
 mod engine;
 mod environments;
 mod eval;
+pub mod functions;
 mod graph;
 mod json;
 pub mod ownership;
@@ -16,7 +17,9 @@ mod partial;
 pub mod saved_plan;
 
 #[allow(dead_code)]
-pub use change_set::{ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, render_change_set};
+pub use change_set::{
+    ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, normalize_cdn, render_change_set,
+};
 #[allow(dead_code)]
 pub use compiler::{
     CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
