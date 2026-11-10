@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const REMOTE_MCP_URL: &str = "https://mcp.railway.com";
 
-/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Factory Droid, Pi).
+/// Install the Railway MCP server config into AI coding tools (Claude Code, Cursor, OpenAI Codex, OpenCode, GitHub Copilot, Factory Droid, Pi, Antigravity).
 ///
 /// Merges a `railway` server entry into each tool's MCP config file. Without `--agent`, only configures detected tools (those with their config dir present).
 #[derive(Parser)]
@@ -183,7 +183,14 @@ pub(crate) async fn install_mcp(
 pub(crate) fn supports_mcp(slug: &str) -> bool {
     matches!(
         slug,
-        "claude-code" | "cursor" | "opencode" | "codex" | "copilot" | "factory-droid" | "pi"
+        "claude-code"
+            | "cursor"
+            | "opencode"
+            | "codex"
+            | "copilot"
+            | "factory-droid"
+            | "pi"
+            | "antigravity"
     )
 }
 
@@ -196,6 +203,7 @@ fn config_path(slug: &str, home: &Path) -> PathBuf {
         "copilot" => home.join(".copilot").join("mcp-config.json"),
         "factory-droid" => home.join(".factory").join("mcp.json"),
         "pi" => home.join(".pi").join("agent").join("mcp.json"),
+        "antigravity" => home.join(".gemini").join("config").join("mcp_config.json"),
         // supports_mcp gates this; unreachable in practice.
         _ => home.join(".unsupported"),
     }
@@ -213,14 +221,16 @@ const ALL_TRANSPORTS: [McpTransport; 3] = [
 pub(crate) fn mcp_configured_any_transport(home: &Path, slug: &str) -> bool {
     let path = config_path(slug, home);
     match slug {
-        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" => read_json_or_empty(&path)
-            .ok()
-            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
-            .is_some_and(|entry| {
-                ALL_TRANSPORTS
-                    .iter()
-                    .any(|t| json_mcp_entry_matches(&entry, *t))
-            }),
+        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" | "antigravity" => {
+            read_json_or_empty(&path)
+                .ok()
+                .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+                .is_some_and(|entry| {
+                    ALL_TRANSPORTS
+                        .iter()
+                        .any(|t| json_mcp_entry_matches(&entry, *t))
+                })
+        }
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
@@ -242,10 +252,12 @@ pub(crate) fn mcp_configured_for_slug(home: &Path, slug: &str, transport: McpTra
     let path = config_path(slug, home);
 
     match slug {
-        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" => read_json_or_empty(&path)
-            .ok()
-            .and_then(|root| root.pointer("/mcpServers/railway").cloned())
-            .is_some_and(|entry| json_mcp_entry_matches(&entry, transport)),
+        "claude-code" | "cursor" | "copilot" | "factory-droid" | "pi" | "antigravity" => {
+            read_json_or_empty(&path)
+                .ok()
+                .and_then(|root| root.pointer("/mcpServers/railway").cloned())
+                .is_some_and(|entry| json_mcp_entry_matches(&entry, transport))
+        }
         "opencode" => read_json_or_empty(&path)
             .ok()
             .and_then(|root| root.pointer("/mcp/railway").cloned())
@@ -394,6 +406,15 @@ fn install_for(slug: &str, path: &Path, transport: McpTransport) -> Result<()> {
             write_json_mcp_servers(path, entry)
         }
         "pi" => {
+            let entry = match transport {
+                McpTransport::RemoteOauth => json!({ "url": REMOTE_MCP_URL }),
+                stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
+            };
+            write_json_mcp_servers(path, entry)
+        }
+        "antigravity" => {
+            // Antigravity reads `url` for Streamable HTTP servers (`serverUrl`
+            // is its legacy key) and `command` + `args` for stdio.
             let entry = match transport {
                 McpTransport::RemoteOauth => json!({ "url": REMOTE_MCP_URL }),
                 stdio => json!({ "command": "railway", "args": stdio_args(stdio) }),
@@ -995,6 +1016,60 @@ mod tests {
             McpTransport::RemoteOauth
         ));
         assert!(mcp_configured_any_transport(home.path(), "pi"));
+    }
+
+    #[test]
+    fn writes_antigravity_mcp_for_each_transport() {
+        let home = tempfile::tempdir().unwrap();
+        let path = config_path("antigravity", home.path());
+        assert_eq!(
+            path,
+            home.path()
+                .join(".gemini")
+                .join("config")
+                .join("mcp_config.json")
+        );
+        // Antigravity creates mcp_config.json empty on first run.
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+
+        install_for("antigravity", &path, McpTransport::RemoteOauth).unwrap();
+        let root: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+        assert_eq!(
+            railway.get("url").and_then(JsonValue::as_str),
+            Some("https://mcp.railway.com")
+        );
+        assert!(railway.get("type").is_none());
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::RemoteOauth
+        ));
+
+        install_for("antigravity", &path, McpTransport::RemoteProxy).unwrap();
+        let root: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let railway = root.pointer("/mcpServers/railway").unwrap();
+        assert_eq!(
+            railway.get("command").and_then(JsonValue::as_str),
+            Some("railway")
+        );
+        assert_eq!(railway.get("args"), Some(&json!(["mcp"])));
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::RemoteProxy
+        ));
+
+        install_for("antigravity", &path, McpTransport::Local).unwrap();
+        assert!(mcp_configured_for_slug(
+            home.path(),
+            "antigravity",
+            McpTransport::Local
+        ));
+        assert!(mcp_configured_any_transport(home.path(), "antigravity"));
     }
 
     #[test]

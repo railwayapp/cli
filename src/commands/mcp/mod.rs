@@ -1,8 +1,12 @@
 use super::*;
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{
+    ServiceExt,
+    transport::{async_rw::AsyncRwTransport, stdio},
+};
 
 mod handler;
 pub(crate) mod install;
+mod lifecycle;
 pub(crate) mod params;
 mod proxy;
 mod tools;
@@ -17,7 +21,7 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// Install Railway's MCP server config into AI coding tools (Claude Code, Cursor, OpenCode, Codex, Pi)
+    /// Install Railway's MCP server config into AI coding tools (Claude Code, Cursor, OpenCode, Codex, Pi, Antigravity)
     Install(install::Args),
     /// Serve the in-process MCP server over stdio, without reaching mcp.railway.com
     Local,
@@ -56,8 +60,13 @@ async fn serve_stdio() -> Result<()> {
     };
     let handler = RailwayMcp::new(client, configs);
 
+    // Modern (2026-07-28) clients open with `server/discover`, which rmcp's
+    // handshake rejects outright; the wrapper answers it so they fall back to
+    // `initialize` instead of watching the process die.
+    let (stdin, stdout) = stdio();
+    let transport = lifecycle::LegacyLifecycle::new(AsyncRwTransport::new_server(stdin, stdout));
     let service = handler
-        .serve(stdio())
+        .serve(transport)
         .await
         .context("Failed to start MCP server")?;
 

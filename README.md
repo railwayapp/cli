@@ -73,7 +73,7 @@ Configure Railway agent support for AI coding tools:
 railway setup agent -y
 ```
 
-This installs Railway skills and configures the remote Railway MCP server (`mcp.railway.com` via `railway mcp proxy`, authenticated with your CLI login) for detected tools such as Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, and Pi.
+This installs Railway skills and configures the remote Railway MCP server (`mcp.railway.com` via `railway mcp proxy`, authenticated with your CLI login) for detected tools such as Claude Code, Cursor, Codex, OpenCode, GitHub Copilot, Factory Droid, Pi, and Antigravity.
 
 Use the focused commands when you only need one part of the setup:
 
