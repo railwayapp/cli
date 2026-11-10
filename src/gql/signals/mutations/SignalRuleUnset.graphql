@@ -1,0 +1,10 @@
+mutation SignalRuleUnset($input: SignalRuleUnsetInput!) {
+  signalRuleUnset(input: $input) {
+    id
+    name
+    owner
+    default
+    rules
+    version
+  }
+}

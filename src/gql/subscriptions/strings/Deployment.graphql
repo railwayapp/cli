@@ -3,5 +3,8 @@ subscription Deployment($id: String!) {
     id
     status
     deploymentStopped
+    environmentId
+    snapshotId
+    createdAt
   }
 }

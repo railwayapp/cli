@@ -1,9 +1,12 @@
 pub mod agent_advisory;
+pub mod cac_deprecation;
 pub mod check_update;
+pub mod clipboard;
 pub mod compare_semver;
 pub mod detect;
 pub mod editor;
 pub mod git;
+pub mod host_env;
 pub mod install_method;
 pub mod logs;
 pub mod progress;
@@ -14,6 +17,7 @@ pub mod self_update;
 pub mod shell;
 pub mod time;
 pub mod two_factor;
+pub mod update_status;
 pub mod watcher;
 
 /// Spawns a command in a fully detached process group so it survives after the

@@ -1,0 +1,17 @@
+query CloudAgentConsoleSessions($cloudAgentId: ID!) {
+  cloudAgentConsoleSessions(cloudAgentId: $cloudAgentId) {
+    edges {
+      node {
+        name
+        kind
+        command
+        attached
+        createdAt
+        runState {
+          running
+          exitCode
+        }
+      }
+    }
+  }
+}

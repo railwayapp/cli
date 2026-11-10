@@ -1,0 +1,10 @@
+query CloudAgent($id: ID!, $environmentId: ID!) {
+  cloudAgent(id: $id, environmentId: $environmentId) {
+    id
+    name
+    status
+    projectId
+    environmentId
+    createdAt
+  }
+}

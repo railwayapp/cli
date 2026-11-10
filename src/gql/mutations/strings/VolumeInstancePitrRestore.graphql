@@ -1,0 +1,15 @@
+mutation VolumeInstancePitrRestore(
+  $volumeInstanceId: String!
+  $targetTimestamp: DateTime!
+  $newServiceName: String
+  $sourceRepoPath: String
+) {
+  volumeInstancePITRRestore(
+    volumeInstanceId: $volumeInstanceId
+    targetTimestamp: $targetTimestamp
+    newServiceName: $newServiceName
+    sourceRepoPath: $sourceRepoPath
+  ) {
+    workflowId
+  }
+}

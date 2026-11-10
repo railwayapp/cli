@@ -10,6 +10,7 @@ use super::cache::DirCache;
 use crate::commands::volume::sftp::{
     LocalOverwritePolicy, VolumeFileEntry, VolumeTransferProgress,
 };
+use crate::tui_theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMode {
@@ -121,6 +122,7 @@ pub struct VolumeBrowserApp {
     /// In-memory cache of recently visited directories. Powers
     /// stale-while-revalidate navigation, optimistic mutations, and prefetch.
     pub cache: DirCache,
+    pub theme: &'static Theme,
 }
 
 impl VolumeBrowserApp {
@@ -143,6 +145,7 @@ impl VolumeBrowserApp {
             transfer_progress: None,
             confirm: None,
             cache: DirCache::new(),
+            theme: Theme::load_preference(),
         };
         app.refresh_local_entries();
         Ok(app)
@@ -333,6 +336,11 @@ impl VolumeBrowserApp {
                 }
             }
             KeyCode::Char('r') | KeyCode::Char('R') => BrowserAction::Refresh,
+            KeyCode::Char('t') => {
+                self.theme = self.theme.next();
+                let _ = self.theme.save_preference();
+                BrowserAction::Continue
+            }
             KeyCode::Char('?') => {
                 self.mode = BrowserMode::Help;
                 BrowserAction::Continue

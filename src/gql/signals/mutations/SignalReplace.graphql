@@ -1,0 +1,10 @@
+mutation SignalReplace($input: SignalReplaceInput!) {
+  signalReplace(input: $input) {
+    id
+    name
+    type
+    owner
+    default
+    version
+  }
+}

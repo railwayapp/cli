@@ -9,6 +9,7 @@ use crate::{
         region_is_available,
     },
     gql::queries,
+    tui_theme::Theme,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,7 @@ pub struct ScaleTuiApp {
     pub focus: ScaleTuiFocus,
     pub edit_input: String,
     pub error: Option<String>,
+    pub theme: &'static Theme,
 }
 
 impl ScaleTuiApp {
@@ -130,6 +132,7 @@ impl ScaleTuiApp {
             focus: ScaleTuiFocus::Regions,
             edit_input: String::new(),
             error: None,
+            theme: Theme::load_preference(),
         }
     }
 
@@ -306,6 +309,11 @@ impl ScaleTuiApp {
                 ScaleTuiAction::Continue
             }
             KeyCode::Char('a') => self.activate_apply(),
+            KeyCode::Char('t') => {
+                self.theme = self.theme.next();
+                let _ = self.theme.save_preference();
+                ScaleTuiAction::Continue
+            }
             KeyCode::Char('?') => {
                 self.mode = ScaleTuiMode::Help;
                 ScaleTuiAction::Continue

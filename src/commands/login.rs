@@ -135,14 +135,22 @@ pub async fn command(args: Args) -> Result<()> {
         }
         Err(_) => "failed",
     };
-    crate::telemetry::send_auth_event(crate::telemetry::CliAuthTrackEvent {
-        transport,
-        outcome,
-        transport_reason: reason,
-        success: result.is_ok(),
-        error_message: result.as_ref().err().map(|e| e.to_string()),
-    })
-    .await;
+    // Fire-and-forget: telemetry is a side effect, not something the user's
+    // result should wait on. Awaiting it inline used to put a second,
+    // independent network call (with its own timeout) in the critical path
+    // of surfacing the *real* outcome to the user — on a flaky or blocked
+    // network path, that doubles the worst-case wait before anything is
+    // printed at all. `result?` below now runs immediately after the auth
+    // attempt itself resolves.
+    tokio::spawn(crate::telemetry::send_auth_event(
+        crate::telemetry::CliAuthTrackEvent {
+            transport,
+            outcome,
+            transport_reason: reason,
+            success: result.is_ok(),
+            error_message: result.as_ref().err().map(|e| e.to_string()),
+        },
+    ));
 
     let token_resp = result?;
 
