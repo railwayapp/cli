@@ -13,6 +13,12 @@ const NETWORK_FLOW_TRAFFIC_WIDTH: usize = 10;
 const NETWORK_FLOW_LATENCY_WIDTH: usize = 8;
 const NETWORK_FLOW_STATUS_WIDTH: usize = 16;
 
+const DNS_QUERY_TIME_WIDTH: usize = 30;
+const DNS_QUERY_ZONE_WIDTH: usize = 8;
+const DNS_QUERY_TYPE_WIDTH: usize = 5;
+const DNS_QUERY_RCODE_WIDTH: usize = 9;
+const DNS_QUERY_NAME_WIDTH: usize = 47;
+
 // Trait for common fields on log types
 pub trait LogLike {
     fn message(&self) -> &str;
@@ -133,7 +139,14 @@ pub fn print_log<T>(log: T, json: bool, format: LogFormat)
 where
     T: LogLike + serde::Serialize,
 {
-    println!("{}", format_log_string(log, json, format));
+    let line = format_log_string(log, json, format);
+    // JSON is already escaped by serde; only the human path reaches a terminal
+    // with raw bytes in it.
+    if json {
+        println!("{line}");
+    } else {
+        println!("{}", strip_terminal_controls(&line));
+    }
 }
 
 pub trait HttpLogLike: serde::Serialize {
@@ -257,6 +270,82 @@ pub fn format_network_flow_log_string<T: NetworkFlowLogLike>(log: &T, json: bool
 
 pub fn print_network_flow_log<T: NetworkFlowLogLike>(log: T, json: bool) {
     println!("{}", format_network_flow_log_string(&log, json));
+}
+
+pub trait DnsQueryLogLike: Serialize {
+    fn queried_at(&self) -> &str;
+    fn qname(&self) -> &str;
+    fn qtype(&self) -> &str;
+    fn rcode(&self) -> &str;
+    fn query_zone_value(&self) -> String;
+    fn answers(&self) -> &[String];
+}
+
+pub fn format_dns_query_log_header() -> String {
+    format!(
+        "{:<time_width$} {:<zone_width$} {:<type_width$} {:<rcode_width$} {:<name_width$} {}",
+        "Time".bold(),
+        "Zone".bold(),
+        "Type".bold(),
+        "Rcode".bold(),
+        "Name".bold(),
+        "Answers".bold(),
+        time_width = DNS_QUERY_TIME_WIDTH,
+        zone_width = DNS_QUERY_ZONE_WIDTH,
+        type_width = DNS_QUERY_TYPE_WIDTH,
+        rcode_width = DNS_QUERY_RCODE_WIDTH,
+        name_width = DNS_QUERY_NAME_WIDTH,
+    )
+}
+
+pub fn format_dns_query_log_string<T: DnsQueryLogLike>(log: &T, json: bool) -> String {
+    if json {
+        let mut value = serde_json::to_value(log).unwrap();
+        if let Value::Object(map) = &mut value {
+            map.insert(
+                "timestamp".to_string(),
+                Value::String(log.queried_at().to_string()),
+            );
+        }
+        return serde_json::to_string(&value).unwrap();
+    }
+
+    let zone = log.query_zone_value();
+    let zone = if zone == "internal" {
+        zone.cyan()
+    } else {
+        zone.normal()
+    };
+    let rcode = log.rcode();
+    let rcode = match rcode {
+        "NOERROR" => rcode.green(),
+        "NXDOMAIN" => rcode.yellow(),
+        _ => rcode.red(),
+    };
+    let answers = if log.answers().is_empty() {
+        "-".to_string()
+    } else {
+        log.answers().join(", ")
+    };
+
+    format!(
+        "{:<time_width$} {:<zone_width$} {:<type_width$} {:<rcode_width$} {:<name_width$} {}",
+        log.queried_at().dimmed(),
+        zone,
+        log.qtype(),
+        rcode,
+        log.qname(),
+        answers.dimmed(),
+        time_width = DNS_QUERY_TIME_WIDTH,
+        zone_width = DNS_QUERY_ZONE_WIDTH,
+        type_width = DNS_QUERY_TYPE_WIDTH,
+        rcode_width = DNS_QUERY_RCODE_WIDTH,
+        name_width = DNS_QUERY_NAME_WIDTH,
+    )
+}
+
+pub fn print_dns_query_log<T: DnsQueryLogLike>(log: T, json: bool) {
+    println!("{}", format_dns_query_log_string(&log, json));
 }
 
 fn endpoint(addr: &str, port: i64) -> String {
@@ -390,7 +479,7 @@ impl LogLike for queries::deployment_logs::LogFields {
     }
 }
 
-impl LogLike for subscriptions::build_logs::LogFields {
+impl LogLike for subscriptions::environment_logs::LogFields {
     fn message(&self) -> &str {
         &self.message
     }
@@ -405,7 +494,7 @@ impl LogLike for subscriptions::build_logs::LogFields {
     }
 }
 
-impl LogLike for queries::build_logs::LogFields {
+impl LogLike for queries::environment_logs::LogFields {
     fn message(&self) -> &str {
         &self.message
     }
@@ -505,6 +594,58 @@ impl NetworkFlowLogLike for queries::network_flow_logs::NetworkFlowLogFields {
 
     fn drop_cause(&self) -> Option<&str> {
         self.drop_cause.as_deref()
+    }
+}
+
+impl DnsQueryLogLike for queries::dns_query_logs::DnsQueryLogFields {
+    fn queried_at(&self) -> &str {
+        &self.queried_at
+    }
+
+    fn qname(&self) -> &str {
+        &self.qname
+    }
+
+    fn qtype(&self) -> &str {
+        &self.qtype
+    }
+
+    fn rcode(&self) -> &str {
+        &self.rcode
+    }
+
+    fn query_zone_value(&self) -> String {
+        serialized_enum_value(&self.query_zone)
+    }
+
+    fn answers(&self) -> &[String] {
+        &self.answers
+    }
+}
+
+impl DnsQueryLogLike for subscriptions::dns_query_logs::DnsQueryLogFields {
+    fn queried_at(&self) -> &str {
+        &self.queried_at
+    }
+
+    fn qname(&self) -> &str {
+        &self.qname
+    }
+
+    fn qtype(&self) -> &str {
+        &self.qtype
+    }
+
+    fn rcode(&self) -> &str {
+        &self.rcode
+    }
+
+    fn query_zone_value(&self) -> String {
+        serialized_enum_value(&self.query_zone)
+    }
+
+    fn answers(&self) -> &[String] {
+        &self.answers
     }
 }
 
@@ -811,5 +952,99 @@ mod tests {
         assert_eq!(json["timestamp"], "2025-01-01T00:00:00Z");
         assert_eq!(json["level"], "warn");
         assert_eq!(json["count"], 42); // This parses as a number
+    }
+}
+
+/// Strip terminal control sequences from a remotely sourced log line.
+///
+/// Log text is written by whatever is running in the service, which in a shared
+/// project is not the same principal as whoever is reading it. Printing raw
+/// `ESC` bytes lets the writer drive the reader's terminal — retitling the
+/// window, repainting the screen, hiding or forging output. Colour is dropped
+/// along with everything else: the alternative is parsing which sequences are
+/// benign, and that varies by emulator.
+///
+/// JSON output is untouched; serde already escapes these bytes.
+pub fn strip_terminal_controls(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // CSI (ESC [ ... final), OSC (ESC ] ... BEL or ST), and the
+            // two-character escapes. Consume the whole sequence.
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' {
+                            break;
+                        }
+                        if next == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            // Keep tab and newline; drop the rest of C0 and DEL, which can
+            // reposition the cursor or erase what was already printed.
+            '\t' | '\n' => out.push(ch),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {}
+            // C1 controls, reachable directly in UTF-8.
+            c if ('\u{80}'..='\u{9f}').contains(&c) => {}
+            c => out.push(c),
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod terminal_control_tests {
+    use super::strip_terminal_controls;
+
+    #[test]
+    fn strips_osc_and_csi_sequences() {
+        assert_eq!(strip_terminal_controls("\u{1b}]0;pwned\u{7}hello"), "hello");
+        assert_eq!(strip_terminal_controls("\u{1b}[31mred\u{1b}[0m"), "red");
+        // OSC terminated by ST rather than BEL.
+        assert_eq!(strip_terminal_controls("\u{1b}]0;t\u{1b}\\after"), "after");
+    }
+
+    #[test]
+    fn strips_bare_control_bytes_but_keeps_tabs_and_newlines() {
+        assert_eq!(strip_terminal_controls("a\u{7}b"), "ab");
+        assert_eq!(strip_terminal_controls("a\rb"), "ab");
+        assert_eq!(strip_terminal_controls("a\u{8}b"), "ab");
+        assert_eq!(strip_terminal_controls("a\u{9b}[2Jb"), "a[2Jb");
+        assert_eq!(strip_terminal_controls("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn leaves_ordinary_text_alone() {
+        assert_eq!(
+            strip_terminal_controls("GET /health 200 12ms — ok ✓"),
+            "GET /health 200 12ms — ok ✓"
+        );
+    }
+
+    #[test]
+    fn output_never_contains_an_escape_byte() {
+        for raw in [
+            "\u{1b}]0;x\u{7}",
+            "\u{1b}[1;31m",
+            "\u{1b}P+q544e\u{1b}\\",
+            "plain",
+        ] {
+            assert!(!strip_terminal_controls(raw).contains('\u{1b}'));
+        }
     }
 }

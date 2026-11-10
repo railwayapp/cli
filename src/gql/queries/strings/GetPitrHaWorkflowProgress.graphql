@@ -1,0 +1,21 @@
+query GetPitrHaWorkflowProgress($environmentId: String!, $rootServiceId: String!) {
+  pitrHaWorkflowProgress(environmentId: $environmentId, rootServiceId: $rootServiceId) {
+    workflowId
+    phase
+    direction
+    startedAt
+    updatedAt
+    completedAt
+    errorMessage
+    failedAtPhase
+    currentMemberServiceId
+    newLeaderServiceId
+    clusterMutated
+    members {
+      serviceId
+      serviceName
+      isLeader
+      status
+    }
+  }
+}

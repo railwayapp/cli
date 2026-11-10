@@ -24,7 +24,7 @@ use super::*;
 /// Connect to a database's shell (psql for Postgres, mongosh for MongoDB, etc.)
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting."
+    after_help = "Examples:\n\n  railway connect postgres\n  railway connect redis --environment production\n  railway connect postgres --tunnel-only\n\nAutomation notes:\n  Non-interactive runs must pass the database service name.\n  The local database client must be installed before connecting.\n  --tunnel-only skips the client and just opens the tunnel, for pointing\n  external tools (TablePlus, DBeaver, pgAdmin, ...) at a private database."
 )]
 pub struct Args {
     /// The name of the database to connect to
@@ -47,6 +47,12 @@ pub struct Args {
     /// Force the public TCP proxy path and never fall back to SSH.
     #[clap(long = "no-ssh", conflicts_with = "ssh")]
     no_ssh: bool,
+
+    /// Open the local tunnel without launching a database client. Prints
+    /// connection details for external tools (TablePlus, DBeaver, pgAdmin,
+    /// ...) and holds the tunnel open until Ctrl+C. Implies --ssh.
+    #[clap(long, conflicts_with = "no_ssh")]
+    tunnel_only: bool,
 
     /// Local port to bind for the SSH tunnel (defaults to an ephemeral port).
     #[clap(short = 'P', long)]
@@ -148,14 +154,25 @@ pub async fn command(args: Args) -> Result<()> {
     if let Some(db_type) = database_type {
         let use_ssh = if args.no_ssh {
             false
-        } else if args.ssh {
-            true
         } else {
-            // Auto: fall back to SSH when there's no public proxy URL to use.
-            !has_public_proxy(&db_type, &variables)
+            // --tunnel-only implies --ssh (and clap's conflicts_with rules
+            // out --no-ssh alongside it, so this can't fall through to the
+            // legacy public-proxy path below).
+            args.ssh || args.tunnel_only || !has_public_proxy(&db_type, &variables)
         };
 
-        if use_ssh {
+        if args.tunnel_only {
+            run_tunnel_only(
+                &client,
+                &configs,
+                &db_type,
+                &variables,
+                &environment_id,
+                &service_id,
+                args.port,
+            )
+            .await?;
+        } else if use_ssh {
             run_ssh_connect(
                 &client,
                 &configs,
@@ -167,7 +184,7 @@ pub async fn command(args: Args) -> Result<()> {
             )
             .await?;
         } else {
-            let (cmd_name, cmd_args) = get_connect_command(&db_type, &variables)?;
+            let (cmd_name, cmd_args, cmd_envs) = get_connect_command(&db_type, &variables)?;
 
             if which(cmd_name.clone()).is_err() {
                 bail!("{} must be installed to continue", cmd_name);
@@ -175,6 +192,7 @@ pub async fn command(args: Args) -> Result<()> {
 
             Command::new(cmd_name.as_str())
                 .args(cmd_args)
+                .envs(cmd_envs)
                 .spawn()?
                 .wait()
                 .await?;
@@ -189,7 +207,7 @@ pub async fn command(args: Args) -> Result<()> {
 fn get_connect_command(
     database_type: &DatabaseType,
     variables: &BTreeMap<String, String>,
-) -> Result<(String, Vec<String>)> {
+) -> Result<(String, Vec<String>, Vec<(String, String)>)> {
     match database_type {
         DatabaseType::PostgreSQL => get_postgres_command(variables),
         DatabaseType::Redis => get_redis_command(variables),
@@ -198,8 +216,23 @@ fn get_connect_command(
     }
 }
 
-fn host_is_tcp_proxy(connect_url: String) -> bool {
-    connect_url.contains("proxy.rlwy.net")
+/// Whether the URL's actual host is a Railway TCP proxy.
+///
+/// This gates handing the URL to a database client, so it has to be a decision
+/// about the parsed host. A substring test over the whole URL is satisfied by
+/// userinfo, path, query, or fragment, which are all attacker-controlled by
+/// anyone who can write the service variable — the real host is then free.
+fn host_is_tcp_proxy(connect_url: &str) -> bool {
+    url::Url::parse(connect_url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(is_railway_proxy_host))
+        .unwrap_or(false)
+}
+
+fn is_railway_proxy_host(host: &str) -> bool {
+    // Hosts are case-insensitive and a trailing dot is the same name.
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "proxy.rlwy.net" || host.ends_with(".proxy.rlwy.net")
 }
 
 /// Whether the service exposes a public TCP-proxy URL for this engine — the
@@ -210,7 +243,7 @@ fn has_public_proxy(database_type: &DatabaseType, variables: &BTreeMap<String, S
     variables
         .get(public_key)
         .or_else(|| variables.get(private_key))
-        .map(|url| host_is_tcp_proxy(url.clone()))
+        .map(|url| host_is_tcp_proxy(url))
         .unwrap_or(false)
 }
 
@@ -252,7 +285,7 @@ async fn run_ssh_connect(
         None => pick_ephemeral_port()?,
     };
 
-    let (cmd_name, cmd_args, remote_port) =
+    let (cmd_name, cmd_args, cmd_envs, remote_port) =
         get_ssh_connect_command(database_type, variables, local_port)?;
 
     if which(cmd_name.clone()).is_err() {
@@ -283,11 +316,88 @@ async fn run_ssh_connect(
 
     Command::new(cmd_name.as_str())
         .args(cmd_args)
+        .envs(cmd_envs)
         .spawn()?
         .wait()
         .await?;
 
     Ok(())
+}
+
+/// Open a local SSH tunnel to the database without launching a client, for
+/// pointing external GUI tools (TablePlus, DBeaver, pgAdmin, ...) at a
+/// private-only database. Prints the connection details and holds the tunnel
+/// open until Ctrl+C.
+async fn run_tunnel_only(
+    client: &Client,
+    configs: &Configs,
+    database_type: &DatabaseType,
+    variables: &BTreeMap<String, String>,
+    environment_id: &str,
+    service_id: &str,
+    requested_port: Option<u16>,
+) -> Result<()> {
+    let local_port = match requested_port {
+        Some(port) => port,
+        None => pick_ephemeral_port()?,
+    };
+
+    let (url, remote_port) = local_tunnel_url(database_type, variables, local_port)?;
+
+    let identity = ensure_ssh_key(client, configs).await?;
+    let ssh_target = get_service_instance_id(client, configs, environment_id, service_id).await?;
+
+    // Held for the tunnel's lifetime; dropping it (when this function
+    // returns) kills the underlying ssh process.
+    let _forward = spawn_native_ssh_forward(
+        &ssh_target,
+        identity.as_deref(),
+        &[PortForward {
+            local_port,
+            remote_port,
+        }],
+    )?;
+
+    print_tunnel_info(database_type, &url);
+
+    // Unlike run_ssh_connect, there's no client process to hand SIGINT to —
+    // the tunnel itself is the session, so we let the default Ctrl+C
+    // behavior stand (no ctrlc::set_handler override) and just wait on it.
+    tokio::signal::ctrl_c()
+        .await
+        .context("Failed to listen for Ctrl+C")?;
+    eprintln!("\nTunnel closed.");
+
+    Ok(())
+}
+
+/// Print the local tunnel's connection details in the shape GUI clients
+/// (TablePlus, DBeaver, pgAdmin, ...) expect: host/port/user/password/db
+/// broken out, plus the full URL for tools that just want one string.
+fn print_tunnel_info(database_type: &DatabaseType, url: &Url) {
+    let host = url.host_str().unwrap_or("127.0.0.1");
+    let port = url.port().unwrap_or_default();
+
+    eprintln!();
+    eprintln!("{database_type} tunnel open — point an external client at:");
+    eprintln!();
+    eprintln!("  Host:     {host}");
+    eprintln!("  Port:     {port}");
+    if !url.username().is_empty() {
+        eprintln!("  User:     {}", url.username());
+    }
+    if let Some(password) = url.password() {
+        eprintln!("  Password: {password}");
+    }
+    let database = url.path().trim_start_matches('/');
+    if !database.is_empty() {
+        eprintln!("  Database: {database}");
+    }
+    eprintln!();
+    eprintln!("  URL:      {url}");
+    eprintln!();
+    eprintln!("Press Ctrl+C to close the tunnel.");
+    eprintln!();
 }
 
 /// Reserve an ephemeral local port by binding then immediately releasing it so
@@ -307,38 +417,66 @@ fn get_ssh_connect_command(
     database_type: &DatabaseType,
     variables: &BTreeMap<String, String>,
     local_port: u16,
-) -> Result<(String, Vec<String>, u16)> {
+) -> Result<(String, Vec<String>, Vec<(String, String)>, u16)> {
     let (url, remote_port) = local_tunnel_url(database_type, variables, local_port)?;
+    let (cmd, args, envs) = client_invocation(database_type, &url, Some(local_port));
+    Ok((cmd, args, envs, remote_port))
+}
 
-    let (cmd, args) = match database_type {
-        DatabaseType::PostgreSQL => ("psql".to_string(), vec![url.to_string()]),
+/// Build the client binary, its arguments, and any environment it needs.
+///
+/// The password never goes in the arguments. `/proc/<pid>/cmdline` is readable
+/// by every local user, while `/proc/<pid>/environ` is readable only by the
+/// process owner, so a credential in argv hands the database password to
+/// anyone sharing the host. Each client's documented credential environment
+/// variable is used instead and the password is stripped from the URL.
+fn client_invocation(
+    database_type: &DatabaseType,
+    url: &Url,
+    mysql_port: Option<u16>,
+) -> (String, Vec<String>, Vec<(String, String)>) {
+    let password = url.password().unwrap_or("").to_string();
+    let mut redacted = url.clone();
+    let _ = redacted.set_password(None);
+
+    match database_type {
+        DatabaseType::PostgreSQL => (
+            "psql".to_string(),
+            vec![redacted.to_string()],
+            vec![("PGPASSWORD".to_string(), password)],
+        ),
         DatabaseType::Redis => (
             "redis-cli".to_string(),
-            vec!["-u".to_string(), url.to_string()],
+            vec!["-u".to_string(), redacted.to_string()],
+            vec![("REDISCLI_AUTH".to_string(), password)],
         ),
-        DatabaseType::MongoDB => ("mongosh".to_string(), vec![url.to_string()]),
         DatabaseType::MySQL => {
             let user = url.username().to_string();
-            let password = url.password().unwrap_or("").to_string();
             let database = url.path().trim_start_matches('/').to_string();
+            let host = url.host_str().unwrap_or("127.0.0.1").to_string();
+            let port = mysql_port
+                .or_else(|| url.port())
+                .unwrap_or(default_remote_port(database_type));
             (
                 "mysql".to_string(),
                 vec![
                     "-h".to_string(),
-                    "127.0.0.1".to_string(),
+                    host,
                     "-u".to_string(),
                     user,
                     "-P".to_string(),
-                    local_port.to_string(),
+                    port.to_string(),
                     "-D".to_string(),
                     database,
-                    format!("-p{password}"),
                 ],
+                vec![("MYSQL_PWD".to_string(), password)],
             )
         }
-    };
-
-    Ok((cmd, args, remote_port))
+        // mongosh has no credential environment variable, and its only
+        // alternative to the URI is an interactive prompt. Left as-is rather
+        // than silently changing the flow; the other three no longer leak.
+        DatabaseType::MongoDB => ("mongosh".to_string(), vec![url.to_string()], Vec::new()),
+    }
 }
 
 /// Parse the engine's private connection URL (falling back to the public one
@@ -374,7 +512,9 @@ fn local_tunnel_url(
     Ok((url, remote_port))
 }
 
-fn get_postgres_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+fn get_postgres_command(
+    variables: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>, Vec<(String, String)>)> {
     let connect_url = variables
         .get("DATABASE_PUBLIC_URL")
         .or_else(|| variables.get("DATABASE_URL"))
@@ -383,14 +523,17 @@ fn get_postgres_command(variables: &BTreeMap<String, String>) -> Result<(String,
             "DATABASE_PUBLIC_URL".to_string(),
         ))?;
 
-    if !host_is_tcp_proxy(connect_url.clone()) {
+    if !host_is_tcp_proxy(&connect_url) {
         return Err(RailwayError::InvalidConnectionVariable.into());
     }
 
-    Ok(("psql".to_string(), vec![connect_url]))
+    let url = Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+    Ok(client_invocation(&DatabaseType::PostgreSQL, &url, None))
 }
 
-fn get_redis_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+fn get_redis_command(
+    variables: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>, Vec<(String, String)>)> {
     let connect_url = variables
         .get("REDIS_PUBLIC_URL")
         .or_else(|| variables.get("REDIS_URL"))
@@ -399,14 +542,17 @@ fn get_redis_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
             "REDIS_PUBLIC_URL".to_string(),
         ))?;
 
-    if !host_is_tcp_proxy(connect_url.clone()) {
+    if !host_is_tcp_proxy(&connect_url) {
         return Err(RailwayError::InvalidConnectionVariable.into());
     }
 
-    Ok(("redis-cli".to_string(), vec!["-u".to_string(), connect_url]))
+    let url = Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+    Ok(client_invocation(&DatabaseType::Redis, &url, None))
 }
 
-fn get_mongo_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+fn get_mongo_command(
+    variables: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>, Vec<(String, String)>)> {
     let connect_url = variables
         .get("MONGO_PUBLIC_URL")
         .or_else(|| variables.get("MONGO_URL"))
@@ -415,14 +561,17 @@ fn get_mongo_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
             "MONGO_PUBLIC_URL".to_string(),
         ))?;
 
-    if !host_is_tcp_proxy(connect_url.clone()) {
+    if !host_is_tcp_proxy(&connect_url) {
         return Err(RailwayError::InvalidConnectionVariable.into());
     }
 
-    Ok(("mongosh".to_string(), vec![connect_url]))
+    let url = Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+    Ok(client_invocation(&DatabaseType::MongoDB, &url, None))
 }
 
-fn get_mysql_command(variables: &BTreeMap<String, String>) -> Result<(String, Vec<String>)> {
+fn get_mysql_command(
+    variables: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>, Vec<(String, String)>)> {
     let connect_url = variables
         .get("MYSQL_PUBLIC_URL")
         .or_else(|| variables.get("MYSQL_URL"))
@@ -431,35 +580,12 @@ fn get_mysql_command(variables: &BTreeMap<String, String>) -> Result<(String, Ve
             "MYSQL_PUBLIC_URL".to_string(),
         ))?;
 
-    if !host_is_tcp_proxy(connect_url.clone()) {
+    if !host_is_tcp_proxy(&connect_url) {
         return Err(RailwayError::InvalidConnectionVariable.into());
     }
 
-    let parsed_url =
-        Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
-
-    let host = parsed_url.host_str().unwrap_or("");
-    let user = parsed_url.username();
-    let password = parsed_url.password().unwrap_or("");
-    let port = parsed_url.port().unwrap_or(3306);
-    let database = parsed_url.path().trim_start_matches('/');
-
-    let pass_arg = format!("-p{password}");
-
-    Ok((
-        "mysql".to_string(),
-        vec![
-            "-h".to_string(),
-            host.to_string(),
-            "-u".to_string(),
-            user.to_string(),
-            "-P".to_string(),
-            port.to_string(),
-            "-D".to_string(),
-            database.to_string(),
-            pass_arg,
-        ],
-    ))
+    let url = Url::parse(&connect_url).map_err(|_err| RailwayError::InvalidConnectionVariable)?;
+    Ok(client_invocation(&DatabaseType::MySQL, &url, None))
 }
 
 #[cfg(test)]
@@ -468,9 +594,46 @@ mod test {
 
     #[test]
     fn test_is_tcp_proxy() {
-        assert!(host_is_tcp_proxy("roundhouse.proxy.rlwy.net".to_string()));
-        assert!(!host_is_tcp_proxy("localhost".to_string()));
-        assert!(!host_is_tcp_proxy("postgres.railway.internal".to_string()));
+        // Real proxy hosts, as they actually arrive: full connection URLs.
+        assert!(host_is_tcp_proxy(
+            "postgresql://u:p@roundhouse.proxy.rlwy.net:5432/railway"
+        ));
+        assert!(host_is_tcp_proxy(
+            "redis://default:p@ROUNDHOUSE.PROXY.RLWY.NET:6379"
+        ));
+        assert!(host_is_tcp_proxy(
+            "postgresql://u:p@proxy.rlwy.net:5432/railway"
+        ));
+
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@localhost:5432/railway"
+        ));
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@postgres.railway.internal:5432/railway"
+        ));
+
+        // The marker anywhere but the host must not satisfy the check.
+        assert!(!host_is_tcp_proxy(
+            "postgresql://127.0.0.1:4444/postgres?service=production&application_name=proxy.rlwy.net"
+        ));
+        assert!(!host_is_tcp_proxy(
+            "postgresql://proxy.rlwy.net@evil.example:5432/db"
+        ));
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@evil.example:5432/proxy.rlwy.net"
+        ));
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@evil.example:5432/db#proxy.rlwy.net"
+        ));
+        // Suffix confusion.
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@proxy.rlwy.net.evil.example:5432/db"
+        ));
+        assert!(!host_is_tcp_proxy(
+            "postgresql://u:p@notproxy.rlwy.net:5432/db"
+        ));
+        // Not a URL at all.
+        assert!(!host_is_tcp_proxy("proxy.rlwy.net"));
     }
 
     #[test]
@@ -498,14 +661,14 @@ mod test {
             "postgresql://postgres:secret@monorail.railway.internal:5432/railway".to_string(),
         );
 
-        let (cmd, args, remote_port) =
+        let (cmd, args, _envs, remote_port) =
             get_ssh_connect_command(&DatabaseType::PostgreSQL, &variables, 49152).unwrap();
 
         assert_eq!(cmd, "psql");
         assert_eq!(remote_port, 5432);
         assert_eq!(
             args,
-            vec!["postgresql://postgres:secret@127.0.0.1:49152/railway".to_string()]
+            vec!["postgresql://postgres@127.0.0.1:49152/railway".to_string()]
         );
     }
 
@@ -519,14 +682,52 @@ mod test {
             "postgresql://postgres:secret@monorail.proxy.rlwy.net:55555/railway".to_string(),
         );
 
-        let (_cmd, args, remote_port) =
+        let (_cmd, args, _envs, remote_port) =
             get_ssh_connect_command(&DatabaseType::PostgreSQL, &variables, 6000).unwrap();
 
         assert_eq!(remote_port, 5432);
         assert_eq!(
             args,
-            vec!["postgresql://postgres:secret@127.0.0.1:6000/railway".to_string()]
+            vec!["postgresql://postgres@127.0.0.1:6000/railway".to_string()]
         );
+    }
+
+    #[test]
+    fn no_client_invocation_puts_the_password_in_argv() {
+        // /proc/<pid>/cmdline is world-readable; /proc/<pid>/environ is not.
+        // Every supported client must keep the secret out of the argument
+        // vector. mongosh is the known exception — it has no credential
+        // environment variable — so it is asserted explicitly rather than
+        // silently passing.
+        let cases = [
+            (
+                DatabaseType::PostgreSQL,
+                "postgresql://postgres:s3cr3t@127.0.0.1:6000/railway",
+            ),
+            (DatabaseType::Redis, "redis://default:s3cr3t@127.0.0.1:6379"),
+            (
+                DatabaseType::MySQL,
+                "mysql://user:s3cr3t@127.0.0.1:3306/railway",
+            ),
+        ];
+
+        for (database_type, raw) in cases {
+            let url = Url::parse(raw).unwrap();
+            let (_cmd, args, envs) = client_invocation(&database_type, &url, None);
+            assert!(
+                !args.iter().any(|arg| arg.contains("s3cr3t")),
+                "{database_type:?} leaked the password in argv: {args:?}"
+            );
+            assert!(
+                envs.iter().any(|(_, value)| value == "s3cr3t"),
+                "{database_type:?} did not pass the password in the environment"
+            );
+        }
+
+        let url = Url::parse("mongodb://user:s3cr3t@127.0.0.1:27017/railway").unwrap();
+        let (_cmd, args, envs) = client_invocation(&DatabaseType::MongoDB, &url, None);
+        assert!(args.iter().any(|arg| arg.contains("s3cr3t")));
+        assert!(envs.is_empty());
     }
 
     #[test]
@@ -537,7 +738,7 @@ mod test {
             "mysql://user:password@mysql.railway.internal:3306/railway".to_string(),
         );
 
-        let (cmd, args, remote_port) =
+        let (cmd, args, _envs, remote_port) =
             get_ssh_connect_command(&DatabaseType::MySQL, &variables, 33060).unwrap();
 
         assert_eq!(cmd, "mysql");
@@ -553,7 +754,6 @@ mod test {
                 "33060".to_string(),
                 "-D".to_string(),
                 "railway".to_string(),
-                "-ppassword".to_string(),
             ]
         );
     }
@@ -574,9 +774,13 @@ mod test {
             );
             variables.insert("DATABASE_URL".to_string(), private_postgres_url.clone());
 
-            let (cmd, args) = get_postgres_command(&variables).unwrap();
+            let (cmd, args, envs) = get_postgres_command(&variables).unwrap();
             assert_eq!(cmd, "psql");
-            assert_eq!(args, vec![public_postgres_url.clone()]);
+            assert_eq!(args, vec![public_postgres_url.replace(":password@", "@")]);
+            assert_eq!(
+                envs,
+                vec![("PGPASSWORD".to_string(), "password".to_string())]
+            );
         }
 
         // Valid DATABASE_URL
@@ -584,9 +788,13 @@ mod test {
             let mut variables = BTreeMap::new();
             variables.insert("DATABASE_URL".to_string(), public_postgres_url.clone());
 
-            let (cmd, args) = get_postgres_command(&variables).unwrap();
+            let (cmd, args, envs) = get_postgres_command(&variables).unwrap();
             assert_eq!(cmd, "psql");
-            assert_eq!(args, vec![public_postgres_url.clone()]);
+            assert_eq!(args, vec![public_postgres_url.replace(":password@", "@")]);
+            assert_eq!(
+                envs,
+                vec![("PGPASSWORD".to_string(), "password".to_string())]
+            );
         }
 
         {
@@ -625,9 +833,19 @@ mod test {
             variables.insert("REDIS_PUBLIC_URL".to_string(), public_redis_url.clone());
             variables.insert("REDIS_URL".to_string(), private_redis_url.clone());
 
-            let (cmd, args) = get_redis_command(&variables).unwrap();
+            let (cmd, args, envs) = get_redis_command(&variables).unwrap();
             assert_eq!(cmd, "redis-cli");
-            assert_eq!(args, vec!["-u".to_string(), public_redis_url.clone()]);
+            assert_eq!(
+                args,
+                vec![
+                    "-u".to_string(),
+                    public_redis_url.replace(":password@", "@")
+                ]
+            );
+            assert_eq!(
+                envs,
+                vec![("REDISCLI_AUTH".to_string(), "password".to_string())]
+            );
         }
 
         // Valid REDIS_URL
@@ -635,9 +853,19 @@ mod test {
             let mut variables = BTreeMap::new();
             variables.insert("REDIS_URL".to_string(), public_redis_url.clone());
 
-            let (cmd, args) = get_redis_command(&variables).unwrap();
+            let (cmd, args, envs) = get_redis_command(&variables).unwrap();
             assert_eq!(cmd, "redis-cli");
-            assert_eq!(args, vec!["-u".to_string(), public_redis_url.clone()]);
+            assert_eq!(
+                args,
+                vec![
+                    "-u".to_string(),
+                    public_redis_url.replace(":password@", "@")
+                ]
+            );
+            assert_eq!(
+                envs,
+                vec![("REDISCLI_AUTH".to_string(), "password".to_string())]
+            );
         }
 
         // No public Redis URL
@@ -666,7 +894,7 @@ mod test {
             variables.insert("MONGO_PUBLIC_URL".to_string(), public_mongo_url.clone());
             variables.insert("MONGO_URL".to_string(), private_mongo_url.clone());
 
-            let (cmd, args) = get_mongo_command(&variables).unwrap();
+            let (cmd, args, _envs) = get_mongo_command(&variables).unwrap();
             assert_eq!(cmd, "mongosh");
             assert_eq!(args, vec![public_mongo_url.clone()]);
         }
@@ -676,7 +904,7 @@ mod test {
             let mut variables = BTreeMap::new();
             variables.insert("MONGO_URL".to_string(), public_mongo_url.clone());
 
-            let (cmd, args) = get_mongo_command(&variables).unwrap();
+            let (cmd, args, _envs) = get_mongo_command(&variables).unwrap();
             assert_eq!(cmd, "mongosh");
             assert_eq!(args, vec![public_mongo_url.clone()]);
         }
@@ -720,7 +948,7 @@ mod test {
             variables.insert("MYSQL_PUBLIC_URL".to_string(), public_mysql_url.clone());
             variables.insert("MYSQL_URL".to_string(), private_mysql_url.clone());
 
-            let (cmd, args) = get_mysql_command(&variables).unwrap();
+            let (cmd, args, _envs) = get_mysql_command(&variables).unwrap();
             assert_eq!(cmd, "mysql");
             assert_eq!(
                 args,
@@ -733,7 +961,6 @@ mod test {
                     "12345".to_string(),
                     "-D".to_string(),
                     "railway".to_string(),
-                    "-ppassword".to_string(),
                 ]
             );
         }

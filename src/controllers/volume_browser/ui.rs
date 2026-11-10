@@ -1,30 +1,31 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use super::app::{BrowserMode, ConfirmAction, ConfirmRequest, LocalEntry, VolumeBrowserApp};
 use crate::commands::volume::sftp::VolumeFileEntry;
+use crate::tui_theme::Theme;
 
-const LABEL_COLOR: Color = Color::DarkGray;
-const BORDER_COLOR: Color = Color::DarkGray;
-const DISABLED_COLOR: Color = Color::Indexed(244);
-const SELECTED_STYLE: Style = Style::new()
-    .fg(Color::White)
-    .bg(Color::Indexed(238))
-    .add_modifier(Modifier::BOLD);
+fn selected_style(theme: &Theme) -> Style {
+    Style::new()
+        .fg(theme.fg)
+        .bg(theme.selection)
+        .add_modifier(Modifier::BOLD)
+}
 
 pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
+    let theme = app.theme;
     let area = frame.area();
     frame.render_widget(Clear, area);
 
     if area.width < 76 || area.height < 20 {
         frame.render_widget(
             Paragraph::new("Terminal too small. Please resize (min 76x20).")
-                .style(Style::default().fg(Color::Yellow)),
+                .style(Style::default().fg(theme.pending)),
             area,
         );
         return;
@@ -45,7 +46,7 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
 
     match app.mode {
         BrowserMode::Confirm => render_confirm(app, frame, area),
-        BrowserMode::Help => render_help(frame, area),
+        BrowserMode::Help => render_help(theme, frame, area),
         BrowserMode::Browse | BrowserMode::Upload => {
             if app.error.is_some() {
                 render_error(app, frame, area);
@@ -55,28 +56,30 @@ pub fn render(app: &VolumeBrowserApp, frame: &mut Frame) {
 }
 
 fn render_header(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let line = Line::from(vec![
-        Span::styled("  Browse ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  Browse ", Style::default().fg(theme.dim)),
         Span::styled(
             app.target_name.clone(),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.running)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" at ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" at ", Style::default().fg(theme.dim)),
         Span::styled(
             app.mount_path.clone(),
             Style::default()
-                .fg(Color::Blue)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  remote ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(app.remote_dir.clone(), Style::default().fg(Color::Cyan)),
+        Span::styled("  remote ", Style::default().fg(theme.dim)),
+        Span::styled(app.remote_dir.clone(), Style::default().fg(theme.accent)),
     ]);
     frame.render_widget(Paragraph::new(vec![line, Line::from("")]), area);
 }
 
 fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     if let Some(progress) = &app.transfer_progress {
         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
         let ratio = if progress.total == 0 {
@@ -86,6 +89,7 @@ fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         };
 
         render_progress_bar(
+            theme,
             frame,
             chunks[0],
             ratio,
@@ -93,20 +97,20 @@ fn render_status(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
         );
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Downloading ", Style::default().fg(LABEL_COLOR)),
+                Span::styled("Downloading ", Style::default().fg(theme.dim)),
                 Span::raw(progress.current_path.clone()),
             ])),
             chunks[1],
         );
     } else if let Some(status) = &app.status {
         frame.render_widget(
-            Paragraph::new(status.clone()).style(Style::default().fg(LABEL_COLOR)),
+            Paragraph::new(status.clone()).style(Style::default().fg(theme.dim)),
             area,
         );
     }
 }
 
-fn render_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, label: &str) {
+fn render_progress_bar(theme: &Theme, frame: &mut Frame, area: Rect, ratio: f64, label: &str) {
     let width = area.width as usize;
     if width == 0 {
         return;
@@ -129,9 +133,9 @@ fn render_progress_bar(frame: &mut Frame, area: Rect, ratio: f64, label: &str) {
             .to_string();
 
         let style = if index < filled_width {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+            Style::default().fg(theme.on_accent).bg(theme.accent)
         } else {
-            Style::default().fg(LABEL_COLOR).bg(Color::Indexed(238))
+            Style::default().fg(theme.dim).bg(theme.surface)
         };
 
         spans.push(Span::styled(text, style));
@@ -152,9 +156,10 @@ fn render_body(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let rows = if app.remote_entries.is_empty() {
         vec![Row::new(vec![
-            Cell::from(Span::styled("No files", Style::default().fg(LABEL_COLOR))),
+            Cell::from(Span::styled("No files", Style::default().fg(theme.dim))),
             Cell::from(""),
             Cell::from(""),
         ])]
@@ -163,13 +168,13 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
             .iter()
             .map(|entry| {
                 let row = Row::new(vec![
-                    Cell::from(remote_name(entry, app.is_busy())),
-                    Cell::from(remote_meta(entry.kind, app.is_busy())),
-                    Cell::from(remote_size(entry, app.is_busy())),
+                    Cell::from(remote_name(theme, entry, app.is_busy())),
+                    Cell::from(remote_meta(theme, entry.kind, app.is_busy())),
+                    Cell::from(remote_size(theme, entry, app.is_busy())),
                 ]);
 
                 if app.is_busy() {
-                    row.style(disabled_tree_style())
+                    row.style(disabled_tree_style(theme))
                 } else {
                     row
                 }
@@ -193,40 +198,40 @@ fn render_remote_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     )
     .header(
         Row::new(vec!["Name", "Type", "Size"]).style(if app.is_busy() {
-            disabled_tree_style()
+            disabled_tree_style(theme)
         } else {
-            Style::default()
-                .fg(LABEL_COLOR)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD)
         }),
     )
     .block(
         Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(BORDER_COLOR)),
+            .border_style(Style::default().fg(theme.accent_dim)),
     )
     .style(if app.is_busy() {
-        disabled_tree_style()
+        disabled_tree_style(theme)
     } else {
         Style::default()
     })
-    .row_highlight_style(SELECTED_STYLE);
+    .row_highlight_style(selected_style(theme));
 
     frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_local_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let rows = if app.local_entries.is_empty() {
         vec![Row::new(vec![Cell::from(Span::styled(
             "No files",
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ))])]
     } else {
         app.local_entries
             .iter()
             .map(|entry| {
-                Row::new(vec![Cell::from(local_name(entry))]).style(local_row_style(entry))
+                Row::new(vec![Cell::from(local_name(theme, entry))])
+                    .style(local_row_style(theme, entry))
             })
             .collect()
     };
@@ -238,24 +243,22 @@ fn render_local_table(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 
     let table = Table::new(rows, [Constraint::Percentage(100)])
         .header(
-            Row::new(vec![app.local_cwd.display().to_string()]).style(
-                Style::default()
-                    .fg(LABEL_COLOR)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Row::new(vec![app.local_cwd.display().to_string()])
+                .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD)),
         )
         .block(
             Block::default()
                 .title(" Upload from local cwd ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(theme.accent)),
         )
-        .row_highlight_style(SELECTED_STYLE);
+        .row_highlight_style(selected_style(theme));
 
     frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let help =
         match app.mode {
             BrowserMode::Browse => browse_help_items(app),
@@ -283,7 +286,7 @@ fn render_help_bar(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
             BrowserMode::Help => vec![("Esc", "close help")],
         };
 
-    frame.render_widget(Paragraph::new(Line::from(help_spans(help))), area);
+    frame.render_widget(Paragraph::new(Line::from(help_spans(theme, help))), area);
 }
 
 fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)> {
@@ -309,13 +312,20 @@ fn browse_help_items(app: &VolumeBrowserApp) -> Vec<(&'static str, &'static str)
         items.push(("E", "edit"));
     }
 
-    items.extend([("R", "refresh"), ("Q", "quit")]);
+    items.extend([("R", "refresh"), ("t", "theme"), ("Q", "quit")]);
     items
 }
 
 fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let Some(confirm) = &app.confirm else {
         return;
+    };
+    // Deleting is destructive; overwriting is merely cautionary.
+    let accent = if confirm.action == ConfirmAction::Delete {
+        theme.danger
+    } else {
+        theme.pending
     };
     let popup = centered_rect(62, confirm_popup_height(confirm), area);
     frame.render_widget(Clear, popup);
@@ -323,20 +333,19 @@ fn render_confirm(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(Span::styled(
             confirm.title.clone(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(confirm.message.clone()),
-        Line::from(confirm_target_line(confirm)),
+        Line::from(confirm_target_line(theme, confirm)),
         Line::from(""),
-        Line::from(help_spans(confirm_help_items(confirm))),
+        Line::from(help_spans(theme, confirm_help_items(confirm))),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
@@ -353,6 +362,7 @@ fn confirm_popup_height(confirm: &ConfirmRequest) -> u16 {
 }
 
 fn render_error(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let Some(error) = &app.error else {
         return;
     };
@@ -362,7 +372,9 @@ fn render_error(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(Span::styled(
             "Action failed",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(error.clone()),
@@ -370,7 +382,8 @@ fn render_error(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
+        .border_style(Style::default().fg(theme.danger))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
@@ -378,21 +391,21 @@ fn render_error(app: &VolumeBrowserApp, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn help_spans(items: Vec<(&'static str, &'static str)>) -> Vec<Span<'static>> {
+fn help_spans(theme: &Theme, items: Vec<(&'static str, &'static str)>) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (idx, (key, label)) in items.into_iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(LABEL_COLOR)));
+            spans.push(Span::styled("  ", Style::default().fg(theme.dim)));
         }
         spans.push(Span::styled(
             key,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!(" {label}"),
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ));
     }
     spans
@@ -410,7 +423,7 @@ fn confirm_help_items(confirm: &ConfirmRequest) -> Vec<(&'static str, &'static s
     }
 }
 
-fn confirm_target_line(confirm: &ConfirmRequest) -> Line<'static> {
+fn confirm_target_line(theme: &Theme, confirm: &ConfirmRequest) -> Line<'static> {
     let target = match confirm.action {
         ConfirmAction::Download => confirm
             .overwrite_path
@@ -423,12 +436,12 @@ fn confirm_target_line(confirm: &ConfirmRequest) -> Line<'static> {
     };
 
     Line::from(vec![
-        Span::styled("Path ", Style::default().fg(LABEL_COLOR)),
-        Span::styled(target, Style::default().fg(Color::White)),
+        Span::styled("Path ", Style::default().fg(theme.dim)),
+        Span::styled(target, Style::default().fg(theme.fg)),
     ])
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(theme: &Theme, frame: &mut Frame, area: Rect) {
     let popup = centered_rect(66, 14, area);
     frame.render_widget(Clear, popup);
 
@@ -436,7 +449,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(
             "Volume browser help",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -449,18 +462,20 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::from("E opens the selected file in your editor and uploads it back."),
         Line::from("R refreshes the remote file list."),
         Line::from("J/K move down/up and L opens a folder."),
+        Line::from("t cycles the colour theme."),
         Line::from(""),
-        Line::from(Span::styled("Esc close", Style::default().fg(LABEL_COLOR))),
+        Line::from(Span::styled("Esc close", Style::default().fg(theme.dim))),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
-fn remote_name(entry: &VolumeFileEntry, refreshing: bool) -> Line<'static> {
+fn remote_name(theme: &Theme, entry: &VolumeFileEntry, refreshing: bool) -> Line<'static> {
     let suffix = if entry.kind == "directory" { "/" } else { "" };
     let label = format!("{}{}", entry.name, suffix);
     if refreshing {
@@ -469,19 +484,19 @@ fn remote_name(entry: &VolumeFileEntry, refreshing: bool) -> Line<'static> {
 
     let style = match entry.kind {
         "directory" => Style::default()
-            .fg(Color::Blue)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
-        "symlink" => Style::default().fg(Color::Cyan),
+        "symlink" => Style::default().fg(theme.accent),
         _ => Style::default(),
     };
     Line::from(Span::styled(label, style))
 }
 
-fn local_name(entry: &LocalEntry) -> Line<'static> {
+fn local_name(theme: &Theme, entry: &LocalEntry) -> Line<'static> {
     let suffix = if entry.is_dir { "/" } else { "" };
     let style = if entry.is_dir {
         Style::default()
-            .fg(Color::Blue)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -489,22 +504,22 @@ fn local_name(entry: &LocalEntry) -> Line<'static> {
     Line::from(Span::styled(format!("{}{}", entry.name, suffix), style))
 }
 
-fn remote_meta(value: impl Into<String>, refreshing: bool) -> Span<'static> {
+fn remote_meta(theme: &Theme, value: impl Into<String>, refreshing: bool) -> Span<'static> {
     if refreshing {
         Span::raw(value.into())
     } else {
-        Span::styled(value.into(), Style::default().fg(LABEL_COLOR))
+        Span::styled(value.into(), Style::default().fg(theme.dim))
     }
 }
 
-fn remote_size(entry: &VolumeFileEntry, refreshing: bool) -> Span<'static> {
+fn remote_size(theme: &Theme, entry: &VolumeFileEntry, refreshing: bool) -> Span<'static> {
     let value = if entry.kind == "directory" {
         "--".to_string()
     } else {
         format_bytes(entry.size)
     };
 
-    remote_meta(value, refreshing)
+    remote_meta(theme, value, refreshing)
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -525,15 +540,13 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn disabled_tree_style() -> Style {
-    Style::default()
-        .fg(DISABLED_COLOR)
-        .add_modifier(Modifier::DIM)
+fn disabled_tree_style(theme: &Theme) -> Style {
+    Style::default().fg(theme.dim).add_modifier(Modifier::DIM)
 }
 
-fn local_row_style(entry: &LocalEntry) -> Style {
+fn local_row_style(theme: &Theme, entry: &LocalEntry) -> Style {
     if entry.is_dir {
-        Style::default().fg(Color::Blue)
+        Style::default().fg(theme.accent)
     } else {
         Style::default()
     }
