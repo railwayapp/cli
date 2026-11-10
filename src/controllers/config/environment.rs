@@ -43,6 +43,135 @@ pub struct ServiceInstance {
     pub is_deleted: Option<bool>,
     pub is_created: Option<bool>,
     pub parent_service_id: Option<String>,
+    /// Cluster membership role stamped by template conversion/scaling:
+    /// "root" | "replica" | "internal" | "edge". `None` for services that
+    /// aren't part of a cluster (or predate this field).
+    pub cluster_role: Option<String>,
+    /// Canvas group id, used to keep live-scaled replica/internal nodes
+    /// visually grouped with their cluster root (`groupSet`).
+    pub group_id: Option<String>,
+    /// Template code of the HA companion to deploy when converting this
+    /// standalone service, declared by its origin template. `None` for
+    /// services provisioned before templates carried the field, and for
+    /// legacy deploys with no template link at all -- those fall back to the
+    /// engine registry's companion (see
+    /// `database_engines::DatabaseEngine::ha_template_code_for`).
+    pub ha_template_code: Option<String>,
+    /// The inverse of `ha_template_code`: the standalone template the root
+    /// falls back to when the cluster is reverted. Set on a cluster root.
+    pub reverts_to_template_code: Option<String>,
+    /// Name of the variable the HA agent sets to "true" when the cluster is
+    /// active (e.g. `PATRONI_ENABLED`, `SENTINEL_ENABLED`, `GR_ENABLED`). This
+    /// is what makes "is this actually a cluster?" a declared question rather
+    /// than a per-engine hardcode.
+    ///
+    /// Note there is deliberately NO `haConversionConfig` field here even
+    /// though a service's stored config may carry one: conversion bounds are
+    /// read from the COMPANION template record (the same record the
+    /// server-side gate reads -- see `adoption_eligibility`), because a
+    /// standalone service's copy can be partial, stale, or absent entirely.
+    /// Not parsing it keeps it impossible to trust by accident.
+    pub ha_active_variable: Option<String>,
+    /// Template-declared coordination-variable wiring for HA scale helpers,
+    /// stamped on the root service at conversion time. `None` for legacy
+    /// (pre-`clusterWiring`) Patroni clusters -- callers fall back to the
+    /// historical hardcoded Patroni wiring in that case (see
+    /// `cluster_scale::resolve_cluster_wiring`).
+    pub cluster_wiring: Option<ClusterWiring>,
+}
+
+/// Coordinates of a declared HTTP probe against a node's own private address:
+/// `GET <path>` on `<port>`, any 2xx meaning healthy. The platform carries no
+/// knowledge of what is listening -- it probes what the template points it at.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HttpEndpoint {
+    pub port: Option<i64>,
+    pub path: Option<String>,
+}
+
+/// A rich member-status API the data nodes expose, when the topology has one.
+/// Unlike the plain HTTP probes, speaking it needs a protocol client, so the
+/// CLI acts on this only when `protocol` names one it implements -- an unknown
+/// protocol is treated exactly like no declaration at all.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MemberStatusApi {
+    pub protocol: Option<String>,
+    pub port: Option<i64>,
+}
+
+/// Template-declared wiring map for HA scale helpers, mirroring
+/// `clusterWiringSchema` in `common/javascript/models/src/environment/schema.ts`.
+/// Lets `railway postgres ha scale` re-stamp coordination variables on an
+/// already-converted cluster without hardcoding any database-specific
+/// variable names. Set on the root service's `environment.config` entry.
+///
+/// In each format string, `{host}` is substituted with the node's
+/// private-domain reference and `{rootName}` with the cluster root's actual
+/// (possibly customer-renamed) service name.
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, JsonSchema, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClusterWiring {
+    /// Variable on each internal service that holds that node's own identity
+    /// (e.g. `ETCD_NAME`). Stamped per node on internal scale.
+    pub internal_node_name_variable: Option<String>,
+    /// Variable on root + replica services that holds the comma-separated
+    /// coordinator hostname list (e.g. `PATRONI_ETCD3_HOSTS`).
+    pub coordinator_hosts_variable: Option<String>,
+    /// Port appended to each coordinator host (e.g. 2379 for etcd).
+    pub coordinator_port: Option<i64>,
+    /// Variable on each replica service that holds that replica's own
+    /// identity (e.g. `PATRONI_NAME`). Stamped per replica on clone.
+    pub replica_node_name_variable: Option<String>,
+    /// Variable on the edge service that holds the comma-separated data-node
+    /// endpoint list (e.g. `POSTGRES_NODES`).
+    pub data_nodes_variable: Option<String>,
+    /// Format for each data-node entry. `{host}`/`{rootName}` are
+    /// substituted as described above; the rest is literal.
+    pub data_nodes_entry_format: Option<String>,
+    /// Variable on root + replica services holding the consensus quorum.
+    /// Restamped to a majority (`floor(dataNodes / 2) + 1`) on replica scale.
+    pub quorum_variable: Option<String>,
+    /// The data nodes host their own consensus voters but expose no quorum
+    /// variable to restamp -- the coordinator derives its majority from live
+    /// membership (MySQL Group Replication). Drives the same
+    /// odd-count-of-at-least-three fence `quorum_variable` does, with no
+    /// stamping. Declaring `quorum_variable` already implies this.
+    pub data_nodes_are_quorum_voters: Option<bool>,
+    /// Variable on root + replica services holding the comma-separated peer
+    /// list each node's own colocated coordinator boots against (e.g.
+    /// `SENTINEL_HOSTS`, `GR_SEEDS`). Unlike `data_nodes_variable` this lands
+    /// on the data nodes rather than the edge, and scale stamps it on newly
+    /// added nodes ONLY: a node that joins later must know the real membership
+    /// at first boot, while an existing node already read its own copy and
+    /// restamping it would only mark the whole fleet stale.
+    pub peer_hosts_variable: Option<String>,
+    /// Format for each peer entry (e.g. `{host}:26379`). `{host}`/`{rootName}`
+    /// are substituted as described above; the rest is literal.
+    pub peer_hosts_entry_format: Option<String>,
+    /// Health probe against the cluster's routing edge node.
+    pub edge_health_check: Option<HttpEndpoint>,
+    /// Health probe against each data (root/replica) node -- the generic
+    /// equivalent of a coordinator API for topologies that expose none.
+    pub data_node_health_check: Option<HttpEndpoint>,
+    /// Health probe against each internal (coordinator) node.
+    pub internal_node_health_check: Option<HttpEndpoint>,
+    /// Role probe against each data node: 200 = this node is the one its own
+    /// coordinator currently treats as primary, 503 = it is not, anything else
+    /// = unknown.
+    pub data_node_role_check: Option<HttpEndpoint>,
+    /// Rich member-status API the data nodes expose, when the topology has one
+    /// (e.g. Patroni's REST API).
+    pub member_status_api: Option<MemberStatusApi>,
+    /// Same transport as `data_node_role_check`, but an ACTION: POST against a
+    /// data node asks that node's own colocated coordinator to make THAT node
+    /// the primary. 2xx means the handoff was accepted -- confirmation comes
+    /// from `data_node_role_check` flipping, never from this response.
+    pub data_node_switchover: Option<HttpEndpoint>,
 }
 
 #[skip_serializing_none]
@@ -142,8 +271,10 @@ pub struct ContainerLimits {
 pub struct DeployConfig {
     pub start_command: Option<String>,
     pub pre_deploy_command: Option<serde_json::Value>, // string or [string]
+    pub pre_deploy_timeout_seconds: Option<i64>,
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<i64>,
+    pub ipv6_egress_enabled: Option<bool>,
     pub num_replicas: Option<i64>,
     pub multi_region_config: Option<BTreeMap<String, Option<RegionConfig>>>,
     pub cron_schedule: Option<String>,
@@ -291,4 +422,100 @@ pub fn prepare_config_for_duplication(mut config: EnvironmentConfig) -> Environm
     }
 
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::MockBackboard;
+    use serde_json::json;
+
+    fn environment_payload(config: serde_json::Value) -> serde_json::Value {
+        json!({
+            "environment": {
+                "id": "env-1",
+                "name": "production",
+                "config": config,
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn parses_services_and_tolerates_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub(
+            "GetEnvironmentConfig",
+            environment_payload(json!({
+                "services": {
+                    "svc-1": {
+                        "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:16" },
+                        "variables": { "PGDATA": { "value": "/var/lib/postgresql/data" } },
+                        "parentServiceId": "svc-0",
+                        // Fields newer than this build must be ignored, not
+                        // fail the parse -- the blob evolves server-side.
+                        "someFutureField": { "nested": true },
+                    }
+                },
+                "unknownTopLevelSection": [1, 2, 3],
+            })),
+        );
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        let response = fetch_environment_config(&client, &configs, "env-1", false)
+            .await
+            .unwrap();
+
+        assert_eq!(response.name, "production");
+        let service = response.config.services.get("svc-1").unwrap();
+        assert_eq!(
+            service.source.as_ref().unwrap().image.as_deref(),
+            Some("ghcr.io/railwayapp-templates/postgres-ssl:16")
+        );
+        assert_eq!(service.parent_service_id.as_deref(), Some("svc-0"));
+
+        // The decrypt flag must reach the wire.
+        assert_eq!(
+            server.variables_for("GetEnvironmentConfig"),
+            vec![json!({ "id": "env-1", "decryptVariables": false })]
+        );
+    }
+
+    #[tokio::test]
+    async fn decrypt_flag_is_passed_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub("GetEnvironmentConfig", environment_payload(json!({})));
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        fetch_environment_config(&client, &configs, "env-1", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            server.variables_for("GetEnvironmentConfig")[0]["decryptVariables"],
+            json!(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_config_blob_fails_with_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockBackboard::spawn();
+        server.stub(
+            "GetEnvironmentConfig",
+            environment_payload(json!({ "services": "not-an-object" })),
+        );
+
+        let configs = server.configs(&dir);
+        let client = reqwest::Client::new();
+        let Err(err) = fetch_environment_config(&client, &configs, "env-1", false).await else {
+            panic!("malformed config must fail to parse");
+        };
+        assert!(
+            format!("{err:#}").contains("Failed to parse environment config"),
+            "unexpected error: {err:#}"
+        );
+    }
 }

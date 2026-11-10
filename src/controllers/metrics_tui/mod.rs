@@ -69,6 +69,12 @@ pub struct ProjectTuiParams {
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
+    // Raw mode plus the alternate screen means stderr writes land wherever
+    // the cursor is and stay there until a full repaint, and an inquire
+    // prompt can never complete. The flag makes `reporter::warn` hold its
+    // tongue and every prompt helper fail fast for as long as this screen
+    // is up.
+    crate::util::prompt::set_terminal_owned(true);
     execute!(
         stdout(),
         EnterAlternateScreen,
@@ -89,6 +95,7 @@ fn restore_terminal() {
         crossterm::event::DisableMouseCapture
     );
     let _ = disable_raw_mode();
+    crate::util::prompt::set_terminal_owned(false);
 }
 
 /// Time range presets matching the Railway dashboard

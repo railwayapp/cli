@@ -1,0 +1,14 @@
+query Template($id: String, $code: String) {
+  template(id: $id, code: $code) {
+    id
+    code
+    name
+    description
+    image
+    category
+    readme
+    demoProjectId
+    status
+    workspaceId
+  }
+}

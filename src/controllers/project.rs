@@ -20,6 +20,7 @@ use crate::{
         },
     },
     errors::RailwayError,
+    workspace::workspaces_with_client,
 };
 
 use super::environment::get_matched_environment;
@@ -58,6 +59,86 @@ pub async fn get_project(
         .project;
 
     Ok(project)
+}
+
+#[derive(Debug, Clone)]
+struct ProjectChoice {
+    id: String,
+    name: String,
+    workspace_name: String,
+}
+
+pub async fn resolve_project_id_or_name(
+    client: &Client,
+    configs: &Configs,
+    project: &str,
+) -> Result<String> {
+    match get_project(client, configs, project.to_string()).await {
+        Ok(project) => return Ok(project.id),
+        Err(RailwayError::ProjectNotFound) => {}
+        Err(RailwayError::GraphQLError(message)) if message.contains("Project not found") => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let choices = project_choices(client, configs).await?;
+    let id_matches = choices
+        .iter()
+        .filter(|choice| choice.id.eq_ignore_ascii_case(project))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_project_match(id_matches, project, "project ID")? {
+        return Ok(choice.id);
+    }
+
+    let name_matches = choices
+        .into_iter()
+        .filter(|choice| choice.name.eq_ignore_ascii_case(project))
+        .collect::<Vec<_>>();
+
+    if let Some(choice) = single_project_match(name_matches, project, "project name")? {
+        return Ok(choice.id);
+    }
+
+    bail!("Project \"{}\" not found", project)
+}
+
+async fn project_choices(client: &Client, configs: &Configs) -> Result<Vec<ProjectChoice>> {
+    let mut choices = Vec::new();
+    for workspace in workspaces_with_client(client, configs).await? {
+        let workspace_name = workspace.name().to_string();
+        choices.extend(
+            workspace
+                .projects()
+                .into_iter()
+                .filter(|project| project.deleted_at().is_none())
+                .map(|project| ProjectChoice {
+                    id: project.id().to_string(),
+                    name: project.name().to_string(),
+                    workspace_name: workspace_name.clone(),
+                }),
+        );
+    }
+    Ok(choices)
+}
+
+fn single_project_match(
+    matches: Vec<ProjectChoice>,
+    input: &str,
+    kind: &str,
+) -> Result<Option<ProjectChoice>> {
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => {
+            let available = matches
+                .iter()
+                .map(|choice| format!("{} ({})", choice.id, choice.workspace_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("Ambiguous {kind} \"{input}\". Use one of these project IDs: {available}");
+        }
+    }
 }
 
 pub fn get_service(
@@ -212,6 +293,21 @@ pub fn find_service_instance<'a>(
         .map(|si| &si.node)
 }
 
+pub fn ensure_service_has_active_deployment(
+    service_instance: &ProjectServiceInstanceNode,
+    environment_name: &str,
+) -> Result<()> {
+    if service_instance.active_deployments.is_empty() {
+        bail!(
+            "Service {} has no active deployment in environment {}. Deploy or restart the service before using file commands.",
+            service_instance.service_name,
+            environment_name
+        );
+    }
+
+    Ok(())
+}
+
 /// Resolved context for service operations (variables, etc.)
 pub struct ServiceContext {
     pub client: Client,
@@ -219,35 +315,73 @@ pub struct ServiceContext {
     pub project: ProjectProject,
     pub project_id: String,
     pub environment_id: String,
+    pub environment_name: String,
     pub service_id: String,
     pub service_name: String,
 }
 
 /// Resolves project, environment, and service from args and linked project.
-/// Returns a ServiceContext with all resolved IDs.
+/// When project_arg is provided, environment_arg must also be provided.
 pub async fn resolve_service_context(
+    project_arg: Option<String>,
     service_arg: Option<String>,
     environment_arg: Option<String>,
 ) -> Result<ServiceContext> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let linked_project = configs.get_linked_project().await?;
 
-    ensure_project_and_environment_exist(&client, &configs, &linked_project).await?;
-    let project = get_project(&client, &configs, linked_project.project.clone()).await?;
+    if project_arg.is_some() && environment_arg.is_none() {
+        bail!("--environment is required when using --project");
+    }
+
+    let linked_project = if project_arg.is_none() {
+        Some(configs.get_linked_project().await?)
+    } else {
+        None
+    };
+
+    if let Some(ref linked_project) = linked_project {
+        ensure_project_and_environment_exist(&client, &configs, linked_project).await?;
+    }
+
+    let project_id = if let Some(project_arg) = project_arg {
+        resolve_project_id_or_name(&client, &configs, &project_arg).await?
+    } else {
+        linked_project
+            .as_ref()
+            .map(|lp| lp.project.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("No project specified. Use --project or run `railway link` first")
+            })?
+    };
+
+    let project = get_project(&client, &configs, project_id.clone()).await?;
 
     let env = match environment_arg {
         Some(env) => env,
-        None => linked_project.environment_id()?.to_string(),
+        None => linked_project
+            .as_ref()
+            .context("No environment linked. Use --environment when using --project")?
+            .environment_id()?
+            .to_string(),
     };
-    let environment_id = get_matched_environment(&project, env)?.id;
+    let environment = get_matched_environment(&project, env)?;
+    let environment_id = environment.id;
+    let environment_name = environment.name;
 
+    let linked_service = linked_project.and_then(|lp| lp.service);
     let services = &project.services.edges;
-    let (service_id, service_name) = match (service_arg, linked_project.service) {
+    if services.is_empty() {
+        bail!(RailwayError::ProjectHasNoServices);
+    }
+
+    let (service_id, service_name) = match (service_arg, linked_service) {
         (Some(service_arg), _) => {
             let service = services
                 .iter()
-                .find(|s| s.node.name == service_arg || s.node.id == service_arg)
+                .find(|s| {
+                    s.node.name.eq_ignore_ascii_case(&service_arg) || s.node.id == service_arg
+                })
                 .with_context(|| format!("Service '{service_arg}' not found"))?;
             (service.node.id.clone(), service.node.name.clone())
         }
@@ -259,6 +393,10 @@ pub async fn resolve_service_context(
                 .unwrap_or_else(|| linked_service.clone());
             (linked_service, name)
         }
+        _ if services.len() == 1 => {
+            let service = &services[0].node;
+            (service.id.clone(), service.name.clone())
+        }
         _ => bail!(RailwayError::NoServiceLinked),
     };
 
@@ -266,8 +404,9 @@ pub async fn resolve_service_context(
         client,
         configs,
         project,
-        project_id: linked_project.project,
+        project_id,
         environment_id,
+        environment_name,
         service_id,
         service_name,
     })

@@ -1,18 +1,70 @@
 use anyhow::{Context, Result, bail};
 use is_terminal::IsTerminal;
 use reqwest::Client;
-use std::path::Path;
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::client::post_graphql;
 use crate::config::Configs;
-use crate::controllers::ssh_keys::{find_local_ssh_keys, register_ssh_key};
+use crate::controllers::ssh::keys::{SshKeySource, find_local_ssh_keys, register_ssh_key};
 use crate::gql::queries::{ServiceInstance, service_instance};
 use crate::util::prompt::{prompt_confirm_with_default, prompt_select};
 
-const SSH_HOST: &str = "ssh.railway.com";
+/// SSH relay endpoint (host, non-default port) for the current environment —
+/// must track `Configs::get_backboard()`'s environment, or key registration
+/// is checked against one backboard while the relay authenticates against
+/// another (dev-mode CLIs used to dial the prod relay and get publickey
+/// denials for keys that were registered fine).
+pub(super) fn ssh_relay() -> (&'static str, Option<u16>) {
+    Configs::get_ssh_relay()
+}
+
+/// Append `-p <port>` when the relay listens on a non-default port (the
+/// develop relay uses 2222).
+fn apply_relay_port(cmd: &mut Command, port: Option<u16>) {
+    if let Some(port) = port {
+        cmd.args(["-p", &port.to_string()]);
+    }
+}
+
+/// Base `ssh` invocation for the current environment's relay: the binary, the
+/// non-default relay port, and the `-i` identity when one was resolved.
+/// Returns the command plus the `<target>@<relay-host>` to append *after* any
+/// mode-specific options (interactive `-t`/`-T`, forward `-N`/`-L`, …). Shared
+/// so the relay/port/identity setup can't drift between the interactive and
+/// forward paths.
+fn base_ssh_command(ssh_target: &str, identity_file: Option<&Path>) -> (Command, String) {
+    let (host, port) = ssh_relay();
+    let mut cmd = Command::new("ssh");
+    apply_relay_port(&mut cmd, port);
+    if let Some(key) = identity_file {
+        cmd.arg("-i").arg(key);
+    }
+    (cmd, format!("{ssh_target}@{host}"))
+}
+
+/// The relay destination for a target: `<target>@<relay-host>`.
+///
+/// A relay target (`agent:<env>:<id>`, `service:…`) is a *username* on the
+/// relay host, not a hostname. Handing the bare target to ssh asks the resolver
+/// to look it up as a host, which fails with "Could not resolve hostname" —
+/// exposed here so callers that build their own invocation, like the TUI's pty
+/// session, cannot rediscover that the hard way.
+pub fn relay_destination(ssh_target: &str) -> String {
+    let (host, _) = ssh_relay();
+    format!("{ssh_target}@{host}")
+}
+
+/// `-p <port>` when the relay listens somewhere other than 22, empty otherwise.
+pub fn relay_port_args() -> Vec<String> {
+    match ssh_relay() {
+        (_, Some(port)) => vec!["-p".to_string(), port.to_string()],
+        (_, None) => Vec::new(),
+    }
+}
 
 /// Get the service instance ID for a service in an environment
 pub async fn get_service_instance_id(
@@ -39,19 +91,47 @@ pub async fn get_service_instance_id(
 /// its workspace's keys; session and user tokens get personal keys. The
 /// CLI doesn't need to distinguish — it passes `workspaceId: null` and
 /// the resolver defaults from `ctx.workspace.id` when present.
-pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
-    let local_keys = find_local_ssh_keys()?;
+pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, true, true).await
+}
+
+/// `ensure_ssh_key` without the "Using SSH key from ..." announcement when a
+/// registered key is already in place — for flows like `railway code` where
+/// ssh is plumbing, not the product. First-run registration still prompts
+/// and prints normally.
+pub async fn ensure_ssh_key_quiet(client: &Client, configs: &Configs) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false, true).await
+}
+
+/// [`ensure_ssh_key_quiet`] that never prompts: the registration path errors
+/// with the recipe instead. For callers running concurrently with another
+/// interactive flow — two prompt sequences interleaved on one terminal are
+/// gibberish — which retry interactively afterwards if they want the prompt.
+pub async fn ensure_ssh_key_noninteractive(
+    client: &Client,
+    configs: &Configs,
+) -> Result<Option<PathBuf>> {
+    ensure_ssh_key_impl(client, configs, false, false).await
+}
+
+async fn ensure_ssh_key_impl(
+    client: &Client,
+    configs: &Configs,
+    announce: bool,
+    interactive: bool,
+) -> Result<Option<PathBuf>> {
+    let local_keys = find_local_ssh_keys().await?;
 
     if local_keys.is_empty() {
         bail!(
-            "No SSH keys found in ~/.ssh/\n\n\
+            "No SSH keys found in your SSH agent or ~/.ssh/\n\n\
             Generate one with:\n  ssh-keygen -t ed25519\n\n\
             Then run this command again."
         );
     }
 
     let registered_keys =
-        crate::controllers::ssh_keys::get_registered_ssh_keys(client, configs, None).await?;
+        crate::controllers::ssh::keys::get_registered_ssh_keys(client, configs, None).await?;
 
     // Find a local key that's already registered
     let registered_local = local_keys.iter().find(|local| {
@@ -61,12 +141,26 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     });
 
     if let Some(key) = registered_local {
-        eprintln!("Using SSH key: {}", key.path.display());
-        return Ok(());
+        if announce {
+            match &key.source {
+                SshKeySource::File(path) => eprintln!(
+                    "Using SSH key from file {}: {}",
+                    path.display(),
+                    key.key_name()
+                ),
+                SshKeySource::Agent => eprintln!("Using SSH key from agent: {}", key.key_name()),
+            }
+        }
+        return Ok(identity_for(key));
     }
 
-    // No local key is registered - need to register one
-    if !std::io::stdin().is_terminal() {
+    // No local key is registered - need to register one. A TUI that owns the
+    // terminal can't host the registration prompt any more than a pipe can —
+    // its event loop consumes the keystrokes and repaints over the output —
+    // so both get the recipe instead. `railway ca` runs this same function as
+    // a preflight before taking the screen, so inside its TUI this path only
+    // fires if the key disappeared mid-session.
+    if !interactive || !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
         bail!(
             "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
             Or import from GitHub:\n  railway ssh keys github"
@@ -80,10 +174,10 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
     } else {
         // Let the user pick which key to register
         use std::fmt;
-        struct KeyOption<'a>(&'a crate::controllers::ssh_keys::LocalSshKey);
+        struct KeyOption<'a>(&'a crate::controllers::ssh::keys::LocalSshKey);
         impl fmt::Display for KeyOption<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{} ({})", self.0.path.display(), self.0.fingerprint)
+                write!(f, "{} ({})", self.0.key_name(), self.0.fingerprint)
             }
         }
         let options: Vec<KeyOption> = local_keys.iter().map(KeyOption).collect();
@@ -93,7 +187,7 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 
     println!(
         "Key: {} ({})",
-        key_to_register.path.display(),
+        key_to_register.key_name(),
         key_to_register.fingerprint
     );
     println!();
@@ -107,25 +201,34 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
         );
     }
 
-    let key_name = key_to_register
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("ssh-key")
-        .to_string();
-
     register_ssh_key(
         client,
         configs,
-        &key_name,
-        &key_to_register.public_key,
+        &key_to_register.key_name(),
+        &key_to_register.public_key.to_string(),
         None,
     )
     .await?;
 
     println!("SSH key registered successfully!");
 
-    Ok(())
+    Ok(identity_for(key_to_register))
+}
+
+/// The path to hand `ssh -i` for a registered local key. File-backed keys point
+/// at the private key beside the `.pub`; agent-backed keys return `None` (the
+/// agent offers them automatically, and there's no file to pass).
+fn identity_for(key: &crate::controllers::ssh::keys::LocalSshKey) -> Option<PathBuf> {
+    match &key.source {
+        SshKeySource::File(path) => {
+            if path.extension().and_then(|e| e.to_str()) == Some("pub") {
+                Some(path.with_extension(""))
+            } else {
+                Some(path.to_path_buf())
+            }
+        }
+        SshKeySource::Agent => None,
+    }
 }
 
 /// Ensure tmux is installed inside the target container.
@@ -133,10 +236,12 @@ pub async fn ensure_ssh_key(client: &Client, configs: &Configs) -> Result<()> {
 /// Split out from the session loop so that a tmux-install failure is
 /// distinguishable from a session connect failure in telemetry.
 pub fn ensure_tmux_installed(ssh_target: &str, identity_file: Option<&Path>) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
 
     eprintln!("Ensuring tmux is installed...");
     let mut install_cmd = Command::new("ssh");
+    apply_relay_port(&mut install_cmd, port);
     if let Some(key) = identity_file {
         install_cmd.arg("-i").arg(key);
     }
@@ -167,7 +272,8 @@ pub fn run_tmux_session(
     session_name: &str,
     identity_file: Option<&Path>,
 ) -> Result<()> {
-    let target = format!("{}@{}", ssh_target, SSH_HOST);
+    let (host, port) = ssh_relay();
+    let target = format!("{ssh_target}@{host}");
     let tmux_cmd = format!(
         "exec tmux new-session -A -s {} \\; set -g mouse on",
         session_name
@@ -175,6 +281,7 @@ pub fn run_tmux_session(
 
     loop {
         let mut session_cmd = Command::new("ssh");
+        apply_relay_port(&mut session_cmd, port);
         if let Some(key) = identity_file {
             session_cmd.arg("-i").arg(key);
         }
@@ -198,6 +305,15 @@ pub fn run_tmux_session(
     Ok(())
 }
 
+/// Resume request for a relay durable session, delivered via SSH `SetEnv`
+/// (the relay intercepts these env keys; they are not forwarded to the VM).
+pub struct DurableResume<'a> {
+    pub session_name: &'a str,
+    /// Resume from the server's last-read cursor instead of replaying the
+    /// full retained scrollback.
+    pub resume_from_last_read: bool,
+}
+
 /// Run SSH command with the given service instance ID.
 /// Optionally executes a command instead of starting an interactive shell.
 ///
@@ -211,15 +327,85 @@ pub fn run_native_ssh(
     service_instance_id: &str,
     command: Option<&[String]>,
     identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
 ) -> Result<i32> {
-    let target = format!("{}@{}", service_instance_id, SSH_HOST);
+    run_native_ssh_with_opts(service_instance_id, command, identity_file, durable, &[])
+}
+
+/// `run_native_ssh` with extra `ssh` options (each element one argv entry,
+/// e.g. `["-o", "ControlMaster=auto"]`). Lets callers opt into connection
+/// multiplexing without changing the shared default path.
+/// Turn off mouse tracking after an interactive session.
+///
+/// An agent or editor on the far side enables it for its own use. Exiting
+/// cleanly turns it off again; being detached from — which is the normal way to
+/// leave a durable session — does not, and the modes stay set on the terminal
+/// that gets handed back. The symptom is unmistakable and cannot be cleared
+/// from the shell: every pointer movement arrives at the prompt as `35;21;32M`.
+pub fn clear_mouse_tracking() {
+    use std::io::Write;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = std::io::stdout().flush();
+}
+
+/// Prepare the remote command words for OpenSSH.
+///
+/// ssh(1) concatenates every remote-command word with single spaces into ONE
+/// string and hands that to the remote login shell — argv boundaries do not
+/// survive the trip. Passed through raw, a multi-arg invocation like
+/// `railway ssh sh -c 'redis-cli -a "$PW" PING && echo ok'` reaches the
+/// remote shell as `sh -c redis-cli -a "$PW" PING && echo ok`, so `sh -c`
+/// takes only `redis-cli` as its script and the rest leaks into `$0`/`$1`
+/// and a second `&&` command.
+///
+/// Quoting each word when the caller passed MORE than one makes the remote
+/// shell re-split back to exactly the caller's argv (`docker exec` /
+/// `kubectl exec` semantics). A single word keeps passing through raw: it IS
+/// the remote shell line — today's documented usage — and quoting it would
+/// collapse the whole line into one command word.
+fn quote_remote_command(args: &[String]) -> Vec<String> {
+    if args.len() <= 1 {
+        return args.to_vec();
+    }
+    args.iter()
+        .map(|arg| match shlex::try_quote(arg) {
+            Ok(quoted) => quoted.into_owned(),
+            // try_quote only fails on interior NUL bytes, which cannot occur
+            // in OS-provided argv; keep the raw word rather than dying.
+            Err(_) => arg.clone(),
+        })
+        .collect()
+}
+
+pub fn run_native_ssh_with_opts(
+    service_instance_id: &str,
+    command: Option<&[String]>,
+    identity_file: Option<&Path>,
+    durable: Option<DurableResume<'_>>,
+    extra_opts: &[String],
+) -> Result<i32> {
     let stdin_tty = std::io::stdin().is_terminal();
     let stdout_tty = std::io::stdout().is_terminal();
 
-    let mut ssh_cmd = Command::new("ssh");
+    let (mut ssh_cmd, target) = base_ssh_command(service_instance_id, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
 
-    if let Some(key) = identity_file {
-        ssh_cmd.arg("-i").arg(key);
+    if let Some(durable) = durable {
+        // Both env keys ride a single SetEnv directive: pre-8.7 OpenSSH only
+        // honors the first SetEnv it encounters.
+        let mut set_env = format!(
+            "SetEnv RAILWAY_DURABLE_SESSION_NAME={}",
+            durable.session_name
+        );
+        if durable.resume_from_last_read {
+            set_env.push_str(" RAILWAY_DURABLE_RESUME=lastread");
+        }
+        ssh_cmd.arg("-o").arg(set_env);
     }
 
     match command {
@@ -238,7 +424,7 @@ pub fn run_native_ssh(
     ssh_cmd.arg(&target);
 
     if let Some(cmd_args) = command {
-        for arg in cmd_args {
+        for arg in quote_remote_command(cmd_args) {
             ssh_cmd.arg(arg);
         }
     }
@@ -249,4 +435,366 @@ pub fn run_native_ssh(
 
     let status = ssh_cmd.status().context("Failed to execute ssh command")?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Marker a readiness probe asks the guest to echo back. Success is this
+/// string round-tripping, never the exit code: the relay answers a session
+/// against a target it cannot route yet with a status JSON and a clean exit
+/// 0, so `ssh <target> true` reports success seconds before a command can
+/// actually run (verified against prod, 2026-08-13).
+const PROBE_MARKER: &str = "RAILWAY_CONNECT_PROBE_OK";
+
+/// Silently test whether a target is connectable yet: ask it to echo a
+/// marker, with success defined as the marker coming back. Failure carries no
+/// diagnosis (a booting agent and a typo'd target look the same), so callers
+/// only ever use this inside a loop that also watches status.
+pub fn probe_native_ssh(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    extra_opts: &[String],
+) -> Result<bool> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    // Bound the probe so one blackholed connection can't eat the caller's
+    // whole readiness budget; the loop retries anyway.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(format!("echo {PROBE_MARKER}"));
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stderr(Stdio::null());
+    let output = ssh_cmd.output().context("Failed to execute ssh command")?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(PROBE_MARKER))
+}
+
+/// One `-L` style forward: localhost:`local_port` → 127.0.0.1:`remote_port`
+/// inside the target.
+#[derive(Clone)]
+pub struct PortForward {
+    pub local_port: u16,
+    pub remote_port: u16,
+}
+
+/// Run a forward-only SSH session (`ssh -N -L ...`) against the relay.
+///
+/// The remote side is pinned to loopback — forwards reach ports the target
+/// itself listens on, mirroring the `/ws/tcpip` bridge's behavior. Blocks
+/// until the connection drops or the user interrupts; a signal-death (Ctrl+C)
+/// is reported as exit code 0 since that's the normal way to stop a forward.
+pub fn run_native_ssh_forward(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    forwards: &[PortForward],
+) -> Result<i32> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    apply_forward_options(&mut ssh_cmd, forwards);
+    ssh_cmd.arg(&target);
+
+    // `-N` runs no command; keep stderr inherited so relay/auth errors and
+    // per-connection forward failures stay visible.
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stdout(Stdio::null());
+    ssh_cmd.stderr(Stdio::inherit());
+
+    let status = ssh_cmd.status().context("Failed to execute ssh command")?;
+    // `code()` is None when ssh died from a signal — for a forward that's the
+    // user's Ctrl+C (delivered to the whole foreground process group).
+    Ok(status.code().unwrap_or(0))
+}
+
+/// Apply the `-N` forward-mode options and `-L` specs shared by the blocking
+/// (`run_native_ssh_forward`) and backgrounded (`spawn_native_ssh_forward`)
+/// paths, so their flags can't drift. The remote side of every forward is
+/// pinned to the `127.0.0.1` literal — names like `localhost` go through the
+/// relay's resolver (which doesn't honor the target's `/etc/hosts`) and resolve
+/// to unreachable mesh addresses, so a literal is the only thing that reliably
+/// reaches the port the target itself listens on.
+fn apply_forward_options(cmd: &mut Command, forwards: &[PortForward]) {
+    cmd.args([
+        "-N",
+        // `-N` runs with stdin closed, so an interactive host-key prompt can't
+        // be answered — a fresh machine that hasn't trusted the relay yet would
+        // die with "Host key verification failed". accept-new auto-trusts on
+        // first contact (TOFU) while still rejecting a *changed* key (MITM
+        // protection). The interactive `sandbox ssh` path doesn't need this: it
+        // inherits stdin and the user can type "yes".
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        // Fail loudly if a forward can't be established instead of sitting
+        // connected with nothing bound.
+        "-o",
+        "ExitOnForwardFailure=yes",
+        // Long-lived idle forwards: detect a dead relay connection within
+        // ~90s instead of hanging until the next local connection fails.
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+    ]);
+
+    for forward in forwards {
+        cmd.args([
+            "-L",
+            &format!(
+                "127.0.0.1:{}:127.0.0.1:{}",
+                forward.local_port, forward.remote_port
+            ),
+        ]);
+    }
+}
+
+/// A backgrounded `ssh -N -L` forward. The child ssh process is killed when the
+/// guard is dropped, so a caller can keep the tunnel up for the lifetime of a
+/// foreground client (e.g. `railway connect` launching psql) and tear it down
+/// automatically when that client exits.
+pub struct ForwardGuard {
+    child: std::process::Child,
+}
+
+impl Drop for ForwardGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Spawn a forward-only SSH session in the background and block until the
+/// forwarded local port(s) accept connections, so the caller can immediately
+/// point a client at `127.0.0.1:<local_port>` without racing an unbound
+/// listener. Returns a guard that kills ssh on drop.
+pub fn spawn_native_ssh_forward(
+    ssh_target: &str,
+    identity_file: Option<&Path>,
+    forwards: &[PortForward],
+) -> Result<ForwardGuard> {
+    // Refuse to start if something already owns a requested local port. The
+    // readiness probe below can only prove that *someone* is listening, not
+    // that it is our ssh child, so a pre-existing listener would otherwise be
+    // accepted as the tunnel and receive whatever the caller sends through it.
+    for forward in forwards {
+        ensure_local_port_free(forward.local_port)?;
+    }
+
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    apply_forward_options(&mut ssh_cmd, forwards);
+    ssh_cmd.arg(&target);
+
+    // Backgrounded: no stdin (host-key prompts are handled by accept-new),
+    // stderr stays visible so relay/auth errors surface, stdout is unused.
+    ssh_cmd.stdin(Stdio::null());
+    ssh_cmd.stdout(Stdio::null());
+    ssh_cmd.stderr(Stdio::inherit());
+
+    // Detach ssh from the terminal's foreground process group. Ctrl+C in the
+    // foreground client (e.g. cancelling a long psql query) is delivered to
+    // the whole group, and ssh doesn't trap SIGINT — left in the group, a
+    // routine query-cancel would kill the tunnel mid-session. Detached, ssh
+    // only goes down via the guard.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        ssh_cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        ssh_cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    let child = ssh_cmd.spawn().context("Failed to spawn ssh forward")?;
+    let mut guard = ForwardGuard { child };
+    wait_for_forward_ready(&mut guard, forwards)?;
+    Ok(guard)
+}
+
+/// Fails unless nothing is currently listening on `127.0.0.1:<port>`. Binding
+/// is the only portable way to ask; the socket is closed immediately so ssh can
+/// take the port, which leaves a small window that the post-probe liveness
+/// re-check in `wait_for_forward_ready` closes.
+fn ensure_local_port_free(port: u16) -> Result<()> {
+    match std::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => bail!(
+            "Local port {port} is already in use. Pick a free port with --port, or stop the process using it.\n\
+             Railway will not send traffic to a port it did not open."
+        ),
+        Err(err) => Err(err).with_context(|| format!("Failed to check local port {port}")),
+    }
+}
+
+/// Poll the forwarded local ports until they accept a TCP connection. Bails if
+/// ssh exits first (e.g. `ExitOnForwardFailure` tripping on a busy local port)
+/// or the tunnel doesn't come up within the deadline.
+fn wait_for_forward_ready(guard: &mut ForwardGuard, forwards: &[PortForward]) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = guard.child.try_wait()? {
+            bail!("SSH tunnel exited before it was ready ({status})");
+        }
+        let all_up = forwards.iter().all(|forward| {
+            let addr = SocketAddr::from(([127, 0, 0, 1], forward.local_port));
+            TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+        });
+        if all_up {
+            // A successful connect only proves someone is listening. ssh reports
+            // a failed bind asynchronously, so re-check that our child is still
+            // alive before treating the listener as ours — otherwise a port that
+            // was taken between the pre-flight check and the bind would be
+            // reported as a ready tunnel.
+            if let Some(status) = guard.child.try_wait()? {
+                bail!(
+                    "SSH tunnel exited while coming up ({status}). The local port is owned by another process."
+                );
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("Timed out waiting for the SSH tunnel to become ready on 127.0.0.1");
+        }
+        sleep(Duration::from_millis(150));
+    }
+}
+
+/// Run a non-interactive command on the target with optional bytes fed to its
+/// stdin, and stdout + stderr captured. Built for agent-launcher plumbing
+/// (`railway code`): secret payloads (credentials) ride stdin so they never
+/// appear in an argv, small reads come back on stdout, and stderr comes back
+/// so callers can tell transport failures (host key, relay refusal) apart
+/// from remote-command failures instead of showing a bare exit code.
+pub fn run_native_ssh_captured(
+    ssh_target: &str,
+    command: &str,
+    identity_file: Option<&Path>,
+    stdin_payload: Option<&[u8]>,
+    extra_opts: &[String],
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    let (mut ssh_cmd, target) = base_ssh_command(ssh_target, identity_file);
+    for opt in extra_opts {
+        ssh_cmd.arg(opt);
+    }
+    // Bound the connect the same way `probe_native_ssh` does. Without it a
+    // blackholed connection hangs forever: `ServerAliveInterval` only polices a
+    // session that is already established, and `ssh_plumbing`'s retry budget is
+    // fiction if a single attempt never returns. Observed in the wild as a
+    // launch parked on "Finalizing Configuration..." with no error and no
+    // timeout, on a VM that was up and billing.
+    ssh_cmd.arg("-o").arg("ConnectTimeout=10");
+    ssh_cmd.arg("-T");
+    ssh_cmd.arg(&target);
+    ssh_cmd.arg(command);
+    capture_command(ssh_cmd, stdin_payload)
+}
+
+fn capture_command(
+    mut ssh_cmd: Command,
+    stdin_payload: Option<&[u8]>,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    use std::io::Write;
+
+    ssh_cmd.stdin(if stdin_payload.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::piped());
+
+    let mut child = ssh_cmd.spawn().context("Failed to execute ssh command")?;
+    let input_result = if let Some(payload) = stdin_payload {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        // Drop closes the pipe so the remote `cat` sees EOF.
+        stdin.write_all(payload)
+    } else {
+        Ok(())
+    };
+    let output = child.wait_with_output()?;
+    // A refused connection can close stdin before the script/payload fits in
+    // the pipe. Preserve SSH's status and diagnostic so callers can retry the
+    // transport failure, instead of masking it with a local BrokenPipe error.
+    // Always reap the child, including when writing stdin failed.
+    if output.status.success() {
+        input_result.context("Failed to send SSH input")?;
+    }
+    Ok((
+        output.status.code().unwrap_or(1),
+        output.stdout,
+        output.stderr,
+    ))
+}
+
+#[cfg(all(test, unix))]
+mod captured_command_tests {
+    use super::*;
+
+    #[test]
+    fn early_connection_failure_preserves_status_and_diagnostic() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf 'connection refused' >&2; exit 255"]);
+        let (status, stdout, stderr) = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap();
+        assert_eq!(status, 255);
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"connection refused");
+    }
+
+    #[test]
+    fn successful_exit_cannot_hide_incomplete_input() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let error = capture_command(cmd, Some(&vec![0; 1024 * 1024])).unwrap_err();
+        assert!(error.to_string().contains("Failed to send SSH input"));
+    }
+}
+
+#[cfg(test)]
+mod quote_remote_command_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The invariant that matters: after ssh joins the words with spaces and
+    /// the remote shell re-splits them, the original argv comes back.
+    fn remote_shell_split(quoted: &[String]) -> Vec<String> {
+        shlex::split(&quoted.join(" ")).expect("quoted words must re-split")
+    }
+
+    #[test]
+    fn a_single_word_is_the_remote_shell_line_and_passes_through_raw() {
+        let input = args(&["redis-cli -a \"$PW\" PING && echo ok"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn plain_words_survive_unchanged() {
+        let input = args(&["ls", "-la", "/data"]);
+        assert_eq!(quote_remote_command(&input), input);
+    }
+
+    #[test]
+    fn argv_boundaries_survive_the_join_and_remote_resplit() {
+        let input = args(&["sh", "-c", "redis-cli -a \"$PW\" PING && echo ok"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn spaces_quotes_and_dollars_stay_inside_their_word() {
+        let input = args(&["echo", "a b", "it's", "$HOME", "x;y|z"]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
+
+    #[test]
+    fn empty_words_are_preserved_as_empty_words() {
+        let input = args(&["printf", "%s", ""]);
+        let quoted = quote_remote_command(&input);
+        assert_eq!(remote_shell_split(&quoted), input);
+    }
 }

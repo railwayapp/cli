@@ -1,0 +1,3 @@
+mutation ClearPitrHaWorkflowProgress($environmentId: String!, $rootServiceId: String!) {
+  clearPitrHaWorkflowProgress(environmentId: $environmentId, rootServiceId: $rootServiceId)
+}

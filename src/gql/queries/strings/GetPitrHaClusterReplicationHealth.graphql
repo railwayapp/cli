@@ -1,0 +1,18 @@
+query GetPitrHaClusterReplicationHealth($environmentId: String!, $rootServiceId: String!) {
+  pitrHaClusterReplicationHealth(environmentId: $environmentId, rootServiceId: $rootServiceId) {
+    allHealthy
+    checkedAt
+    environmentId
+    reachable
+    rootServiceId
+    members {
+      serviceId
+      serviceName
+      healthy
+      isLeader
+      lagMb
+      patroniName
+      state
+    }
+  }
+}

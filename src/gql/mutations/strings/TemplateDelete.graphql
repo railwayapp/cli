@@ -1,0 +1,3 @@
+mutation TemplateDelete($id: String!, $workspaceId: String) {
+  templateDelete(id: $id, input: { workspaceId: $workspaceId })
+}

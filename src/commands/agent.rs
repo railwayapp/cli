@@ -18,9 +18,15 @@ const THINKING_MESSAGES: &[&str] = &[
     "All aboard...",
 ];
 
+use chrono::{DateTime, Local};
+
 use crate::{
     controllers::{
-        chat::{ChatEvent, ChatRequest, build_chat_client, get_chat_url, stream_chat},
+        chat::{
+            ChatEvent, ChatMessage, ChatMessagePart, ChatRequest, ChatThread, build_chat_client,
+            get_chat_url, get_thread_messages, get_thread_messages_url, get_threads_url,
+            list_threads, stream_chat,
+        },
         environment::get_matched_environment,
         project::get_project,
         service::get_or_prompt_service,
@@ -38,7 +44,9 @@ use super::*;
     after_help = "Examples:\n\n\
       railway agent                                             # Interactive mode\n\
       railway agent -p \"what's the status of my deployment?\"    # Single prompt\n\
-      railway agent -p \"why is my service crashing?\" --json     # JSON output"
+      railway agent -p \"why is my service crashing?\" --json     # JSON output\n\
+      railway agent --list                                      # List existing threads\n\
+      railway agent --thread-id <ID>                            # Continue a thread"
 )]
 pub struct Args {
     /// Send a single prompt (omit for interactive mode)
@@ -60,6 +68,10 @@ pub struct Args {
     /// Environment to use (defaults to linked environment)
     #[clap(short, long)]
     environment: Option<String>,
+
+    /// List existing agent threads for the current environment
+    #[clap(long, conflicts_with_all = ["prompt", "thread_id", "service"])]
+    list: bool,
 }
 
 #[derive(Default, Serialize)]
@@ -94,9 +106,22 @@ pub async fn command(args: Args) -> Result<()> {
         None => linked_project.environment_id()?.to_string(),
     };
 
+    let chat_client = build_chat_client(&configs)?;
+
+    if args.list {
+        let threads = list_threads(
+            &chat_client,
+            &get_threads_url(&configs),
+            &environment_id,
+            None,
+        )
+        .await?;
+        render_threads(&threads, args.json)?;
+        return Ok(());
+    }
+
     let service_id = get_or_prompt_service(Some(linked_project), project, args.service).await?;
 
-    let chat_client = build_chat_client(&configs)?;
     let url = get_chat_url(&configs);
     let is_tty = std::io::stdout().is_terminal();
 
@@ -116,6 +141,19 @@ pub async fn command(args: Args) -> Result<()> {
         )
         .await
     } else {
+        let history = match args.thread_id.as_deref() {
+            Some(tid) => {
+                let messages_url = get_thread_messages_url(&configs, tid);
+                get_thread_messages(&chat_client, &messages_url, Some(10))
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("{}", format!("Could not load thread history: {e}").dimmed());
+                        Vec::new()
+                    })
+            }
+            None => Vec::new(),
+        };
+
         run_repl(
             &chat_client,
             &url,
@@ -123,11 +161,105 @@ pub async fn command(args: Args) -> Result<()> {
             &environment_id,
             service_id.as_deref(),
             args.thread_id,
+            history,
             args.json,
             is_tty,
         )
         .await
     }
+}
+
+fn render_history(messages: &[ChatMessage], thread_id: Option<&str>) {
+    let banner = match thread_id {
+        Some(id) => format!("── resuming thread {id} ──"),
+        None => "── resuming thread ──".to_string(),
+    };
+    println!("{}", banner.dimmed());
+
+    let skin = termimad::MadSkin::default();
+
+    for message in messages {
+        let is_assistant = message.role == "assistant";
+        let role_label = match message.role.as_str() {
+            "user" => "You:".bold(),
+            "assistant" => "Railway Agent:".purple().bold(),
+            other => other.bold(),
+        };
+        println!("{}", role_label);
+
+        let text_parts: Vec<&str> = message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                ChatMessagePart::Text { content } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let text = if text_parts.is_empty() {
+            message.content.clone()
+        } else {
+            text_parts.join("")
+        };
+        if !text.trim().is_empty() {
+            if is_assistant {
+                skin.print_text(&text);
+            } else {
+                println!("{}", text);
+            }
+        }
+
+        for part in &message.parts {
+            match part {
+                ChatMessagePart::Tool {
+                    tool_name,
+                    is_error,
+                    ..
+                } => {
+                    let label = if *is_error {
+                        format!("[tool failed: {tool_name}]")
+                    } else {
+                        format!("[used tool: {tool_name}]")
+                    };
+                    println!("{}", label.dimmed().italic());
+                }
+                ChatMessagePart::Attachment { name, .. } => {
+                    println!("{}", format!("[attachment: {name}]").dimmed().italic());
+                }
+                ChatMessagePart::Text { .. } => {}
+            }
+        }
+
+        println!();
+    }
+
+    println!("{}", "── end of history ──".dimmed());
+}
+
+fn render_threads(threads: &[ChatThread], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(threads)?);
+        return Ok(());
+    }
+
+    if threads.is_empty() {
+        println!("No agent threads found for this environment.");
+        return Ok(());
+    }
+
+    println!("{}", "Agent Threads".bold());
+    for thread in threads {
+        let title = thread.title.as_deref().unwrap_or("(untitled)");
+        let updated = DateTime::parse_from_rfc3339(&thread.updated_at)
+            .map(|t| {
+                t.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S %Z")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| thread.updated_at.clone());
+        println!("  {} | {} | {}", thread.id, title, updated.dimmed(),);
+    }
+    Ok(())
 }
 
 async fn run_single_shot(
@@ -146,6 +278,7 @@ async fn run_single_shot(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repl(
     client: &reqwest::Client,
     url: &str,
@@ -153,6 +286,7 @@ async fn run_repl(
     environment_id: &str,
     service_id: Option<&str>,
     initial_thread_id: Option<String>,
+    history: Vec<ChatMessage>,
     json: bool,
     is_tty: bool,
 ) -> Result<()> {
@@ -165,6 +299,11 @@ async fn run_repl(
         "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed()
     );
     println!();
+
+    if !history.is_empty() {
+        render_history(&history, initial_thread_id.as_deref());
+        println!();
+    }
 
     let mut thread_id = initial_thread_id;
 

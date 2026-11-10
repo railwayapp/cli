@@ -1,0 +1,16 @@
+mutation SandboxCheckpointCreate(
+  $environmentId: String!
+  $sandboxId: String!
+  $name: String!
+) {
+  sandboxCheckpointCreate(
+    environmentId: $environmentId
+    sandboxId: $sandboxId
+    name: $name
+  ) {
+    id
+    key
+    createdAt
+    environmentId
+  }
+}

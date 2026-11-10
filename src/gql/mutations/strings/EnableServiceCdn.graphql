@@ -1,0 +1,6 @@
+mutation EnableServiceCdn($input: EnableServiceCdnInput!) {
+  enableServiceCdn(input: $input) {
+    id
+    enabled
+  }
+}

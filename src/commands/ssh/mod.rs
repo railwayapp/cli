@@ -6,11 +6,23 @@ use clap::Parser;
 use crate::{client::GQLClient, config::Configs};
 
 mod common;
+// `pub(crate)` so `ca desktop` can write an agent's OpenSSH block with the same
+// marker scheme, file locking and permissions as `railway ssh config`.
+pub(crate) mod config;
 mod keys;
-mod native;
-mod tel;
+pub(crate) mod native;
+// `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.
+pub(crate) mod tel;
 
 use common::*;
+
+// Re-exported for the `sandbox` and `code` commands, which reuse the same
+// native SSH transport (key registration + `ssh <target>@<env relay host>`).
+pub use native::{
+    DurableResume, PortForward, ensure_ssh_key, ensure_ssh_key_quiet, get_service_instance_id,
+    probe_native_ssh, run_native_ssh, run_native_ssh_captured, run_native_ssh_forward,
+    run_native_ssh_with_opts, spawn_native_ssh_forward,
+};
 
 /// Connect to a service via SSH or manage SSH keys
 #[derive(Parser, Clone)]
@@ -55,13 +67,18 @@ pub struct Args {
 
 #[derive(Parser, Clone)]
 enum Commands {
+    /// Add, preview, or remove an OpenSSH config block for a service
+    Config(config::Args),
+
     /// Manage SSH keys registered with Railway
     Keys(keys::Args),
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    if let Some(Commands::Keys(keys_args)) = args.subcommand {
-        return keys::command(keys_args).await;
+    match args.subcommand {
+        Some(Commands::Config(config_args)) => return config::command(config_args).await,
+        Some(Commands::Keys(keys_args)) => return keys::command(keys_args).await,
+        None => {}
     }
 
     if args.native {
@@ -73,8 +90,10 @@ pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
 
+    let mut auto_ssh_identity = None;
     if args.identity_file.is_none() {
-        tel::track("key_setup", native::ensure_ssh_key(&client, &configs).await).await?;
+        auto_ssh_identity =
+            tel::track("key_setup", ensure_ssh_key(&client, &configs).await).await?;
     }
 
     let ssh_target = if let Some(ref instance_id) = args.deployment_instance {
@@ -98,17 +117,20 @@ pub async fn command(args: Args) -> Result<()> {
         .await?
     };
 
-    let identity_file = args.identity_file.as_deref();
+    let effective_identity = args
+        .identity_file
+        .as_deref()
+        .or(auto_ssh_identity.as_deref());
 
     if let Some(session_name) = args.session {
         tel::track(
             "tmux_install",
-            native::ensure_tmux_installed(&ssh_target, identity_file),
+            native::ensure_tmux_installed(&ssh_target, effective_identity),
         )
         .await?;
         return tel::track(
             "session_connect",
-            native::run_tmux_session(&ssh_target, &session_name, identity_file),
+            native::run_tmux_session(&ssh_target, &session_name, effective_identity),
         )
         .await;
     }
@@ -120,7 +142,7 @@ pub async fn command(args: Args) -> Result<()> {
     };
     let exit_code = tel::track(
         "spawn",
-        native::run_native_ssh(&ssh_target, command, identity_file),
+        native::run_native_ssh(&ssh_target, command, effective_identity, None),
     )
     .await?;
     if exit_code != 0 {

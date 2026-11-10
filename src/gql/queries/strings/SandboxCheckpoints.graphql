@@ -1,0 +1,8 @@
+query SandboxCheckpoints($environmentId: String!) {
+  sandboxCheckpoints(environmentId: $environmentId) {
+    id
+    key
+    createdAt
+    environmentId
+  }
+}

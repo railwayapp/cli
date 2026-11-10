@@ -1,0 +1,20 @@
+query ServiceEdgeConfig($environmentId: String!, $serviceId: String!) {
+  serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+    id
+    edgeConfig {
+      id
+      enabled
+      caching {
+        mode
+        defaultTtlSeconds
+        htmlCaching
+        staleWhileRevalidate {
+          enabled
+        }
+        purgeOnDeploy
+      }
+      purgeEpoch
+      purgeEpochByKind
+    }
+  }
+}

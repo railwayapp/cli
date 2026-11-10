@@ -59,6 +59,8 @@ query EnvironmentInstances(
           cronSchedule
           nextCronRunAt
           startCommand
+          tracingEnabled
+          autoInstrumentationEnabled
         }
       }
       pageInfo {
@@ -69,12 +71,15 @@ query EnvironmentInstances(
     volumeInstances(first: $volumeInstancesFirst, after: $volumeInstancesAfter) {
       edges {
         node {
+          id
           serviceId
           mountPath
           environmentId
           currentSizeMB
           sizeMB
           state
+          deletedAt
+          isPendingDeletion
           volume {
             name
             id

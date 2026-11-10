@@ -9,31 +9,35 @@ use crate::{
     controllers::user::get_user,
     errors::RailwayError,
     oauth,
-    util::{progress::create_spinner, prompt::prompt_confirm_with_default_with_cancel},
+    util::progress::create_spinner,
 };
 
 use super::*;
 
-/// Login to your Railway account
+/// Sign in to Railway — also creates a new account if you don't have one.
+///
+/// Uses a single OAuth flow for both sign-in and sign-up. Brand-new
+/// accounts are detected automatically and land on a welcome page;
+/// existing users see the standard sign-in confirmation. Use
+/// --browserless for SSH sessions, remote dev boxes, or any
+/// environment where a local browser can't open.
 #[derive(Parser)]
 pub struct Args {
-    /// Browserless login
+    /// Use a device-code flow instead of opening a browser. Prints
+    /// a sign-in link + short code to use from any device. Only
+    /// needed when this machine truly has no browser — the CLI
+    /// already auto-detects SSH, CI, and missing DISPLAY. If a human
+    /// is at this machine (including under a coding agent), omit
+    /// this flag: the browser flow completes far more reliably.
     #[clap(short, long)]
     pub browserless: bool,
 }
 
-pub async fn command(args: Args) -> Result<()> {
-    if !crate::macros::is_stdout_terminal() {
-        if args.browserless {
-            bail!(
-                "Browserless login requires an interactive terminal. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
-            );
-        }
-        bail!(
-            "Cannot login in non-interactive mode. For non-interactive environments, set RAILWAY_API_TOKEN or RAILWAY_TOKEN."
-        );
-    }
+pub async fn prompt_login() -> Result<()> {
+    command(Args { browserless: false }).await
+}
 
+pub async fn command(args: Args) -> Result<()> {
     let mut configs = Configs::new()?;
 
     // Check for env var tokens first
@@ -63,16 +67,92 @@ pub async fn command(args: Args) -> Result<()> {
 
     let host = configs.get_host();
 
-    let token_resp = if args.browserless {
-        device_flow_login(host).await?
-    } else {
-        let confirm = prompt_confirm_with_default_with_cancel("Open the browser?", true)?;
-        match confirm {
-            Some(true) => browser_login(host).await?,
-            Some(false) => device_flow_login(host).await?,
-            None => return Ok(()),
+    // `login` is an explicit auth request, so we always attempt it —
+    // only the transport varies. Device-code when the user asked for it
+    // (--browserless) or no local browser is reachable (CI/SSH/no
+    // DISPLAY); otherwise open a browser. browser_login itself falls
+    // back to device-code if `open` fails. Neither path needs a TTY.
+    let ctx = crate::exec_context::ExecutionContext::detect(false, false);
+    let transport_choice = ctx.login_transport(args.browserless);
+
+    // Why this transport was chosen, for funnel telemetry. Env
+    // constraints win over the flag: "flag_browserless" is reported
+    // only when a browser was otherwise reachable, so it counts exactly
+    // the sessions a bare `railway login` would have sent down the
+    // (far more reliable) browser path. browser_login overwrites both
+    // labels if its `open` attempt fails and it falls back.
+    let mut reason = match transport_choice {
+        crate::exec_context::AuthTransport::Browser => "browser",
+        crate::exec_context::AuthTransport::DeviceCode => {
+            headless_reason().unwrap_or(if args.browserless {
+                "flag_browserless"
+            } else {
+                "unknown"
+            })
         }
     };
+
+    // --browserless on a machine that has a browser: honor the flag,
+    // but say so in the output. Agents (the dominant source of this
+    // combination) read command output at exactly this moment, and the
+    // browser path completes far more often for watched sessions.
+    if reason == "flag_browserless" {
+        println!(
+            "  {} A browser is available on this machine — `railway login` without {} opens it directly and completes more reliably.",
+            "→".cyan(),
+            "--browserless".bold(),
+        );
+    }
+
+    let mut transport = match transport_choice {
+        crate::exec_context::AuthTransport::DeviceCode => "device_code",
+        crate::exec_context::AuthTransport::Browser => "browser",
+    };
+    let result = match transport_choice {
+        crate::exec_context::AuthTransport::DeviceCode => device_flow_login(host).await,
+        crate::exec_context::AuthTransport::Browser => {
+            browser_login(host, &mut transport, &mut reason).await
+        }
+    };
+
+    // Funnel telemetry: record the auth-attempt outcome. Sent via a
+    // public mutation so timeouts/failures (no token yet) are captured,
+    // attributed by caller/agent-session. Fires from here regardless of
+    // whether `login` was invoked directly or chained from an unauthed
+    // `up`.
+    let outcome = match &result {
+        Ok(_) => "succeeded",
+        // Device-code expiry is a typed error; the browser path's
+        // timeout is an anyhow context string ("Authentication timed
+        // out…"), so check both.
+        Err(e)
+            if matches!(
+                e.downcast_ref::<crate::errors::RailwayError>(),
+                Some(crate::errors::RailwayError::OAuthDeviceCodeExpired)
+            ) || e.to_string().contains("timed out") =>
+        {
+            "timed_out"
+        }
+        Err(_) => "failed",
+    };
+    // Fire-and-forget: telemetry is a side effect, not something the user's
+    // result should wait on. Awaiting it inline used to put a second,
+    // independent network call (with its own timeout) in the critical path
+    // of surfacing the *real* outcome to the user — on a flaky or blocked
+    // network path, that doubles the worst-case wait before anything is
+    // printed at all. `result?` below now runs immediately after the auth
+    // attempt itself resolves.
+    tokio::spawn(crate::telemetry::send_auth_event(
+        crate::telemetry::CliAuthTrackEvent {
+            transport,
+            outcome,
+            transport_reason: reason,
+            success: result.is_ok(),
+            error_message: result.as_ref().err().map(|e| e.to_string()),
+        },
+    ));
+
+    let token_resp = result?;
 
     configs.save_oauth_tokens(
         &token_resp.access_token,
@@ -91,30 +171,68 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     if let Some(name) = me.name {
-        println!("Logged in as {} ({})", name.bold(), me.email);
+        println!(
+            "  {} Signed in as {} ({})",
+            "✓".green(),
+            name.bold(),
+            me.email,
+        );
     } else {
-        println!("Logged in as {}", me.email);
+        println!("  {} Signed in as {}", "✓".green(), me.email);
     }
 
     Ok(())
 }
 
 /// Browser flow: Authorization Code + PKCE with localhost redirect.
-async fn browser_login(host: &str) -> Result<oauth::TokenResponse> {
+///
+/// `transport` / `reason` are the funnel-telemetry labels owned by the
+/// caller; they're overwritten here when the `open` attempt fails and
+/// the flow falls back to device-code, so telemetry records the
+/// transport that actually ran rather than the one that was chosen.
+async fn browser_login(
+    host: &str,
+    transport: &mut &'static str,
+    reason: &mut &'static str,
+) -> Result<oauth::TokenResponse> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     let pkce = oauth::generate_pkce();
     let state = oauth::generate_state();
-    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state);
+    let caller = crate::telemetry::detect_caller();
+    let auth_url = oauth::get_authorization_url(host, &redirect_uri, &pkce, &state, &caller);
+    // Sign-up vs sign-in is handled entirely server-side (the consent
+    // screen adapts for brand-new accounts); the CLI doesn't declare
+    // its intent up front.
 
+    // Tell the user before we steal window focus, and show the URL up
+    // front as a copy-paste fallback (wrong browser/profile/tab opened,
+    // or debugging).
+    println!();
+    println!(
+        "  {} Opening your browser to sign in — finish there.",
+        "→".cyan()
+    );
+    println!("    {}", auth_url.bold().underline());
+    println!();
+
+    // If we can't open a browser, fall back to device-code flow (which
+    // uses a different URL that doesn't need a localhost callback, and
+    // prints its own verification URL + short code).
     if ::open::that(&auth_url).is_err() {
+        println!(
+            "  {} Couldn't open a browser — use the sign-in code below instead.",
+            "→".cyan(),
+        );
+        *transport = "device_code";
+        *reason = "open_failed_fallback";
         drop(listener);
         return device_flow_login(host).await;
     }
 
-    let spinner = create_spinner("Waiting for authentication...".into());
+    let spinner = create_spinner("Waiting for sign-in...".into());
 
     let result = tokio::time::timeout(
         Duration::from_secs(300),
@@ -229,12 +347,28 @@ async fn send_response(
     };
     let dots_url = format!("https://{host}/dots-oxipng.png");
 
+    // On success, redirect the browser to the dashboard after a short
+    // pause; the CLI's localhost callback doesn't need the tab to stay
+    // open past this point — the token was captured before we serve
+    // this response.
+    let refresh_meta = if success {
+        format!(r#"<meta http-equiv="refresh" content="2;url=https://{host}/dashboard">"#)
+    } else {
+        String::new()
+    };
+    let body_copy = if success {
+        "Taking you to your dashboard…"
+    } else {
+        "You can close this window and return to your terminal."
+    };
+
     let body = format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{refresh_meta}
 <title>Railway CLI</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@600&display=swap');
@@ -300,7 +434,7 @@ async fn send_response(
   <div class="card">
     <div class="icon">{icon}</div>
     <h1>{message}</h1>
-    <p>You can close this window and return to your terminal.</p>
+    <p>{body_copy}</p>
   </div>
 </body>
 </html>"#
@@ -316,21 +450,71 @@ async fn send_response(
 
 /// Browserless flow: Device Authorization Grant (RFC 8628).
 async fn device_flow_login(host: &str) -> Result<oauth::TokenResponse> {
-    let device_auth = oauth::request_device_code(host).await?;
+    let caller = crate::telemetry::detect_caller();
+    let device_auth = oauth::request_device_code(host, &caller).await?;
 
-    println!(
-        "Your authentication code is: {}",
-        device_auth.user_code.bold().purple()
-    );
-    println!(
-        "Please visit:\n  {}",
-        device_auth.verification_uri.bold().underline()
-    );
+    // Prefer the one-click link (code pre-embedded): a single URL
+    // survives being relayed through an agent transcript far better
+    // than a URL plus a separate code to transcribe. Keep the code
+    // visible beneath for cross-device entry and as a fallback.
+    println!();
+    if let Some(ref one_click) = device_auth.verification_uri_complete {
+        println!("  {} Sign in with one click:", "→".cyan());
+        println!("    {}", one_click.bold().underline());
+        println!();
+        println!(
+            "  {} Or go to {} and enter this code:",
+            "→".cyan(),
+            device_auth.verification_uri.underline(),
+        );
+        println!("    {}", device_auth.user_code.bold().purple());
+    } else {
+        println!("  {} Sign in at:", "→".cyan());
+        println!("    {}", device_auth.verification_uri.bold().underline());
+        println!();
+        println!("  {} Enter this code:", "→".cyan());
+        println!("    {}", device_auth.user_code.bold().purple());
+    }
+    println!();
 
-    let spinner = create_spinner("Waiting for authentication...".into());
+    let spinner = create_spinner("Waiting for sign-in...".into());
 
     let token_resp = oauth::poll_for_token(host, &device_auth).await?;
 
     spinner.finish_and_clear();
     Ok(token_resp)
+}
+
+/// Why a local browser can't be used, if it can't. `None` means a
+/// browser is plausibly reachable. The label doubles as the
+/// `transport_reason` funnel-telemetry value, so keep values in sync
+/// with the backend's accepted labels.
+///
+/// Heuristics (intentionally conservative — false positives just
+/// route the user to a non-interactive path, which still works):
+/// - $CI is truthy (CI runners have no GUI). Truthy, not merely set:
+///   `CI=false` / `CI=0` / `CI=""` appear in real dotfiles and must
+///   not route a desktop session to device-code.
+/// - $SSH_CONNECTION is set (remote shell, browser would open on the
+///   wrong machine)
+/// - On Linux, $DISPLAY is empty (no X11 / Wayland session)
+pub fn headless_reason() -> Option<&'static str> {
+    if crate::config::Configs::env_is_ci() {
+        return Some("env_ci");
+    }
+    if std::env::var("SSH_CONNECTION").is_ok() {
+        return Some("env_ssh");
+    }
+    if cfg!(target_os = "linux") && std::env::var("DISPLAY").unwrap_or_default().is_empty() {
+        return Some("no_display");
+    }
+    None
+}
+
+/// Detect environments where opening a local browser will fail or
+/// be useless, AND where we shouldn't try to show an interactive
+/// picker. Used to skip the `open` attempt and go straight to
+/// device-code flow, and to gate clack-style prompts in other commands.
+pub fn is_likely_headless() -> bool {
+    headless_reason().is_some()
 }

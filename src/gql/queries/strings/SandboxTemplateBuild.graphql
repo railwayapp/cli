@@ -1,0 +1,7 @@
+query SandboxTemplateBuild($environmentId: String!, $id: ID!) {
+  sandboxTemplateBuild(environmentId: $environmentId, id: $id) {
+    id
+    status
+    environmentId
+  }
+}

@@ -1,6 +1,12 @@
 #[macro_export]
 macro_rules! commands {
-    ($($module:ident $(($($alias:ident),*))?),*) => {
+    (@command_name $module:ident) => {
+        stringify!($module)
+    };
+    (@command_name $module:ident as $name:literal) => {
+        $name
+    };
+    ($($module:ident $(as $name:literal)? $(($($alias:ident),*))?),*) => {
         pastey::paste! {
             /// Build the global CLI (root command) and attach module subcommands.
             pub fn build_args() -> clap::Command {
@@ -11,14 +17,15 @@ macro_rules! commands {
                     .propagate_version(true)
                     .about(concat!(
                         clap::crate_description!(),
-                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and MCP configuration."
+                        "\n\nTip: Using an AI coding agent? Run `railway setup agent -y` to install Railway skills and the Railway MCP server."
                     ))
                     .long_about(None)
                     .version(clap::crate_version!());
                 $(
                     {
+                        let command_name = $crate::commands!(@command_name $module $(as $name)?);
                         // Get the subcommand as defined by the module.
-                        let sub = <$module::Args as ::clap::CommandFactory>::command();
+                        let sub = <$crate::commands::$module::Args as ::clap::CommandFactory>::command();
                         // Allow the module to add dynamic arguments (if needed) and add any aliases.
                         let sub = {
                             let mut s = sub;
@@ -37,11 +44,11 @@ macro_rules! commands {
                                     s = get_dynamic_args(s);
                                 }
                             }
-                            s = s.name(stringify!($module));
+                            s = s.name(command_name);
                             s
                         };
                         // Add this subcommand into the global CLI.
-                        cmd = cmd.subcommand(sub);
+                        cmd = cmd.subcommand(sub.name(command_name));
                     }
                 )*
                 cmd = cmd
@@ -62,21 +69,34 @@ macro_rules! commands {
             pub async fn exec_cli(matches: clap::ArgMatches) -> anyhow::Result<()> {
                 match matches.subcommand() {
                     $(
-                        Some((stringify!([<$module:snake>]), sub_matches)) => {
-                            let subcommand_name = sub_matches.subcommand_name().map(|s| s.to_string());
-                            let args = <$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
+                        Some((matched_command_name, sub_matches))
+                            if matched_command_name == $crate::commands!(@command_name [<$module:snake>] $(as $name)?) => {
+                            // Walk nested subcommand levels so telemetry can
+                            // distinguish e.g. `sandbox template build` from
+                            // `sandbox template status` ("template:build").
+                            let subcommand_name = {
+                                let mut parts: Vec<&str> = Vec::new();
+                                let mut current = sub_matches;
+                                while let Some((name, next)) = current.subcommand() {
+                                    parts.push(name);
+                                    current = next;
+                                }
+                                if parts.is_empty() { None } else { Some(parts.join(":")) }
+                            };
+                            let command_name = stringify!([<$module:snake>]);
+                            let args = <$crate::commands::$module::Args as ::clap::FromArgMatches>::from_arg_matches(sub_matches)
                                 .map_err(anyhow::Error::from)?;
                             let start = ::std::time::Instant::now();
-                            let result = $module::command(args).await;
+                            let result = $crate::commands::$module::command(args).await;
                             let duration = start.elapsed();
                             $crate::telemetry::send($crate::telemetry::CliTrackEvent {
-                                command: stringify!([<$module:snake>]).to_string(),
+                                command: command_name.to_string(),
                                 sub_command: subcommand_name,
                                 success: result.is_ok(),
-                                error_message: result.as_ref().err().map(|e| {
-                                    let msg = format!("{e}");
-                                    if msg.len() > 256 { msg[..256].to_string() } else { msg }
-                                }),
+                                error_message: result
+                                    .as_ref()
+                                    .err()
+                                    .map(|e| $crate::telemetry::truncate_message(&format!("{e:#}"))),
                                 duration_ms: duration.as_millis() as u64,
                                 cli_version: env!("CARGO_PKG_VERSION"),
                                 os: ::std::env::consts::OS,
@@ -89,6 +109,9 @@ macro_rules! commands {
                     _ => {
                         build_args().print_help()?;
                         println!();
+                        // Bare `railway` shows the same root help as --help;
+                        // mirror its agent-tooling health check.
+                        $crate::commands::setup::print_agent_health_check();
                     }
                 }
                 Ok(())

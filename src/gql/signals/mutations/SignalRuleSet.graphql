@@ -1,0 +1,10 @@
+mutation SignalRuleSet($input: SignalRuleSetInput!) {
+  signalRuleSet(input: $input) {
+    id
+    name
+    owner
+    default
+    rules
+    version
+  }
+}

@@ -1,0 +1,13 @@
+query PrivateNetworkEndpoint($privateNetworkId: String!, $environmentId: String!, $serviceId: String!) {
+  privateNetworkEndpoint(privateNetworkId: $privateNetworkId, environmentId: $environmentId, serviceId: $serviceId) {
+    publicId
+    serviceInstanceId
+    dnsName
+    newDnsName
+    privateIps
+    createdAt
+    deletedAt
+    tags
+    syncStatus
+  }
+}

@@ -18,6 +18,17 @@ type EnvironmentConfig = controllers::config::EnvironmentConfig;
 #[allow(dead_code)]
 pub struct CliEventTrack;
 
+/// Short-lived JWT for a cloud agent's in-VM harness gate (see
+/// `CloudAgent.agentWsUrl`) — the door the manage TUI reads railway-agent
+/// conversation transcripts through.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentHarnessToken.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CloudAgentHarnessToken;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
@@ -53,12 +64,62 @@ pub struct ServiceDomainCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDomainUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceDomainUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDomainDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceDomainDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ValidateTwoFactor.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ValidateTwoFactor;
 
 pub type SerializedTemplateConfig = serde_json::Value;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateGenerate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateGenerate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplatePublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplatePublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateUnpublish.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateUnpublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TemplateDelete;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -171,11 +232,112 @@ pub struct ServiceCreate;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceConnect.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct ServiceConnect;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceDisconnect.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceDisconnect;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnableServiceCdn.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnableServiceCdn;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/UpdateServiceEdgeConfig.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct UpdateServiceEdgeConfig;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DisableServiceCdn.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DisableServiceCdn;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/PurgeServiceCache.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct PurgeServiceCache;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SetServiceUnderAttackMode.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SetServiceUnderAttackMode;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/CustomDomainCreate.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
 )]
 pub struct CustomDomainCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CustomDomainUpdate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CustomDomainIssueCertificate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CustomDomainIssueCertificate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TcpProxyDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct TcpProxyDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/PrivateNetworkEndpointRename.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct PrivateNetworkEndpointRename;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -197,10 +359,27 @@ pub struct ServiceInstanceDeploy;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DeploymentInstanceExecutionCreate.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct DeploymentInstanceExecutionCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceInstanceDeployLatestCommit.graphql",
     response_derives = "Debug, Serialize, Clone"
 )]
 pub struct ServiceInstanceDeployLatestCommit;
+
+/// One-off deploy of a specific commit, without pinning it in the environment config.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ServiceInstanceDeployCommit.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ServiceInstanceDeployCommit;
 
 #[derive(GraphQLQuery)]
 #[graphql(
@@ -276,6 +455,24 @@ pub struct EnvironmentStageChanges;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EgressGatewayAssociationCreate.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct EgressGatewayAssociationCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EgressGatewayAssociationsClear.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EgressGatewayAssociationsClear;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/ServiceInstanceUpdate.graphql",
     response_derives = "Debug, Serialize, Clone",
     variables_derives = "Default",
@@ -299,6 +496,113 @@ pub struct SshPublicKeyCreate;
 )]
 pub struct SshPublicKeyDelete;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentDelete.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentSleep.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentSleep;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentWake.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentWake;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxTemplateBuild.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxTemplateBuild;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCheckpointCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCheckpointCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCheckpointRename.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCheckpointRename;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxCheckpointDelete.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct SandboxCheckpointDelete;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/GenerateShellToken.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct GenerateShellToken;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxDestroy.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct SandboxDestroy;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/SandboxHeartbeat.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+#[allow(dead_code)]
+pub struct SandboxHeartbeat;
+
 impl std::fmt::Display for custom_domain_create::DNSRecordType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -312,3 +616,125 @@ impl std::fmt::Display for custom_domain_create::DNSRecordType {
         }
     }
 }
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateDeployV2.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateDeployV2;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/TemplateRevert.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct TemplateRevert;
+
+/// Commits a staged environment patch, used by `template_apply`'s auto-deploy wrapper.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnvironmentPatchCommitStaged.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnvironmentPatchCommitStaged;
+
+/// Used by `railway postgres pitr backup create`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupCreate;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/EnablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct EnablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/DisablePitrForHaCluster.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct DisablePitrForHaCluster;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CancelPitrHaWorkflow.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct CancelPitrHaWorkflow;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/ClearPitrHaWorkflowProgress.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct ClearPitrHaWorkflowProgress;
+
+/// Used by `railway postgres pitr restore`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstancePitrRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstancePitrRestore;
+
+/// Used by `railway postgres pitr backup delete`, once per id. The batch
+/// mutation (`volumeInstanceBackupBatchDelete`) also exists but is
+/// Internal-subgraph only -- this single-id one is on the public graph.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupDelete.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupDelete;
+
+/// Used by `railway postgres pitr backup lock`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupLock.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VolumeInstanceBackupLock;
+
+/// Used by `railway postgres pitr backup restore`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupRestore.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupRestore;
+
+/// Used by `railway postgres pitr schedule set`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/VolumeInstanceBackupScheduleUpdate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VolumeInstanceBackupScheduleUpdate;

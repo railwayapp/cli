@@ -1,0 +1,18 @@
+query DeploymentInstanceExecutions(
+  $input: DeploymentInstanceExecutionListInput!
+  $first: Int
+) {
+  deploymentInstanceExecutions(input: $input, first: $first) {
+    edges {
+      node {
+        id
+        deploymentId
+        deploymentMeta
+        status
+        createdAt
+        completedAt
+        updatedAt
+      }
+    }
+  }
+}

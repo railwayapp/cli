@@ -1,0 +1,1216 @@
+use std::{env, path::PathBuf, process::Stdio};
+
+use is_terminal::IsTerminal;
+
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::{io::AsyncWriteExt, process::Command};
+
+use crate::{
+    client::{GQLClient, post_graphql},
+    gql::queries,
+    util::{
+        progress::{create_spinner_if, fail_spinner, success_spinner},
+        prompt::prompt_confirm_with_default,
+    },
+};
+
+use super::*;
+
+/// Preview or stage Railway IaC changes from .railway/railway.ts
+#[derive(Parser)]
+pub struct Args {
+    /// Path to the Railway IaC file. Defaults to nearest .railway/railway.ts resolved by the runner.
+    #[clap(long)]
+    pub(super) file: Option<PathBuf>,
+
+    /// Stage the proposed ChangeSet in Backboard.
+    #[clap(long)]
+    pub(super) stage: bool,
+
+    /// Output raw runner JSON.
+    #[clap(long)]
+    pub(super) json: bool,
+
+    /// Confirm prompts and proceed non-interactively.
+    #[clap(long)]
+    pub(super) yes: bool,
+
+    /// Allow destructive applies in non-interactive or agent sessions.
+    #[clap(long)]
+    pub(super) confirm_destructive: bool,
+
+    #[clap(skip)]
+    pub(super) apply: bool,
+
+    /// Ask Backboard to decrypt variables while planning, when authorized.
+    #[clap(long)]
+    pub(super) decrypt_variables: bool,
+
+    /// Include generated graph TypeScript types in runner output.
+    #[clap(long)]
+    pub(super) include_types: bool,
+
+    /// Path to the TypeScript IaC runner. When set (or RAILWAY_IAC_TS_BIN / RAILWAY_IAC_ENGINE=ts),
+    /// plan/apply use railway-iac-ts. Default is the CLI-native engine.
+    #[clap(long)]
+    pub(super) runner: Option<String>,
+
+    /// Show full change details.
+    #[clap(long, alias = "full")]
+    pub(super) verbose: bool,
+
+    /// Exit 2 when a plan has pending changes, 0 when none (plan only). For CI gating.
+    #[clap(long)]
+    pub(super) detailed_exit_code: bool,
+
+    /// Print variable values in the plan instead of redacting them.
+    #[clap(long)]
+    pub(super) show_values: bool,
+
+    /// Write a pinned plan artifact (plan only).
+    #[clap(long)]
+    pub(super) out: Option<PathBuf>,
+
+    /// Apply a pinned plan artifact without re-evaluating the authoring file.
+    #[clap(long)]
+    pub(super) plan: Option<PathBuf>,
+
+    /// Tree hash written into `--out`. Defaults to `git rev-parse HEAD:.railway`.
+    #[clap(long)]
+    pub(super) source_tree: Option<String>,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    pub(super) environment: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RunnerResponse {
+    pub(super) ok: bool,
+    command: String,
+    file: String,
+    current_environment: Option<CurrentEnvironment>,
+    pub(super) change_set: Option<ChangeSet>,
+    diff: Option<String>,
+    pub(super) diagnostics: Vec<Diagnostic>,
+    pub(super) current_graph: Option<DesiredGraph>,
+    pub(super) desired_graph: Option<DesiredGraph>,
+    staged_patch: Option<StagedPatch>,
+    apply_result: Option<ChangeSetApplyResult>,
+    deployment_id: Option<String>,
+    staged_patch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_policy: Option<crate::iac::VariablePolicyReport>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CurrentEnvironment {
+    project_id: Option<String>,
+    project_name: Option<String>,
+    environment_id: String,
+    environment_name: Option<String>,
+    config_etag: Option<String>,
+    #[serde(default)]
+    pr: Option<EnvironmentPr>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentPr {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+impl RunnerResponse {
+    pub(super) fn pull_pr_repo(&self) -> Option<&str> {
+        self.current_environment
+            .as_ref()?
+            .pr
+            .as_ref()?
+            .repo
+            .as_deref()
+            .filter(|repo| !repo.is_empty())
+    }
+}
+
+#[derive(Deserialize, serde::Serialize)]
+pub(super) struct ChangeSet {
+    pub(super) changes: Vec<Change>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+pub(super) struct Change {
+    summary: Option<String>,
+    severity: Option<String>,
+    kind: Option<String>,
+    details: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+pub(super) struct Diagnostic {
+    severity: String,
+    pub(super) path: String,
+    pub(super) message: String,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeSetApplyResult {
+    id: String,
+    status: String,
+    changes: Vec<ChangeOperationResult>,
+    diagnostics: Value,
+    deployment_id: Option<String>,
+    staged_patch_id: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ChangeOperationResult {
+    kind: String,
+    path: Option<String>,
+    summary: Option<String>,
+    status: String,
+    outputs: Option<Value>,
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredGraph {
+    pub(super) project: Option<DesiredProject>,
+    pub(super) resources: Vec<DesiredResource>,
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredProject {
+    pub(super) name: String,
+}
+
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DesiredResource {
+    pub(super) address: Option<String>,
+    pub(super) r#type: String,
+    pub(super) kind: Option<String>,
+    pub(super) name: String,
+    pub(super) engine: Option<String>,
+    pub(super) variables: Option<serde_json::Map<String, Value>>,
+    pub(super) source: Option<Value>,
+    pub(super) build: Option<Value>,
+    pub(super) deploy: Option<Value>,
+    pub(super) networking: Option<Value>,
+    pub(super) volume_attachments: Option<serde_json::Map<String, Value>>,
+    pub(super) config: Option<Value>,
+    pub(super) group_id: Option<String>,
+    pub(super) tracing: Option<Value>,
+    pub(super) cdn: Option<Value>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct StagedPatch {
+    id: String,
+    #[allow(dead_code)]
+    patch: Option<Value>,
+}
+
+pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
+    let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
+    let (response, _) =
+        invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await?;
+    Ok(response)
+}
+
+pub(super) async fn run_command(args: Args) -> Result<()> {
+    if let Some(path) = &args.plan {
+        return apply_pinned_plan(&args, path).await;
+    }
+
+    let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
+    let command = if args.stage {
+        "stage"
+    } else if args.apply {
+        "apply"
+    } else {
+        "plan"
+    };
+
+    if args.stage && !args.yes {
+        let mut spinner = create_spinner_if(
+            !args.json && std::io::stdout().is_terminal(),
+            "Checking proposed changes".into(),
+        );
+        let (preview, _) =
+            invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
+        if let Some(spinner) = &mut spinner {
+            if preview.ok {
+                success_spinner(spinner, "Checked proposed changes".into());
+            } else {
+                fail_spinner(spinner, "Could not check proposed changes".into());
+            }
+        }
+
+        if has_destructive_changes(&preview) {
+            bail!(
+                "These changes remove Railway resources. Re-run with --stage --yes to stage them."
+            );
+        }
+    }
+
+    if command == "apply" {
+        let preview =
+            preview_before_apply(&args, &configs, &linked_project, &token, auth_type).await?;
+        let changes = preview
+            .change_set
+            .as_ref()
+            .map(|change_set| change_set.changes.len())
+            .unwrap_or(0);
+        if changes == 0 {
+            if !args.json {
+                print_response_with_options(&preview, args.verbose);
+            }
+            return Ok(());
+        }
+
+        let destructive = has_destructive_changes(&preview);
+        guard_destructive_apply(&args, destructive)?;
+
+        if !args.yes && !args.json {
+            print_response_with_options_and_next(&preview, args.verbose, false);
+            println!();
+            let prompt = if destructive {
+                "Apply these changes? This will remove Railway resources or variables."
+            } else {
+                "Apply these changes to Railway?"
+            };
+            if !prompt_confirm_with_default(prompt, false)? {
+                bail!("No changes applied.");
+            }
+            println!();
+        }
+    }
+
+    let mut spinner = create_spinner_if(
+        !args.json && std::io::stdout().is_terminal(),
+        runner_message(command).into(),
+    );
+    let (output, raw) =
+        invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
+    if output.ok {
+        if let Some(path) = &args.out {
+            write_pinned_plan(&args, &raw, path)?;
+        }
+    }
+    if let Some(spinner) = &mut spinner {
+        if output.ok {
+            success_spinner(spinner, runner_done_message(command).into());
+        } else {
+            fail_spinner(spinner, "Could not read Railway configuration".into());
+        }
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        if !output.ok {
+            bail!(runner_diagnostics_message(&output));
+        }
+        maybe_detailed_exit(&args, command, &output);
+        return Ok(());
+    }
+
+    print_response_with_options(&output, args.verbose);
+    if !output.ok {
+        bail!(runner_diagnostics_message(&output));
+    }
+
+    maybe_detailed_exit(&args, command, &output);
+
+    Ok(())
+}
+
+/// Terraform-style `-detailed-exitcode`: on a successful `plan`, exit 2 if changes
+/// are pending (0 if none). Opt-in via --detailed-exit-code, so default behavior is
+/// unchanged and existing CI keeps working. Errors still surface as a non-zero
+/// failure through the normal path; this only distinguishes no-changes from changes.
+fn maybe_detailed_exit(args: &Args, command: &str, output: &RunnerResponse) {
+    if !args.detailed_exit_code || command != "plan" || !output.ok {
+        return;
+    }
+    let pending = output
+        .change_set
+        .as_ref()
+        .map(|change_set| !change_set.changes.is_empty())
+        .unwrap_or(false);
+    if pending {
+        std::process::exit(2);
+    }
+}
+
+async fn preview_before_apply(
+    args: &Args,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+    token: &str,
+    auth_type: &str,
+) -> Result<RunnerResponse> {
+    if !args.yes && !args.json && !std::io::stdout().is_terminal() {
+        bail!("Run `railway config apply --yes` to apply changes non-interactively.");
+    }
+
+    let mut spinner = create_spinner_if(
+        !args.json && std::io::stdout().is_terminal(),
+        "Checking Railway configuration".into(),
+    );
+    let (preview, _) =
+        invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
+    if let Some(spinner) = &mut spinner {
+        if preview.ok {
+            success_spinner(spinner, "Checked Railway configuration".into());
+        } else {
+            fail_spinner(spinner, "Could not read Railway configuration".into());
+        }
+    }
+
+    if !preview.ok {
+        if !args.json {
+            print_response_with_options_and_next(&preview, args.verbose, false);
+        }
+        bail!(runner_diagnostics_message(&preview));
+    }
+
+    Ok(preview)
+}
+
+fn guard_destructive_apply(args: &Args, destructive: bool) -> Result<()> {
+    if !destructive || args.confirm_destructive {
+        return Ok(());
+    }
+
+    if args.yes || args.json || crate::telemetry::is_agent() {
+        bail!(
+            "Destructive Railway configuration changes require explicit confirmation. Review `railway config plan`, then re-run with `railway config apply --confirm-destructive` if the removals are expected."
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'static str)> {
+    ensure_config_context_with_prompt(std::io::stdout().is_terminal()).await
+}
+
+pub(super) async fn ensure_config_context_with_prompt(
+    interactive: bool,
+) -> Result<(Configs, LinkedProject, String, &'static str)> {
+    let configs = Configs::new()?;
+    let (token, auth_type) = match get_runner_token(&configs) {
+        Ok(token) => token,
+        Err(error) if interactive => {
+            println!("{}", "Log in to Railway to continue.".bold());
+            crate::commands::login::prompt_login().await?;
+            get_runner_token(&Configs::new()?).map_err(|_| error)?
+        }
+        Err(error) => return Err(error),
+    };
+
+    let linked_project = match configs.get_linked_project().await {
+        Ok(linked_project) => linked_project,
+        Err(_error) if interactive => {
+            println!();
+            println!("{}", "Connect Railway configuration".bold());
+            println!("Choose the project and environment to manage.");
+            crate::commands::link::link_project_without_service().await?
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok((Configs::new()?, linked_project, token, auth_type))
+}
+
+/// `--environment` replaces the linked environment for eval, fetch, and apply.
+///
+/// A project token cannot read other environments, so a different target fails
+/// before the list query.
+async fn target_linked_environment(
+    configs: &Configs,
+    linked: &LinkedProject,
+    requested: Option<&str>,
+    auth_type: &str,
+) -> Result<LinkedProject> {
+    let Some(requested) = requested else {
+        return Ok(linked.clone());
+    };
+    if auth_type == "project-token" {
+        let token_id = linked.environment.as_deref().unwrap_or_default();
+        let token_name = linked.environment_name.as_deref();
+        if super::environment::token_targets_other(token_id, token_name, requested) {
+            let label = super::environment::scoped_environment_label(token_id, token_name);
+            bail!(super::environment::token_scope_error(label, requested));
+        }
+        return Ok(linked.clone());
+    }
+    let environments = list_project_environments(configs, &linked.project).await?;
+    let resolved = super::environment::resolve_environment(requested, &environments)?;
+    let mut targeted = linked.clone();
+    targeted.environment = Some(resolved.id.clone());
+    targeted.environment_name = Some(resolved.name.clone());
+    Ok(targeted)
+}
+
+async fn list_project_environments(
+    configs: &Configs,
+    project_id: &str,
+) -> Result<Vec<super::environment::NamedEnvironment>> {
+    let client = GQLClient::new_authorized(configs)?;
+    let mut after: Option<String> = None;
+    let mut environments = Vec::new();
+    loop {
+        let vars = queries::environments::Variables {
+            project_id: project_id.to_string(),
+            is_ephemeral: None,
+            first: Some(500),
+            after: after.clone(),
+        };
+        let response =
+            post_graphql::<queries::Environments, _>(&client, configs.get_backboard(), vars)
+                .await?;
+        let page = response.environments;
+        for edge in page.edges {
+            environments.push(super::environment::NamedEnvironment {
+                id: edge.node.id,
+                name: edge.node.name,
+            });
+        }
+        if !page.page_info.has_next_page {
+            break;
+        }
+        match page.page_info.end_cursor {
+            Some(cursor) if Some(&cursor) != after.as_ref() => after = Some(cursor),
+            _ => break,
+        }
+    }
+    Ok(environments)
+}
+
+fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
+    if let Some(token) = Configs::get_railway_token() {
+        return Ok((token, "project-token"));
+    }
+
+    configs
+        .get_railway_auth_token()
+        .map(|token| (token, "bearer"))
+        .context(
+            "Not authenticated. Run `railway login`, set RAILWAY_API_TOKEN, or set RAILWAY_TOKEN.",
+        )
+}
+
+fn write_pinned_plan(args: &Args, raw: &serde_json::Value, path: &PathBuf) -> Result<()> {
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let tree = crate::iac::saved_plan::source_tree(&cwd, args.source_tree.as_deref())?;
+    let plan = crate::iac::saved_plan::from_runner_json(raw, tree)?;
+    crate::iac::saved_plan::write_plan(path, &plan)?;
+    if !args.json {
+        eprintln!("{} {}", "Wrote".dimmed(), path.display());
+    }
+    Ok(())
+}
+
+async fn apply_pinned_plan(args: &Args, path: &PathBuf) -> Result<()> {
+    if !args.yes && !args.json && !std::io::stdout().is_terminal() {
+        bail!(
+            "Run `railway config apply --plan {} --yes` to apply a pinned plan non-interactively.",
+            path.display()
+        );
+    }
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let plan = crate::iac::saved_plan::read_plan(path)?;
+    crate::iac::saved_plan::assert_source_tree(&plan, &cwd)?;
+    if let Some(requested) = args.environment.as_deref() {
+        let (configs, linked, _, auth_type) = ensure_config_context().await?;
+        let targeted =
+            target_linked_environment(&configs, &linked, Some(requested), auth_type).await?;
+        super::environment::ensure_pinned_plan_environment(
+            &plan.environment_id,
+            requested,
+            targeted.environment_id()?,
+        )?;
+    }
+    guard_destructive_apply(args, plan.destructive)?;
+
+    if !args.yes && !args.json {
+        if let Some(diff) = &plan.diff {
+            println!("{diff}");
+        }
+        println!();
+        let prompt = if plan.destructive {
+            "Apply this pinned plan? This will remove Railway resources or variables."
+        } else {
+            "Apply this pinned plan to Railway?"
+        };
+        if !prompt_confirm_with_default(prompt, false)? {
+            bail!("No changes applied.");
+        }
+        println!();
+    }
+
+    let (configs, _, _, _) = ensure_config_context().await?;
+    let result = crate::iac::saved_plan::apply_saved_plan(&configs, &plan).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if result.get("status").and_then(Value::as_str) == Some("noop") {
+        println!(
+            "{}",
+            "✓ Your Railway configuration is already up to date.".green()
+        );
+        return Ok(());
+    }
+    println!("{}", "Applied pinned Railway configuration.".green());
+    Ok(())
+}
+
+async fn invoke_runner(
+    args: &Args,
+    configs: &Configs,
+    linked_project: &LinkedProject,
+    token: &str,
+    auth_type: &str,
+    command: &str,
+) -> Result<(RunnerResponse, Value)> {
+    let linked_project = target_linked_environment(
+        configs,
+        linked_project,
+        args.environment.as_deref(),
+        auth_type,
+    )
+    .await?;
+    let linked_project = &linked_project;
+    let cwd_path = env::current_dir().context("Unable to get current working directory")?;
+    if !crate::iac::use_legacy_ts_runner(args.runner.as_deref()) {
+        let value = crate::iac::run_native(
+            &crate::iac::NativeRun {
+                file: args.file.clone(),
+                decrypt_variables: args.decrypt_variables,
+                show_values: args.show_values,
+            },
+            configs,
+            linked_project,
+            command,
+        )
+        .await?;
+        let response = serde_json::from_value(value.clone())
+            .context("Native IaC engine returned a response the CLI could not parse")?;
+        return Ok((response, value));
+    }
+    let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
+
+    let cwd = cwd_path.to_string_lossy().to_string();
+
+    let request = serde_json::json!({
+        "command": command,
+        "cwd": cwd,
+        "file": args.file.as_ref().map(|path| path.to_string_lossy().to_string()),
+        "includeTypes": args.include_types,
+        "pretty": false,
+        "revealValues": args.show_values,
+        "context": {
+            "projectId": linked_project.project,
+            "projectName": linked_project.name,
+            "environmentId": linked_project.environment,
+            "environment": linked_project.environment_name,
+            "environmentName": linked_project.environment_name
+        },
+        "backboard": {
+            "endpoint": configs.get_backboard(),
+            "token": token,
+            "authType": auth_type,
+            "projectId": linked_project.project,
+            "environmentId": linked_project.environment,
+            "decryptVariables": args.decrypt_variables,
+            "merge": true
+        }
+    });
+
+    let mut command = Command::new(&runner.path);
+    if let Some(runner_cwd) = runner_cwd(&runner.path) {
+        command.current_dir(runner_cwd);
+    }
+    if matches!(Configs::get_environment_id(), Environment::Dev) {
+        command.env("NODE_TLS_REJECT_UNAUTHORIZED", "0");
+    }
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| runner_not_found_message(&runner))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(request.to_string().as_bytes()).await?;
+    }
+
+    let output = child.wait_with_output().await?;
+    let stdout = String::from_utf8(output.stdout).context("Runner stdout was not valid UTF-8")?;
+    let stderr = String::from_utf8(output.stderr).context("Runner stderr was not valid UTF-8")?;
+
+    let value: Value = serde_json::from_str(&stdout).with_context(|| {
+        format!("IaC runner returned non-JSON output.\nstdout:\n{stdout}\nstderr:\n{stderr}")
+    })?;
+    let response: RunnerResponse = serde_json::from_value(value.clone())
+        .context("IaC runner returned a response the CLI could not parse")?;
+
+    Ok((response, value))
+}
+
+struct ResolvedRunner {
+    path: String,
+    source: RunnerSource,
+}
+
+enum RunnerSource {
+    Explicit,
+    Env,
+    ProjectDependency,
+    Path,
+}
+
+fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> ResolvedRunner {
+    if let Some(runner) = explicit_runner {
+        return ResolvedRunner {
+            path: runner.to_string(),
+            source: RunnerSource::Explicit,
+        };
+    }
+
+    if let Ok(runner) = env::var("RAILWAY_IAC_TS_BIN") {
+        return ResolvedRunner {
+            path: runner,
+            source: RunnerSource::Env,
+        };
+    }
+
+    if let Some(runner) =
+        find_project_runner(cwd).or_else(|| find_project_runner(&cwd.join(".railway")))
+    {
+        return ResolvedRunner {
+            path: runner.to_string_lossy().to_string(),
+            source: RunnerSource::ProjectDependency,
+        };
+    }
+
+    ResolvedRunner {
+        path: "railway-iac-ts".to_string(),
+        source: RunnerSource::Path,
+    }
+}
+
+/// The directory the runner search is allowed to reach: the enclosing git
+/// repository, or `start` itself when there isn't one. Without a bound the
+/// search reaches `/`, so on a shared host any writable ancestor — a CI
+/// workspace root, `/tmp` — can offer the binary we are about to execute.
+fn project_search_root(start: &std::path::Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(start)
+        .to_path_buf()
+}
+
+/// Whether `path` is writable by anyone other than its owner. A runner sitting
+/// in a group- or world-writable directory can be replaced by another local
+/// principal between now and exec, so it is not a trustworthy candidate.
+#[cfg(unix)]
+fn writable_by_others(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o022 != 0)
+        .unwrap_or(true)
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_path: &std::path::Path) -> bool {
+    false
+}
+
+fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
+    let binary = if cfg!(windows) {
+        "railway-iac-ts.cmd"
+    } else {
+        "railway-iac-ts"
+    };
+
+    // This candidate is executed and then handed a Railway bearer token on
+    // stdin, and it takes precedence over whatever the user installed in PATH.
+    // Only accept one inside the project, reachable through directories no
+    // other local principal can write to.
+    let root = project_search_root(start);
+    for dir in start.ancestors() {
+        let candidate = dir.join("node_modules").join(".bin").join(binary);
+        if candidate.exists() {
+            if writable_by_others(&candidate)
+                || dir
+                    .ancestors()
+                    .take_while(|ancestor| ancestor.starts_with(&root))
+                    .any(writable_by_others)
+            {
+                return None;
+            }
+            return Some(candidate);
+        }
+        if dir == root {
+            break;
+        }
+    }
+
+    None
+}
+
+fn runner_not_found_message(runner: &ResolvedRunner) -> String {
+    match runner.source {
+        RunnerSource::Explicit | RunnerSource::Env => format!(
+            "Could not start Railway configuration support from `{}`. Check that the path exists and is executable.",
+            runner.path
+        ),
+        RunnerSource::ProjectDependency | RunnerSource::Path => "Could not find Railway configuration support for this project. Install the Railway TypeScript SDK, then run this command again: https://github.com/railwayapp/railway-ts-sdk".to_string(),
+    }
+}
+
+fn runner_cwd(runner: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(runner);
+    if path.file_name()?.to_str()? != "bin.js" {
+        return None;
+    }
+    let iac_dir = path.parent()?;
+    if iac_dir.file_name()?.to_str()? != "iac" {
+        return None;
+    }
+    let dist_dir = iac_dir.parent()?;
+    if dist_dir.file_name()?.to_str()? != "dist" {
+        return None;
+    }
+    dist_dir.parent().map(|path| path.to_path_buf())
+}
+
+fn print_variable_policy(response: &RunnerResponse) {
+    let Some(policy) = &response.variable_policy else {
+        return;
+    };
+    let railway_variables = response
+        .current_graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .resources
+                .iter()
+                .map(|resource| {
+                    resource
+                        .variables
+                        .as_ref()
+                        .map(|variables| variables.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+    let line = crate::iac::format_variable_policy_line(policy, railway_variables);
+    if let Some((label, rest)) = line.split_once(": ") {
+        println!("{} {}", format!("{label}:").dimmed(), rest.cyan());
+    } else {
+        println!("{}", line.dimmed());
+    }
+}
+
+/// Terraform-style one-line summary printed atop the change list.
+fn plan_summary_line(changes: &[Change]) -> String {
+    let (mut add, mut change, mut destroy) = (0usize, 0usize, 0usize);
+    for entry in changes {
+        match entry.kind.as_deref() {
+            Some("resource.create") | Some("domain.create") => add += 1,
+            Some("resource.delete") | Some("variable.delete") => destroy += 1,
+            // resource.update, variable.set, and anything else count as a change.
+            _ => change += 1,
+        }
+    }
+    format!(
+        "{} {}, {}, {}",
+        "Plan:".bold(),
+        format!("{add} to add").green(),
+        format!("{change} to change").yellow(),
+        format!("{destroy} to destroy").red(),
+    )
+}
+
+fn has_destructive_changes(response: &RunnerResponse) -> bool {
+    response
+        .change_set
+        .as_ref()
+        .map(|change_set| {
+            change_set
+                .changes
+                .iter()
+                .any(|change| change.severity.as_deref() == Some("destructive"))
+        })
+        .unwrap_or(false)
+}
+
+fn runner_message(command: &str) -> &'static str {
+    match command {
+        "apply" => "Applying Railway configuration",
+        "stage" => "Checking Railway configuration",
+        _ => "Checking Railway configuration",
+    }
+}
+
+fn runner_done_message(command: &str) -> &'static str {
+    match command {
+        "apply" => "Applied Railway configuration",
+        "stage" => "Checked Railway configuration",
+        _ => "Checked Railway configuration",
+    }
+}
+
+fn runner_diagnostics_message(response: &RunnerResponse) -> String {
+    let diagnostics = response
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            if diagnostic.path.is_empty() {
+                diagnostic.message.clone()
+            } else {
+                format!("{}: {}", diagnostic.path, diagnostic.message)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if diagnostics.is_empty() {
+        return "Railway configuration could not be processed. Run again with --verbose for more details.".into();
+    }
+
+    format!(
+        "Railway configuration could not be processed:\n{}",
+        diagnostics.join("\n")
+    )
+}
+
+pub(super) fn print_response_with_options(response: &RunnerResponse, verbose: bool) {
+    print_response_with_options_and_next(response, verbose, true);
+}
+
+pub(super) fn print_response_with_options_and_next(
+    response: &RunnerResponse,
+    verbose: bool,
+    show_next: bool,
+) {
+    println!();
+    println!("{}", "Railway configuration".bold());
+    println!(
+        "{} {}",
+        "Using".dimmed(),
+        display_file_path(&response.file).cyan()
+    );
+
+    if let Some(environment) = &response.current_environment {
+        if let Some(project_name) = environment
+            .project_name
+            .as_deref()
+            .or(environment.project_id.as_deref())
+        {
+            println!("{} {}", "Project".dimmed(), project_name.cyan());
+        }
+        let environment_name = environment
+            .environment_name
+            .as_deref()
+            .unwrap_or(&environment.environment_id);
+        println!("{} {}", "Environment".dimmed(), environment_name.cyan());
+        print_variable_policy(response);
+        if verbose {
+            if let Some(project_id) = &environment.project_id {
+                println!("{} {}", "Project ID".dimmed(), project_id.dimmed());
+            }
+        }
+    } else {
+        print_variable_policy(response);
+    }
+    println!();
+
+    for diagnostic in &response.diagnostics {
+        let text = if diagnostic.path.is_empty() {
+            format!("{}: {}", diagnostic.severity, diagnostic.message)
+        } else {
+            format!(
+                "{}: {}: {}",
+                diagnostic.severity, diagnostic.path, diagnostic.message
+            )
+        };
+        if diagnostic.severity == "error" {
+            println!("{} {}", "Error".red().bold(), text.red());
+        } else {
+            println!("{} {}", "Warning".yellow().bold(), text.yellow());
+        }
+    }
+
+    if !response.ok {
+        return;
+    }
+
+    let changes = response
+        .change_set
+        .as_ref()
+        .map(|change_set| change_set.changes.as_slice())
+        .unwrap_or(&[]);
+
+    if let Some(apply_result) = &response.apply_result {
+        print_operation_results(apply_result, verbose);
+        if verbose {
+            println!();
+            println!("{} {}", "Result".dimmed(), apply_result.id.dimmed());
+            if let Some(deployment_id) = response
+                .deployment_id
+                .as_ref()
+                .or(apply_result.deployment_id.as_ref())
+            {
+                println!("{} {}", "Deployment".dimmed(), deployment_id.dimmed());
+            }
+            if let Some(staged_patch_id) = response
+                .staged_patch_id
+                .as_ref()
+                .or(apply_result.staged_patch_id.as_ref())
+            {
+                println!("{} {}", "Patch".dimmed(), staged_patch_id.dimmed());
+            }
+        }
+        return;
+    }
+
+    if changes.is_empty() {
+        println!(
+            "{}",
+            "✓ Your Railway configuration is already up to date.".green()
+        );
+    } else {
+        println!("{}", plan_summary_line(changes));
+        for change in changes {
+            print_change(change, verbose);
+        }
+
+        let destructive = changes
+            .iter()
+            .filter(|change| change.severity.as_deref() == Some("destructive"))
+            .count();
+        if destructive > 0 {
+            println!();
+            println!(
+                "{} {}",
+                "!".red().bold(),
+                format!("{destructive} destructive change(s) will remove Railway resources or variables.").red()
+            );
+        }
+
+        if show_next {
+            println!();
+            println!("{}", "Next".bold());
+            println!(
+                "  {} Run {} to apply these changes.",
+                "•".cyan(),
+                "railway config apply".cyan()
+            );
+        }
+    }
+}
+
+fn display_file_path(path: &str) -> String {
+    let path = PathBuf::from(path);
+    let cwd = std::env::current_dir().ok();
+    let display_path = cwd
+        .as_ref()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(&path);
+    display_path.display().to_string()
+}
+
+fn print_operation_results(apply_result: &ChangeSetApplyResult, verbose: bool) {
+    if apply_result.changes.is_empty() {
+        return;
+    }
+    let total = apply_result.changes.len();
+    println!("{} {}", "Changes".bold(), format!("({total})").dimmed());
+    for change in &apply_result.changes {
+        let summary = change
+            .summary
+            .as_deref()
+            .or(change.path.as_deref())
+            .unwrap_or(&change.kind);
+        let marker = match change.status.as_str() {
+            "applied" => "✓".green().bold(),
+            "noop" => "=".dimmed(),
+            "failed" => "✕".red().bold(),
+            _ => "•".cyan(),
+        };
+        if verbose {
+            println!(
+                "  {} {} {}",
+                marker,
+                summary,
+                format!("({})", change.status).dimmed()
+            );
+        } else {
+            println!("  {} {}", marker, summary);
+        }
+        if verbose {
+            if let Some(outputs) = &change.outputs {
+                print_operation_outputs(outputs, 4);
+            }
+        }
+    }
+}
+
+fn print_operation_outputs(value: &Value, indent: usize) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                match value {
+                    Value::Object(_) | Value::Array(_) => {
+                        println!("{}{}", " ".repeat(indent), key.dimmed());
+                        print_operation_outputs(value, indent + 2);
+                    }
+                    _ => println!(
+                        "{}{} {}",
+                        " ".repeat(indent),
+                        key.dimmed(),
+                        format_output_value(value).cyan()
+                    ),
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                print_operation_outputs(value, indent);
+            }
+        }
+        _ => println!(
+            "{}{}",
+            " ".repeat(indent),
+            format_output_value(value).cyan()
+        ),
+    }
+}
+
+fn format_output_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "null".to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn print_change(change: &Change, _verbose: bool) {
+    let summary = change
+        .summary
+        .as_deref()
+        .or(change.kind.as_deref())
+        .unwrap_or("change");
+    let marker = marker_for_change(change);
+    println!("  {} {}", marker, summary);
+    if let Some(details) = &change.details {
+        for detail in details {
+            println!("    {} {}", "└".dimmed(), format_detail(detail));
+        }
+    }
+}
+
+/// Source code diffs ride along as `+ `/`- ` prefixed details; everything
+/// else is a `path (before → after)` line.
+fn format_detail(detail: &str) -> colored::ColoredString {
+    if detail.starts_with("+ ") {
+        detail.green()
+    } else if detail.starts_with("- ") {
+        detail.red()
+    } else {
+        detail.dimmed()
+    }
+}
+
+fn marker_for_change(change: &Change) -> colored::ColoredString {
+    match change.kind.as_deref() {
+        Some("resource.create") | Some("variable.set") | Some("domain.create") => {
+            "+".green().bold()
+        }
+        Some("resource.delete") | Some("variable.delete") => "-".red().bold(),
+        _ => "~".yellow().bold(),
+    }
+}
+
+#[cfg(test)]
+mod runner_discovery_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_runner(dir: &std::path::Path) -> PathBuf {
+        let bin_dir = dir.join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let binary = if cfg!(windows) {
+            "railway-iac-ts.cmd"
+        } else {
+            "railway-iac-ts"
+        };
+        let path = bin_dir.join(binary);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn resolves_a_runner_installed_beside_the_railway_config() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        let expected = make_runner(&railway_dir);
+
+        let resolved = resolve_runner(None, root.path());
+
+        assert_eq!(PathBuf::from(resolved.path), expected);
+        assert!(matches!(resolved.source, RunnerSource::ProjectDependency));
+    }
+
+    #[test]
+    fn finds_a_runner_inside_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let expected = make_runner(root.path());
+        let nested = root.path().join("apps").join("web");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_project_runner(&nested), Some(expected));
+    }
+
+    #[test]
+    fn does_not_search_above_the_repository_root() {
+        let outer = tempfile::tempdir().unwrap();
+        make_runner(outer.path());
+        let repo = outer.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert_eq!(find_project_runner(&repo), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_runner_reachable_through_a_world_writable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let shared = root.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        make_runner(&shared);
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+
+        assert_eq!(find_project_runner(&shared), None);
+    }
+}

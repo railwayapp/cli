@@ -1,0 +1,32 @@
+mutation TemplatePublish(
+  $id: String!
+  $description: String!
+  $category: String!
+  $readme: String!
+  $image: String
+  $demoProjectId: String
+  $workspaceId: String
+) {
+  templatePublish(
+    id: $id
+    input: {
+      description: $description
+      category: $category
+      readme: $readme
+      image: $image
+      demoProjectId: $demoProjectId
+      workspaceId: $workspaceId
+    }
+  ) {
+    id
+    code
+    name
+    description
+    image
+    category
+    readme
+    demoProjectId
+    status
+    workspaceId
+  }
+}

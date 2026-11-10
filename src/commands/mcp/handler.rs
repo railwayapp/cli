@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use super::params::*;
 
@@ -20,7 +19,7 @@ use crate::{
         project::{get_environment_instances, get_project, get_service_ids_in_env},
         upload::{create_deploy_tarball, upload_deploy_tarball},
         user::get_user,
-        variables::get_service_variables,
+        variables::get_service_variables_including_sealed,
     },
     gql::{mutations, queries},
     telemetry,
@@ -33,9 +32,26 @@ use crate::{
 
 #[derive(Clone)]
 pub struct RailwayMcp {
-    pub(crate) client: reqwest::Client,
+    /// Swappable HTTP client. `GQLClient::new_authorized` bakes the bearer
+    /// token into the client's default headers, so the client is only valid for
+    /// as long as that token is. This server outlives its access token (1h) by
+    /// hours, so the client has to be replaceable — otherwise every tool call
+    /// after expiry fails and `railway login` cannot heal the running process.
+    /// Paired with the bearer token it carries, so the two can never disagree.
+    /// Rebuilding a `reqwest::Client` throws away its connection pool and costs
+    /// a fresh TLS handshake (~130ms per call, measured), so it is replaced only
+    /// when the token actually changes rather than on every tool call.
+    client: Arc<std::sync::RwLock<AuthedClient>>,
     pub(crate) configs: Arc<Configs>,
     tool_router: ToolRouter<Self>,
+}
+
+/// An HTTP client together with the bearer token baked into its default
+/// headers. Kept as one value so a reader can never see a new client with a
+/// stale token.
+struct AuthedClient {
+    http: reqwest::Client,
+    token: Option<String>,
 }
 
 pub(crate) struct ResolvedContext {
@@ -54,10 +70,84 @@ pub(crate) struct ResolvedServiceContext {
 
 impl RailwayMcp {
     pub fn new(client: reqwest::Client, configs: Configs) -> Self {
+        let token = configs.get_railway_auth_token();
         Self {
-            client,
+            client: Arc::new(std::sync::RwLock::new(AuthedClient {
+                http: client,
+                token,
+            })),
             configs: Arc::new(configs),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// The HTTP client to use for this request. Cloning a `reqwest::Client` is
+    /// cheap (it is an `Arc` internally) and shares the connection pool.
+    ///
+    /// A poisoned lock means a previous swap panicked mid-write; the inner
+    /// client is still a valid value, so keep serving with it.
+    pub(crate) fn client(&self) -> reqwest::Client {
+        self.client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .http
+            .clone()
+    }
+
+    /// Re-resolve credentials from disk, refresh them if needed, and swap in a
+    /// client carrying the current bearer token. Returns whether the token
+    /// changed, i.e. whether a request that just failed on auth is worth
+    /// retrying.
+    ///
+    /// Called at the start of every tool call. This is what makes the server
+    /// survive its own access-token lifetime, and what lets a `railway login` in
+    /// another terminal take effect without restarting the editor.
+    ///
+    /// `force` ignores the local expiry timestamp, for use after an actual
+    /// authorization failure: a token can die server-side (grant revoked, or
+    /// evicted by the per-grant refresh-token cap) while still looking valid
+    /// here.
+    ///
+    /// Failures are deliberately silent: stdout is the JSON-RPC channel, the
+    /// existing client may still work, and the tool call's own error is a better
+    /// signal than one from a speculative refresh.
+    pub(crate) async fn sync_client(&self, force: bool) -> bool {
+        let Ok(mut configs) = Configs::new() else {
+            return false;
+        };
+        if force {
+            let _ = crate::client::force_refresh(&mut configs).await;
+        } else {
+            let _ = crate::client::ensure_valid_token(&mut configs).await;
+        }
+
+        let token = configs.get_railway_auth_token();
+        // Steady state: the token is unchanged, so keep the existing client and
+        // its warm connection pool. This is the common path on every tool call.
+        if self
+            .client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token
+            == token
+        {
+            return false;
+        }
+        // A cleared token cannot authorize anything, so there is nothing to
+        // install and no point retrying.
+        if token.is_none() {
+            return false;
+        }
+        match crate::client::GQLClient::new_authorized(&configs) {
+            Ok(http) => {
+                *self
+                    .client
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    AuthedClient { http, token };
+                true
+            }
+            Err(_) => false,
         }
     }
 
@@ -79,7 +169,7 @@ impl RailwayMcp {
                 )
             })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -126,7 +216,7 @@ impl RailwayMcp {
             first: Some(1),
         };
         let response = post_graphql::<queries::Deployments, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -186,6 +276,39 @@ impl RailwayMcp {
             context: ctx,
         })
     }
+
+    pub(crate) async fn fetch_domains(
+        &self,
+        ctx: &ResolvedServiceContext,
+    ) -> Result<queries::domains::DomainsDomains, McpError> {
+        post_graphql::<queries::Domains, _>(
+            &self.client(),
+            self.configs.get_backboard(),
+            queries::domains::Variables {
+                environment_id: ctx.environment_id.clone(),
+                project_id: ctx.project_id.clone(),
+                service_id: ctx.service_id.clone(),
+            },
+        )
+        .await
+        .map(|response| response.domains)
+        .map_err(|e| McpError::internal_error(format!("Failed to query domains: {e}"), None))
+    }
+
+    pub(crate) async fn resolve_domain_details(
+        &self,
+        ctx: &ResolvedServiceContext,
+        identifier: &str,
+    ) -> Result<McpDomainDetails, McpError> {
+        let domains = self.fetch_domains(ctx).await?;
+        let items = mcp_domain_items(&domains);
+        find_mcp_domain(&items, identifier).cloned().ok_or_else(|| {
+            McpError::invalid_params(
+                format!("Domain '{identifier}' not found on the selected service."),
+                None,
+            )
+        })
+    }
 }
 
 fn format_environments(project: &queries::RailwayProject) -> String {
@@ -208,11 +331,371 @@ fn format_services(project: &queries::RailwayProject) -> String {
         .join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpDomainKind {
+    Custom,
+    Service,
+}
+
+impl fmt::Display for McpDomainKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            McpDomainKind::Custom => write!(f, "custom"),
+            McpDomainKind::Service => write!(f, "service"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct McpDomainDetails {
+    id: String,
+    domain: String,
+    kind: McpDomainKind,
+    target_port: Option<i64>,
+    sync_status: String,
+    service_domain_suffix: Option<String>,
+    environment_id: String,
+    service_id: String,
+    dns_records: Vec<McpDnsRecord>,
+    verification: Option<McpVerification>,
+    certificate: Option<McpCertificateStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct McpDnsRecord {
+    record_type: String,
+    name: String,
+    required_value: String,
+    current_value: String,
+    status: String,
+    zone: String,
+}
+
+#[derive(Debug, Clone)]
+struct McpVerification {
+    verified: bool,
+    dns_host: Option<String>,
+    token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct McpCertificateStatus {
+    status: String,
+    detailed_status: Option<String>,
+    error_message: Option<String>,
+    error_type: Option<String>,
+    retryable: Option<bool>,
+    cdn_provider: Option<String>,
+}
+
+fn mcp_domain_items(domains: &queries::domains::DomainsDomains) -> Vec<McpDomainDetails> {
+    domains
+        .service_domains
+        .iter()
+        .map(mcp_domain_from_service)
+        .chain(domains.custom_domains.iter().map(mcp_domain_from_custom))
+        .collect()
+}
+
+fn mcp_domain_from_service(
+    domain: &queries::domains::DomainsDomainsServiceDomains,
+) -> McpDomainDetails {
+    McpDomainDetails {
+        id: domain.id.clone(),
+        domain: domain.domain.clone(),
+        kind: McpDomainKind::Service,
+        target_port: domain.target_port,
+        sync_status: enum_name(&domain.sync_status),
+        service_domain_suffix: domain.suffix.clone(),
+        environment_id: domain.environment_id.clone(),
+        service_id: domain.service_id.clone(),
+        dns_records: Vec::new(),
+        verification: None,
+        certificate: None,
+    }
+}
+
+fn mcp_domain_from_custom(
+    domain: &queries::domains::DomainsDomainsCustomDomains,
+) -> McpDomainDetails {
+    McpDomainDetails {
+        id: domain.id.clone(),
+        domain: domain.domain.clone(),
+        kind: McpDomainKind::Custom,
+        target_port: domain.target_port,
+        sync_status: enum_name(&domain.sync_status),
+        service_domain_suffix: None,
+        environment_id: domain.environment_id.clone(),
+        service_id: domain.service_id.clone(),
+        dns_records: domain
+            .status
+            .dns_records
+            .iter()
+            .map(|record| McpDnsRecord {
+                record_type: enum_name(&record.record_type),
+                name: if record.hostlabel.is_empty() {
+                    "@".to_string()
+                } else {
+                    record.hostlabel.clone()
+                },
+                required_value: record.required_value.clone(),
+                current_value: record.current_value.clone(),
+                status: enum_name(&record.status),
+                zone: record.zone.clone(),
+            })
+            .collect(),
+        verification: Some(McpVerification {
+            verified: domain.status.verified,
+            dns_host: domain.status.verification_dns_host.clone(),
+            token: domain.status.verification_token.clone(),
+        }),
+        certificate: Some(McpCertificateStatus {
+            status: enum_name(&domain.status.certificate_status),
+            detailed_status: enum_name_option(&domain.status.certificate_status_detailed),
+            error_message: domain.status.certificate_error_message.clone(),
+            error_type: enum_name_option(&domain.status.certificate_error_type),
+            retryable: domain.status.certificate_retryable,
+            cdn_provider: enum_name_option(&domain.status.cdn_provider),
+        }),
+    }
+}
+
+fn find_mcp_domain<'a>(
+    domains: &'a [McpDomainDetails],
+    identifier: &str,
+) -> Option<&'a McpDomainDetails> {
+    let normalized = normalize_domain_identifier(identifier);
+
+    domains.iter().find(|domain| {
+        domain.id.eq_ignore_ascii_case(identifier)
+            || domain.domain.eq_ignore_ascii_case(&normalized)
+    })
+}
+
+fn normalize_domain_identifier(identifier: &str) -> String {
+    let trimmed = identifier.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn format_domains(domains: &[McpDomainDetails]) -> String {
+    if domains.is_empty() {
+        return "No domains found.".to_string();
+    }
+
+    let mut output = String::from("## Domains\n");
+    for domain in domains {
+        output.push_str(&format!(
+            "- https://{} (type: {}, id: {}, target_port: {}, sync_status: {})\n",
+            domain.domain,
+            domain.kind,
+            domain.id,
+            format_target_port(domain.target_port),
+            domain.sync_status
+        ));
+    }
+    output
+}
+
+fn format_domain_details(domain: &McpDomainDetails) -> String {
+    let mut output = format!(
+        "## Domain status\nURL: https://{}\nID: {}\nType: {}\nTarget port: {}\nSync status: {}\n",
+        domain.domain,
+        domain.id,
+        domain.kind,
+        format_target_port(domain.target_port),
+        domain.sync_status
+    );
+
+    if let Some(verification) = &domain.verification {
+        output.push_str(&format!(
+            "Verified: {}\n",
+            if verification.verified { "yes" } else { "no" }
+        ));
+    }
+
+    if let Some(certificate) = &domain.certificate {
+        output.push_str(&format!("Certificate status: {}\n", certificate.status));
+        if let Some(detailed_status) = &certificate.detailed_status {
+            output.push_str(&format!("Certificate detail: {detailed_status}\n"));
+        }
+        if let Some(error_message) = &certificate.error_message {
+            output.push_str(&format!("Certificate error: {error_message}\n"));
+        }
+        if let Some(error_type) = &certificate.error_type {
+            output.push_str(&format!("Certificate error type: {error_type}\n"));
+        }
+        if let Some(retryable) = certificate.retryable {
+            output.push_str(&format!("Certificate retryable: {retryable}\n"));
+        }
+        if let Some(cdn_provider) = &certificate.cdn_provider {
+            output.push_str(&format!("CDN provider: {cdn_provider}\n"));
+        }
+    }
+
+    if !domain.dns_records.is_empty() {
+        output.push_str("\nDNS records:\n");
+        for record in &domain.dns_records {
+            output.push_str(&format!(
+                "- {} {} -> {} (status: {}, current: {})\n",
+                record.record_type,
+                record.name,
+                record.required_value,
+                record.status,
+                if record.current_value.is_empty() {
+                    "-"
+                } else {
+                    &record.current_value
+                }
+            ));
+        }
+
+        if let Some(verification) = &domain.verification
+            && !verification.verified
+            && let (Some(host), Some(token)) = (&verification.dns_host, &verification.token)
+        {
+            let zone = domain
+                .dns_records
+                .first()
+                .map(|record| record.zone.as_str())
+                .unwrap_or("");
+            let host_label = host.strip_suffix(&format!(".{zone}")).unwrap_or(host);
+            output.push_str(&format!(
+                "- TXT {host_label} -> {} (verification)\n",
+                verification_txt_value(token)
+            ));
+        }
+    }
+
+    output
+}
+
+fn verification_txt_value(token: &str) -> String {
+    let mut token = token;
+    while let Some(stripped) = token.strip_prefix("railway-verify=") {
+        token = stripped;
+    }
+    format!("railway-verify={token}")
+}
+
+fn format_target_port(port: Option<i64>) -> String {
+    port.map(|port| port.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn mcp_service_domain_input(
+    domain: &McpDomainDetails,
+    new_domain: &str,
+) -> Result<String, McpError> {
+    let normalized = normalize_domain_identifier(new_domain);
+
+    if normalized.is_empty() {
+        return Err(McpError::invalid_params(
+            "new_domain must not be empty.",
+            None,
+        ));
+    }
+
+    if normalized.contains('.') {
+        return Ok(normalized);
+    }
+
+    let Some(suffix) = &domain.service_domain_suffix else {
+        return Err(McpError::invalid_params(
+            "Pass the full service domain because the current suffix could not be resolved.",
+            None,
+        ));
+    };
+
+    Ok(format!("{normalized}.{suffix}"))
+}
+
+fn enum_name<T: fmt::Debug>(value: &T) -> String {
+    format!("{value:?}")
+}
+
+fn enum_name_option<T: fmt::Debug>(value: &Option<T>) -> Option<String> {
+    value.as_ref().map(enum_name)
+}
+
+const CERTIFICATE_STATUS_ISSUE_FAILED: &str = "CERTIFICATE_STATUS_TYPE_ISSUE_FAILED";
+
+fn certificate_retry_unavailable_reason(domain: &McpDomainDetails) -> Option<String> {
+    let Some(certificate) = &domain.certificate else {
+        return Some(
+            "Certificate retry is only available after certificate issuance fails. Current status is unknown."
+                .to_string(),
+        );
+    };
+
+    if certificate.status != CERTIFICATE_STATUS_ISSUE_FAILED {
+        return Some(format!(
+            "Certificate retry is only available after certificate issuance fails. Current status: {}.",
+            certificate.status
+        ));
+    }
+
+    if certificate.retryable == Some(false) {
+        return Some(
+            certificate
+                .error_message
+                .as_ref()
+                .map(|message| format!("Certificate retry is not available for this failure. {message}"))
+                .unwrap_or_else(|| {
+                    "Certificate retry is not available for this failure. Check your DNS configuration or contact support."
+                        .to_string()
+                }),
+        );
+    }
+
+    None
+}
+
+fn validate_domain_port(port: i64) -> Result<i64, McpError> {
+    if (1..=65535).contains(&port) {
+        Ok(port)
+    } else {
+        Err(McpError::invalid_params(
+            "port must be a number from 1 to 65535",
+            None,
+        ))
+    }
+}
+
+/// Whether a tool result failed because the request was not authorized.
+///
+/// Matches on the rendered message because the underlying `RailwayError` is
+/// already flattened into an `McpError` string by the time it reaches the
+/// dispatcher. The markers live in `errors.rs` beside the variants they
+/// describe, with a test pinning the coupling.
+///
+/// A false positive here is bounded: `sync_client` only reports success when the
+/// bearer token actually changed, so an unrelated error mentioning
+/// "Unauthorized" cannot by itself cause the tool to be re-run.
+fn is_auth_failure(result: &Result<CallToolResult, McpError>) -> bool {
+    let Err(err) = result else {
+        return false;
+    };
+    let rendered = err.to_string();
+    crate::errors::AUTH_FAILURE_MARKERS
+        .iter()
+        .any(|marker| rendered.contains(marker))
+}
+
 #[tool_router]
 impl RailwayMcp {
     #[tool(description = "Check Railway authentication status and return the current user")]
     async fn whoami(&self) -> Result<CallToolResult, McpError> {
-        let user = get_user(&self.client, &self.configs).await.map_err(|e| {
+        let user = get_user(&self.client(), &self.configs).await.map_err(|e| {
             McpError::internal_error(
                 format!("Not authenticated. Run 'railway login' first. Error: {e}"),
                 None,
@@ -306,7 +789,7 @@ impl RailwayMcp {
             }
         };
 
-        let project = get_project(&self.client, &self.configs, project_id)
+        let project = get_project(&self.client(), &self.configs, project_id)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -346,7 +829,7 @@ impl RailwayMcp {
         };
 
         let response = post_graphql::<queries::Deployments, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -376,7 +859,7 @@ impl RailwayMcp {
     }
 
     #[tool(
-        description = "List all environment variables for a service. Returns KEY=VALUE pairs. If no IDs are provided, uses the currently linked project/service/environment."
+        description = "List all environment variables for a service. Returns KEY=VALUE pairs. Sealed variables are listed by name only, in a trailing 'Sealed' section: they are already set on the service and their value cannot be read back by anyone, so treat them as present and never recreate them. If no IDs are provided, uses the currently linked project/service/environment."
     )]
     async fn list_variables(
         &self,
@@ -386,8 +869,8 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
 
-        let variables = get_service_variables(
-            &self.client,
+        let variables = get_service_variables_including_sealed(
+            &self.client(),
             &self.configs,
             ctx.project_id,
             ctx.environment_id,
@@ -402,11 +885,28 @@ impl RailwayMcp {
             )]));
         }
 
-        let output: String = variables
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Sealed variables have no readable value, but the agent still needs to
+        // know they exist — dropping them made it recreate variables that were
+        // already set, or wait for ones that were never missing.
+        let mut readable: Vec<String> = Vec::new();
+        let mut sealed: Vec<String> = Vec::new();
+        for (key, value) in &variables {
+            match value {
+                Some(value) => readable.push(format!("{key}={value}")),
+                None => sealed.push(format!("- {key}")),
+            }
+        }
+
+        let mut output = readable.join("\n");
+        if !sealed.is_empty() {
+            if !output.is_empty() {
+                output.push_str("\n\n");
+            }
+            output.push_str(
+                "Sealed (set on this service, but the value cannot be read back by anyone - treat these as present and do not recreate them):\n",
+            );
+            output.push_str(&sealed.join("\n"));
+        }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
@@ -482,7 +982,7 @@ impl RailwayMcp {
 
         let backboard = self.configs.get_backboard();
         let fetch_params = FetchLogsParams {
-            client: &self.client,
+            client: &self.client(),
             backboard: &backboard,
             deployment_id: deployment_id.clone(),
             limit: Some(lines),
@@ -565,7 +1065,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::VariableCollectionUpsert, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -589,40 +1089,21 @@ impl RailwayMcp {
         let ctx = self
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
+        let target_port = params.port.map(validate_domain_port).transpose()?;
 
         if let Some(custom_domain) = &params.domain {
-            // Custom domain flow: check availability then create
-            let avail_vars = queries::custom_domain_available::Variables {
-                domain: custom_domain.clone(),
-            };
-            let avail = post_graphql::<queries::CustomDomainAvailable, _>(
-                &self.client,
-                self.configs.get_backboard(),
-                avail_vars,
-            )
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to check domain availability: {e}"), None)
-            })?;
-
-            if !avail.custom_domain_available.available {
-                let msg = &avail.custom_domain_available.message;
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Domain '{custom_domain}' is not available: {msg}"
-                ))]));
-            }
-
+            // Custom domain creation performs availability checks server-side.
             let create_vars = mutations::custom_domain_create::Variables {
                 input: mutations::custom_domain_create::CustomDomainCreateInput {
                     domain: custom_domain.clone(),
-                    environment_id: ctx.environment_id,
-                    project_id: ctx.project_id,
-                    service_id: ctx.service_id,
-                    target_port: params.port,
+                    environment_id: ctx.environment_id.clone(),
+                    project_id: ctx.project_id.clone(),
+                    service_id: ctx.service_id.clone(),
+                    target_port,
                 },
             };
             let result = post_graphql::<mutations::CustomDomainCreate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 create_vars,
             )
@@ -631,72 +1112,34 @@ impl RailwayMcp {
                 McpError::internal_error(format!("Failed to create custom domain: {e}"), None)
             })?;
 
-            let domain_data = &result.custom_domain_create;
-            let mut output = format!(
-                "Custom domain created: {}\n\nDNS Records to configure:\n",
-                domain_data.domain
-            );
-            for record in &domain_data.status.dns_records {
-                output.push_str(&format!(
-                    "  {} {} -> {}\n",
-                    record.record_type, record.hostlabel, record.required_value
-                ));
-            }
-
-            // Include TXT verification record if the domain is not yet verified
-            if !domain_data.status.verified {
-                if let (Some(host), Some(token)) = (
-                    &domain_data.status.verification_dns_host,
-                    &domain_data.status.verification_token,
-                ) {
-                    let zone = domain_data
-                        .status
-                        .dns_records
-                        .first()
-                        .map(|r| r.zone.as_str())
-                        .unwrap_or("");
-                    let host_label = host.strip_suffix(&format!(".{zone}")).unwrap_or(host);
-                    output.push_str(&format!(
-                        "\nVerification TXT record (required):\n  TXT {host_label} -> railway-verify={token}\n"
-                    ));
-                }
-            }
-
-            Ok(CallToolResult::success(vec![Content::text(output)]))
+            let domain = self
+                .resolve_domain_details(&ctx, &result.custom_domain_create.id)
+                .await?;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Custom domain created.\n\n{}",
+                format_domain_details(&domain)
+            ))]))
         } else {
             // Service domain flow: return existing or create new
-            let domain_vars = queries::domains::Variables {
-                environment_id: ctx.environment_id.clone(),
-                project_id: ctx.project_id.clone(),
-                service_id: ctx.service_id.clone(),
-            };
-            let existing = post_graphql::<queries::Domains, _>(
-                &self.client,
-                self.configs.get_backboard(),
-                domain_vars,
-            )
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query domains: {e}"), None))?;
+            let existing = self.fetch_domains(&ctx).await?;
 
-            let domains = &existing.domains;
+            let domains = &existing;
             if !domains.service_domains.is_empty() || !domains.custom_domains.is_empty() {
-                let mut output = String::from("Existing domains:\n");
-                for sd in &domains.service_domains {
-                    output.push_str(&format!("  Service domain: https://{}\n", sd.domain));
-                }
-                for cd in &domains.custom_domains {
-                    output.push_str(&format!("  Custom domain: https://{}\n", cd.domain));
-                }
+                let output = format!(
+                    "Existing domains:\n{}",
+                    format_domains(&mcp_domain_items(domains))
+                );
                 return Ok(CallToolResult::success(vec![Content::text(output)]));
             }
 
             // No domains exist — create a service domain
             let create_vars = mutations::service_domain_create::Variables {
-                environment_id: ctx.environment_id,
-                service_id: ctx.service_id,
+                environment_id: ctx.environment_id.clone(),
+                service_id: ctx.service_id.clone(),
+                target_port,
             };
             let result = post_graphql::<mutations::ServiceDomainCreate, _>(
-                &self.client,
+                &self.client(),
                 self.configs.get_backboard(),
                 create_vars,
             )
@@ -705,11 +1148,231 @@ impl RailwayMcp {
                 McpError::internal_error(format!("Failed to create service domain: {e}"), None)
             })?;
 
+            let domain = self
+                .resolve_domain_details(&ctx, &result.service_domain_create.id)
+                .await?;
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Service domain created: https://{}",
-                result.service_domain_create.domain
+                "Service domain created.\n\n{}",
+                format_domain_details(&domain)
             ))]))
         }
+    }
+
+    #[tool(
+        description = "List service and custom domains for a service. Returns domain, type, ID, target port, and sync status."
+    )]
+    async fn list_domains(
+        &self,
+        Parameters(params): Parameters<ServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domains = self.fetch_domains(&ctx).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            format_domains(&mcp_domain_items(&domains)),
+        )]))
+    }
+
+    #[tool(
+        description = "Show status for a service or custom domain by domain name, URL, or domain ID. Includes DNS records, verification status, certificate status/errors, sync status, and target port."
+    )]
+    async fn domain_status(
+        &self,
+        Parameters(params): Parameters<DomainStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domain = self.resolve_domain_details(&ctx, &params.domain).await?;
+        Ok(CallToolResult::success(vec![Content::text(
+            format_domain_details(&domain),
+        )]))
+    }
+
+    #[tool(
+        description = "Retry failed TLS certificate issuance for a custom domain by domain name, URL, or domain ID. Custom domains only. Returns updated status after readback."
+    )]
+    async fn retry_domain_certificate(
+        &self,
+        Parameters(params): Parameters<DomainStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domain = self.resolve_domain_details(&ctx, &params.domain).await?;
+
+        if domain.kind != McpDomainKind::Custom {
+            return Err(McpError::invalid_params(
+                "Certificate retry is only supported for custom domains.",
+                None,
+            ));
+        }
+        if let Some(reason) = certificate_retry_unavailable_reason(&domain) {
+            return Err(McpError::invalid_params(reason, None));
+        }
+
+        post_graphql::<mutations::CustomDomainIssueCertificate, _>(
+            &self.client(),
+            self.configs.get_backboard(),
+            mutations::custom_domain_issue_certificate::Variables {
+                id: domain.id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to retry domain certificate: {e}"), None)
+        })?;
+
+        let updated = self.resolve_domain_details(&ctx, &domain.id).await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Certificate retry requested.\n\n{}",
+            format_domain_details(&updated)
+        ))]))
+    }
+
+    #[tool(
+        description = "Delete a custom or service domain by domain name, URL, or domain ID. This is irreversible. Returns a preview first.",
+        annotations(destructive_hint = true)
+    )]
+    async fn delete_domain(
+        &self,
+        Parameters(params): Parameters<DeleteDomainParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domain = self.resolve_domain_details(&ctx, &params.domain).await?;
+
+        if !params.confirm {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "⚠️ This will permanently delete {} domain https://{} (id: {}). Call again with confirm: true to proceed.",
+                domain.kind, domain.domain, domain.id
+            ))]));
+        }
+
+        match domain.kind {
+            McpDomainKind::Custom => {
+                post_graphql::<mutations::CustomDomainDelete, _>(
+                    &self.client(),
+                    self.configs.get_backboard(),
+                    mutations::custom_domain_delete::Variables {
+                        id: domain.id.clone(),
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to delete custom domain: {e}"), None)
+                })?;
+            }
+            McpDomainKind::Service => {
+                post_graphql::<mutations::ServiceDomainDelete, _>(
+                    &self.client(),
+                    self.configs.get_backboard(),
+                    mutations::service_domain_delete::Variables {
+                        id: domain.id.clone(),
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to delete service domain: {e}"), None)
+                })?;
+            }
+        }
+
+        let domains = self.fetch_domains(&ctx).await?;
+        let remaining = mcp_domain_items(&domains);
+        if find_mcp_domain(&remaining, &domain.id).is_some() {
+            return Err(McpError::internal_error(
+                format!(
+                    "Domain deletion was requested, but {} still exists after verification.",
+                    domain.id
+                ),
+                None,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Deleted {} domain https://{} (id: {}).",
+            domain.kind, domain.domain, domain.id
+        ))]))
+    }
+
+    #[tool(
+        description = "Update a custom or service domain by domain name, URL, or domain ID. Supports target port changes for both domain types and Railway service-domain renames via new_domain. Port must be from 1 to 65535. Returns updated status after readback."
+    )]
+    async fn update_domain(
+        &self,
+        Parameters(params): Parameters<UpdateDomainParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.port.is_none() && params.new_domain.is_none() {
+            return Err(McpError::invalid_params(
+                "Provide port, new_domain, or both.",
+                None,
+            ));
+        }
+
+        let port = params.port.map(validate_domain_port).transpose()?;
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+        let domain = self.resolve_domain_details(&ctx, &params.domain).await?;
+
+        match domain.kind {
+            McpDomainKind::Custom => {
+                if params.new_domain.is_some() {
+                    return Err(McpError::invalid_params(
+                        "Custom domains cannot be renamed. Create the new custom domain, then delete the old one.",
+                        None,
+                    ));
+                }
+
+                post_graphql::<mutations::CustomDomainUpdate, _>(
+                    &self.client(),
+                    self.configs.get_backboard(),
+                    mutations::custom_domain_update::Variables {
+                        environment_id: domain.environment_id.clone(),
+                        id: domain.id.clone(),
+                        target_port: port,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to update custom domain: {e}"), None)
+                })?;
+            }
+            McpDomainKind::Service => {
+                post_graphql::<mutations::ServiceDomainUpdate, _>(
+                    &self.client(),
+                    self.configs.get_backboard(),
+                    mutations::service_domain_update::Variables {
+                        input: mutations::service_domain_update::ServiceDomainUpdateInput {
+                            domain: params
+                                .new_domain
+                                .as_deref()
+                                .map(|new_domain| mcp_service_domain_input(&domain, new_domain))
+                                .transpose()?
+                                .unwrap_or_else(|| domain.domain.clone()),
+                            environment_id: domain.environment_id.clone(),
+                            service_domain_id: domain.id.clone(),
+                            service_id: domain.service_id.clone(),
+                            target_port: port,
+                        },
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    McpError::internal_error(format!("Failed to update service domain: {e}"), None)
+                })?;
+            }
+        }
+
+        let updated = self.resolve_domain_details(&ctx, &domain.id).await?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Updated domain https://{}.\n\n{}",
+            domain.domain,
+            format_domain_details(&updated)
+        ))]))
     }
 
     #[tool(
@@ -731,7 +1394,7 @@ impl RailwayMcp {
                 )
             })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -755,7 +1418,7 @@ impl RailwayMcp {
                 )
             })?;
             let instances = get_environment_instances(
-                &self.client,
+                &self.client(),
                 &self.configs,
                 &project_id,
                 &environment.id,
@@ -851,7 +1514,7 @@ impl RailwayMcp {
             )
         })?;
 
-        let project = get_project(&self.client, &self.configs, project_id.clone())
+        let project = get_project(&self.client(), &self.configs, project_id.clone())
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to get project: {e}"), None))?;
 
@@ -927,6 +1590,24 @@ impl RailwayMcp {
     }
 
     #[tool(
+        description = "Connect an existing Railway service to a GitHub repo or Docker image. For GitHub repos, this enables Railway-managed deployment triggers when the project has GitHub App access."
+    )]
+    async fn connect_service_source(
+        &self,
+        Parameters(params): Parameters<ConnectServiceSourceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_connect_service_source(params).await
+    }
+
+    #[tool(description = "Disconnect an existing Railway service from its current source.")]
+    async fn disconnect_service_source(
+        &self,
+        Parameters(params): Parameters<ServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_disconnect_service_source(params).await
+    }
+
+    #[tool(
         description = "Remove a service from a Railway project. This is irreversible. Returns a preview first.",
         annotations(destructive_hint = true)
     )]
@@ -980,6 +1661,67 @@ impl RailwayMcp {
         Parameters(params): Parameters<GetServiceConfigParams>,
     ) -> Result<CallToolResult, McpError> {
         self.do_get_service_config(params).await
+    }
+
+    #[tool(
+        description = "List public TCP proxies for a Railway service. Returns endpoint, ID, proxy port, application port, and sync status."
+    )]
+    async fn list_tcp_proxies(
+        &self,
+        Parameters(params): Parameters<ServiceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_list_tcp_proxies(params).await
+    }
+
+    #[tool(
+        description = "Create a public TCP proxy for a Railway service application port. Only one TCP proxy is allowed per service instance."
+    )]
+    async fn create_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<CreateTcpProxyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_create_tcp_proxy(params).await
+    }
+
+    #[tool(
+        description = "Get details for one public TCP proxy by ID, domain, endpoint, proxy port, or application port."
+    )]
+    async fn get_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<TcpProxySelectorParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_get_tcp_proxy(params).await
+    }
+
+    #[tool(
+        description = "Remove a public TCP proxy by ID, domain, endpoint, proxy port, or application port. This is irreversible and returns a preview first.",
+        annotations(destructive_hint = true)
+    )]
+    async fn remove_tcp_proxy(
+        &self,
+        Parameters(params): Parameters<RemoveTcpProxyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_remove_tcp_proxy(params).await
+    }
+
+    #[tool(
+        description = "Get private networking status for a service. Returns full hostname, short name, network name/ID, sync status, address family, and private IPs. If network is omitted, returns all private networks in the environment."
+    )]
+    async fn private_network_status(
+        &self,
+        Parameters(params): Parameters<PrivateNetworkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_private_network_status(params).await
+    }
+
+    #[tool(
+        description = "Update the private networking endpoint name for a service. Name must be the short prefix without the .internal suffix. If network is omitted, uses the only private network or the network named railway."
+    )]
+    async fn private_network_update(
+        &self,
+        Parameters(params): Parameters<UpdatePrivateNetworkParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.do_private_network_update(params).await
     }
 
     #[tool(
@@ -1181,13 +1923,25 @@ impl RailwayMcp {
             })?,
         };
 
-        let body = create_deploy_tarball(&path, &path, false, |_, _| {}).map_err(|e| {
+        let tarball = create_deploy_tarball(&path, &path, false, |_, _| {}).map_err(|e| {
             McpError::internal_error(format!("Failed to create deploy tarball: {e}"), None)
         })?;
+        let skipped_note = if tarball.skipped_symlinks.is_empty() {
+            String::new()
+        } else {
+            let listed = tarball
+                .skipped_symlinks
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n\nSkipped symlinks pointing outside the project (not uploaded):\n{listed}")
+        };
+        let body = tarball.bytes;
 
         let hostname = self.configs.get_host();
         let response = upload_deploy_tarball(
-            &self.client,
+            &self.client(),
             hostname,
             &ctx.project_id,
             &ctx.environment_id,
@@ -1199,7 +1953,7 @@ impl RailwayMcp {
         .map_err(|e| McpError::internal_error(format!("Failed to deploy: {e}"), None))?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deployment started!\n  Deployment ID: {}\n  URL: {}\n  Build Logs: {}\n  Domain: {}\n\nUse get_logs with deployment_id '{}' to check build/deploy progress.",
+            "Deployment started!\n  Deployment ID: {}\n  URL: {}\n  Build Logs: {}\n  Domain: {}\n\nUse get_logs with deployment_id '{}' to check build/deploy progress.{skipped_note}",
             response.deployment_id,
             response.url,
             response.logs_url,
@@ -1209,7 +1963,42 @@ impl RailwayMcp {
     }
 }
 
+fn railway_mcp_server_info() -> ServerInfo {
+    let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        .with_server_info(Implementation::new("railway", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            "Railway MCP server. Manage your Railway projects, services, deployments, and more.",
+        );
+    // Preserve the protocol version advertised by rmcp 0.16.0 so older MCP
+    // clients are not forced onto the newer 2025-06-18 protocol by this bump.
+    info.protocol_version = ProtocolVersion::V_2025_03_26;
+    info
+}
+
 impl ServerHandler for RailwayMcp {
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        // Capture the client identity at the handshake — the earliest and
+        // most reliable point, and the only one that covers sessions which
+        // enumerate tools but never call one. Without this, those sessions'
+        // `mcp_session` lifecycle event falls back to env/process-tree
+        // detection and lands in `agent_unknown`. OnceLock keeps the first
+        // (handshake) value, so a later tool call won't override it.
+        telemetry::record_mcp_client(&telemetry::McpClientInfo {
+            name: request.client_info.name.clone(),
+        });
+
+        // Preserve the default rmcp behavior: stash peer info for later
+        // `peer_info()` reads, then return our server info.
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
+    }
+
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -1226,22 +2015,39 @@ impl ServerHandler for RailwayMcp {
             .map(|info| telemetry::McpClientInfo {
                 name: info.client_info.name.clone(),
             });
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(tcc).await;
+        // Single choke point for every tool call: make sure the credentials we
+        // are about to use are current. Without this the bearer token captured
+        // at process start is used forever.
+        self.sync_client(false).await;
+
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(
+            self,
+            request.clone(),
+            context.clone(),
+        );
+        let mut result = self.tool_router.call(tcc).await;
+
+        // Reactive re-auth. The pre-dispatch sync trusts the local expiry
+        // timestamp, so it does nothing for a token that merely looks valid but
+        // has already died server-side (grant revoked, or evicted by the
+        // per-grant refresh-token cap). Without this the session would stay
+        // broken for its entire life. Retry only when re-auth actually produced
+        // a different token — otherwise a retry cannot help, and re-running a
+        // tool that was rejected on authorization is pointless.
+        if is_auth_failure(&result) && self.sync_client(true).await {
+            let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+            result = self.tool_router.call(tcc).await;
+        }
         let duration_ms = start.elapsed().as_millis() as u64;
 
         telemetry::send_mcp_tool_with_client(
             tool_name,
             duration_ms,
             result.is_ok(),
-            result.as_ref().err().map(|e| {
-                let msg = format!("{e}");
-                if msg.len() > 256 {
-                    msg[..256].to_string()
-                } else {
-                    msg
-                }
-            }),
+            result
+                .as_ref()
+                .err()
+                .map(|e| telemetry::truncate_message(&format!("{e}"))),
             mcp_client,
         )
         .await;
@@ -1266,20 +2072,133 @@ impl ServerHandler for RailwayMcp {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "railway".to_string(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: None,
-                icons: None,
-                website_url: None,
-            },
-            instructions: Some(
-                "Railway MCP server. Manage your Railway projects, services, deployments, and more.".to_string(),
-            ),
+        railway_mcp_server_info()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_proxy_tools_are_registered() {
+        let router = RailwayMcp::tool_router();
+        let tools = router.list_all();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"list_tcp_proxies"));
+        assert!(names.contains(&"create_tcp_proxy"));
+        assert!(names.contains(&"get_tcp_proxy"));
+        assert!(names.contains(&"remove_tcp_proxy"));
+    }
+
+    #[test]
+    fn server_info_preserves_advertised_protocol_version() {
+        let info = railway_mcp_server_info();
+
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_03_26);
+        assert_eq!(info.server_info.name, "railway");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        assert!(info.instructions.is_some());
+    }
+
+    fn sample_domain() -> McpDomainDetails {
+        McpDomainDetails {
+            id: "dom_123".to_string(),
+            domain: "api.example.com".to_string(),
+            kind: McpDomainKind::Custom,
+            target_port: Some(3000),
+            sync_status: "ACTIVE".to_string(),
+            service_domain_suffix: None,
+            environment_id: "env_123".to_string(),
+            service_id: "svc_123".to_string(),
+            dns_records: Vec::new(),
+            verification: None,
+            certificate: None,
         }
+    }
+
+    fn sample_service_domain() -> McpDomainDetails {
+        let mut domain = sample_domain();
+        domain.kind = McpDomainKind::Service;
+        domain.domain = "api.up.railway.app".to_string();
+        domain.service_domain_suffix = Some("up.railway.app".to_string());
+        domain
+    }
+
+    fn sample_certificate(status: &str, retryable: Option<bool>) -> McpCertificateStatus {
+        McpCertificateStatus {
+            status: status.to_string(),
+            detailed_status: None,
+            error_message: Some("Certificate failed.".to_string()),
+            error_type: None,
+            retryable,
+            cdn_provider: None,
+        }
+    }
+
+    #[test]
+    fn mcp_domain_lookup_accepts_id_name_and_url() {
+        let domains = vec![sample_domain()];
+
+        assert!(find_mcp_domain(&domains, "dom_123").is_some());
+        assert!(find_mcp_domain(&domains, "API.EXAMPLE.COM").is_some());
+        assert!(find_mcp_domain(&domains, "https://api.example.com/").is_some());
+        assert!(find_mcp_domain(&domains, "missing.example.com").is_none());
+    }
+
+    #[test]
+    fn mcp_service_domain_input_accepts_full_domain_or_host_label() {
+        let domain = sample_service_domain();
+
+        assert_eq!(
+            mcp_service_domain_input(&domain, "web.up.railway.app").unwrap(),
+            "web.up.railway.app"
+        );
+        assert_eq!(
+            mcp_service_domain_input(&domain, "web").unwrap(),
+            "web.up.railway.app"
+        );
+        assert!(mcp_service_domain_input(&domain, "").is_err());
+    }
+
+    #[test]
+    fn mcp_certificate_retry_matches_dashboard_gate() {
+        let mut domain = sample_domain();
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate(CERTIFICATE_STATUS_ISSUE_FAILED, None));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(true),
+        ));
+        assert_eq!(certificate_retry_unavailable_reason(&domain), None);
+
+        domain.certificate = Some(sample_certificate(
+            CERTIFICATE_STATUS_ISSUE_FAILED,
+            Some(false),
+        ));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+
+        domain.certificate = Some(sample_certificate("CERTIFICATE_STATUS_TYPE_VALID", None));
+        assert!(certificate_retry_unavailable_reason(&domain).is_some());
+    }
+
+    #[test]
+    fn mcp_verification_txt_value_has_one_prefix() {
+        assert_eq!(verification_txt_value("abc123"), "railway-verify=abc123");
+        assert_eq!(
+            verification_txt_value("railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
+        assert_eq!(
+            verification_txt_value("railway-verify=railway-verify=abc123"),
+            "railway-verify=abc123"
+        );
     }
 }

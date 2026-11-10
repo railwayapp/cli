@@ -1,0 +1,14 @@
+query TcpProxies($environmentId: String!, $serviceId: String!) {
+  tcpProxies(environmentId: $environmentId, serviceId: $serviceId) {
+    id
+    domain
+    proxyPort
+    applicationPort
+    serviceId
+    environmentId
+    syncStatus
+    createdAt
+    updatedAt
+    deletedAt
+  }
+}

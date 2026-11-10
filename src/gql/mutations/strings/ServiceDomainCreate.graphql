@@ -1,8 +1,23 @@
-mutation ServiceDomainCreate($environmentId: String!, $serviceId: String!) {
+mutation ServiceDomainCreate(
+  $environmentId: String!
+  $serviceId: String!
+  $targetPort: Int
+) {
   serviceDomainCreate(
-    input: { environmentId: $environmentId, serviceId: $serviceId }
+    input: {
+      environmentId: $environmentId
+      serviceId: $serviceId
+      targetPort: $targetPort
+    }
   ) {
     id
     domain
+    suffix
+    environmentId
+    serviceId
+    targetPort
+    syncStatus
+    createdAt
+    updatedAt
   }
 }

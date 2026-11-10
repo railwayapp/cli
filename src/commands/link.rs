@@ -7,7 +7,10 @@ use std::{collections::HashSet, fmt::Display};
 use crate::{
     controllers::project::{get_environment_instances, get_service_ids_in_env},
     errors::RailwayError,
-    util::prompt::{fake_select, prompt_options, prompt_options_skippable},
+    util::prompt::{
+        fake_select, prompt_options, prompt_options_skippable, prompt_select,
+        prompt_text_with_placeholder_if_blank,
+    },
     workspace::{Project, Workspace, workspaces},
 };
 
@@ -41,6 +44,23 @@ pub struct Args {
     json: bool,
 }
 
+impl Args {
+    pub(crate) fn for_service_link(
+        project: Option<String>,
+        environment: Option<String>,
+        service: Option<String>,
+    ) -> Self {
+        Self {
+            environment,
+            project,
+            service,
+            team: None,
+            workspace: None,
+            json: false,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LinkOutput {
@@ -54,7 +74,109 @@ struct LinkOutput {
     service_name: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum LinkProjectChoice {
+    Existing,
+    New,
+}
+
+impl Display for LinkProjectChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LinkProjectChoice::Existing => write!(f, "Use an existing Railway project"),
+            LinkProjectChoice::New => write!(f, "Create a new Railway project"),
+        }
+    }
+}
+
+pub async fn link_project_without_service() -> Result<LinkedProject> {
+    let mut configs = Configs::new()?;
+    let workspaces = workspaces().await?;
+
+    let choice = if std::io::stdout().is_terminal() {
+        prompt_select(
+            "Where should Railway apply this configuration?",
+            vec![LinkProjectChoice::Existing, LinkProjectChoice::New],
+        )?
+    } else {
+        LinkProjectChoice::Existing
+    };
+
+    match choice {
+        LinkProjectChoice::Existing => {
+            let workspace = select_workspace(None, None, workspaces)?;
+            let project = select_project(workspace, None)?;
+            let environment = select_environment(None, &project)?;
+
+            configs.link_project(
+                project.id.clone(),
+                Some(project.name.clone()),
+                environment.id.clone(),
+                Some(environment.name.clone()),
+            )?;
+            configs.write()?;
+
+            println!(
+                "\n{} {} {}",
+                "Project".green(),
+                project.name.magenta().bold(),
+                "linked successfully! 🎉".green()
+            );
+        }
+        LinkProjectChoice::New => {
+            let client = GQLClient::new_authorized(&configs)?;
+            let workspace = select_workspace(None, None, workspaces)?;
+            let project_name = prompt_new_project_name()?;
+            let vars = mutations::project_create::Variables {
+                name: if project_name.is_empty() {
+                    None
+                } else {
+                    Some(project_name)
+                },
+                description: None,
+                workspace_id: Some(workspace.id().to_owned()),
+            };
+            let project =
+                post_graphql::<mutations::ProjectCreate, _>(&client, configs.get_backboard(), vars)
+                    .await?
+                    .project_create;
+            let environment = project
+                .environments
+                .edges
+                .first()
+                .context("No environments")?
+                .node
+                .clone();
+
+            configs.link_project(
+                project.id.clone(),
+                Some(project.name.clone()),
+                environment.id.clone(),
+                Some(environment.name.clone()),
+            )?;
+            configs.write()?;
+
+            println!(
+                "\n{} {} {}",
+                "Created and linked project".green().bold(),
+                project.name.magenta().bold(),
+                format!("on {workspace}").green()
+            );
+        }
+    }
+
+    configs.get_linked_project().await
+}
+
 pub async fn command(args: Args) -> Result<()> {
+    link_command(args, false).await
+}
+
+pub(crate) async fn command_requiring_service(args: Args) -> Result<()> {
+    link_command(args, true).await
+}
+
+async fn link_command(args: Args, require_service: bool) -> Result<()> {
     let mut configs = Configs::new()?;
 
     // Support both team (deprecated) and workspace arguments
@@ -84,7 +206,7 @@ pub async fn command(args: Args) -> Result<()> {
     let environment_instances =
         get_environment_instances(&client, &configs, &project.id, &environment.id).await?;
     let service_ids = get_service_ids_in_env(&environment_instances);
-    let service = select_service(&project, &service_ids, args.service)?;
+    let service = select_service(&project, &service_ids, args.service, require_service)?;
 
     configs.link_project(
         project.id.clone(),
@@ -124,10 +246,34 @@ pub async fn command(args: Args) -> Result<()> {
     Ok(())
 }
 
+fn prompt_new_project_name() -> Result<String> {
+    let default_name = std::env::current_dir()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "railway-project".to_string());
+
+    if !std::io::stdout().is_terminal() {
+        return Ok(default_name);
+    }
+
+    let maybe_name =
+        prompt_text_with_placeholder_if_blank("Project name", &default_name, &default_name)?;
+    let name = maybe_name.trim();
+    Ok(if name.is_empty() {
+        default_name
+    } else {
+        name.to_string()
+    })
+}
+
 fn select_service(
     project: &NormalisedProject,
     service_ids: &HashSet<String>,
     service: Option<String>,
+    require_service: bool,
 ) -> Result<Option<NormalisedService>, anyhow::Error> {
     let useful_services = project
         .services
@@ -164,7 +310,14 @@ fn select_service(
                 );
             }
         } else if std::io::stdout().is_terminal() {
-            prompt_options_skippable("Select a service <esc to skip>", useful_services)?
+            if require_service {
+                Some(prompt_options("Select a service", useful_services)?)
+            } else {
+                prompt_options_skippable(
+                    "Select a service (optional) <esc to skip>",
+                    useful_services,
+                )?
+            }
         } else if useful_services.len() == 1 {
             let svc = useful_services.into_iter().next().unwrap();
             eprintln!("No service specified — auto-selecting \"{}\"", svc.name);
@@ -180,6 +333,13 @@ fn select_service(
             } else {
                 String::new()
             };
+            if require_service {
+                bail!(
+                    "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
+                    names.join(", "),
+                    suffix
+                );
+            }
             eprintln!(
                 "Multiple services available — use --service <name> to link one.\nAvailable: {}{}",
                 names.join(", "),
@@ -188,6 +348,9 @@ fn select_service(
             None
         }
     } else {
+        if require_service {
+            bail!("No services found");
+        }
         None
     };
     Ok(service)

@@ -1,0 +1,3 @@
+mutation SandboxCheckpointDelete($environmentId: String!, $id: ID!) {
+  sandboxCheckpointDelete(environmentId: $environmentId, id: $id)
+}

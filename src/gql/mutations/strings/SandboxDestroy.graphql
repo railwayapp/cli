@@ -1,0 +1,6 @@
+mutation SandboxDestroy($id: String!, $environmentId: String!) {
+  sandboxDestroy(id: $id, environmentId: $environmentId) {
+    id
+    status
+  }
+}

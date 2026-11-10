@@ -34,7 +34,7 @@ impl RailwayMcp {
 
         let backboard = self.configs.get_backboard();
         fetch_http_logs_for_deployment(
-            &self.client,
+            &self.client(),
             &backboard,
             deployment_id,
             lines.unwrap_or(200),
@@ -83,7 +83,7 @@ impl RailwayMcp {
 
         let backboard = self.configs.get_backboard();
         let result = fetch_resource_metrics(FetchResourceMetricsParams {
-            client: &self.client,
+            client: &self.client(),
             backboard: &backboard,
             service_id: &ctx.service_id,
             environment_id: &ctx.environment_id,

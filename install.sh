@@ -24,7 +24,19 @@ help_text="Options
    Override the base URL used for downloading releases
 
    --agents
-   Install or reuse the Railway CLI, then configure Railway agent support
+   Install or reuse the Railway CLI, then configure Railway agent support.
+   On supported CLI versions this defaults to the remote MCP server via
+   \`railway mcp proxy\` (CLI login auth).
+
+   --remote
+   When used with --agents, configure the remote MCP server at
+   mcp.railway.com via the CLI proxy (uses \`railway login\`). Compatibility
+   alias of the default on current CLIs; also forces proxy on older CLIs
+   that still default \`setup agent -y\` to local MCP.
+
+   --local
+   When used with --agents, configure the local GraphQL-backed MCP server
+   (\`railway mcp\`) instead of the remote CLI proxy default.
 
    -r, --remove
    Uninstall railway
@@ -38,6 +50,7 @@ set -eu
 printf '\n'
 
 BOLD="$(tput bold 2>/dev/null || printf '')"
+DIM="$(tput dim 2>/dev/null || printf '')"
 GREY="$(tput setaf 0 2>/dev/null || printf '')"
 UNDERLINE="$(tput smul 2>/dev/null || printf '')"
 RED="$(tput setaf 1 2>/dev/null || printf '')"
@@ -82,8 +95,10 @@ has() {
 
 RANDOM_FOR_SH=$(od -vAn -N4 -tu4 < /dev/urandom | sed 's/\t*$//g')
 
-# Removes leading whitespace
-RANDOM_FOR_SH=$(echo ${RANDOM_FOR_SH:-$RANDOM})
+# Removes leading whitespace. The fallback is $$ rather than $RANDOM: this
+# script runs under dash and busybox ash (via `curl … | sh`), where $RANDOM is
+# unset and `set -u` would abort with "RANDOM: parameter not set".
+RANDOM_FOR_SH=$(echo ${RANDOM_FOR_SH:-$$})
 
 # Gets path to a temporary file, even if
 get_tmpfile() {
@@ -136,16 +151,49 @@ tildify() {
   fi
 }
 
+# POSIX stand-in for bash's ${var//needle/repl}. This script is reached via
+# `curl … | sh` on systems where /bin/sh is dash (Debian/Ubuntu) or busybox ash
+# (Alpine), neither of which supports pattern-substitution expansion.
+replace_all() {
+  local str="$1"
+  local needle="$2"
+  local repl="$3"
+  local out=""
+  local head
+
+  # An empty needle matches at every position, so the loop below would never
+  # advance. No caller does this today; guard anyway rather than let a future one
+  # hang the installer with no output.
+  if [ -z "$needle" ]; then
+    printf '%s' "$str"
+    return 0
+  fi
+
+  # Assign the prefix on its own line: `"${str%%"$needle"*}"` nested inside an
+  # outer double-quoted string is left unspecified by POSIX, and this script
+  # runs under whatever /bin/sh the host provides.
+  while :; do
+    case "$str" in
+      *"$needle"*)
+        head=${str%%"$needle"*}
+        out=$out$head$repl
+        str=${str#*"$needle"}
+        ;;
+      *) break ;;
+    esac
+  done
+
+  printf '%s%s' "$out" "$str"
+}
+
 shell_quote() {
-  local value="$1"
-  value=${value//\'/\'\\\'\'}
-  printf "'%s'" "$value"
+  printf "'%s'" "$(replace_all "$1" "'" "'\\''")"
 }
 
 fish_quote() {
-  local value="$1"
-  value=${value//\\/\\\\}
-  value=${value//\'/\\\'}
+  local value
+  value="$(replace_all "$1" '\' '\\')"
+  value="$(replace_all "$value" "'" "\\'")"
   printf "'%s'" "$value"
 }
 
@@ -211,8 +259,12 @@ unpack() {
 
   case "$archive" in
     *.tar.gz)
-      flags=$(test -n)
-      ${sudo} tar "${flags}" -xzf "${archive}" -C "${bin_dir}"
+      # VERBOSE is normalized to "v" or "" during option parsing. Fold it into
+      # the flag bundle rather than passing a separate "${flags}" word: when
+      # empty that expands to an empty argument, which GNU tar ignores but
+      # busybox tar (Alpine) reads as a member name -> "tar: : not found in
+      # archive".
+      ${sudo} tar "-${VERBOSE}xzf" "${archive}" -C "${bin_dir}"
       return 0
       ;;
     *.zip)
@@ -393,6 +445,8 @@ is_build_available() {
 UNINSTALL=0
 HELP=0
 AGENTS=0
+REMOTE=0
+LOCAL=0
 RAILWAY_HOME_DIR=""
 RAILWAY_ENV_FILE=""
 RAILWAY_FISH_ENV_FILE=""
@@ -402,19 +456,39 @@ RAILWAY_PATH_MARKER_END="# <<< railway initialize <<<"
 SHELL_STARTUP_FILE=""
 SHELL_STARTUP_ACTION=""
 
-DEFAULT_VERSION=$(curl -s https://api.github.com/repos/railwayapp/cli/releases/latest | grep -o '"tag_name":[[:space:]]*"v[^"]*"' | cut -d'"' -f4 | cut -c2-)
+# Resolve the version to install. Deliberately lazy: called only after --help and
+# --remove have had their chance to exit, and skipped outright when the caller
+# pinned RAILWAY_VERSION. Use GitHub's latest-release redirect instead of the
+# REST API, whose unauthenticated quota is shared by every client on a public IP.
+# Resolving eagerly also broke pinned installs, --help and --remove. (#1030)
+resolve_railway_version() {
+  local latest_url
 
-if [ -z "$DEFAULT_VERSION" ]; then
-  error "Failed to fetch latest version from GitHub"
-  exit 1
-fi
+  if [ -n "${RAILWAY_VERSION-}" ]; then
+    return 0
+  fi
+
+  latest_url=$(curl --fail --silent --show-error --head --location \
+    --connect-timeout 5 --max-time 15 --output /dev/null \
+    --write-out '%{url_effective}' \
+    https://github.com/railwayapp/cli/releases/latest) || latest_url=""
+
+  # Accept only a release tag from this repository, not a login/error page or
+  # the unresolved /latest URL. A failed request must not supply a version.
+  RAILWAY_VERSION=$(printf '%s\n' "$latest_url" \
+    | sed -n 's|^https://github.com/railwayapp/cli/releases/tag/v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p')
+
+  if [ -z "$RAILWAY_VERSION" ]; then
+    error "Could not determine the latest Railway CLI version from GitHub."
+    info "Check that https://github.com/railwayapp/cli/releases/latest is reachable."
+    info "Retry, or pin a known version to skip this lookup entirely:"
+    info "  ${BOLD}RAILWAY_VERSION=<x.y.z>${NO_COLOR}"
+    exit 1
+  fi
+}
 
 
 # defaults
-if [ -z "${RAILWAY_VERSION-}" ]; then
-  RAILWAY_VERSION="$DEFAULT_VERSION"
-fi
-
 if [ -z "${RAILWAY_PLATFORM-}" ]; then
   PLATFORM="$(detect_platform)"
 fi
@@ -477,6 +551,14 @@ while [ "$#" -gt 0 ]; do
     AGENTS=1
     shift 1
     ;;
+  --remote)
+    REMOTE=1
+    shift 1
+    ;;
+  --local)
+    LOCAL=1
+    shift 1
+    ;;
   -h | --help)
     HELP=1
     shift 1
@@ -518,6 +600,19 @@ if [ -n "${VERBOSE-}" ]; then
   VERBOSE=v
 else
   VERBOSE=
+fi
+
+# --remote / --local only take effect alongside --agents. Warn loudly rather
+# than silently no-op.
+if [ "$REMOTE" = 1 ] && [ "$AGENTS" != 1 ]; then
+  warn "--remote has no effect without --agents. Re-run with both flags to configure remote MCP."
+fi
+if [ "$LOCAL" = 1 ] && [ "$AGENTS" != 1 ]; then
+  warn "--local has no effect without --agents. Re-run with both flags to configure local MCP."
+fi
+if [ "$REMOTE" = 1 ] && [ "$LOCAL" = 1 ]; then
+  error "--remote and --local cannot be used together."
+  exit 1
 fi
 
 write_env_files() {
@@ -709,6 +804,7 @@ configure_shell_startup() {
 }
 
 configure_shell_path() {
+  local quiet="${1:-}"
   local quoted_bin_dir
   local quoted_railway_home
   local fish_bin_dir
@@ -755,6 +851,17 @@ $fish_line"
   if activation="$(activation_command)"; then
     path_commands="$activation"
     startup_contents="$activation"
+  fi
+
+  # Agent flow: still write the startup file, but collapse to one clean line.
+  # The "source in this shell" reminder is deferred to the next-steps block, so
+  # leave PATH_ACTIVATION_PRINTED unset to signal next-steps should show it.
+  if [ -n "$quiet" ]; then
+    if configure_shell_startup "$startup_contents"; then
+      completed "Shell PATH — $(tildify "$SHELL_STARTUP_FILE") updated"
+    fi
+    RAILWAY_ACTIVATION_CMD="$path_commands"
+    return
   fi
 
   warn "Railway was installed to $(tildify "$BIN_DIR"), but this shell does not resolve 'railway' from there yet."
@@ -840,6 +947,9 @@ find_railway_bins() {
 }
 
 print_cli_conflicts() {
+  # In quiet mode (the agent setup flow) we only surface an actual conflict;
+  # the informational "on PATH" listing is noise when there's a single install.
+  local quiet="${1:-}"
   local bins_file
   local bin version
   local count=0
@@ -852,14 +962,14 @@ print_cli_conflicts() {
     return
   fi
 
-  info "Railway CLI on PATH:"
+  [ -z "$quiet" ] && info "Railway CLI on PATH:"
   while IFS= read -r bin; do
     count=$((count + 1))
     version="$("$bin" --version 2>/dev/null || echo unknown)"
-    info "  $bin ($version)"
+    [ -z "$quiet" ] && info "  $bin ($version)"
   done < "$bins_file"
   rm -f "$bins_file"
-  info "Shells use the first entry above."
+  [ -z "$quiet" ] && info "Shells use the first entry above."
 
   if [ "$count" -gt 1 ]; then
     warn "Multiple Railway CLI installs found. No PATH entries were reordered or removed."
@@ -887,6 +997,7 @@ warn_existing_path_conflict() {
 run_agent_setup() {
   local railway_bin="$1"
   local yes=""
+  local mcp_transport=""
 
   if [ -z "${RAILWAY_INSTALL_REQUEST_ID-}" ]; then
     RAILWAY_INSTALL_REQUEST_ID="install_$(od -vAn -N16 -tx1 < /dev/urandom | tr -d ' \n')"
@@ -895,6 +1006,23 @@ run_agent_setup() {
 
   if [ -n "${FORCE-}" ] || [ ! -t 0 ]; then
     yes="-y"
+  fi
+
+  # Transport selection for `setup agent`:
+  # - `--local` opts into the in-process server.
+  # - `--remote` forces the CLI proxy (alias of the current default).
+  # - Non-interactive agents setup also passes `--remote` when the binary
+  #   supports it, so older CLIs that still default `-y` to local MCP land on
+  #   the proxy. Probe `--help` first: pre-proxy binaries must not die on an
+  #   unrecognized flag when we continue with a managed/Homebrew install.
+  if [ "$LOCAL" = 1 ]; then
+    mcp_transport="--local"
+  elif [ "$REMOTE" = 1 ]; then
+    mcp_transport="--remote"
+  elif [ -n "$yes" ]; then
+    if "$railway_bin" setup agent --help 2>&1 | grep -q -- '--remote'; then
+      mcp_transport="--remote"
+    fi
   fi
 
   if [ -t 0 ] && [ -z "${FORCE-}" ]; then
@@ -906,11 +1034,73 @@ run_agent_setup() {
     fi
   fi
 
-  "$railway_bin" setup agent $yes
-
-  if ! "$railway_bin" whoami >/dev/null 2>&1; then
-    warn "Next: run '$railway_bin login' to finish setup (opens a browser)."
+  # Tell `setup agent` it's running inside the installer so it renders its
+  # skills/MCP steps as part of one unified flow (no duplicate header, footer,
+  # login prompt, or restart notices — the installer prints those once below).
+  # Never let this abort the installer bare under `set -e`. The CLI itself is
+  # installed and working by this point, so a failure here must say which half
+  # broke, surface the real status, and still point somewhere useful — the old
+  # behaviour was to die mid-script with no Railway-branded message at all.
+  AGENT_SETUP_RC=0
+  RAILWAY_SETUP_EMBEDDED=1 "$railway_bin" setup agent $yes $mcp_transport || AGENT_SETUP_RC=$?
+  if [ "$AGENT_SETUP_RC" -ne 0 ]; then
+    printf "\n"
+    if [ "$AGENT_SETUP_RC" -eq 2 ]; then
+      error "This Railway CLI (${CURRENT_VERSION:-unknown}) does not support 'setup agent'."
+      error "Upgrade it first, then re-run: curl -fsSL railway.com/agents.sh | sh"
+    elif [ "$AGENT_SETUP_RC" -gt 128 ]; then
+      error "Agent setup terminated by signal $((AGENT_SETUP_RC - 128)): $railway_bin setup agent"
+      error "Please report this at https://github.com/railwayapp/cli/issues/new"
+    else
+      error "Agent setup failed (exit $AGENT_SETUP_RC): $railway_bin setup agent"
+    fi
+    info "The Railway CLI itself is installed and usable: $(tildify "$railway_bin")"
+    info "Re-run 'railway setup agent' once the above is resolved."
+    exit "$AGENT_SETUP_RC"
   fi
+
+  # Record login state (and the "Logged in as …" line) for the next-steps
+  # block; don't warn here. whoami exits non-zero and prints nothing when
+  # unauthenticated — the `|| true` matters under `set -e`: without it, this
+  # assignment itself aborts the whole script for the (extremely common)
+  # not-logged-in-yet case, and print_agent_next_steps() below never runs.
+  AGENT_WHOAMI="$("$railway_bin" whoami 2>/dev/null || true)"
+  if [ -n "$AGENT_WHOAMI" ]; then
+    AGENT_LOGGED_IN=1
+  else
+    AGENT_LOGGED_IN=0
+  fi
+}
+
+# Section 2 of the agent setup flow: a visually distinct "completion +
+# verification" block, separated from the installation steps by a rule.
+print_agent_next_steps() {
+  local rule="────────────────────────────────────────────"
+  printf '\n%s\n\n' "$rule"
+  printf '%s %s\n' "${GREEN}✓${NO_COLOR}" "${BOLD}Setup complete${NO_COLOR}"
+
+  printf '\n%s\n' "${BOLD}Next steps${NO_COLOR}"
+
+  # 1. Account — green check when already authenticated, otherwise the action.
+  if [ "${AGENT_LOGGED_IN:-0}" = "1" ]; then
+    printf '  1  %s\n' "${GREEN}✓ ${AGENT_WHOAMI:-Logged in to Railway}${NO_COLOR}"
+  else
+    printf '  1  Run %s to connect your Railway account\n' "${BOLD}railway login${NO_COLOR}"
+  fi
+
+  # 2. Shell PATH — green check when railway already resolves, otherwise activate.
+  if [ -n "${RAILWAY_ACTIVATION_CMD:-}" ]; then
+    printf '  2  Run %s to use railway in this shell\n' "${BOLD}${RAILWAY_ACTIVATION_CMD}${NO_COLOR}"
+  else
+    printf '  2  %s\n' "${GREEN}✓ railway is on your PATH${NO_COLOR}"
+  fi
+
+  # 3. Kick the tires — guide the user (or agent) into actually using it.
+  printf '  3  %s\n' "Run your agent (Claude Code, Codex, OpenCode, etc.) and ask it to ${BOLD}'Show the status of your projects'${NO_COLOR} or ${BOLD}'Deploy this application'${NO_COLOR}"
+
+  printf '\n%s\n' "${DIM}Note: if running in an agent session, you may need to restart the agent to access the new Skills or MCP resources.${NO_COLOR}"
+
+  printf '\n%s\n\n' "Docs · ${UNDERLINE}https://docs.railway.com/agents${NO_COLOR}"
 }
 
 if [ "$UNINSTALL" = 1 ]; then
@@ -954,6 +1144,10 @@ if [ "$HELP" = 1 ]; then
     exit 0
 fi
 
+# Everything past this point needs a concrete version; --help and --remove are
+# already done, so this is the first place the lookup can be required.
+resolve_railway_version
+
 RAILWAY_UPGRADE_AGENT=0
 
 if [ "$AGENTS" = 1 ] && has railway; then
@@ -971,6 +1165,19 @@ if [ "$AGENTS" = 1 ] && has railway; then
 
   if [ "$NEEDS_UPGRADE" = 0 ]; then
     info "No PATH changes were made."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  # Refuse to self-upgrade inside a Railway Sandbox. The sandbox's own
+  # exec/SSH bridge is served by the resident `railway` process, so
+  # replacing that binary in place isn't possible there (extracting or
+  # renaming a new binary over it fails, with no user-facing workaround).
+  # The sandbox's pre-installed CLI is managed by Railway, so continue
+  # with it instead of attempting an upgrade that cannot succeed.
+  if [ -n "${RAILWAY_SANDBOX_ID-}" ]; then
+    info "Running inside a Railway Sandbox — the pre-installed CLI is managed by Railway."
+    info "Continuing with $CURRENT_VERSION."
     run_agent_setup "$RAILWAY_BIN"
     exit 0
   fi
@@ -993,8 +1200,62 @@ if [ "$AGENTS" = 1 ] && has railway; then
   esac
 
   if [ "$BREW_INSTALL" = 1 ]; then
+    if [ "$REMOTE" = 1 ] || [ "$LOCAL" = 1 ]; then
+      # Transport flags were added in newer releases. Continuing with an older
+      # brewed CLI would call `setup agent --remote/--local` and fail with an
+      # unrecognized-arg error after we already told the user we were continuing.
+      # Refuse early.
+      flag_name="--remote"
+      if [ "$LOCAL" = 1 ]; then
+        flag_name="--local"
+      fi
+      error "Railway CLI was installed via Homebrew (version $CURRENT_VERSION)."
+      error "The $flag_name flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Run 'brew upgrade railway' first, then re-run cli.new --agents $flag_name."
+      exit 1
+    fi
     warn "Railway CLI was installed via Homebrew."
     warn "Run 'brew upgrade railway' to update from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
+    info "Continuing with $CURRENT_VERSION."
+    run_agent_setup "$RAILWAY_BIN"
+    exit 0
+  fi
+
+  # Same reasoning as the Homebrew branch above, for the JS package managers.
+  # Every release we publish is a native executable, so a `railway` on PATH that
+  # is a script or a link into node_modules belongs to something else: npm, yarn
+  # and bun symlink a .js entrypoint, pnpm writes a /bin/sh shim. Extracting into
+  # that bin dir replaces the tool's entry with a raw binary it still records as
+  # its own, so a later `npm uninstall -g @railway/cli` deletes the binary we
+  # just installed — leaving no railway at all — and reinstalling reverts it.
+  MANAGED_BIN=0
+  case "$RAILWAY_BIN" in
+    */node_modules/*) MANAGED_BIN=1 ;;
+  esac
+  if [ "$MANAGED_BIN" = 0 ] && [ -L "$RAILWAY_BIN" ]; then
+    case "$(readlink "$RAILWAY_BIN" 2>/dev/null || true)" in
+      */node_modules/*|*.js) MANAGED_BIN=1 ;;
+    esac
+  fi
+  # Catches pnpm's shell shim, and any hand-rolled wrapper — which we equally
+  # should not overwrite.
+  if [ "$MANAGED_BIN" = 0 ] && [ "$(head -c 2 "$RAILWAY_BIN" 2>/dev/null || true)" = '#!' ]; then
+    MANAGED_BIN=1
+  fi
+
+  if [ "$MANAGED_BIN" = 1 ]; then
+    if [ "$REMOTE" = 1 ] || [ "$LOCAL" = 1 ]; then
+      flag_name="--remote"
+      if [ "$LOCAL" = 1 ]; then
+        flag_name="--local"
+      fi
+      error "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN ($CURRENT_VERSION)."
+      error "The $flag_name flag requires Railway CLI $RAILWAY_VERSION or newer."
+      error "Update it with that tool first (e.g. 'npm install -g @railway/cli@latest'), then re-run cli.new --agents $flag_name."
+      exit 1
+    fi
+    warn "Railway CLI on PATH is managed by another tool: $RAILWAY_BIN"
+    warn "Update it with that tool (e.g. 'npm install -g @railway/cli@latest') to go from $CURRENT_VERSION to $RAILWAY_VERSION, then re-run cli.new --agents."
     info "Continuing with $CURRENT_VERSION."
     run_agent_setup "$RAILWAY_BIN"
     exit 0
@@ -1074,15 +1335,27 @@ mkdir -p "${BIN_DIR}" || {
 }
 check_bin_dir "${BIN_DIR}"
 
+if [ "$AGENTS" = 1 ] && [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
+  printf '\n%s\n' "${BOLD}Setting up Railway for agents${NO_COLOR}"
+fi
+
 install "${EXT}"
 
-completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
+if [ "$AGENTS" = 1 ]; then
+  completed "CLI — v${RAILWAY_VERSION} · $(tildify "$BIN_DIR")"
+else
+  completed "railway was installed successfully to $(tildify "$BIN_DIR/railway")"
+fi
 if [ "$RAILWAY_UPGRADE_AGENT" != "1" ]; then
   write_env_files
 fi
 
 if ! installed_railway_is_on_path; then
-  configure_shell_path
+  if [ "$AGENTS" = 1 ]; then
+    configure_shell_path quiet
+  else
+    configure_shell_path
+  fi
 fi
 
 if [ "$AGENTS" != 1 ]; then
@@ -1102,18 +1375,20 @@ if [ "$AGENTS" = 1 ]; then
     info "Upgraded Railway CLI to ${GREEN}${RAILWAY_VERSION}${NO_COLOR}."
   fi
 
-  print_cli_conflicts
+  print_cli_conflicts quiet
   run_agent_setup "$RAILWAY_BIN"
 
-  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && activation="$(activation_command)"; then
-    warn "IMPORTANT: Railway was installed to $BIN_DIR."
-    warn "Run '$activation' in new shells before calling railway, or add it to your shell startup file."
-  elif [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ]; then
-    warn "IMPORTANT: Railway was installed to $BIN_DIR."
-    warn "Add it to PATH before calling railway in new shells."
+  if [ "$RAILWAY_UPGRADE_AGENT" != "1" ] && [ "$PATH_ACTIVATION_PRINTED" != "1" ] && [ -z "$(activation_command)" ]; then
+    # No activation file was written; fall back to a plain PATH note.
+    warn "Railway was installed to $BIN_DIR. Add it to PATH before calling railway in new shells."
   fi
+
+  print_agent_next_steps
 fi
 
+# The "Poof" banner + telemetry notice are the standalone-CLI install ending;
+# the agent flow prints its own unified "Next steps" closer above instead.
+if [ "$AGENTS" != 1 ]; then
 printf "$MAGENTA"
   cat <<'EOF'
                    .
@@ -1136,3 +1411,4 @@ printf "$NO_COLOR"
 
 info "Railway collects anonymous CLI usage data to improve the developer experience."
 info "You can opt out anytime: ${BOLD}railway telemetry disable${NO_COLOR} or ${BOLD}RAILWAY_NO_TELEMETRY=1${NO_COLOR}"
+fi

@@ -1,0 +1,10 @@
+mutation SandboxTemplateBuild(
+  $environmentId: String!
+  $input: SandboxTemplateInput!
+) {
+  sandboxTemplateBuild(environmentId: $environmentId, input: $input) {
+    id
+    status
+    environmentId
+  }
+}

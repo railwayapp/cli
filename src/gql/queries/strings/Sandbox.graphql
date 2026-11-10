@@ -1,0 +1,6 @@
+query Sandbox($environmentId: String!, $id: String!) {
+  sandbox(environmentId: $environmentId, id: $id) {
+    id
+    status
+  }
+}

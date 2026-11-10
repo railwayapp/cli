@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::app::{Selection, Tab, TuiApp};
 use super::log_store::LogRef;
+use crate::tui_theme::Theme;
 
 fn convert_color(c: colored::Color) -> Color {
     match c {
@@ -32,6 +33,7 @@ fn convert_color(c: colored::Color) -> Color {
 }
 
 pub fn render(app: &mut TuiApp, frame: &mut Frame) {
+    let theme = app.theme;
     let info_height = if app.show_info { 3 } else { 0 };
 
     let chunks = Layout::vertical([
@@ -50,10 +52,11 @@ pub fn render(app: &mut TuiApp, frame: &mut Frame) {
     if app.show_info {
         render_info_pane(app, frame, chunks[2]);
     }
-    render_help_bar(app, frame, chunks[3]);
+    render_help_bar(theme, app, frame, chunks[3]);
 }
 
 fn render_tabs(app: &TuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let mut titles: Vec<Line> = Vec::new();
 
     if app.show_local_tab() {
@@ -76,17 +79,17 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: Rect) {
     let selected = app.tab_index();
 
     let follow_indicator = if app.follow_mode {
-        Span::styled(" [FOLLOW]", Style::default().fg(Color::Green))
+        Span::styled(" [FOLLOW]", Style::default().fg(theme.running))
     } else {
-        Span::styled(" [PAUSED]", Style::default().fg(Color::Yellow))
+        Span::styled(" [PAUSED]", Style::default().fg(theme.pending))
     };
 
     let tabs = Tabs::new(titles)
         .select(selected)
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(theme.dim))
         .highlight_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
         .divider("|");
@@ -98,6 +101,7 @@ fn render_tabs(app: &TuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let visible_height = area.height as usize;
     app.set_visible_height(visible_height);
 
@@ -153,6 +157,7 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
             .unwrap_or_else(|| convert_color(log_color));
 
         let line = render_log_line(
+            theme,
             service_name,
             service_color,
             message,
@@ -176,6 +181,7 @@ fn render_logs(app: &mut TuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_log_line<'a>(
+    theme: &Theme,
     service_name: &str,
     service_color: Color,
     message: &str,
@@ -246,7 +252,7 @@ fn render_log_line<'a>(
         let text: String = chars[sel_start..sel_end.min(line_len)].iter().collect();
         spans.push(Span::styled(
             text,
-            Style::default().bg(Color::White).fg(Color::Black),
+            Style::default().bg(theme.selection).fg(theme.fg),
         ));
     }
 
@@ -264,6 +270,7 @@ fn render_log_line<'a>(
 }
 
 fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let services_to_show: Vec<&super::app::ServiceInfo> = match app.current_tab {
         Tab::Local => app.services.iter().filter(|s| !s.is_docker).collect(),
         Tab::Image => app.services.iter().filter(|s| s.is_docker).collect(),
@@ -285,7 +292,7 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
             match (&svc.private_url, &svc.public_url) {
                 (Some(priv_url), Some(pub_url)) => {
                     spans.push(Span::raw(priv_url.clone()));
-                    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(" | ", Style::default().fg(theme.dim)));
                     spans.push(Span::raw(pub_url.clone()));
                 }
                 (Some(url), None) | (None, Some(url)) => {
@@ -293,16 +300,16 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
                 }
                 (None, None) => {
                     if let Some(cmd) = &svc.command {
-                        spans.push(Span::styled(cmd.clone(), Style::default().fg(Color::Gray)));
+                        spans.push(Span::styled(cmd.clone(), Style::default().fg(theme.dim)));
                     } else if let Some(img) = &svc.image {
-                        spans.push(Span::styled(img.clone(), Style::default().fg(Color::Gray)));
+                        spans.push(Span::styled(img.clone(), Style::default().fg(theme.dim)));
                     }
                 }
             }
 
             spans.push(Span::styled(
                 format!(" ({} vars)", svc.var_count),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.dim),
             ));
 
             Line::from(spans)
@@ -311,28 +318,30 @@ fn render_info_pane(app: &TuiApp, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(theme.accent_dim));
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
-fn render_help_bar(app: &TuiApp, frame: &mut Frame, area: Rect) {
+fn render_help_bar(theme: &Theme, app: &TuiApp, frame: &mut Frame, area: Rect) {
     let mut help_text = vec![
-        Span::styled("1-9", Style::default().fg(Color::Yellow)),
+        Span::styled("1-9", Style::default().fg(theme.accent)),
         Span::raw(" tab  "),
-        Span::styled("j/k", Style::default().fg(Color::Yellow)),
+        Span::styled("j/k", Style::default().fg(theme.accent)),
         Span::raw(" scroll  "),
-        Span::styled("drag", Style::default().fg(Color::Yellow)),
+        Span::styled("drag", Style::default().fg(theme.accent)),
         Span::raw(" copy  "),
-        Span::styled("i", Style::default().fg(Color::Yellow)),
+        Span::styled("i", Style::default().fg(theme.accent)),
         Span::raw(if app.show_info { " hide" } else { " info" }),
         Span::raw("  "),
-        Span::styled("f", Style::default().fg(Color::Yellow)),
+        Span::styled("f", Style::default().fg(theme.accent)),
         Span::raw(" follow  "),
-        Span::styled("r", Style::default().fg(Color::Yellow)),
+        Span::styled("r", Style::default().fg(theme.accent)),
         Span::raw(" restart  "),
-        Span::styled("q", Style::default().fg(Color::Yellow)),
+        Span::styled("t", Style::default().fg(theme.accent)),
+        Span::raw(" theme  "),
+        Span::styled("q", Style::default().fg(theme.accent)),
         Span::raw(" quit"),
     ];
 
@@ -341,14 +350,14 @@ fn render_help_bar(app: &TuiApp, frame: &mut Frame, area: Rect) {
         if instant.elapsed().as_secs() < 2 {
             help_text.push(Span::styled(
                 "  [Copied!]",
-                Style::default().fg(Color::Green),
+                Style::default().fg(theme.running),
             ));
         }
     } else if let Some(instant) = app.copy_failed {
         if instant.elapsed().as_secs() < 2 {
             help_text.push(Span::styled(
                 "  [Copy failed]",
-                Style::default().fg(Color::Red),
+                Style::default().fg(theme.danger),
             ));
         }
     }

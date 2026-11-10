@@ -11,10 +11,52 @@ query Domains(
     serviceDomains {
       id
       domain
+      suffix
+      environmentId
+      serviceId
+      targetPort
+      syncStatus
+      createdAt
+      updatedAt
     }
     customDomains {
       id
       domain
+      environmentId
+      projectId
+      serviceId
+      targetPort
+      syncStatus
+      createdAt
+      updatedAt
+      status {
+        dnsRecords {
+          hostlabel
+          fqdn
+          recordType
+          requiredValue
+          currentValue
+          status
+          zone
+          purpose
+        }
+        cdnProvider
+        certificateStatus
+        certificateStatusDetailed
+        certificateErrorMessage
+        certificateErrorType
+        certificateRetryable
+        certificates {
+          issuedAt
+          expiresAt
+          domainNames
+          fingerprintSha256
+          keyType
+        }
+        verificationToken
+        verificationDnsHost
+        verified
+      }
     }
   }
 }

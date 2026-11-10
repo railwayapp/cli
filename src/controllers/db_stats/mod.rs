@@ -4,25 +4,36 @@ mod postgres;
 mod redis;
 pub mod types;
 
-use std::process::Stdio;
-
-use anyhow::{Result, bail};
-use tokio::io::AsyncWriteExt;
+use anyhow::Result;
 
 use crate::controllers::database::DatabaseType;
-use crate::controllers::ssh_keys::find_local_ssh_keys;
+use crate::controllers::exec::exec_probe_in_container;
+use crate::controllers::ssh::keys::find_local_ssh_keys;
 
 pub use types::DatabaseStats;
 
-const SSH_HOST: &str = "ssh.railway.com";
+/// The engine collectors' shared exec: the retrying probe wrapper with one
+/// stats-appropriate per-attempt budget (these back `railway metrics`, so a
+/// relay blip must not blank a whole stats pane).
+async fn exec_command_in_container(
+    service_instance_id: &str,
+    command: &str,
+) -> anyhow::Result<String> {
+    exec_probe_in_container(
+        service_instance_id,
+        command,
+        std::time::Duration::from_secs(15),
+    )
+    .await
+}
 
 /// Preflight check for SSH-based DB stats collection. Runs locally only --
 /// it catches the common "no SSH key" case before we spawn the SSH process,
 /// so we can surface actionable guidance instead of a cryptic failure.
-pub fn preflight_db_stats_ssh() -> Result<(), String> {
-    match find_local_ssh_keys() {
+pub async fn preflight_db_stats_ssh() -> Result<(), String> {
+    match find_local_ssh_keys().await {
         Ok(keys) if keys.is_empty() => Err(
-            "no local SSH key found in ~/.ssh\n  \
+            "no SSH keys found in your SSH agent or ~/.ssh/\n\n\
              generate one with `ssh-keygen -t ed25519`, then register it with `railway ssh keys add`"
                 .to_string(),
         ),
@@ -111,43 +122,6 @@ fn cli_tool_missing(db_type: &DatabaseType, lower_err: &str) -> bool {
     lower_err.contains(tool)
 }
 
-/// Execute a shell command inside a service container via native SSH
-/// (`ssh <instanceId>@ssh.railway.com`) and capture stdout.
-async fn exec_command_in_container(service_instance_id: &str, command: &str) -> Result<String> {
-    let target = format!("{service_instance_id}@{SSH_HOST}");
-
-    let mut child = tokio::process::Command::new("ssh")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg(&target)
-        .arg("sh")
-        .arg("-s")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(command.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-    } else {
-        bail!("Failed to open stdin for SSH command");
-    }
-
-    let output = child.wait_with_output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "SSH command failed (exit {}): {}",
-            output.status,
-            stderr.trim()
-        );
-    }
-
-    Ok(String::from_utf8(output.stdout)?)
-}
-
 /// Fetch database-specific internal metrics by SSHing into the container
 /// and running database CLI commands.
 pub async fn fetch_db_stats(
@@ -176,7 +150,11 @@ pub async fn fetch_db_stats(
 
 /// Split raw command output into sections by delimiter markers.
 /// Returns a map of section_name -> section_content.
-fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
+///
+/// `pub(crate)`: also reused by `commands::postgres::pgbouncer`'s live pool
+/// probe (`SHOW POOLS`/`SHOW STATS`/`SHOW SERVERS`), which follows the same
+/// `echo '===NAME==='` delimiter convention as this module's own commands.
+pub(crate) fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
     let mut sections = std::collections::HashMap::new();
     let mut current_name: Option<&str> = None;
     let mut current_start = 0;
@@ -217,7 +195,9 @@ fn split_sections(output: &str) -> std::collections::HashMap<&str, &str> {
 }
 
 /// Parse a simple integer from a string, returning 0 on failure.
-fn parse_i64(s: &str) -> i64 {
+///
+/// `pub(crate)`: reused by `commands::postgres::pgbouncer`'s live pool probe.
+pub(crate) fn parse_i64(s: &str) -> i64 {
     s.trim().parse().unwrap_or(0)
 }
 

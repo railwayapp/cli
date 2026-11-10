@@ -1,0 +1,10 @@
+query Signal($owner: String!, $name: String!) {
+  signal(owner: $owner, name: $name) {
+    id
+    name
+    type
+    owner
+    default
+    version
+  }
+}

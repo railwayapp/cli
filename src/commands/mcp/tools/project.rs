@@ -3,6 +3,7 @@ use rmcp::{ErrorData as McpError, model::*};
 use crate::{
     client::post_graphql,
     controllers::{
+        github::{resolve_repo_branch, validate_repo_name},
         project::{get_environment_instances, service_instances_in_env},
         regions::{fetch_regions_for_project, resolve_deploy_region_id},
     },
@@ -12,8 +13,8 @@ use crate::{
 
 use super::super::handler::RailwayMcp;
 use super::super::params::{
-    CreateEnvironmentParams, CreateProjectParams, CreateServiceParams, EnvironmentStatusParams,
-    RemoveServiceParams, UpdateServiceParams,
+    ConnectServiceSourceParams, CreateEnvironmentParams, CreateProjectParams, CreateServiceParams,
+    EnvironmentStatusParams, RemoveServiceParams, ServiceParams, UpdateServiceParams,
 };
 
 impl RailwayMcp {
@@ -58,7 +59,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ProjectCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -108,7 +109,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::EnvironmentCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -133,10 +134,32 @@ impl RailwayMcp {
                 None,
             ));
         }
+        if params.branch.is_some() && params.source_repo.is_none() {
+            return Err(McpError::invalid_params(
+                "branch can only be used with source_repo.",
+                None,
+            ));
+        }
 
         let ctx = self
             .resolve_context(params.project_id, params.environment_id)
             .await?;
+
+        let branch = if let Some(repo) = params.source_repo.as_deref() {
+            validate_repo_name(repo).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            Some(
+                resolve_repo_branch(&self.client(), &self.configs, repo, params.branch)
+                    .await
+                    .map_err(|e| {
+                        McpError::invalid_params(
+                            format!("Failed to resolve repo branch: {e}"),
+                            None,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
 
         let source = if params.source_image.is_some() || params.source_repo.is_some() {
             Some(mutations::service_create::ServiceSourceInput {
@@ -150,14 +173,14 @@ impl RailwayMcp {
         let vars = mutations::service_create::Variables {
             name: params.name,
             project_id: ctx.project_id,
-            environment_id: ctx.environment_id,
+            environment_id: Some(ctx.environment_id),
             source,
-            branch: None,
+            branch,
             variables: None,
         };
 
         let result = post_graphql::<mutations::ServiceCreate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -167,6 +190,94 @@ impl RailwayMcp {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Service created: {} (id: {})",
             result.service_create.name, result.service_create.id
+        ))]))
+    }
+
+    pub(crate) async fn do_connect_service_source(
+        &self,
+        params: ConnectServiceSourceParams,
+    ) -> Result<CallToolResult, McpError> {
+        if params.source_image.is_some() == params.source_repo.is_some() {
+            return Err(McpError::invalid_params(
+                "Provide exactly one of source_repo or source_image.",
+                None,
+            ));
+        }
+        if params.branch.is_some() && params.source_repo.is_none() {
+            return Err(McpError::invalid_params(
+                "branch can only be used with source_repo.",
+                None,
+            ));
+        }
+
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+
+        let (repo, branch, image) = if let Some(repo) = params.source_repo {
+            validate_repo_name(&repo).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            let branch = resolve_repo_branch(&self.client(), &self.configs, &repo, params.branch)
+                .await
+                .map_err(|e| {
+                    McpError::invalid_params(format!("Failed to resolve repo branch: {e}"), None)
+                })?;
+            (Some(repo), Some(branch), None)
+        } else {
+            (None, None, params.source_image)
+        };
+
+        let result = post_graphql::<mutations::ServiceConnect, _>(
+            &self.client(),
+            self.configs.get_backboard(),
+            mutations::service_connect::Variables {
+                id: ctx.service_id.clone(),
+                input: mutations::service_connect::ServiceConnectInput {
+                    repo: repo.clone(),
+                    branch: branch.clone(),
+                    image: image.clone(),
+                },
+            },
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to connect service source: {e}"), None)
+        })?;
+
+        let source = match (&repo, &branch, &image) {
+            (Some(repo), Some(branch), _) => format!("{repo}@{branch}"),
+            (_, _, Some(image)) => image.clone(),
+            _ => "source".to_string(),
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Connected service source: {} (id: {}) -> {}",
+            result.service_connect.name, result.service_connect.id, source
+        ))]))
+    }
+
+    pub(crate) async fn do_disconnect_service_source(
+        &self,
+        params: ServiceParams,
+    ) -> Result<CallToolResult, McpError> {
+        let ctx = self
+            .resolve_service_context(params.project_id, params.service_id, params.environment_id)
+            .await?;
+
+        let result = post_graphql::<mutations::ServiceDisconnect, _>(
+            &self.client(),
+            self.configs.get_backboard(),
+            mutations::service_disconnect::Variables {
+                id: ctx.service_id.clone(),
+            },
+        )
+        .await
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to disconnect service source: {e}"), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Disconnected service source: {} (id: {})",
+            result.service_disconnect.name, result.service_disconnect.id
         ))]))
     }
 
@@ -184,7 +295,7 @@ impl RailwayMcp {
         };
 
         post_graphql::<mutations::ServiceDelete, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -221,7 +332,7 @@ impl RailwayMcp {
         let region = match params.region {
             Some(region_input) => {
                 let regions =
-                    fetch_regions_for_project(&self.client, &self.configs, Some(&ctx.project_id))
+                    fetch_regions_for_project(&self.client(), &self.configs, Some(&ctx.project_id))
                         .await
                         .map_err(|e| {
                             McpError::internal_error(format!("Failed to fetch regions: {e}"), None)
@@ -260,7 +371,7 @@ impl RailwayMcp {
         };
 
         let result = post_graphql::<mutations::ServiceInstanceUpdate, _>(
-            &self.client,
+            &self.client(),
             self.configs.get_backboard(),
             vars,
         )
@@ -302,7 +413,7 @@ impl RailwayMcp {
         output.push_str("--------|--------|-------------------|---------------\n");
 
         let environment_instances =
-            get_environment_instances(&self.client, &self.configs, &ctx.project_id, &env.node.id)
+            get_environment_instances(&self.client(), &self.configs, &ctx.project_id, &env.node.id)
                 .await
                 .map_err(|e| {
                     McpError::internal_error(

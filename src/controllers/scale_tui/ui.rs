@@ -7,23 +7,25 @@ use ratatui::{
 };
 
 use crate::controllers::regions::MAX_TOTAL_REPLICAS;
+use crate::tui_theme::Theme;
 
 use super::{RegionRow, ScaleTuiApp, ScaleTuiFocus, ScaleTuiMode};
 
-const LABEL_COLOR: Color = Color::DarkGray;
-const BORDER_COLOR: Color = Color::DarkGray;
-const SELECTED_ROW_STYLE: Style = Style::new()
-    .fg(Color::White)
-    .bg(Color::Indexed(238))
-    .add_modifier(Modifier::BOLD);
+fn selected_row_style(theme: &Theme) -> Style {
+    Style::new()
+        .fg(theme.fg)
+        .bg(theme.selection)
+        .add_modifier(Modifier::BOLD)
+}
 
 pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
+    let theme = app.theme;
     let area = frame.area();
     frame.render_widget(Clear, area);
 
     if area.width < 72 || area.height < 18 {
         let warning = Paragraph::new("Terminal too small. Please resize (min 72x18).")
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(theme.pending));
         frame.render_widget(warning, area);
         return;
     }
@@ -52,25 +54,26 @@ pub fn render(app: &ScaleTuiApp, frame: &mut Frame) {
 
     match app.mode {
         ScaleTuiMode::Confirm => render_confirm_popup(app, frame, area),
-        ScaleTuiMode::Help => render_help_popup(frame, area),
+        ScaleTuiMode::Help => render_help_popup(theme, frame, area),
         ScaleTuiMode::Browse | ScaleTuiMode::Edit => {}
     }
 }
 
 fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let header = vec![
-        Span::styled("  Scale ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  Scale ", Style::default().fg(theme.dim)),
         Span::styled(
             app.service_name.clone(),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.running)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  in  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  in  ", Style::default().fg(theme.dim)),
         Span::styled(
             app.environment_name.clone(),
             Style::default()
-                .fg(Color::Blue)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
     ];
@@ -82,11 +85,12 @@ fn render_header(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let visible = app.visible_indices();
     if visible.is_empty() {
         let message = "No regions available.";
         frame.render_widget(
-            Paragraph::new(format!("  {message}")).style(Style::default().fg(LABEL_COLOR)),
+            Paragraph::new(format!("  {message}")).style(Style::default().fg(theme.dim)),
             area,
         );
         return;
@@ -100,7 +104,7 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
             replica_cell(app, visible_idx, row, selected),
             Cell::from(change_label(row)),
         ])
-        .style(row_style(row, selected))
+        .style(row_style(theme, row, selected))
     });
 
     let table = Table::new(
@@ -112,18 +116,15 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["Region", "Replicas", "Change"]).style(
-            Style::default()
-                .fg(LABEL_COLOR)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Row::new(vec!["Region", "Replicas", "Change"])
+            .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD)),
     )
     .block(
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(BORDER_COLOR)),
+            .border_style(Style::default().fg(theme.accent_dim)),
     )
-    .row_highlight_style(SELECTED_ROW_STYLE);
+    .row_highlight_style(selected_row_style(theme));
 
     let mut state = TableState::default();
     if app.focus == ScaleTuiFocus::Regions {
@@ -133,29 +134,41 @@ fn render_table(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_actions(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let line = Line::from(vec![
-        button("Apply", app.focus == ScaleTuiFocus::Apply, Color::Green),
+        button(
+            "Apply",
+            app.focus == ScaleTuiFocus::Apply,
+            theme.fg,
+            theme.running,
+        ),
         Span::raw("  "),
-        button("Cancel", app.focus == ScaleTuiFocus::Cancel, Color::Red),
+        button(
+            "Cancel",
+            app.focus == ScaleTuiFocus::Cancel,
+            theme.fg,
+            theme.danger,
+        ),
     ]);
 
     frame.render_widget(Paragraph::new(vec![Line::from(""), line]), area);
 }
 
 fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let mut lines = Vec::new();
 
     if let Some(error) = &app.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.danger),
         )));
     } else if !app.changes().is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(app.command_preview()));
         lines.push(Line::from(Span::styled(
             format!("{} region change(s) selected.", app.changes().len()),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme.running),
         )));
     }
 
@@ -163,11 +176,12 @@ fn render_preview(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let help = match app.mode {
         ScaleTuiMode::Browse if app.focus == ScaleTuiFocus::Regions => {
-            "Up/Down move  type edit  +/- adjust  0 remove  Enter edit  ? help"
+            "Up/Down move  type edit  +/- adjust  0 remove  Enter edit  t theme  ? help"
         }
-        ScaleTuiMode::Browse => "Enter activate  Up regions  q cancel  ? help",
+        ScaleTuiMode::Browse => "Enter activate  Up regions  q cancel  t theme  ? help",
         ScaleTuiMode::Edit => "Type replicas  Enter save  Esc cancel  Backspace delete",
         ScaleTuiMode::Confirm => "Enter apply  e edit  q cancel",
         ScaleTuiMode::Help => "Esc close help",
@@ -175,13 +189,14 @@ fn render_help_bar(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             help,
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ))),
         area,
     );
 }
 
 fn render_confirm_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let popup = centered_rect(58, 12, area);
     frame.render_widget(Clear, popup);
 
@@ -189,7 +204,7 @@ fn render_confirm_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(
             "Apply scale changes?",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -206,19 +221,20 @@ fn render_confirm_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     if hidden > 0 {
         lines.push(Line::from(Span::styled(
             format!("and {hidden} more..."),
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         )));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter apply  e edit  q cancel",
-        Style::default().fg(LABEL_COLOR),
+        Style::default().fg(theme.dim),
     )));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
@@ -226,7 +242,7 @@ fn render_confirm_popup(app: &ScaleTuiApp, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_help_popup(frame: &mut Frame, area: Rect) {
+fn render_help_popup(theme: &Theme, frame: &mut Frame, area: Rect) {
     let popup = centered_rect(62, 13, area);
     frame.render_widget(Clear, popup);
 
@@ -234,7 +250,7 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(
             "Scale TUI help",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -244,14 +260,16 @@ fn render_help_popup(frame: &mut Frame, area: Rect) {
         Line::from("Enter saves an inline edit."),
         Line::from("0 sets the selected region to zero replicas."),
         Line::from("a previews and applies the selected changes."),
+        Line::from("t cycles the colour theme."),
         Line::from("q or Esc cancels without applying."),
         Line::from(""),
-        Line::from(Span::styled("Esc close", Style::default().fg(LABEL_COLOR))),
+        Line::from(Span::styled("Esc close", Style::default().fg(theme.dim))),
     ];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::new(1, 1, 1, 1));
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
@@ -273,24 +291,25 @@ fn replica_cell(
     row: &RegionRow,
     selected: bool,
 ) -> Cell<'static> {
+    let theme = app.theme;
     let is_editing = app.mode == ScaleTuiMode::Edit && app.selected == visible_idx;
     if is_editing {
         return Cell::from(Line::from(vec![Span::styled(
             format!("[{}]", app.edit_input),
-            replica_style(row, selected),
+            replica_style(theme, row, selected),
         )]));
     }
 
     Cell::from(Line::from(Span::styled(
         row.desired.to_string(),
-        replica_style(row, selected),
+        replica_style(theme, row, selected),
     )))
 }
 
-fn button(label: &'static str, focused: bool, color: Color) -> Span<'static> {
+fn button(label: &'static str, focused: bool, on_color: Color, color: Color) -> Span<'static> {
     let style = if focused {
         Style::default()
-            .fg(Color::White)
+            .fg(on_color)
             .bg(color)
             .add_modifier(Modifier::BOLD)
     } else {
@@ -316,28 +335,28 @@ fn change_label(row: &RegionRow) -> String {
     }
 }
 
-fn row_style(row: &RegionRow, selected: bool) -> Style {
+fn row_style(theme: &Theme, row: &RegionRow, selected: bool) -> Style {
     if selected {
-        return SELECTED_ROW_STYLE;
+        return selected_row_style(theme);
     }
 
     if row.changed() {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme.running)
     } else if !row.available {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.pending)
     } else {
         Style::default()
     }
 }
 
-fn replica_style(row: &RegionRow, selected: bool) -> Style {
+fn replica_style(theme: &Theme, row: &RegionRow, selected: bool) -> Style {
     if selected {
-        return SELECTED_ROW_STYLE;
+        return selected_row_style(theme);
     }
 
     if row.changed() {
         Style::default()
-            .fg(Color::Green)
+            .fg(theme.running)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()

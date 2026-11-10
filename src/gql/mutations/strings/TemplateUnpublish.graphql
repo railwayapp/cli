@@ -1,0 +1,3 @@
+mutation TemplateUnpublish($id: String!) {
+  templateUnpublish(id: $id)
+}

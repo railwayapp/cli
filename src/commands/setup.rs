@@ -13,7 +13,7 @@ use crate::{
     telemetry::{self, SetupAgentPhase, SetupAgentTrackEvent},
 };
 
-const DOCS_URL: &str = "https://docs.railway.com/ai";
+const DOCS_URL: &str = "https://docs.railway.com/agents";
 
 /// Set up your editor for Railway agent functionality (skills, MCP, login)
 #[derive(Parser)]
@@ -32,12 +32,25 @@ enum SetupCommand {
 pub struct AgentArgs {
     /// Skip prompts and accept defaults: auto-detect installed editors, skip the login flow.
     /// Also auto-engaged when stdout is not a terminal (e.g. piped or running under CI).
+    /// Non-interactive MCP default is the remote CLI proxy (`railway mcp proxy`).
     #[clap(short = 'y', long)]
     yes: bool,
 
-    /// Configure the remote HTTP MCP server at mcp.railway.com instead of the local stdio server.
-    #[clap(long)]
+    /// Configure the remote MCP server via the CLI proxy (`railway mcp proxy` →
+    /// mcp.railway.com, auth via `railway login`). Default for `-y` / non-interactive
+    /// setup; kept as a compatibility alias. Ignored when `--oauth` is set.
+    #[clap(long, conflicts_with = "local")]
     remote: bool,
+
+    /// Configure the local GraphQL-backed MCP server (`railway mcp local`) instead of
+    /// the remote CLI proxy default.
+    #[clap(long, conflicts_with_all = ["remote", "oauth"])]
+    local: bool,
+
+    /// Use editor OAuth against https://mcp.railway.com directly (not the CLI proxy).
+    /// Takes precedence over `--remote`.
+    #[clap(long, conflicts_with = "local")]
+    oauth: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -63,40 +76,70 @@ impl fmt::Display for ToolChoice {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum McpChoice {
     Local,
-    Remote,
+    RemoteProxy,
+    RemoteOauth,
     Skip,
 }
 
 impl fmt::Display for McpChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            McpChoice::RemoteProxy => write!(
+                f,
+                "Remote (default) {}",
+                "— mcp.railway.com via the CLI proxy (uses your `railway login`)".dimmed()
+            ),
             McpChoice::Local => write!(
                 f,
-                "Local (default)  {}",
-                "— runs `railway mcp` as a stdio server".dimmed()
+                "Local            {}",
+                "— runs `railway mcp local` as a stdio server".dimmed()
             ),
-            McpChoice::Remote => write!(
+            McpChoice::RemoteOauth => write!(
                 f,
-                "Remote           {}",
-                "— https://mcp.railway.com (HTTP)".dimmed()
+                "Remote (OAuth)   {}",
+                "— https://mcp.railway.com directly; your editor handles OAuth".dimmed()
             ),
             McpChoice::Skip => write!(f, "Skip             {}", "— don't configure MCP".dimmed()),
         }
     }
 }
 
-fn pick_mcp_choice(remote_flag: bool, non_interactive: bool) -> Result<McpChoice> {
-    if remote_flag {
-        return Ok(McpChoice::Remote);
-    }
-    if non_interactive {
+fn pick_mcp_choice(
+    remote_flag: bool,
+    oauth_flag: bool,
+    local_flag: bool,
+    non_interactive: bool,
+) -> Result<McpChoice> {
+    if local_flag {
         return Ok(McpChoice::Local);
     }
-    let options = vec![McpChoice::Local, McpChoice::Remote, McpChoice::Skip];
+    if oauth_flag {
+        if remote_flag {
+            eprintln!(
+                "{} {}",
+                "!".yellow().bold(),
+                "Using editor OAuth (https://mcp.railway.com); --remote is ignored with --oauth."
+                    .yellow()
+            );
+        }
+        return Ok(McpChoice::RemoteOauth);
+    }
+    if remote_flag || non_interactive {
+        // `--remote` is now an explicit no-op alias of the non-interactive default.
+        return Ok(McpChoice::RemoteProxy);
+    }
+    let options = vec![
+        McpChoice::RemoteProxy,
+        McpChoice::Local,
+        McpChoice::RemoteOauth,
+        McpChoice::Skip,
+    ];
+    // Remote is index 0 and labeled default; start the cursor there so Enter accepts it.
     inquire::Select::new("Configure MCP server:", options)
+        .with_starting_cursor(0)
         .with_render_config(Configs::get_render_config())
         .prompt()
         .context("Failed to prompt for MCP transport")
@@ -123,15 +166,10 @@ async fn agent_setup(args: AgentArgs) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            let message = err.to_string();
             telemetry::send_setup_agent(SetupAgentTrackEvent {
                 phase: SetupAgentPhase::Finish,
                 success: Some(false),
-                error_message: Some(if message.len() > 256 {
-                    message[..256].to_string()
-                } else {
-                    message
-                }),
+                error_message: Some(telemetry::truncate_message(&err.to_string())),
                 configured_clients: None,
             })
             .await;
@@ -146,8 +184,14 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     // isn't a TTY (piped, CI, agent-driven). Matches the convention used by
     // `interact_or!` elsewhere in this CLI.
     let non_interactive = args.yes || !is_stdout_terminal();
+    // When launched by the installer (`… | sh --agents`, which sets
+    // RAILWAY_SETUP_EMBEDDED), render only the skills/MCP steps as part of one
+    // unified flow — the installer prints the banner, next steps, and closer.
+    let embedded = std::env::var("RAILWAY_SETUP_EMBEDDED").is_ok();
 
-    println!("\n{}\n", "Railway Agent Setup".bold().cyan());
+    if !embedded {
+        println!("\n{}\n", "Railway Agent Setup".bold().cyan());
+    }
 
     let choices: Vec<ToolChoice> = coding_tools(&home)
         .into_iter()
@@ -166,7 +210,9 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
             .filter(|c| c.detected)
             .map(|c| c.slug.to_string())
             .collect();
-        println!("{} {}\n", "Detected:".bold(), detected.join(", ").cyan());
+        if !embedded {
+            println!("{} {}\n", "Detected:".bold(), detected.join(", ").cyan());
+        }
         detected
     } else {
         let default_indices: Vec<usize> = choices
@@ -206,44 +252,117 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
         .cloned()
         .collect();
     if missing_skills.is_empty() {
-        println!(
-            "\n{} {}",
-            "-".dimmed(),
-            "Railway skills already configured; skipping install.".dimmed()
-        );
-    } else {
-        skills::install_skills(&missing_skills).await?;
-    }
-
-    // Step 2: MCP install (skips universal internally — no MCP convention).
-    // `--remote` short-circuits the prompt; `-y`/non-TTY defaults to local.
-    let mcp_choice = pick_mcp_choice(args.remote, non_interactive)?;
-    match mcp_choice {
-        McpChoice::Local => install_missing_mcp(&home, &selected_slugs, false).await?,
-        McpChoice::Remote => install_missing_mcp(&home, &selected_slugs, true).await?,
-        McpChoice::Skip => {
+        if !embedded {
             println!(
                 "\n{} {}",
                 "-".dimmed(),
-                "Skipping MCP install. Run `railway mcp install` later to configure.".dimmed()
+                "Railway skills already configured; skipping install.".dimmed()
             );
+        }
+    } else {
+        skills::install_skills(&missing_skills, false, embedded).await?;
+    }
+    if embedded {
+        let names: Vec<&str> = choices
+            .iter()
+            .filter(|c| selected_slugs.iter().any(|s| s.as_str() == c.slug))
+            .map(|c| c.name)
+            .collect();
+        println!(
+            "{} {} \u{2014} {}",
+            "\u{2713}".green(),
+            "Agent skills".bold(),
+            names.join(", ")
+        );
+    }
+
+    // Step 2: MCP install (skips universal internally — no MCP convention).
+    // Flags short-circuit the prompt; `-y`/non-TTY defaults to the remote CLI proxy.
+    let mcp_choice = pick_mcp_choice(args.remote, args.oauth, args.local, non_interactive)?;
+    let mcp_transport = match mcp_choice {
+        McpChoice::Local => {
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::Local,
+                embedded,
+            )
+            .await?;
+            Some("local")
+        }
+        McpChoice::RemoteProxy => {
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::RemoteProxy,
+                embedded,
+            )
+            .await?;
+            Some("remote-proxy")
+        }
+        McpChoice::RemoteOauth => {
+            install_missing_mcp(
+                &home,
+                &selected_slugs,
+                mcp_install::McpTransport::RemoteOauth,
+                embedded,
+            )
+            .await?;
+            Some("remote-oauth")
+        }
+        McpChoice::Skip => {
+            if !embedded {
+                println!(
+                    "\n{} {}",
+                    "-".dimmed(),
+                    "Skipping MCP install. Run `railway mcp install` later to configure.".dimmed()
+                );
+            }
+            None
+        }
+    };
+    if embedded {
+        if let Some(transport) = mcp_transport {
+            let names: Vec<&str> = choices
+                .iter()
+                .filter(|c| {
+                    selected_slugs.iter().any(|s| s.as_str() == c.slug)
+                        && mcp_install::supports_mcp(c.slug)
+                })
+                .map(|c| c.name)
+                .collect();
+            if !names.is_empty() {
+                println!(
+                    "{} {} ({}) \u{2014} {}",
+                    "\u{2713}".green(),
+                    "Railway MCP".bold(),
+                    transport,
+                    names.join(", ")
+                );
+            }
         }
     }
 
-    // Step 3: login
-    if non_interactive {
-        warn_if_not_logged_in().await;
-    } else {
-        ensure_logged_in_interactive().await?;
+    // Step 3: login — skipped when embedded; the installer owns login (it logs
+    // in interactively before this runs, and shows `railway login` in its
+    // consolidated next-steps when not logged in).
+    if !embedded {
+        if non_interactive {
+            warn_if_not_logged_in().await;
+        } else {
+            ensure_logged_in_interactive().await?;
+        }
     }
 
-    // Step 4: docs link
-    println!(
-        "\n{} {} {}\n",
-        "\u{2713}".green().bold(),
-        "Setup complete. Learn more:".bold(),
-        DOCS_URL.purple()
-    );
+    // Step 4: docs link — the installer prints the unified closer when embedded.
+    if !embedded {
+        println!(
+            "\n{} {} {}\n",
+            "\u{2713}".green().bold(),
+            "Setup complete. Learn more:".bold(),
+            DOCS_URL.purple()
+        );
+    }
 
     if let Err(e) = crate::util::agent_advisory::record_setup_complete() {
         eprintln!("{}: {e}", "Warning: failed to record agent setup".yellow());
@@ -252,28 +371,145 @@ async fn agent_setup_inner(args: AgentArgs) -> Result<Vec<String>> {
     Ok(configured_clients)
 }
 
+/// Health check for the root help screen: green/red status lines for Railway
+/// skills and MCP configuration across detected editors — exactly the set
+/// `railway setup agent -y` would install for. No network; a handful of stat
+/// calls and local config-file parses. Prints nothing when no coding tools
+/// are detected or in CI.
+pub(crate) fn print_agent_health_check() {
+    if Configs::env_is_ci() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+
+    let detected: Vec<_> = coding_tools(&home)
+        .into_iter()
+        .filter(|tool| tool.slug == "universal" || tool.global_parent.is_dir())
+        .collect();
+
+    // The universal `.agents` target alone doesn't indicate agent usage — only
+    // run the health check for users with an actual coding tool installed.
+    if !detected.iter().any(|tool| tool.slug != "universal") {
+        return;
+    }
+
+    let missing_skills: Vec<&str> = detected
+        .iter()
+        .filter(|tool| !skills::skills_configured_for_slug(&home, tool.slug))
+        .map(|tool| tool.name)
+        .collect();
+
+    // Either transport counts as configured — `setup agent` installs one of
+    // the two, and a remote-configured editor isn't unhealthy.
+    let missing_mcp: Vec<&str> = detected
+        .iter()
+        .filter(|tool| mcp_install::supports_mcp(tool.slug))
+        .filter(|tool| !mcp_install::mcp_configured_any_transport(&home, tool.slug))
+        .map(|tool| tool.name)
+        .collect();
+
+    let skills_ok = missing_skills.is_empty();
+    let mcp_ok = missing_mcp.is_empty();
+
+    // Styled as a section of the help output (it only prints after root
+    // help), with the verdict line last — the spot the eye lands on.
+    eprintln!("\n{}", "Agent tooling:".dimmed());
+
+    if skills_ok {
+        let auto_update_enabled = !crate::telemetry::is_auto_update_disabled();
+        let revision = match skills::installed_skills_revision(&home) {
+            Some((installed, skills::SkillsStaleness::UpdatePending(newer)))
+                if auto_update_enabled =>
+            {
+                format!(" (rev {installed} \u{2192} {newer}, automatic update pending)")
+            }
+            Some((installed, skills::SkillsStaleness::UpdateAvailable(newer)))
+                if auto_update_enabled =>
+            {
+                format!(
+                    " (rev {installed} \u{2192} {newer}, local changes skipped; run `railway skills update` to review)"
+                )
+            }
+            Some((installed, skills::SkillsStaleness::UpToDate)) => {
+                format!(" (rev {installed}, up to date)")
+            }
+            // No staleness evidence yet — show the revision, claim nothing.
+            Some((installed, _)) => format!(" (rev {installed})"),
+            None => String::new(),
+        };
+        eprintln!(
+            "  {} {}{}",
+            "\u{2713}".green(),
+            "Railway skills installed".green(),
+            revision.dimmed()
+        );
+    } else {
+        eprintln!(
+            "  {} {}",
+            "\u{2717}".red(),
+            format!(
+                "Railway skills not installed: {}",
+                missing_skills.join(", ")
+            )
+            .red()
+        );
+    }
+
+    if mcp_ok {
+        eprintln!(
+            "  {} {}",
+            "\u{2713}".green(),
+            "Railway MCP server configured".green()
+        );
+    } else {
+        eprintln!(
+            "  {} {}",
+            "\u{2717}".red(),
+            format!(
+                "Railway MCP server not configured: {}",
+                missing_mcp.join(", ")
+            )
+            .red()
+        );
+    }
+
+    if skills_ok && mcp_ok {
+        eprintln!("  {}", "Agent tooling is healthy".green());
+    } else {
+        eprintln!(
+            "  Run {} to install missing configuration.",
+            "railway setup agent".cyan()
+        );
+    }
+}
+
 async fn install_missing_mcp(
     home: &std::path::Path,
     selected_slugs: &[String],
-    remote: bool,
+    transport: mcp_install::McpTransport,
+    quiet: bool,
 ) -> Result<()> {
     let missing_mcp: Vec<String> = selected_slugs
         .iter()
         .filter(|slug| slug.as_str() != "universal")
-        .filter(|slug| !mcp_install::mcp_configured_for_slug(home, slug, remote))
+        .filter(|slug| !mcp_install::mcp_configured_for_slug(home, slug, transport))
         .cloned()
         .collect();
 
     if missing_mcp.is_empty() {
-        println!(
-            "\n{} {}",
-            "-".dimmed(),
-            "Railway MCP already configured; skipping install.".dimmed()
-        );
+        if !quiet {
+            println!(
+                "\n{} {}",
+                "-".dimmed(),
+                "Railway MCP already configured; skipping install.".dimmed()
+            );
+        }
         return Ok(());
     }
 
-    mcp_install::install_mcp(&missing_mcp, remote).await
+    mcp_install::install_mcp(&missing_mcp, transport, quiet).await
 }
 
 /// Mirrors the logic at the top of `login::command` without invoking the
@@ -334,4 +570,46 @@ async fn ensure_logged_in_interactive() -> Result<()> {
 
     println!("\n{}", "Logging in to Railway...".bold());
     login::command(login::Args { browserless: false }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_interactive_defaults_to_remote_proxy() {
+        assert_eq!(
+            pick_mcp_choice(false, false, false, true).unwrap(),
+            McpChoice::RemoteProxy
+        );
+    }
+
+    #[test]
+    fn remote_flag_selects_proxy_and_remains_compatible() {
+        assert_eq!(
+            pick_mcp_choice(true, false, false, false).unwrap(),
+            McpChoice::RemoteProxy
+        );
+        assert_eq!(
+            pick_mcp_choice(true, false, false, true).unwrap(),
+            McpChoice::RemoteProxy
+        );
+    }
+
+    #[test]
+    fn local_and_oauth_flags_override_default() {
+        assert_eq!(
+            pick_mcp_choice(false, false, true, true).unwrap(),
+            McpChoice::Local
+        );
+        assert_eq!(
+            pick_mcp_choice(false, true, false, true).unwrap(),
+            McpChoice::RemoteOauth
+        );
+        // `--local` wins if both local and remote somehow appear.
+        assert_eq!(
+            pick_mcp_choice(true, false, true, true).unwrap(),
+            McpChoice::Local
+        );
+    }
 }

@@ -1,0 +1,6 @@
+mutation DisablePitrForHaCluster($input: DisablePitrForHaClusterInput!) {
+  disablePitrForHaCluster(input: $input) {
+    projectId
+    workflowId
+  }
+}

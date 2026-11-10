@@ -1,0 +1,7 @@
+query EgressGateways($environmentId: String!, $serviceId: String!) {
+  egressGateways(environmentId: $environmentId, serviceId: $serviceId) {
+    ipv4
+    region
+    zone
+  }
+}

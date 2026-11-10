@@ -1,0 +1,7 @@
+mutation SandboxHeartbeat($id: String!, $environmentId: String!) {
+  sandboxHeartbeat(id: $id, environmentId: $environmentId) {
+    id
+    status
+    idleTimeoutMinutes
+  }
+}

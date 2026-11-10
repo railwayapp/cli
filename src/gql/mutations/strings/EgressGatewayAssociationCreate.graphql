@@ -1,0 +1,7 @@
+mutation EgressGatewayAssociationCreate($input: EgressGatewayCreateInput!) {
+  egressGatewayAssociationCreate(input: $input) {
+    ipv4
+    region
+    zone
+  }
+}
