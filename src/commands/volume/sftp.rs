@@ -1050,6 +1050,7 @@ impl VolumeSftp {
             let filename = remote_path
                 .rsplit('/')
                 .find(|segment| !segment.is_empty())
+                .and_then(safe_local_component)
                 .ok_or_else(|| anyhow!("Could not infer a local filename from {remote_path}"))?;
             Ok(local_path.join(filename))
         }
@@ -1106,6 +1107,30 @@ mod tests {
             VolumeSftp::upload_destination(Path::new("dump.sql"), "/backups", true).unwrap(),
             "/backups/dump.sql"
         );
+    }
+
+    #[test]
+    fn download_destination_uses_the_remote_name_inside_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            VolumeSftp::download_destination("/data/app.log", dir.path()).unwrap(),
+            dir.path().join("app.log")
+        );
+        assert_eq!(
+            VolumeSftp::download_destination("/data/logs/", dir.path()).unwrap(),
+            dir.path().join("logs")
+        );
+    }
+
+    #[test]
+    fn download_destination_rejects_names_that_are_not_a_single_component() {
+        let dir = tempfile::tempdir().unwrap();
+        for remote in ["/data/..", "/data/..\\app.log", "/data/C:app.log"] {
+            assert!(
+                VolumeSftp::download_destination(remote, dir.path()).is_err(),
+                "should reject {remote:?}"
+            );
+        }
     }
 
     #[cfg(unix)]

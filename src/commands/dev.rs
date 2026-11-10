@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -1087,12 +1087,7 @@ async fn up_command(args: UpArgs) -> Result<()> {
 
     let yaml = serde_yaml::to_string(&compose)?;
 
-    // This file carries every resolved service variable, so it must not inherit
-    // a world-readable mode from the ambient umask.
-    let tmp_path = output_path.with_extension("yml.tmp");
-    std::fs::write(&tmp_path, &yaml)?;
-    crate::config::secure_config_file(&tmp_path)?;
-    std::fs::rename(&tmp_path, &output_path)?;
+    write_compose_file(&output_path, &yaml)?;
 
     if args.dry_run {
         println!("\n{} {}", "Generated".green(), output_path.display());
@@ -1608,6 +1603,17 @@ fn escape_compose_values(vars: BTreeMap<String, String>) -> BTreeMap<String, Str
         .collect()
 }
 
+// This file carries every resolved service variable, so it must not inherit
+// a world-readable mode from the ambient umask.
+fn write_compose_file(path: &Path, yaml: &str) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(yaml.as_bytes())?;
+    crate::config::secure_config_file(tmp.path())?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod compose_interpolation_tests {
     use super::escape_compose_values;
@@ -1668,5 +1674,43 @@ mod compose_interpolation_tests {
         // Escaped on the way in, un-escaped by Compose on the way out.
         let escaped = escape_compose_values(map(&[("PASSWORD", "pa$$w0rd")]));
         assert_eq!(escaped["PASSWORD"], "pa$$$$w0rd");
+    }
+}
+
+#[cfg(test)]
+mod compose_file_tests {
+    use super::write_compose_file;
+
+    #[test]
+    fn replaces_an_existing_compose_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docker-compose.yml");
+        std::fs::write(&path, "old").unwrap();
+
+        write_compose_file(&path, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leaves_an_existing_tmp_path_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, "baseline").unwrap();
+        std::os::unix::fs::symlink(&other, dir.path().join("docker-compose.yml.tmp")).unwrap();
+        let path = dir.path().join("docker-compose.yml");
+
+        write_compose_file(&path, "services: {}").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "services: {}");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "baseline");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
