@@ -16,7 +16,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let proxies = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -39,7 +39,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let proxies = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -59,7 +59,7 @@ impl RailwayMcp {
 
         let service_name = service_name(&ctx);
         let mode = tcp_proxy::apply_tcp_proxy_patch(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.context.project,
             &ctx.environment_id,
@@ -74,7 +74,7 @@ impl RailwayMcp {
 
         if mode == PatchMode::Commit {
             tcp_proxy::verify_tcp_proxy_configured(
-                &self.client,
+                &self.client(),
                 &self.configs,
                 &ctx.environment_id,
                 &ctx.service_id,
@@ -87,7 +87,7 @@ impl RailwayMcp {
         }
 
         let active_proxy = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -110,7 +110,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let proxies = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -132,7 +132,7 @@ impl RailwayMcp {
             .resolve_service_context(params.project_id, params.service_id, params.environment_id)
             .await?;
         let proxies = tcp_proxy::fetch_tcp_proxies(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,
@@ -148,7 +148,7 @@ impl RailwayMcp {
         }
 
         tcp_proxy::delete_tcp_proxy(
-            &self.client,
+            &self.client(),
             &self.configs,
             &ctx.environment_id,
             &ctx.service_id,

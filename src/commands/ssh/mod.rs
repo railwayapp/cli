@@ -6,19 +6,22 @@ use clap::Parser;
 use crate::{client::GQLClient, config::Configs};
 
 mod common;
-mod config;
+// `pub(crate)` so `ca desktop` can write an agent's OpenSSH block with the same
+// marker scheme, file locking and permissions as `railway ssh config`.
+pub(crate) mod config;
 mod keys;
-mod native;
+pub(crate) mod native;
 // `pub(crate)` so `sandbox ssh` can emit the same stage-failure telemetry.
 pub(crate) mod tel;
 
 use common::*;
 
-// Re-exported for the `sandbox` command, which reuses the same native SSH
-// transport (key registration + `ssh <target>@<env relay host>`).
+// Re-exported for the `sandbox` and `code` commands, which reuse the same
+// native SSH transport (key registration + `ssh <target>@<env relay host>`).
 pub use native::{
-    DurableResume, PortForward, ensure_ssh_key, get_service_instance_id, run_native_ssh,
-    run_native_ssh_forward, spawn_native_ssh_forward,
+    DurableResume, PortForward, ensure_ssh_key, ensure_ssh_key_quiet, get_service_instance_id,
+    probe_native_ssh, run_native_ssh, run_native_ssh_captured, run_native_ssh_forward,
+    run_native_ssh_with_opts, spawn_native_ssh_forward,
 };
 
 /// Connect to a service via SSH or manage SSH keys

@@ -5,23 +5,16 @@ use serde_json::Value;
 use crate::{
     client::post_graphql,
     commands::Configs,
-    gql::{
-        queries,
-        signals::{
-            Signal, SignalCreate, SignalDefaultSet, SignalDelete, SignalReplace, SignalRuleSet,
-            SignalRuleUnset, Signals, signal, signal_create, signal_default_set, signal_delete,
-            signal_replace, signal_rule_set, signal_rule_unset, signals,
-        },
+    gql::signals::{
+        Signal, SignalCreate, SignalDefaultSet, SignalDelete, SignalReplace, SignalRuleSet,
+        SignalRuleUnset, Signals, signal, signal_create, signal_default_set, signal_delete,
+        signal_replace, signal_rule_set, signal_rule_unset, signals,
     },
 };
 
 pub type SignalType = signal_create::SignalType;
 
-pub async fn resolve_scope_owner(
-    client: &Client,
-    configs: &Configs,
-    explicit: Option<String>,
-) -> Result<String> {
+pub async fn resolve_scope_owner(configs: &Configs, explicit: Option<String>) -> Result<String> {
     if let Some(scope) = explicit {
         return parse_scope(&scope);
     }
@@ -32,20 +25,11 @@ pub async fn resolve_scope_owner(
         return parse_scope(&from_env);
     }
 
-    let linked = configs
-        .get_linked_project()
-        .await
-        .context("No linked project. Link one with `railway link` or pass --scope.")?;
-    let vars = queries::project::Variables {
-        id: linked.project.clone(),
-    };
-    let project = post_graphql::<queries::Project, _>(client, configs.get_backboard(), vars)
-        .await?
-        .project;
-    let workspace_id = project
-        .workspace_id
-        .context("Linked project has no workspace id; pass --scope explicitly.")?;
-    Ok(format!("workspace:{workspace_id}"))
+    let linked = configs.get_linked_project().await.context(
+        "Could not determine a project. Set RAILWAY_TOKEN to a project token, link a project with \
+         `railway link`, or pass --scope project:<id>.",
+    )?;
+    Ok(format!("project:{}", linked.project))
 }
 
 fn parse_scope(raw: &str) -> Result<String> {

@@ -6,9 +6,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::{io::AsyncWriteExt, process::Command};
 
-use crate::util::{
-    progress::{create_spinner_if, fail_spinner, success_spinner},
-    prompt::prompt_confirm_with_default,
+use crate::{
+    client::{GQLClient, post_graphql},
+    gql::queries,
+    util::{
+        progress::{create_spinner_if, fail_spinner, success_spinner},
+        prompt::prompt_confirm_with_default,
+    },
 };
 
 use super::*;
@@ -47,7 +51,8 @@ pub struct Args {
     #[clap(long)]
     pub(super) include_types: bool,
 
-    /// Path to the TypeScript IaC runner binary. Defaults to RAILWAY_IAC_TS_BIN or railway-iac-ts.
+    /// Path to the TypeScript IaC runner. When set (or RAILWAY_IAC_TS_BIN / RAILWAY_IAC_ENGINE=ts),
+    /// plan/apply use railway-iac-ts. Default is the CLI-native engine.
     #[clap(long)]
     pub(super) runner: Option<String>,
 
@@ -62,6 +67,22 @@ pub struct Args {
     /// Print variable values in the plan instead of redacting them.
     #[clap(long)]
     pub(super) show_values: bool,
+
+    /// Write a pinned plan artifact (plan only).
+    #[clap(long)]
+    pub(super) out: Option<PathBuf>,
+
+    /// Apply a pinned plan artifact without re-evaluating the authoring file.
+    #[clap(long)]
+    pub(super) plan: Option<PathBuf>,
+
+    /// Tree hash written into `--out`. Defaults to `git rev-parse HEAD:.railway`.
+    #[clap(long)]
+    pub(super) source_tree: Option<String>,
+
+    /// Environment name or ID. Defaults to the linked environment.
+    #[clap(long, value_name = "name|id")]
+    pub(super) environment: Option<String>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -83,6 +104,8 @@ pub(super) struct RunnerResponse {
     apply_result: Option<ChangeSetApplyResult>,
     deployment_id: Option<String>,
     staged_patch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variable_policy: Option<crate::iac::VariablePolicyReport>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -92,6 +115,28 @@ struct CurrentEnvironment {
     project_name: Option<String>,
     environment_id: String,
     environment_name: Option<String>,
+    config_etag: Option<String>,
+    #[serde(default)]
+    pr: Option<EnvironmentPr>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentPr {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+impl RunnerResponse {
+    pub(super) fn pull_pr_repo(&self) -> Option<&str> {
+        self.current_environment
+            .as_ref()?
+            .pr
+            .as_ref()?
+            .repo
+            .as_deref()
+            .filter(|repo| !repo.is_empty())
+    }
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -134,24 +179,25 @@ struct ChangeOperationResult {
     outputs: Option<Value>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredGraph {
     pub(super) project: Option<DesiredProject>,
     pub(super) resources: Vec<DesiredResource>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredProject {
     pub(super) name: String,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct DesiredResource {
     pub(super) address: Option<String>,
     pub(super) r#type: String,
+    pub(super) kind: Option<String>,
     pub(super) name: String,
     pub(super) engine: Option<String>,
     pub(super) variables: Option<serde_json::Map<String, Value>>,
@@ -162,6 +208,8 @@ pub(super) struct DesiredResource {
     pub(super) volume_attachments: Option<serde_json::Map<String, Value>>,
     pub(super) config: Option<Value>,
     pub(super) group_id: Option<String>,
+    pub(super) tracing: Option<Value>,
+    pub(super) cdn: Option<Value>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -173,10 +221,16 @@ struct StagedPatch {
 
 pub(super) async fn run(args: &Args, command: &str) -> Result<RunnerResponse> {
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
-    invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await
+    let (response, _) =
+        invoke_runner(args, &configs, &linked_project, &token, auth_type, command).await?;
+    Ok(response)
 }
 
 pub(super) async fn run_command(args: Args) -> Result<()> {
+    if let Some(path) = &args.plan {
+        return apply_pinned_plan(&args, path).await;
+    }
+
     let (configs, linked_project, token, auth_type) = ensure_config_context().await?;
     let command = if args.stage {
         "stage"
@@ -191,7 +245,7 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
             !args.json && std::io::stdout().is_terminal(),
             "Checking proposed changes".into(),
         );
-        let preview =
+        let (preview, _) =
             invoke_runner(&args, &configs, &linked_project, &token, auth_type, "plan").await?;
         if let Some(spinner) = &mut spinner {
             if preview.ok {
@@ -245,8 +299,13 @@ pub(super) async fn run_command(args: Args) -> Result<()> {
         !args.json && std::io::stdout().is_terminal(),
         runner_message(command).into(),
     );
-    let output =
+    let (output, raw) =
         invoke_runner(&args, &configs, &linked_project, &token, auth_type, command).await?;
+    if output.ok {
+        if let Some(path) = &args.out {
+            write_pinned_plan(&args, &raw, path)?;
+        }
+    }
     if let Some(spinner) = &mut spinner {
         if output.ok {
             success_spinner(spinner, runner_done_message(command).into());
@@ -307,7 +366,8 @@ async fn preview_before_apply(
         !args.json && std::io::stdout().is_terminal(),
         "Checking Railway configuration".into(),
     );
-    let preview = invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
+    let (preview, _) =
+        invoke_runner(args, configs, linked_project, token, auth_type, "plan").await?;
     if let Some(spinner) = &mut spinner {
         if preview.ok {
             success_spinner(spinner, "Checked Railway configuration".into());
@@ -341,10 +401,16 @@ fn guard_destructive_apply(args: &Args, destructive: bool) -> Result<()> {
 }
 
 async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'static str)> {
+    ensure_config_context_with_prompt(std::io::stdout().is_terminal()).await
+}
+
+pub(super) async fn ensure_config_context_with_prompt(
+    interactive: bool,
+) -> Result<(Configs, LinkedProject, String, &'static str)> {
     let configs = Configs::new()?;
     let (token, auth_type) = match get_runner_token(&configs) {
         Ok(token) => token,
-        Err(error) if std::io::stdout().is_terminal() => {
+        Err(error) if interactive => {
             println!("{}", "Log in to Railway to continue.".bold());
             crate::commands::login::prompt_login().await?;
             get_runner_token(&Configs::new()?).map_err(|_| error)?
@@ -354,16 +420,81 @@ async fn ensure_config_context() -> Result<(Configs, LinkedProject, String, &'st
 
     let linked_project = match configs.get_linked_project().await {
         Ok(linked_project) => linked_project,
-        Err(_error) if std::io::stdout().is_terminal() => {
+        Err(_error) if interactive => {
             println!();
             println!("{}", "Connect Railway configuration".bold());
-            println!("Choose where .railway/railway.ts should plan and apply changes.");
+            println!("Choose the project and environment to manage.");
             crate::commands::link::link_project_without_service().await?
         }
         Err(error) => return Err(error),
     };
 
     Ok((Configs::new()?, linked_project, token, auth_type))
+}
+
+/// `--environment` replaces the linked environment for eval, fetch, and apply.
+///
+/// A project token cannot read other environments, so a different target fails
+/// before the list query.
+async fn target_linked_environment(
+    configs: &Configs,
+    linked: &LinkedProject,
+    requested: Option<&str>,
+    auth_type: &str,
+) -> Result<LinkedProject> {
+    let Some(requested) = requested else {
+        return Ok(linked.clone());
+    };
+    if auth_type == "project-token" {
+        let token_id = linked.environment.as_deref().unwrap_or_default();
+        let token_name = linked.environment_name.as_deref();
+        if super::environment::token_targets_other(token_id, token_name, requested) {
+            let label = super::environment::scoped_environment_label(token_id, token_name);
+            bail!(super::environment::token_scope_error(label, requested));
+        }
+        return Ok(linked.clone());
+    }
+    let environments = list_project_environments(configs, &linked.project).await?;
+    let resolved = super::environment::resolve_environment(requested, &environments)?;
+    let mut targeted = linked.clone();
+    targeted.environment = Some(resolved.id.clone());
+    targeted.environment_name = Some(resolved.name.clone());
+    Ok(targeted)
+}
+
+async fn list_project_environments(
+    configs: &Configs,
+    project_id: &str,
+) -> Result<Vec<super::environment::NamedEnvironment>> {
+    let client = GQLClient::new_authorized(configs)?;
+    let mut after: Option<String> = None;
+    let mut environments = Vec::new();
+    loop {
+        let vars = queries::environments::Variables {
+            project_id: project_id.to_string(),
+            is_ephemeral: None,
+            first: Some(500),
+            after: after.clone(),
+        };
+        let response =
+            post_graphql::<queries::Environments, _>(&client, configs.get_backboard(), vars)
+                .await?;
+        let page = response.environments;
+        for edge in page.edges {
+            environments.push(super::environment::NamedEnvironment {
+                id: edge.node.id,
+                name: edge.node.name,
+            });
+        }
+        if !page.page_info.has_next_page {
+            break;
+        }
+        match page.page_info.end_cursor {
+            Some(cursor) if Some(&cursor) != after.as_ref() => after = Some(cursor),
+            _ => break,
+        }
+    }
+    Ok(environments)
 }
 
 fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
@@ -379,6 +510,72 @@ fn get_runner_token(configs: &Configs) -> Result<(String, &'static str)> {
         )
 }
 
+fn write_pinned_plan(args: &Args, raw: &serde_json::Value, path: &PathBuf) -> Result<()> {
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let tree = crate::iac::saved_plan::source_tree(&cwd, args.source_tree.as_deref())?;
+    let plan = crate::iac::saved_plan::from_runner_json(raw, tree)?;
+    crate::iac::saved_plan::write_plan(path, &plan)?;
+    if !args.json {
+        eprintln!("{} {}", "Wrote".dimmed(), path.display());
+    }
+    Ok(())
+}
+
+async fn apply_pinned_plan(args: &Args, path: &PathBuf) -> Result<()> {
+    if !args.yes && !args.json && !std::io::stdout().is_terminal() {
+        bail!(
+            "Run `railway config apply --plan {} --yes` to apply a pinned plan non-interactively.",
+            path.display()
+        );
+    }
+    let cwd = env::current_dir().context("Unable to get current working directory")?;
+    let plan = crate::iac::saved_plan::read_plan(path)?;
+    crate::iac::saved_plan::assert_source_tree(&plan, &cwd)?;
+    if let Some(requested) = args.environment.as_deref() {
+        let (configs, linked, _, auth_type) = ensure_config_context().await?;
+        let targeted =
+            target_linked_environment(&configs, &linked, Some(requested), auth_type).await?;
+        super::environment::ensure_pinned_plan_environment(
+            &plan.environment_id,
+            requested,
+            targeted.environment_id()?,
+        )?;
+    }
+    guard_destructive_apply(args, plan.destructive)?;
+
+    if !args.yes && !args.json {
+        if let Some(diff) = &plan.diff {
+            println!("{diff}");
+        }
+        println!();
+        let prompt = if plan.destructive {
+            "Apply this pinned plan? This will remove Railway resources or variables."
+        } else {
+            "Apply this pinned plan to Railway?"
+        };
+        if !prompt_confirm_with_default(prompt, false)? {
+            bail!("No changes applied.");
+        }
+        println!();
+    }
+
+    let (configs, _, _, _) = ensure_config_context().await?;
+    let result = crate::iac::saved_plan::apply_saved_plan(&configs, &plan).await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    if result.get("status").and_then(Value::as_str) == Some("noop") {
+        println!(
+            "{}",
+            "✓ Your Railway configuration is already up to date.".green()
+        );
+        return Ok(());
+    }
+    println!("{}", "Applied pinned Railway configuration.".green());
+    Ok(())
+}
+
 async fn invoke_runner(
     args: &Args,
     configs: &Configs,
@@ -386,8 +583,32 @@ async fn invoke_runner(
     token: &str,
     auth_type: &str,
     command: &str,
-) -> Result<RunnerResponse> {
+) -> Result<(RunnerResponse, Value)> {
+    let linked_project = target_linked_environment(
+        configs,
+        linked_project,
+        args.environment.as_deref(),
+        auth_type,
+    )
+    .await?;
+    let linked_project = &linked_project;
     let cwd_path = env::current_dir().context("Unable to get current working directory")?;
+    if !crate::iac::use_legacy_ts_runner(args.runner.as_deref()) {
+        let value = crate::iac::run_native(
+            &crate::iac::NativeRun {
+                file: args.file.clone(),
+                decrypt_variables: args.decrypt_variables,
+                show_values: args.show_values,
+            },
+            configs,
+            linked_project,
+            command,
+        )
+        .await?;
+        let response = serde_json::from_value(value.clone())
+            .context("Native IaC engine returned a response the CLI could not parse")?;
+        return Ok((response, value));
+    }
     let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
 
     let cwd = cwd_path.to_string_lossy().to_string();
@@ -440,13 +661,15 @@ async fn invoke_runner(
     let stdout = String::from_utf8(output.stdout).context("Runner stdout was not valid UTF-8")?;
     let stderr = String::from_utf8(output.stderr).context("Runner stderr was not valid UTF-8")?;
 
-    let response: RunnerResponse = serde_json::from_str(&stdout).with_context(|| {
+    let value: Value = serde_json::from_str(&stdout).with_context(|| {
         format!("IaC runner returned non-JSON output.\nstdout:\n{stdout}\nstderr:\n{stderr}")
     })?;
+    let response: RunnerResponse = serde_json::from_value(value.clone())
+        .context("IaC runner returned a response the CLI could not parse")?;
 
     warn_outdated_runner(&response);
 
-    Ok(response)
+    Ok((response, value))
 }
 
 /// Responses without sdkVersion come from SDKs that predate the version
@@ -495,7 +718,9 @@ fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> Resol
         };
     }
 
-    if let Some(runner) = find_project_runner(cwd) {
+    if let Some(runner) =
+        find_project_runner(cwd).or_else(|| find_project_runner(&cwd.join(".railway")))
+    {
         return ResolvedRunner {
             path: runner.to_string_lossy().to_string(),
             source: RunnerSource::ProjectDependency,
@@ -508,6 +733,34 @@ fn resolve_runner(explicit_runner: Option<&str>, cwd: &std::path::Path) -> Resol
     }
 }
 
+/// The directory the runner search is allowed to reach: the enclosing git
+/// repository, or `start` itself when there isn't one. Without a bound the
+/// search reaches `/`, so on a shared host any writable ancestor — a CI
+/// workspace root, `/tmp` — can offer the binary we are about to execute.
+fn project_search_root(start: &std::path::Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(start)
+        .to_path_buf()
+}
+
+/// Whether `path` is writable by anyone other than its owner. A runner sitting
+/// in a group- or world-writable directory can be replaced by another local
+/// principal between now and exec, so it is not a trustworthy candidate.
+#[cfg(unix)]
+fn writable_by_others(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o022 != 0)
+        .unwrap_or(true)
+}
+
+#[cfg(not(unix))]
+fn writable_by_others(_path: &std::path::Path) -> bool {
+    false
+}
+
 fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
     let binary = if cfg!(windows) {
         "railway-iac-ts.cmd"
@@ -515,10 +768,26 @@ fn find_project_runner(start: &std::path::Path) -> Option<PathBuf> {
         "railway-iac-ts"
     };
 
+    // This candidate is executed and then handed a Railway bearer token on
+    // stdin, and it takes precedence over whatever the user installed in PATH.
+    // Only accept one inside the project, reachable through directories no
+    // other local principal can write to.
+    let root = project_search_root(start);
     for dir in start.ancestors() {
         let candidate = dir.join("node_modules").join(".bin").join(binary);
         if candidate.exists() {
+            if writable_by_others(&candidate)
+                || dir
+                    .ancestors()
+                    .take_while(|ancestor| ancestor.starts_with(&root))
+                    .any(writable_by_others)
+            {
+                return None;
+            }
             return Some(candidate);
+        }
+        if dir == root {
+            break;
         }
     }
 
@@ -549,6 +818,35 @@ fn runner_cwd(runner: &str) -> Option<PathBuf> {
         return None;
     }
     dist_dir.parent().map(|path| path.to_path_buf())
+}
+
+fn print_variable_policy(response: &RunnerResponse) {
+    let Some(policy) = &response.variable_policy else {
+        return;
+    };
+    let railway_variables = response
+        .current_graph
+        .as_ref()
+        .map(|graph| {
+            graph
+                .resources
+                .iter()
+                .map(|resource| {
+                    resource
+                        .variables
+                        .as_ref()
+                        .map(|variables| variables.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+    let line = crate::iac::format_variable_policy_line(policy, railway_variables);
+    if let Some((label, rest)) = line.split_once(": ") {
+        println!("{} {}", format!("{label}:").dimmed(), rest.cyan());
+    } else {
+        println!("{}", line.dimmed());
+    }
 }
 
 /// Terraform-style one-line summary printed atop the change list.
@@ -653,11 +951,14 @@ pub(super) fn print_response_with_options_and_next(
             .as_deref()
             .unwrap_or(&environment.environment_id);
         println!("{} {}", "Environment".dimmed(), environment_name.cyan());
+        print_variable_policy(response);
         if verbose {
             if let Some(project_id) = &environment.project_id {
                 println!("{} {}", "Project ID".dimmed(), project_id.dimmed());
             }
         }
+    } else {
+        print_variable_policy(response);
     }
     println!();
 
@@ -842,8 +1143,20 @@ fn print_change(change: &Change, _verbose: bool) {
     println!("  {} {}", marker, summary);
     if let Some(details) = &change.details {
         for detail in details {
-            println!("    {} {}", "└".dimmed(), detail.dimmed());
+            println!("    {} {}", "└".dimmed(), format_detail(detail));
         }
+    }
+}
+
+/// Source code diffs ride along as `+ `/`- ` prefixed details; everything
+/// else is a `path (before → after)` line.
+fn format_detail(detail: &str) -> colored::ColoredString {
+    if detail.starts_with("+ ") {
+        detail.green()
+    } else if detail.starts_with("- ") {
+        detail.red()
+    } else {
+        detail.dimmed()
     }
 }
 
@@ -854,5 +1167,74 @@ fn marker_for_change(change: &Change) -> colored::ColoredString {
         }
         Some("resource.delete") | Some("variable.delete") => "-".red().bold(),
         _ => "~".yellow().bold(),
+    }
+}
+
+#[cfg(test)]
+mod runner_discovery_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_runner(dir: &std::path::Path) -> PathBuf {
+        let bin_dir = dir.join("node_modules").join(".bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let binary = if cfg!(windows) {
+            "railway-iac-ts.cmd"
+        } else {
+            "railway-iac-ts"
+        };
+        let path = bin_dir.join(binary);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn resolves_a_runner_installed_beside_the_railway_config() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let railway_dir = root.path().join(".railway");
+        fs::create_dir_all(&railway_dir).unwrap();
+        let expected = make_runner(&railway_dir);
+
+        let resolved = resolve_runner(None, root.path());
+
+        assert_eq!(PathBuf::from(resolved.path), expected);
+        assert!(matches!(resolved.source, RunnerSource::ProjectDependency));
+    }
+
+    #[test]
+    fn finds_a_runner_inside_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let expected = make_runner(root.path());
+        let nested = root.path().join("apps").join("web");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(find_project_runner(&nested), Some(expected));
+    }
+
+    #[test]
+    fn does_not_search_above_the_repository_root() {
+        let outer = tempfile::tempdir().unwrap();
+        make_runner(outer.path());
+        let repo = outer.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        assert_eq!(find_project_runner(&repo), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_runner_reachable_through_a_world_writable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        let shared = root.path().join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        make_runner(&shared);
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+
+        assert_eq!(find_project_runner(&shared), None);
     }
 }

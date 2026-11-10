@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -24,9 +24,16 @@ use crate::util::shell::shell_join;
 
 /// Manage ephemeral sandboxes
 #[derive(Parser)]
-#[clap(
-    after_help = "Examples:\n\n  railway sandbox create            # create + remember it as active\n  railway sandbox create --variable FOO=bar,DB_URL=postgres.DATABASE_URL\n  railway sandbox create --env-file .env\n  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait\n  railway sandbox create --template dev   # boot from the pre-built snapshot\n  railway sandbox checkpoint create my-setup       # capture the active sandbox's disk\n  railway sandbox create --checkpoint my-setup     # boot a new sandbox from it\n  railway sandbox checkpoint list   # list named checkpoints in the environment\n  railway sandbox list              # list sandboxes in the environment\n  railway sandbox ssh               # connect to the active (last) sandbox\n  railway sandbox ssh --id <id>     # connect to a specific sandbox\n  railway sandbox exec --id <id> -- ls -la\n  railway sandbox exec --detach -- npm run build   # leave it running, prints a session name\n  railway sandbox exec --session <name>            # reattach to a detached/disconnected command\n  railway sandbox forward 3000      # localhost:3000 → port 3000 in the active sandbox\n  railway sandbox forward 8080:3000 # localhost:8080 → port 3000 (explicit local port)\n  railway sandbox forward 3000 5432 # several ports over one connection\n  railway sandbox fork              # fork the active sandbox; the fork becomes active\n  railway sandbox fork <id> --variable FOO=bar\n  railway sandbox destroy --id <id>\n\nNote: requires the PROJECT_SANDBOXES feature to be enabled."
-)]
+#[clap(after_help = r#"Examples:
+  railway sandbox create                 # create and select the active sandbox
+  railway sandbox ssh                    # connect to the active sandbox
+  railway sandbox exec -- ls -la         # run a command
+  railway sandbox fork                   # fork and select the new sandbox
+  railway sandbox destroy                # delete the active sandbox
+
+Commands use the active sandbox unless you specify an ID.
+Use railway sandbox <command> --help for options and examples.
+Requires Sandboxes access."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -77,6 +84,16 @@ enum Commands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox create --private-network --domain 3000
+  railway sandbox create --template dev
+  railway sandbox create --checkpoint my-setup
+  railway sandbox create --env-file .env --variable MODE=dev
+
+--domain publishes an HTTP port and requires --private-network.
+Use --domain web:3000 for a hostname prefix; repeat for multiple ports.
+Build templates with railway sandbox template build; capture checkpoints with
+railway sandbox checkpoint create."#)]
 struct CreateArgs {
     /// Minutes the sandbox may sit idle before it is auto-destroyed
     #[clap(long)]
@@ -110,6 +127,15 @@ struct CreateArgs {
     #[clap(long)]
     private_network: bool,
 
+    /// Publish an HTTP domain on a port, optionally with a prefix (repeatable).
+    /// Requires --private-network
+    #[clap(
+        long = "domain",
+        value_name = "[PREFIX:]PORT",
+        requires = "private_network"
+    )]
+    domains: Vec<PublicDomainSpec>,
+
     /// Output the created sandbox as JSON
     #[clap(long)]
     json: bool,
@@ -138,6 +164,9 @@ enum TemplateCommands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox template build --name dev -c 'npm i -g pnpm' --wait
+  railway sandbox create --template dev"#)]
 struct TemplateBuildArgs {
     /// Shell instruction to run while building (repeatable, runs in order;
     /// each step must exit 0 within 10 minutes)
@@ -194,6 +223,11 @@ enum CheckpointCommands {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox checkpoint create my-setup
+  railway sandbox create --checkpoint my-setup
+
+Reusing a name replaces the previous checkpoint."#)]
 struct CheckpointCreateArgs {
     /// Name for the checkpoint, usable with `railway sandbox create
     /// --checkpoint <name>` (64-character hex names are reserved for
@@ -260,6 +294,13 @@ struct TemplateListArgs {
 /// Fork has no trailing command, so a positional id is unambiguous; `--id` is
 /// also accepted. Omitted → the active sandbox is the fork source.
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox fork
+  railway sandbox fork <id> --private-network --domain web:3000
+  railway sandbox fork <id> --env-file .env
+
+The fork becomes active. Variables, private-network mode, and public domains
+are not inherited; supply them again as needed."#)]
 struct ForkArgs {
     /// Source sandbox ID to fork (defaults to the active sandbox)
     #[clap(value_name = "ID")]
@@ -289,6 +330,15 @@ struct ForkArgs {
     /// egress only). The fork does not inherit the source's network mode
     #[clap(long)]
     private_network: bool,
+
+    /// Publish an HTTP domain on a port, optionally with a prefix (repeatable).
+    /// Requires --private-network; forks do not inherit source domains
+    #[clap(
+        long = "domain",
+        value_name = "[PREFIX:]PORT",
+        requires = "private_network"
+    )]
+    domains: Vec<PublicDomainSpec>,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -341,6 +391,10 @@ struct SshArgs {
 }
 
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox exec -- ls -la
+  railway sandbox exec --detach -- npm run build
+  railway sandbox exec --session <name>"#)]
 struct ExecArgs {
     /// Sandbox ID to run in (defaults to the active sandbox)
     #[clap(long = "id", value_name = "ID")]
@@ -376,6 +430,10 @@ struct ExecArgs {
 /// Ports are positional so the common case stays short; `--id` selects a
 /// sandbox other than the active one.
 #[derive(Parser)]
+#[clap(after_help = r#"Examples:
+  railway sandbox forward 3000            # localhost:3000 to sandbox port 3000
+  railway sandbox forward 8080:3000       # localhost:8080 to sandbox port 3000
+  railway sandbox forward 3000 5432       # forward several ports"#)]
 struct ForwardArgs {
     /// Ports to forward: `REMOTE` (same port locally) or `LOCAL:REMOTE`
     #[clap(value_name = "[LOCAL:]REMOTE", required = true)]
@@ -458,7 +516,7 @@ impl std::fmt::Display for Choice {
 /// explicit `--project`/`--environment` flags → the linked project/environment
 /// → an interactive picker (when attached to a TTY) → a helpful error in
 /// non-interactive contexts.
-async fn resolve_project_and_env(
+pub(crate) async fn resolve_project_and_env(
     configs: &mut Configs,
     client: &reqwest::Client,
     project: Option<String>,
@@ -511,7 +569,7 @@ async fn resolve_project_and_env(
 /// proceeds without one). Uses the OAuth-safe `UserProjects` listing (what
 /// `railway list` uses) — the `projects(workspaceId:)` root field is not
 /// authorized for plain user tokens.
-async fn prompt_workspace_project_env(
+pub(crate) async fn prompt_workspace_project_env(
     client: &reqwest::Client,
     configs: &mut Configs,
 ) -> Result<(String, String)> {
@@ -774,7 +832,7 @@ fn parse_env_file(path: &std::path::Path) -> Result<Vec<Variable>> {
 /// scalar, wrapping bare references. Files load first (in order), then flags —
 /// so a `--variable` overrides a file entry with the same key. `None` when
 /// empty so `skip_serializing_none` omits the field from the mutation input.
-fn variables_to_input(
+pub(crate) fn variables_to_input(
     env_files: &[std::path::PathBuf],
     args: &[String],
 ) -> Result<Option<BTreeMap<String, String>>> {
@@ -793,24 +851,104 @@ fn variables_to_input(
     ))
 }
 
+#[derive(Clone, Debug)]
+struct PublicDomainSpec {
+    prefix: Option<String>,
+    port: u16,
+}
+
+impl FromStr for PublicDomainSpec {
+    type Err = anyhow::Error;
+
+    fn from_str(spec: &str) -> Result<Self> {
+        let (prefix, port) = match spec.split_once(':') {
+            Some((prefix, port)) => {
+                if prefix.is_empty()
+                    || prefix.len() > 46
+                    || !prefix
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                    || prefix.starts_with('-')
+                    || prefix.ends_with('-')
+                {
+                    bail!(
+                        "domain prefix must be 1-46 lowercase letters, digits, or hyphens, with no leading or trailing hyphen"
+                    );
+                }
+                (Some(prefix.to_owned()), port)
+            }
+            None => (None, spec),
+        };
+        let port = port
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| {
+                anyhow!("domain port must be between 1 and 65535 (use [PREFIX:]PORT)")
+            })?;
+        Ok(Self { prefix, port })
+    }
+}
+
+fn public_domains_input(
+    domains: &[PublicDomainSpec],
+) -> Result<Option<Vec<mutations::sandbox_create::SandboxDomainInput>>> {
+    if domains.is_empty() {
+        return Ok(None);
+    }
+    if domains.len() > 10 {
+        bail!("a sandbox supports at most 10 public domains");
+    }
+    let mut ports = BTreeSet::new();
+    let mut prefixes = BTreeSet::new();
+    for domain in domains {
+        if !ports.insert(domain.port) {
+            bail!("public domain ports must be unique: {}", domain.port);
+        }
+        if let Some(prefix) = &domain.prefix {
+            if !prefixes.insert(prefix) {
+                bail!("public domain prefixes must be unique: {prefix}");
+            }
+        }
+    }
+    Ok(Some(
+        domains
+            .iter()
+            .map(|domain| mutations::sandbox_create::SandboxDomainInput {
+                prefix: domain.prefix.clone(),
+                port: i64::from(domain.port),
+            })
+            .collect(),
+    ))
+}
+
+/// How `create_and_store` reports the new sandbox.
+pub(crate) enum CreateReport {
+    /// The full `sandbox create` block: id, status, region, connect hints.
+    Full,
+    Json,
+}
+
 /// Run `sandboxCreate` with the given input, persist the result as the active
 /// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
-/// and print create-style output.
-async fn create_and_store(
+/// and print create-style output. Returns the new sandbox's id (`pub(crate)`
+/// so `railway code` can reuse the create flow).
+pub(crate) async fn create_and_store(
     configs: &mut Configs,
     client: &reqwest::Client,
     project_id: String,
     environment_id: String,
     input: mutations::sandbox_create::SandboxCreateInput,
-    json: bool,
+    report: CreateReport,
     forked: bool,
-) -> Result<()> {
+) -> Result<String> {
     let (doing, did, failed) = if forked {
         ("Forking sandbox", "Forked", "Failed to fork sandbox")
     } else {
         ("Creating sandbox", "Created", "Failed to create sandbox")
     };
 
+    let requested_domains = input.public_domains.as_ref().map_or(0, Vec::len);
     let mut spinner = create_shimmer_spinner(doing);
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
@@ -838,18 +976,28 @@ async fn create_and_store(
     );
     configs.write()?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&sandbox)?);
-    } else {
-        println!("✓ {did} sandbox {} (now active)", sandbox.id);
-        println!("  status: {:?}", sandbox.status);
-        println!("  region: {}", sandbox.region);
-        if let Some(idle) = sandbox.idle_timeout_minutes {
-            println!("  idle timeout: {idle}m");
+    match report {
+        CreateReport::Json => println!("{}", serde_json::to_string_pretty(&sandbox)?),
+        CreateReport::Full => {
+            println!("✓ {did} sandbox {} (now active)", sandbox.id);
+            println!("  status: {:?}", sandbox.status);
+            println!("  region: {}", sandbox.region);
+            if let Some(idle) = sandbox.idle_timeout_minutes {
+                println!("  idle timeout: {idle}m");
+            }
+            if sandbox.domains.len() < requested_domains {
+                println!("  domains: publishing (run `railway sandbox list` to see the URLs)");
+            }
+            for domain in &sandbox.domains {
+                println!(
+                    "  {}: https://{} -> port {}",
+                    domain.prefix, domain.domain, domain.port
+                );
+            }
+            println!("\nConnect with:\n  railway sandbox ssh");
         }
-        println!("\nConnect with:\n  railway sandbox ssh");
     }
-    Ok(())
+    Ok(sandbox.id)
 }
 
 async fn create(
@@ -859,6 +1007,7 @@ async fn create(
     environment: Option<String>,
     args: CreateArgs,
 ) -> Result<()> {
+    let public_domains = public_domains_input(&args.domains)?;
     let (project_id, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
@@ -894,12 +1043,16 @@ async fn create(
     let input = mutations::sandbox_create::SandboxCreateInput {
         environment_id: environment_id.clone(),
         idle_timeout_minutes: args.idle_timeout_minutes,
+        public_domains,
         template,
         source_sandbox_id: None,
         network_isolation: args
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
+        // region flag yet.
+        region: None,
     };
     create_and_store(
         configs,
@@ -907,10 +1060,15 @@ async fn create(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         false,
     )
     .await
+    .map(|_| ())
 }
 
 async fn template(
@@ -1334,6 +1492,7 @@ async fn fork(
     environment: Option<String>,
     args: ForkArgs,
 ) -> Result<()> {
+    let public_domains = public_domains_input(&args.domains)?;
     let (source_sandbox_id, environment_id) = resolve_target(
         configs,
         client,
@@ -1360,12 +1519,16 @@ async fn fork(
     let input = mutations::sandbox_create::SandboxCreateInput {
         environment_id: environment_id.clone(),
         idle_timeout_minutes: args.idle_timeout_minutes,
+        public_domains,
         template: None,
         source_sandbox_id: Some(source_sandbox_id),
         network_isolation: args
             .private_network
             .then_some(mutations::sandbox_create::SandboxNetworkIsolation::PRIVATE),
         variables: variables_to_input(&args.env_files, &args.variables)?,
+        // Server-side default (SANDBOX_DEFAULT_REGION); the CLI exposes no
+        // region flag yet.
+        region: None,
     };
     create_and_store(
         configs,
@@ -1373,10 +1536,15 @@ async fn fork(
         project_id,
         environment_id,
         input,
-        args.json,
+        if args.json {
+            CreateReport::Json
+        } else {
+            CreateReport::Full
+        },
         true,
     )
     .await
+    .map(|_| ())
 }
 
 async fn list(
@@ -1459,6 +1627,12 @@ async fn list(
             node.region,
             node.created_at.format("%Y-%m-%d %H:%M").to_string()
         );
+        for domain in &node.domains {
+            println!(
+                "    {}: https://{} -> port {}",
+                domain.prefix, domain.domain, domain.port
+            );
+        }
     }
     if hidden > 0 {
         println!("\n({hidden} destroyed sandboxes hidden; use --all to show them)");
@@ -2039,7 +2213,7 @@ async fn fetch_sandbox_status(
     Ok(res.sandbox.map(|s| s.status))
 }
 
-fn spawn_heartbeat(
+pub(crate) fn spawn_heartbeat(
     client: reqwest::Client,
     backboard: String,
     environment_id: String,
@@ -2070,6 +2244,98 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn domain_flags_parse_for_create_and_fork() {
+        for command in ["create", "fork"] {
+            let parsed = parse_exec(&[
+                command,
+                "--private-network",
+                "--domain",
+                "8080",
+                "--domain",
+                "api:3000",
+            ])
+            .unwrap();
+            let domains = match parsed.command {
+                Commands::Create(args) => args.domains,
+                Commands::Fork(args) => args.domains,
+                _ => panic!("expected create or fork"),
+            };
+            let input = public_domains_input(&domains).unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(input).unwrap(),
+                serde_json::json!([
+                    { "port": 8080 },
+                    { "prefix": "api", "port": 3000 },
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn domain_flags_require_private_network() {
+        for command in ["create", "fork"] {
+            assert!(parse_exec(&[command, "--domain", "8080"]).is_err());
+            assert!(parse_exec(&[command]).is_ok());
+        }
+        assert!(public_domains_input(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn domain_specs_reject_invalid_prefixes_and_ports() {
+        for spec in [
+            "",
+            "0",
+            "65536",
+            "api:0",
+            "api:65536",
+            "api:abc",
+            ":8080",
+            "API:8080",
+            "-api:8080",
+            "api-:8080",
+            "api.foo:8080",
+            "a_b:8080",
+            "api:8080:9000",
+            "https://api:8080",
+            "é:8080",
+        ] {
+            assert!(spec.parse::<PublicDomainSpec>().is_err(), "accepted {spec}");
+        }
+        assert!(
+            format!("{}:8080", "a".repeat(47))
+                .parse::<PublicDomainSpec>()
+                .is_err()
+        );
+        assert!(
+            format!("{}:65535", "a".repeat(46))
+                .parse::<PublicDomainSpec>()
+                .is_ok()
+        );
+        assert!("a-1:1".parse::<PublicDomainSpec>().is_ok());
+    }
+
+    #[test]
+    fn domain_requests_validate_count_and_uniqueness() {
+        for specs in [vec!["8080", "api:8080"], vec!["api:8080", "api:3000"]] {
+            let domains: Vec<_> = specs
+                .iter()
+                .map(|s| s.parse::<PublicDomainSpec>().unwrap())
+                .collect();
+            assert!(public_domains_input(&domains).is_err());
+        }
+        let domains: Vec<_> = (1..=10)
+            .map(|port| PublicDomainSpec { prefix: None, port })
+            .collect();
+        assert_eq!(public_domains_input(&domains).unwrap().unwrap().len(), 10);
+        let mut too_many = domains;
+        too_many.push(PublicDomainSpec {
+            prefix: None,
+            port: 11,
+        });
+        assert!(public_domains_input(&too_many).is_err());
     }
 
     #[test]
@@ -2133,7 +2399,15 @@ mod tests {
     #[test]
     fn invalid_pair_errors() {
         assert!(parse_variable_args(&args(&["NOVALUE"])).is_err());
-        assert!(parse_variable_args(&args(&["FOO=bar,NOVALUE=,BAZ=qux"])).is_err());
+        assert!(parse_variable_args(&args(&["FOO=bar,=nokey,BAZ=qux"])).is_err());
+    }
+
+    #[test]
+    fn empty_value_sets_the_empty_string() {
+        let vars = parse_variable_args(&args(&["FOO=bar,BLANK=,BAZ=qux"])).unwrap();
+        assert_eq!(vars.len(), 3);
+        assert_eq!(vars[1].key, "BLANK");
+        assert_eq!(vars[1].value, "");
     }
 
     #[test]

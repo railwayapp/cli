@@ -12,13 +12,13 @@ use crate::{
 #[derive(Parser)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 #[clap(
-    after_help = "Examples:\n\n  railway flag list\n  railway flag set checkout.v2 true\n  railway flag set theme \"blue\"\n  railway flag set checkout.v2 true --when 'workspace_plan == \"enterprise\"'\n  railway flag set checkout.v2 true --when \"bucket(workspace_id) < 0.25\"\n  railway flag delete checkout.v2\n  railway flag unset checkout.v2 --rule-id enterprise-on\n"
+    after_help = "Examples:\n\n  railway flag list\n  railway flag set checkout.v2 true\n  railway flag set theme \"blue\"\n  railway flag set checkout.v2 true --when 'plan == \"enterprise\"'\n  railway flag set checkout.v2 true --when \"bucket(key) < 0.25\"\n  railway flag delete checkout.v2\n  railway flag unset checkout.v2 --rule-id enterprise-on\n"
 )]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
 
-    /// Flag scope, e.g. workspace:<id> or project:<id> (defaults to linked project's workspace)
+    /// Project containing the flags, as project:<id> (defaults to the project token or linked project)
     #[clap(long, global = true)]
     scope: Option<String>,
 
@@ -33,7 +33,7 @@ pub struct Args {
 
 #[derive(Parser)]
 enum Commands {
-    /// List feature flags for a scope
+    /// List feature flags for the current project
     #[clap(visible_alias = "ls")]
     List(ListArgs),
 
@@ -100,7 +100,7 @@ struct UnsetArgs {
 pub async fn command(args: Args) -> Result<()> {
     let configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    let owner = resolve_scope_owner(&client, &configs, args.scope.or(args.owner)).await?;
+    let owner = resolve_scope_owner(&configs, args.scope.or(args.owner)).await?;
 
     match args.command {
         Commands::List(list_args) => {
@@ -543,5 +543,13 @@ mod flag_list_tests {
             "source": { "type": "literal", "value": true },
         });
         assert_eq!(rule_value(&rule), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn accepts_project_scope_after_subcommand() {
+        let args = Args::try_parse_from(["railway flag", "list", "--scope", "project:project-id"])
+            .expect("--scope should be accepted after a subcommand");
+
+        assert_eq!(args.scope.as_deref(), Some("project:project-id"));
     }
 }

@@ -1,0 +1,14 @@
+query VolumeInstanceBackupList($volumeInstanceId: String!) {
+  volumeInstanceBackupList(volumeInstanceId: $volumeInstanceId) {
+    id
+    name
+    createdAt
+    expiresAt
+    externalId
+    referencedMB
+    usedMB
+    scheduleId
+    volumeInstanceSizeMB
+    creatorId
+  }
+}

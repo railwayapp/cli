@@ -1,0 +1,2078 @@
+//! Stdio ↔ streamable-HTTP proxy for the remote Railway MCP server.
+//!
+//! Bridges a harness speaking MCP over stdio (Claude Code, Cursor, …) to
+//! `mcp.railway.com`, attaching a fresh `Authorization: Bearer` from the CLI's
+//! stored login on every request. This lets users who have already run
+//! `railway login` use the remote MCP server without going through the
+//! harness's OAuth (DCR + browser consent) flow, and without ever writing a
+//! long-lived credential into the harness config.
+//!
+//! Auth freshness is delegated to [`crate::client::ensure_valid_token`], which
+//! serializes refreshes across concurrent CLI processes via the config
+//! lockfile — the proxy can safely run alongside the local `railway mcp`
+//! server and any other CLI invocations.
+//!
+//! The remote server currently runs the streamable-HTTP transport statelessly
+//! (no `Mcp-Session-Id` issued), but the proxy tracks a session id anyway and
+//! transparently re-initializes + retries once if the server ever reports a
+//! missing/expired session. Server-initiated messages (the optional GET SSE
+//! stream) are not proxied; nothing in the current tool surface relies on
+//! them.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use serde_json::{Value as JsonValue, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, mpsc};
+
+use crate::client::ensure_valid_token;
+use crate::commands::Environment;
+use crate::config::Configs;
+use crate::consts;
+use crate::telemetry;
+
+/// JSON-RPC error code for auth failures surfaced by the proxy itself.
+const AUTH_ERROR_CODE: i64 = -32001;
+
+/// Hard ceiling on a single upstream response (one SSE stream, or a non-SSE
+/// body). The proxy runs long-lived and attaches a live credential on every
+/// request, so a compromised edge (or a dev/http override MITM) streaming a
+/// boundary-less or unbounded body must not be able to grow memory without
+/// limit. Generous enough for the largest legitimate tool payloads.
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+const LOGIN_HINT: &str = "Not logged in to Railway. Run `railway login` in a terminal, then retry \
+     — the proxy picks up the new login automatically, no restart needed.";
+
+struct ProxyState {
+    http: reqwest::Client,
+    url: String,
+    configs: Mutex<Configs>,
+    session: Mutex<SessionMeta>,
+    /// Serialize recovery without holding session metadata across HTTP awaits.
+    recovery: Mutex<()>,
+    /// Resolved once at startup: the proxy's working directory is fixed for
+    /// the life of the process, so the link cannot change under it.
+    link: LinkContext,
+    /// The harness that spawned the proxy, resolved once at startup from the
+    /// environment and process tree. Sent upstream so traffic stays
+    /// attributed when the harness's `clientInfo.name` is missing or generic.
+    harness: HarnessAttribution,
+    /// Upstream failures not yet followed by a success. Never held across an
+    /// await, so a plain mutex is enough.
+    health: std::sync::Mutex<SessionHealth>,
+}
+
+/// Why an upstream exchange failed, reduced to a handful of low-cardinality
+/// categories for the process-level `cli_mcp` telemetry row.
+///
+/// Before this existed `serve_proxy` returned `Ok(())` however the session
+/// went: every error was answered to the harness as JSON-RPC and then
+/// forgotten, so all ~274k proxy rows a week reported `success=true` and the
+/// CLI side carried no failure signal at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpstreamFailure {
+    /// No usable CLI login, so nothing was forwarded (e.g. a project-token-only
+    /// environment, or a login that expired and could not be refreshed).
+    NotLoggedIn,
+    /// mcp.railway.com answered 401/403.
+    Rejected(u16),
+    /// Could not connect or send the request (DNS, refused, TLS, …).
+    Unreachable,
+    /// Connect or response timeout.
+    TimedOut,
+    /// The connection dropped while the response was being read.
+    ConnectionLost,
+    /// HTTP 429.
+    RateLimited,
+    /// Any other non-success HTTP status (5xx, unexpected 4xx).
+    Http(u16),
+    /// Anything else the proxy could not classify.
+    Other,
+}
+
+impl UpstreamFailure {
+    fn from_status(status: u16) -> Self {
+        match status {
+            401 | 403 => Self::Rejected(status),
+            429 => Self::RateLimited,
+            _ => Self::Http(status),
+        }
+    }
+
+    fn from_error(err: &anyhow::Error) -> Self {
+        for cause in err.chain() {
+            if let Some(upstream) = cause.downcast_ref::<UpstreamStatusError>() {
+                return Self::from_status(upstream.status);
+            }
+            if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
+                return if err.is_timeout() {
+                    Self::TimedOut
+                } else if err.is_body() || err.is_decode() {
+                    Self::ConnectionLost
+                } else {
+                    Self::Unreachable
+                };
+            }
+        }
+        Self::Other
+    }
+
+    /// Which failure to report when several are outstanding: the one a user
+    /// most needs to act on.
+    fn severity(self) -> u8 {
+        match self {
+            Self::Rejected(_) => 7,
+            Self::NotLoggedIn => 6,
+            Self::Unreachable => 5,
+            Self::TimedOut => 4,
+            Self::Http(status) if status >= 500 => 3,
+            Self::ConnectionLost => 2,
+            Self::RateLimited => 1,
+            Self::Http(_) | Self::Other => 0,
+        }
+    }
+
+    /// Fixed wording per category (the HTTP status is the only variable), so
+    /// `error_message` stays groupable and carries no ids, URLs or bodies.
+    /// Each phrase is chosen to land in the matching `telemetry::error_class`
+    /// bucket.
+    fn telemetry_message(self) -> String {
+        let detail = match self {
+            Self::NotLoggedIn => "mcp upstream not reached: the proxy has no railway login".into(),
+            Self::Rejected(401) => "mcp upstream rejected the railway login (HTTP 401)".into(),
+            Self::Rejected(status) => format!("mcp upstream forbidden (HTTP {status})"),
+            Self::Unreachable => "mcp upstream unreachable: could not connect".into(),
+            Self::TimedOut => "mcp upstream timed out".into(),
+            Self::ConnectionLost => "mcp upstream unreachable: connection lost mid-response".into(),
+            Self::RateLimited => "mcp upstream rate limit hit (HTTP 429)".into(),
+            Self::Http(status) => format!("mcp upstream http error (HTTP {status})"),
+            Self::Other => "mcp upstream request failed".into(),
+        };
+        format!("Railway MCP proxy session ended with an unrecovered upstream failure: {detail}")
+    }
+}
+
+/// Tracks whether the session ended healthy. A failure stays outstanding until
+/// a later upstream exchange succeeds, so a transient 502 (or a `railway login`
+/// mid-session) does not mark the whole session failed; one that never
+/// recovers does.
+#[derive(Default)]
+struct SessionHealth {
+    unrecovered: Option<UpstreamFailure>,
+}
+
+impl SessionHealth {
+    fn record_success(&mut self) {
+        self.unrecovered = None;
+    }
+
+    fn record_failure(&mut self, failure: UpstreamFailure) {
+        if self
+            .unrecovered
+            .is_none_or(|current| failure.severity() >= current.severity())
+        {
+            self.unrecovered = Some(failure);
+        }
+    }
+}
+
+/// A non-success HTTP status from the upstream, kept typed so session health
+/// can classify it. Displays exactly as the old string error did, so what the
+/// harness sees is unchanged.
+#[derive(Debug)]
+struct UpstreamStatusError {
+    status: u16,
+    message: String,
+}
+
+impl std::fmt::Display for UpstreamStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UpstreamStatusError {}
+
+fn upstream_status_error(status: reqwest::StatusCode, message: String) -> anyhow::Error {
+    anyhow::Error::new(UpstreamStatusError {
+        status: status.as_u16(),
+        message,
+    })
+}
+
+impl ProxyState {
+    fn health(&self) -> std::sync::MutexGuard<'_, SessionHealth> {
+        self.health.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[derive(Default)]
+struct SessionMeta {
+    id: Option<String>,
+    /// Advances after recovery, including when the upstream is stateless.
+    generation: u64,
+    /// The harness's `initialize` request, kept so the proxy can re-establish
+    /// an upstream session (expiry, or a degraded logged-out start) without
+    /// involving the harness.
+    init_request: Option<JsonValue>,
+    /// Header-safe harness identity extracted from `initialize.params.clientInfo.name`
+    /// and attached to every upstream request as `x-railway-mcp-client`.
+    client_name: Option<String>,
+    /// Which context parameters each remote tool declares, learned from the
+    /// `tools/list` result. Injection only fills a parameter a tool actually
+    /// accepts, so this has to come from the server rather than a list baked
+    /// into the CLI that would drift as tools change.
+    tool_params: HashMap<String, HashSet<String>>,
+    /// Request ids whose arguments the proxy completed, so the outgoing request
+    /// can declare it. Cleared as each is sent.
+    injected_ids: HashSet<String>,
+}
+
+/// The project this invocation targets, used only to complete a tool call that
+/// named no scope of its own.
+///
+/// Deliberately just the project. `environmentId` and `serviceId` are
+/// subordinate to a project, and filling them from the directory link is what
+/// broke explicit cross-project calls: a linked environment paired with a
+/// caller-supplied project from somewhere else fails the server's auth gate
+/// with "you don't have the required role". The server resolves the
+/// environment itself where that is safe, and requires both explicitly on the
+/// destructive tools, where guessing is worse than asking.
+///
+/// Resolved from RAILWAY_PROJECT_ID or the `railway link` directory, whichever
+/// is present — the two sources `get_linked_project` reads without I/O.
+/// Deliberately NOT covered: resolving a project from a RAILWAY_TOKEN, which
+/// costs a GraphQL round trip and would put a network call (and a 15s connect
+/// timeout on a bad one) in front of proxy startup while the harness waits.
+/// Who is driving the proxy, as env/process detection sees it. Empty when the
+/// proxy runs from a human terminal or CI (the same gate the deploy upload
+/// uses), so those requests carry no caller header.
+#[derive(Clone, Default)]
+struct HarnessAttribution {
+    caller: Option<String>,
+    agent_session_id: Option<String>,
+}
+
+impl HarnessAttribution {
+    fn detect() -> Self {
+        match telemetry::deploy_attribution() {
+            Some((caller, agent_session_id)) => Self {
+                caller: Some(caller),
+                agent_session_id,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct LinkContext {
+    project_id: Option<String>,
+}
+
+/// Parameters that scope a tool call to a resource. Any one of these means the
+/// caller expressed intent about *what* it is acting on, so the proxy leaves
+/// the call alone entirely.
+///
+/// This is what keeps cross-project work intact. A caller holding a serviceId
+/// from another project and no projectId gets the plain "projectId Required"
+/// back and can correct itself. Injecting a project there would answer a
+/// question nobody asked — the server would look for that service in the
+/// linked project, fail, and report "not found in this project", which reads
+/// to a model as "this service does not exist".
+///
+/// Measured 2026-08-19: of ~80,000 successful local MCP calls, the
+/// project-omitted/service-supplied combination occurred exactly zero times.
+/// Callers supply full context or none, so gating on this costs nothing.
+const SCOPING_PARAMS: [&str; 4] = ["projectId", "environmentId", "serviceId", "deploymentId"];
+
+/// Marks traffic as coming through `railway mcp proxy` so remote MCP telemetry
+/// can separate it from editor OAuth and other direct clients.
+const MCP_TRANSPORT_HEADER: &str = "x-railway-mcp-transport";
+const MCP_TRANSPORT_VALUE: &str = "cli-proxy";
+const MCP_CLIENT_HEADER: &str = "x-railway-mcp-client";
+/// Agent attribution, named as backboard reads them
+/// (helpers/agentAttribution.ts). Backboard prefers `x-railway-caller` over
+/// `x-railway-mcp-client`, so the proxy sends the best identity it has in
+/// both.
+const RAILWAY_CALLER_HEADER: &str = "x-railway-caller";
+const RAILWAY_AGENT_SESSION_HEADER: &str = "x-railway-agent-session";
+/// Names the context the proxy filled in on this call. Injection is otherwise
+/// invisible — the server cannot tell an injected projectId from one the
+/// caller chose — so without this there is no way to measure how often it
+/// fires, or to recognise it in a report of "the agent looked at the wrong
+/// project".
+const MCP_INJECTED_HEADER: &str = "x-railway-mcp-injected";
+
+/// SEP-2243 transport headers. The modern (2026-07-28) lifecycle restates a
+/// request's method — and, for a tool call, the target name — in headers the
+/// streamable-HTTP transport requires; the server rejects a modern body whose
+/// `Mcp-Method` header is absent. A native HTTP client sets these itself, but
+/// the harness reaches us over stdio, which carries neither, so we derive them
+/// from the body being forwarded. The server ignores them on a request it
+/// classifies as legacy.
+const MCP_METHOD_HEADER: &str = "mcp-method";
+const MCP_NAME_HEADER: &str = "mcp-name";
+
+type Out = mpsc::UnboundedSender<String>;
+
+pub async fn serve_proxy() -> Result<()> {
+    let configs = Configs::new()?;
+    let url = resolve_mcp_url(&configs)?;
+
+    let http = reqwest::Client::builder()
+        .danger_accept_invalid_certs(matches!(Configs::get_environment_id(), Environment::Dev))
+        .user_agent(consts::get_user_agent())
+        .connect_timeout(Duration::from_secs(15))
+        // An MCP JSON-RPC POST is never legitimately redirected. Following
+        // redirects on a request that carries a Bearer is unnecessary attack
+        // surface — reqwest strips the token cross-host, but a same-host 307/308
+        // would re-send the body and the redirected response is relayed blind.
+        // Refuse redirects outright.
+        .redirect(reqwest::redirect::Policy::none())
+        // No overall timeout: tool calls (e.g. railway-agent) can legitimately
+        // stream for minutes.
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let link = read_link_context(&configs);
+    let state = Arc::new(ProxyState {
+        http,
+        url,
+        configs: Mutex::new(configs),
+        session: Mutex::new(SessionMeta::default()),
+        recovery: Mutex::new(()),
+        link,
+        harness: HarnessAttribution::detect(),
+        health: std::sync::Mutex::new(SessionHealth::default()),
+    });
+
+    // All stdout writes go through one task so concurrent responses can't
+    // interleave within a line.
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(line) = rx.recv().await {
+            let _ = stdout.write_all(line.as_bytes()).await;
+            let _ = stdout.write_all(b"\n").await;
+            let _ = stdout.flush().await;
+        }
+    });
+
+    let stdin = BufReader::new(tokio::io::stdin());
+    let mut lines = stdin.lines();
+    // Process messages inline until the MCP handshake completes so the
+    // initialize → initialized ordering is preserved upstream, then handle
+    // messages concurrently (harnesses issue parallel tool calls).
+    let mut handshake_done = false;
+
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: JsonValue = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("railway mcp proxy: ignoring unparseable message: {e}");
+                continue;
+            }
+        };
+
+        let mut msg = msg;
+        if method_of(&msg) == Some("initialize") {
+            let mut session = state.session.lock().await;
+            session.init_request = Some(msg.clone());
+            session.client_name = extract_mcp_client_header(&msg);
+        } else if method_of(&msg) == Some("tools/call") {
+            let mut session = state.session.lock().await;
+            if inject_link_context(&state.link, &session.tool_params, &mut msg) {
+                for id in ids_of(&msg) {
+                    session.injected_ids.insert(id.to_string());
+                }
+            }
+        }
+
+        if handshake_done {
+            let state = state.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                handle_message(&state, msg, &tx).await;
+            });
+        } else {
+            let completes_handshake = method_of(&msg) == Some("notifications/initialized");
+            handle_message(&state, msg, &tx).await;
+            if completes_handshake {
+                handshake_done = true;
+            }
+        }
+    }
+
+    // stdin closed: the harness is gone. Best-effort end of the remote
+    // session, then a bounded wait for in-flight tasks — a stalled upstream
+    // stream must not keep an orphaned proxy alive after the harness exits.
+    end_session(&state).await;
+    drop(tx);
+    let _ = tokio::time::timeout(Duration::from_secs(5), writer).await;
+
+    // Only now, with the harness already gone, does an unrecovered upstream
+    // failure become the process result. Returning it any earlier would end a
+    // session that might still recover; returning it here cannot disturb the
+    // stdio client, and it is what lets the dispatch macro's `cli_mcp` row
+    // report success=false with a classifiable error_message.
+    session_result(&state)
+}
+
+fn session_result(state: &ProxyState) -> Result<()> {
+    match state.health().unrecovered {
+        Some(failure) => Err(anyhow::anyhow!(failure.telemetry_message())),
+        None => Ok(()),
+    }
+}
+
+fn method_of(msg: &JsonValue) -> Option<&str> {
+    msg.get("method").and_then(JsonValue::as_str)
+}
+
+/// Read the directory link the same way the local MCP server does, so the two
+/// surfaces resolve the same project. Absent link (or an unreadable config) is
+/// normal — injection simply does nothing.
+fn read_link_context(configs: &Configs) -> LinkContext {
+    // RAILWAY_PROJECT_ID wins over the directory link, matching
+    // `get_linked_project`. With only the project in play there is no longer a
+    // way to pair one project's id with another's environment.
+    let project_id = Configs::get_railway_project_id()
+        .or_else(|| {
+            configs
+                .get_local_linked_project()
+                .ok()
+                .map(|linked| linked.project)
+        })
+        .filter(|s| !s.is_empty());
+
+    LinkContext { project_id }
+}
+
+/// Learn each tool's declared parameters from a `tools/list` result.
+///
+/// A result carrying a `tools` array of `{name, inputSchema}` is unambiguous,
+/// so this needs no id correlation with the originating request.
+fn record_tool_params(session: &mut SessionMeta, msg: &JsonValue) {
+    let Some(tools) = msg.pointer("/result/tools").and_then(JsonValue::as_array) else {
+        return;
+    };
+    for tool in tools {
+        let Some(name) = tool.get("name").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let declared = tool
+            .pointer("/inputSchema/properties")
+            .and_then(JsonValue::as_object)
+            .map(|props| props.keys().cloned().collect::<HashSet<String>>())
+            .unwrap_or_default();
+        session.tool_params.insert(name.to_string(), declared);
+    }
+}
+
+/// Fill in linked project/environment/service on a `tools/call` the harness
+/// left them off.
+///
+/// Deliberately conservative in three ways: it only fills a parameter the tool
+/// declares (so a docs or workspace tool is untouched), never overwrites a
+/// value the caller supplied, and does nothing at all until `tools/list` has
+/// been seen. An unknown tool is left exactly as the harness sent it.
+fn inject_link_context(
+    link: &LinkContext,
+    tool_params: &HashMap<String, HashSet<String>>,
+    msg: &mut JsonValue,
+) -> bool {
+    let Some(project_id) = link.project_id.as_deref() else {
+        return false;
+    };
+    if method_of(msg) != Some("tools/call") {
+        return false;
+    }
+    let Some(tool_name) = msg
+        .pointer("/params/name")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+    else {
+        return false;
+    };
+    // No schema yet (tools/list not seen): forward untouched rather than send
+    // a parameter the tool may not accept.
+    let Some(declared) = tool_params.get(&tool_name) else {
+        return false;
+    };
+    if !declared.contains("projectId") {
+        return false;
+    }
+
+    // The caller named a resource, so it has its own intent about scope.
+    let supplied = |param: &str| {
+        msg.pointer(&format!("/params/arguments/{param}"))
+            .is_some_and(|v| !v.is_null())
+    };
+    if SCOPING_PARAMS.iter().any(|param| supplied(param)) {
+        return false;
+    }
+
+    // Only projectId. environmentId and serviceId are subordinate to a project
+    // and the server resolves or requires them itself: it defaults the
+    // environment where that is safe, and demands both explicitly on the
+    // destructive tools, where guessing is worse than asking.
+    let Some(params) = msg.get_mut("params").and_then(JsonValue::as_object_mut) else {
+        return false;
+    };
+    let arguments = params
+        .entry("arguments")
+        .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
+    let Some(arguments) = arguments.as_object_mut() else {
+        return false;
+    };
+    arguments.insert(
+        "projectId".to_string(),
+        JsonValue::String(project_id.to_string()),
+    );
+    true
+}
+
+/// Request ids awaiting a response in this message — one for a plain request,
+/// several for a JSON-RPC batch (protocol ≤2025-03-26 allows top-level
+/// arrays), none for notifications. Error paths must answer every id or the
+/// harness waits forever.
+fn ids_of(msg: &JsonValue) -> Vec<JsonValue> {
+    match msg {
+        JsonValue::Array(items) => items
+            .iter()
+            .filter_map(|m| m.get("id").cloned().filter(|id| !id.is_null()))
+            .collect(),
+        _ => msg
+            .get("id")
+            .cloned()
+            .filter(|id| !id.is_null())
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn resolve_mcp_url(configs: &Configs) -> Result<String> {
+    let is_dev = matches!(Configs::get_environment_id(), Environment::Dev);
+    if let Ok(raw) = std::env::var("RAILWAY_MCP_URL") {
+        if let Some(url) = validate_mcp_override(&raw, is_dev)? {
+            return Ok(url);
+        }
+    }
+    Ok(format!("https://mcp.{}", configs.get_host()))
+}
+
+/// Validate a `RAILWAY_MCP_URL` override. Returns the normalized URL, `None`
+/// when the value is blank (caller falls back to the default), or an error
+/// when it would send the Bearer over a non-TLS connection.
+///
+/// The Bearer is attached to every request to this URL, and the cross-host
+/// redirect strip does not protect the *first* hop — so a plaintext target
+/// leaks the credential outright. Require https except in the local Dev
+/// environment, where a plaintext raildev endpoint is expected.
+fn validate_mcp_override(raw: &str, is_dev: bool) -> Result<Option<String>> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    if !url.starts_with("https://") && !is_dev {
+        anyhow::bail!(
+            "RAILWAY_MCP_URL must be an https:// URL (got {url:?}); refusing to send credentials over a non-TLS connection."
+        );
+    }
+    Ok(Some(url.trim_end_matches('/').to_string()))
+}
+
+async fn handle_message(state: &ProxyState, msg: JsonValue, out: &Out) {
+    let ids = ids_of(&msg);
+
+    let Some(token) = fresh_token(state).await else {
+        state.health().record_failure(UpstreamFailure::NotLoggedIn);
+        respond_unauthenticated(&msg, &ids, out);
+        return;
+    };
+
+    if let Err(e) = forward(state, &msg, &token, out).await {
+        state
+            .health()
+            .record_failure(UpstreamFailure::from_error(&e));
+        if ids.is_empty() {
+            eprintln!("railway mcp proxy: {e:#}");
+        }
+        for id in &ids {
+            send_error(out, id, -32603, &format!("Railway MCP proxy error: {e:#}"));
+        }
+    }
+}
+
+/// Get a currently-valid auth token, refreshing the stored OAuth credentials
+/// if they have expired. Returns `None` when the user has no usable login.
+async fn fresh_token(state: &ProxyState) -> Option<String> {
+    let mut configs = state.configs.lock().await;
+    // A proxy started before `railway login` has no token in memory, and
+    // `ensure_valid_token`'s fast path never re-reads the config in that
+    // state. Reload from disk so a login that happened after startup is
+    // picked up — this is what makes the LOGIN_HINT's "no restart needed"
+    // promise true.
+    if configs.get_railway_auth_token().is_none() {
+        if let Err(e) = configs.reload() {
+            eprintln!("railway mcp proxy: config reload failed: {e:#}");
+        }
+    }
+    if let Err(e) = ensure_valid_token(&mut configs).await {
+        // On `invalid_grant` the dead credential has already been cleared, so
+        // `get_railway_auth_token()` below returns None and the caller answers
+        // with LOGIN_HINT — actionable inside an MCP harness, where this
+        // stderr line is invisible. Previously the stale token was handed back
+        // and every tool call failed as an opaque "Unauthorized" instead.
+        eprintln!("railway mcp proxy: token refresh failed: {e:#}");
+    }
+    configs.get_railway_auth_token()
+}
+
+/// Without a login the proxy still completes the MCP handshake (a crashed
+/// server renders as an opaque failure in most harnesses) and answers every
+/// request with an actionable error. Once the user logs in, the next request
+/// heals automatically via the re-initialize path in [`forward`].
+fn respond_unauthenticated(msg: &JsonValue, ids: &[JsonValue], out: &Out) {
+    let [id] = ids else {
+        // Batch or notification: answer every id (none for a notification).
+        for id in ids {
+            send_error(out, id, AUTH_ERROR_CODE, LOGIN_HINT);
+        }
+        return;
+    };
+
+    if method_of(msg) == Some("initialize") {
+        let protocol = msg
+            .pointer("/params/protocolVersion")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("2025-03-26");
+        let result = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": protocol,
+                "capabilities": { "tools": { "listChanged": true } },
+                "serverInfo": {
+                    "name": "railway",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "instructions": LOGIN_HINT,
+            }
+        });
+        let _ = out.send(result.to_string());
+    } else {
+        send_error(out, id, AUTH_ERROR_CODE, LOGIN_HINT);
+    }
+}
+
+async fn forward(state: &ProxyState, msg: &JsonValue, token: &str, out: &Out) -> Result<()> {
+    let is_initialize = method_of(msg) == Some("initialize");
+    let (session_id, generation, can_reinit, metadata) = {
+        let mut session = state.session.lock().await;
+        let injected = ids_of(msg)
+            .iter()
+            .any(|id| session.injected_ids.remove(&id.to_string()));
+        (
+            session.id.clone(),
+            session.generation,
+            session.init_request.is_some(),
+            RequestMetadata {
+                client_name: session.client_name.clone(),
+                injected,
+            },
+        )
+    };
+
+    let resp = post_message(
+        state,
+        msg,
+        token,
+        if is_initialize {
+            None
+        } else {
+            session_id.as_deref()
+        },
+        &metadata,
+    )
+    .await?;
+
+    // Session lost or never established upstream (server-side expiry, or the
+    // proxy started degraded while logged out): re-initialize with the
+    // captured initialize request and retry once.
+    let status = resp.status();
+    if !is_initialize && (status == 404 || status == 400) && can_reinit {
+        drop(resp);
+        reinitialize(state, token, generation).await?;
+        let session_id = state.session.lock().await.id.clone();
+        let resp = post_message(state, msg, token, session_id.as_deref(), &metadata).await?;
+        return consume_response(state, resp, msg, is_initialize, out).await;
+    }
+
+    consume_response(state, resp, msg, is_initialize, out).await
+}
+
+/// Keep per-request telemetry intact when retrying a rejected request.
+struct RequestMetadata {
+    client_name: Option<String>,
+    injected: bool,
+}
+
+async fn post_message(
+    state: &ProxyState,
+    msg: &JsonValue,
+    token: &str,
+    session_id: Option<&str>,
+    metadata: &RequestMetadata,
+) -> Result<reqwest::Response> {
+    let mut req = state
+        .http
+        .post(&state.url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("accept", "application/json, text/event-stream")
+        .header("x-source", consts::get_user_agent())
+        .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE);
+    req = with_attribution(req, metadata.client_name.as_deref(), &state.harness);
+    if metadata.injected {
+        req = req.header(MCP_INJECTED_HEADER, "projectId");
+    }
+    if let Some(sid) = session_id {
+        req = req.header("mcp-session-id", sid);
+    }
+    // SEP-2243: derive the modern transport headers from the body. A value a
+    // header cannot legally carry is left off rather than sent malformed — the
+    // server then classifies the request as legacy, which is the same outcome
+    // as before this was added.
+    if let Some(method) = method_of(msg) {
+        if header_safe(method) {
+            req = req.header(MCP_METHOD_HEADER, method);
+        }
+        if let Some(name) = msg.pointer("/params/name").and_then(JsonValue::as_str)
+            && header_safe(name)
+        {
+            req = req.header(MCP_NAME_HEADER, name);
+        }
+    }
+    req.json(msg)
+        .send()
+        .await
+        .context("failed to reach the remote MCP server")
+}
+
+/// Attach agent attribution to an upstream request. The client name from the
+/// harness's `initialize` handshake is the stronger identity and wins for
+/// `x-railway-caller`; the env/process-detected harness covers a handshake
+/// with no usable name (and any request whose metadata lacks one), which
+/// previously reached backboard with no caller at all. Warehouse 2026-10-16:
+/// ~13k users/wk of proxied connect events arrived caller-less, 99% of them
+/// users whose other proxied events were attributed.
+fn with_attribution(
+    mut req: reqwest::RequestBuilder,
+    client_name: Option<&str>,
+    harness: &HarnessAttribution,
+) -> reqwest::RequestBuilder {
+    if let Some(client) = client_name {
+        req = req.header(MCP_CLIENT_HEADER, client);
+    }
+    if let Some(caller) = client_name
+        .or(harness.caller.as_deref())
+        .filter(|c| header_safe(c))
+    {
+        req = req.header(RAILWAY_CALLER_HEADER, caller);
+    }
+    if let Some(session) = harness
+        .agent_session_id
+        .as_deref()
+        .filter(|s| header_safe(s))
+    {
+        req = req.header(RAILWAY_AGENT_SESSION_HEADER, session);
+    }
+    req
+}
+
+/// A header may only carry visible ASCII; a value that cannot restate the body
+/// in a header is left off rather than sent malformed.
+fn header_safe(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_graphic() || c == ' ')
+}
+
+/// Pull a telemetry-safe client identity out of an MCP `initialize` request.
+fn extract_mcp_client_header(msg: &JsonValue) -> Option<String> {
+    let name = msg
+        .pointer("/params/clientInfo/name")
+        .and_then(JsonValue::as_str)?;
+    telemetry::mcp_client_header_value(name)
+}
+
+/// Re-run the MCP handshake upstream using the harness's captured `initialize`
+/// request, discarding the result (the harness already completed its own
+/// handshake). A separate lock serializes recovery; session metadata is only
+/// locked for snapshots and publication, never while awaiting HTTP.
+async fn reinitialize(state: &ProxyState, token: &str, failed_generation: u64) -> Result<()> {
+    let _recovery = state.recovery.lock().await;
+    let (init, metadata) = {
+        let session = state.session.lock().await;
+        // Another request already recovered the session this request used.
+        // Compare generations because a stateless server never issues an id.
+        if session.generation != failed_generation {
+            return Ok(());
+        }
+        (
+            session
+                .init_request
+                .clone()
+                .context("no initialize request captured yet")?,
+            RequestMetadata {
+                client_name: session.client_name.clone(),
+                injected: false,
+            },
+        )
+    };
+
+    let resp = post_message(state, &init, token, None, &metadata).await?;
+    if !resp.status().is_success() {
+        return Err(upstream_status_error(
+            resp.status(),
+            format!("re-initialize failed with HTTP {}", resp.status()),
+        ));
+    }
+    let session_id = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    read_body_capped(resp).await?;
+
+    let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let resp = post_message(state, &initialized, token, session_id.as_deref(), &metadata).await?;
+    if !resp.status().is_success() {
+        return Err(upstream_status_error(
+            resp.status(),
+            format!(
+                "re-initialize notification failed with HTTP {}",
+                resp.status()
+            ),
+        ));
+    }
+    read_body_capped(resp).await?;
+
+    let mut session = state.session.lock().await;
+    session.id = session_id;
+    session.generation += 1;
+    Ok(())
+}
+
+async fn consume_response(
+    state: &ProxyState,
+    resp: reqwest::Response,
+    msg: &JsonValue,
+    is_initialize: bool,
+    out: &Out,
+) -> Result<()> {
+    let status = resp.status();
+
+    if is_initialize {
+        if let Some(sid) = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            state.session.lock().await.id = Some(sid.to_string());
+        }
+    }
+
+    if status == 401 || status == 403 {
+        // Answered to the harness below rather than returned as an error, so
+        // record it here; it stays outstanding unless a later call succeeds.
+        state
+            .health()
+            .record_failure(UpstreamFailure::Rejected(status.as_u16()));
+        let _ = resp.bytes().await;
+        for id in &ids_of(msg) {
+            send_error(
+                out,
+                id,
+                AUTH_ERROR_CODE,
+                "Railway rejected the CLI's credentials. Run `railway login` and try again.",
+            );
+        }
+        return Ok(());
+    }
+
+    if !status.is_success() {
+        let body = read_body_capped(resp).await.unwrap_or_default();
+        return Err(upstream_status_error(
+            status,
+            format!(
+                "remote MCP server returned HTTP {status}: {}",
+                truncate(&body, 300)
+            ),
+        ));
+    }
+
+    // The upstream accepted the request. A stream that breaks after this
+    // point is recorded as a failure on top of it, by the caller.
+    state.health().record_success();
+
+    // Accepted notification/response with no body.
+    if status == 202 || status == 204 {
+        return Ok(());
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // A tools/list result tells us which context parameters each tool accepts,
+    // which is what makes link-context injection safe. Learned from whichever
+    // transport the server answered on.
+    let learn_tools = method_of(msg) == Some("tools/list");
+
+    if content_type.starts_with("text/event-stream") {
+        stream_sse(state, resp, out, learn_tools).await
+    } else {
+        let body = read_body_capped(resp).await?;
+        if let Some(parsed) = emit_json_line(body.trim(), out)
+            && learn_tools
+        {
+            record_tool_params(&mut *state.session.lock().await, &parsed);
+        }
+        Ok(())
+    }
+}
+
+/// Read a full (non-streaming) response body, refusing to buffer more than
+/// [`MAX_RESPONSE_BYTES`]. `reqwest`'s `text()`/`bytes()` have no size cap, so
+/// a compromised or MITM'd upstream could otherwise stream an unbounded body
+/// into a long-lived proxy and exhaust memory.
+async fn read_body_capped(resp: reqwest::Response) -> Result<String> {
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("error reading response from remote MCP server")?;
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            anyhow::bail!(
+                "remote MCP server response exceeded {MAX_RESPONSE_BYTES} bytes; aborting."
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Relay every SSE `data:` payload to stdout as its own JSON-RPC line. The
+/// server closes the per-request stream after the final response message.
+async fn stream_sse(
+    state: &ProxyState,
+    resp: reqwest::Response,
+    out: &Out,
+    learn_tools: bool,
+) -> Result<()> {
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("error reading SSE stream from remote MCP server")?;
+        buf.extend_from_slice(&chunk);
+        while let Some((event_len, boundary_end)) = find_event_boundary(&buf) {
+            let event: Vec<u8> = buf.drain(..boundary_end).collect();
+            if let Some(parsed) = emit_sse_event(&event[..event_len], out)
+                && learn_tools
+            {
+                record_tool_params(&mut *state.session.lock().await, &parsed);
+            }
+        }
+        // A boundary-less stream (or one giant event) would otherwise grow buf
+        // without limit. Cap it: past the ceiling, no legitimate single SSE
+        // event is pending — abort rather than let a bad upstream OOM us.
+        if buf.len() > MAX_RESPONSE_BYTES {
+            anyhow::bail!(
+                "remote MCP server SSE event exceeded {MAX_RESPONSE_BYTES} bytes; aborting."
+            );
+        }
+    }
+    if !buf.is_empty()
+        && let Some(parsed) = emit_sse_event(&buf, out)
+        && learn_tools
+    {
+        record_tool_params(&mut *state.session.lock().await, &parsed);
+    }
+    Ok(())
+}
+
+/// Find the end of the next SSE event: a blank line, i.e. `\n\n` or
+/// `\r\n\r\n`. Returns (event bytes length, total length including boundary).
+fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
+    for i in 0..buf.len() {
+        if buf[i] != b'\n' {
+            continue;
+        }
+        if buf.get(i + 1) == Some(&b'\n') {
+            return Some((i, i + 2));
+        }
+        if buf.get(i + 1) == Some(&b'\r') && buf.get(i + 2) == Some(&b'\n') {
+            return Some((i, i + 3));
+        }
+    }
+    None
+}
+
+fn emit_sse_event(raw: &[u8], out: &Out) -> Option<JsonValue> {
+    let text = String::from_utf8_lossy(raw);
+    let data_lines: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|rest| rest.strip_prefix(' ').unwrap_or(rest))
+        .collect();
+    if data_lines.is_empty() {
+        return None;
+    }
+    emit_json_line(&data_lines.join("\n"), out)
+}
+
+/// Write one JSON-RPC message as a single stdout line. Payloads are compacted
+/// through serde so an upstream message containing raw newlines can't corrupt
+/// the newline-delimited stdio framing.
+fn emit_json_line(payload: &str, out: &Out) -> Option<JsonValue> {
+    if payload.is_empty() {
+        return None;
+    }
+    let parsed = serde_json::from_str::<JsonValue>(payload).ok();
+    let line = parsed
+        .as_ref()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| payload.replace(['\n', '\r'], " "));
+    let _ = out.send(line);
+    parsed
+}
+
+fn send_error(out: &Out, id: &JsonValue, code: i64, message: &str) {
+    let err = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    let _ = out.send(err.to_string());
+}
+
+/// Best-effort session teardown when the harness disconnects.
+async fn end_session(state: &ProxyState) {
+    let (session_id, client_name) = {
+        let session = state.session.lock().await;
+        (session.id.clone(), session.client_name.clone())
+    };
+    let Some(session_id) = session_id else { return };
+    let token = { state.configs.lock().await.get_railway_auth_token() };
+    let Some(token) = token else { return };
+    let mut req = state
+        .http
+        .delete(&state.url)
+        .header("authorization", format!("Bearer {token}"))
+        .header("mcp-session-id", session_id)
+        .header(MCP_TRANSPORT_HEADER, MCP_TRANSPORT_VALUE)
+        .timeout(Duration::from_secs(5));
+    req = with_attribution(req, client_name.as_deref(), &state.harness);
+    let _ = req.send().await;
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            out.push(line);
+        }
+        out
+    }
+
+    #[test]
+    fn mcp_override_rejects_plaintext_outside_dev() {
+        // http:// would send the Bearer in the clear — refused in prod/staging.
+        assert!(validate_mcp_override("http://evil.example/mcp", false).is_err());
+        // Blank falls back to the default (Ok(None), not an error).
+        assert_eq!(validate_mcp_override("  ", false).unwrap(), None);
+        // https is accepted and trailing slashes normalized.
+        assert_eq!(
+            validate_mcp_override("https://mcp.railway.com/", false).unwrap(),
+            Some("https://mcp.railway.com".to_string()),
+        );
+        // Dev allows plaintext for a local raildev endpoint.
+        assert_eq!(
+            validate_mcp_override("http://localhost:8080", true).unwrap(),
+            Some("http://localhost:8080".to_string()),
+        );
+    }
+
+    #[test]
+    fn header_safe_accepts_wire_methods_and_rejects_unsendable_values() {
+        assert!(header_safe("server/discover"));
+        assert!(header_safe("tools/call"));
+        assert!(header_safe("get-service-config"));
+        // A blank value, control chars, or non-ASCII can't restate the body.
+        assert!(!header_safe(""));
+        assert!(!header_safe("tools/call\n"));
+        assert!(!header_safe("naïve"));
+    }
+
+    #[test]
+    fn sse_event_boundary_handles_lf_and_crlf() {
+        assert_eq!(find_event_boundary(b"data: {}\n\nrest"), Some((8, 10)));
+        assert_eq!(find_event_boundary(b"data: {}\r\n\r\nrest"), Some((9, 12)));
+        assert_eq!(find_event_boundary(b"data: {}"), None);
+    }
+
+    #[test]
+    fn sse_event_extracts_data_payload() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        emit_sse_event(b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1}", &tx);
+        assert_eq!(collect(&mut rx), vec![r#"{"id":1,"jsonrpc":"2.0"}"#]);
+    }
+
+    #[test]
+    fn sse_event_joins_multiline_data() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        emit_sse_event(b"data: {\"a\":\ndata: 1}", &tx);
+        assert_eq!(collect(&mut rx), vec![r#"{"a":1}"#]);
+    }
+
+    #[test]
+    fn sse_event_without_data_is_dropped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        emit_sse_event(b"event: ping\nid: 4", &tx);
+        assert!(collect(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn json_lines_are_compacted_to_one_line() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        emit_json_line("{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 7\n}", &tx);
+        let lines = collect(&mut rx);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].contains('\n'));
+    }
+
+    #[test]
+    fn unauthenticated_initialize_fabricates_result() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18" },
+        });
+        respond_unauthenticated(&msg, &ids_of(&msg), &tx);
+        let lines = collect(&mut rx);
+        assert_eq!(lines.len(), 1);
+        let parsed: JsonValue = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(
+            parsed.pointer("/result/protocolVersion").unwrap(),
+            "2025-06-18"
+        );
+        assert!(
+            parsed
+                .pointer("/result/instructions")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("railway login")
+        );
+    }
+
+    #[test]
+    fn unauthenticated_request_gets_actionable_error() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let msg = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" });
+        respond_unauthenticated(&msg, &ids_of(&msg), &tx);
+        let lines = collect(&mut rx);
+        assert_eq!(lines.len(), 1);
+        let parsed: JsonValue = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(parsed.pointer("/error/code").unwrap(), AUTH_ERROR_CODE);
+        assert!(
+            parsed
+                .pointer("/error/message")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("railway login")
+        );
+    }
+
+    #[test]
+    fn unauthenticated_notification_is_dropped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let msg = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        respond_unauthenticated(&msg, &ids_of(&msg), &tx);
+        assert!(collect(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn extracts_known_mcp_client_from_initialize() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "1.0.0" }
+            }
+        });
+        assert_eq!(
+            extract_mcp_client_header(&msg).as_deref(),
+            Some("claude_code")
+        );
+    }
+
+    #[test]
+    fn extracts_unknown_mcp_client_as_slug() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": { "clientInfo": { "name": "Totally New IDE" } }
+        });
+        assert_eq!(
+            extract_mcp_client_header(&msg).as_deref(),
+            Some("mcp_unknown:totally-new-ide")
+        );
+    }
+
+    #[test]
+    fn missing_client_info_yields_no_header() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "params": { "protocolVersion": "2025-03-26" }
+        });
+        assert_eq!(extract_mcp_client_header(&msg), None);
+    }
+
+    fn attribution_headers(
+        client_name: Option<&str>,
+        harness: &HarnessAttribution,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let req = with_attribution(
+            reqwest::Client::new().post("http://127.0.0.1/mcp"),
+            client_name,
+            harness,
+        )
+        .build()
+        .unwrap();
+        let get = |name: &str| {
+            req.headers()
+                .get(name)
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        (
+            get(MCP_CLIENT_HEADER),
+            get(RAILWAY_CALLER_HEADER),
+            get(RAILWAY_AGENT_SESSION_HEADER),
+        )
+    }
+
+    #[test]
+    fn harness_attribution_covers_a_missing_client_name() {
+        let harness = HarnessAttribution {
+            caller: Some("codex".to_string()),
+            agent_session_id: Some("0199f0c2-thread".to_string()),
+        };
+        // No usable clientInfo name: the detected harness still names the
+        // caller, where the request previously carried no attribution.
+        assert_eq!(
+            attribution_headers(None, &harness),
+            (
+                None,
+                Some("codex".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A handshake name wins for the caller and is still sent as the
+        // client header.
+        assert_eq!(
+            attribution_headers(Some("mcp_unknown:totally-new-ide"), &harness),
+            (
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("mcp_unknown:totally-new-ide".to_string()),
+                Some("0199f0c2-thread".to_string())
+            )
+        );
+        // A human or CI launch detects nothing and sends nothing extra.
+        assert_eq!(
+            attribution_headers(None, &HarnessAttribution::default()),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn unauthenticated_batch_answers_every_id() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let msg = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
+            { "jsonrpc": "2.0", "method": "notifications/progress" },
+            { "jsonrpc": "2.0", "id": "two", "method": "tools/call" },
+        ]);
+        let ids = ids_of(&msg);
+        assert_eq!(ids, vec![json!(1), json!("two")]);
+        respond_unauthenticated(&msg, &ids, &tx);
+        let lines = collect(&mut rx);
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let parsed: JsonValue = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed.pointer("/error/code").unwrap(), AUTH_ERROR_CODE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod link_context_tests {
+    use super::*;
+
+    fn link() -> LinkContext {
+        LinkContext {
+            project_id: Some("proj-1".into()),
+        }
+    }
+
+    fn params_for(tool: &str, declared: &[&str]) -> HashMap<String, HashSet<String>> {
+        let mut m = HashMap::new();
+        m.insert(
+            tool.to_string(),
+            declared.iter().map(|s| s.to_string()).collect(),
+        );
+        m
+    }
+
+    fn call(tool: &str, arguments: JsonValue) -> JsonValue {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        })
+    }
+
+    const CTX: &[&str] = &["projectId", "environmentId", "serviceId"];
+
+    #[test]
+    fn fills_the_project_when_the_caller_gave_no_scope_at_all() {
+        // The case worth serving: ~39,800 successful local calls a day supply
+        // no context and lean on `railway link`.
+        let mut msg = call("list-services", json!({}));
+        assert!(inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+    }
+
+    #[test]
+    fn never_fills_a_subordinate_id() {
+        // environmentId and serviceId belong to a project. Filling them from
+        // the link is what corrupted an explicitly cross-project call: the
+        // server saw the linked environment against another project and denied
+        // the request.
+        let mut msg = call("list-services", json!({}));
+        inject_link_context(&link(), &params_for("list-services", CTX), &mut msg);
+        assert!(msg.pointer("/params/arguments/environmentId").is_none());
+        assert!(msg.pointer("/params/arguments/serviceId").is_none());
+    }
+
+    #[test]
+    fn leaves_an_explicit_project_alone() {
+        let mut msg = call("list-services", json!({ "projectId": "other" }));
+        assert!(!inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(msg.pointer("/params/arguments/projectId").unwrap(), "other");
+    }
+
+    #[test]
+    fn stays_out_of_a_call_that_named_any_resource() {
+        // Cross-project work lives here. A caller holding a serviceId from
+        // another project must get "projectId Required", not a project we
+        // guessed — otherwise the failure reads as "that service is gone".
+        for scoped in [
+            json!({ "serviceId": "svc-from-another-project" }),
+            json!({ "environmentId": "env-from-another-project" }),
+            json!({ "deploymentId": "dep-from-another-project" }),
+        ] {
+            let mut msg = call("get-logs", scoped.clone());
+            let declared = params_for(
+                "get-logs",
+                &["projectId", "environmentId", "serviceId", "deploymentId"],
+            );
+            assert!(
+                !inject_link_context(&link(), &declared, &mut msg),
+                "should not inject over {scoped}"
+            );
+            assert!(msg.pointer("/params/arguments/projectId").is_none());
+        }
+    }
+
+    #[test]
+    fn treats_an_explicit_null_scope_as_absent() {
+        let mut msg = call("list-services", json!({ "projectId": null }));
+        assert!(inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+    }
+
+    #[test]
+    fn leaves_tools_that_do_not_take_a_project_alone() {
+        let mut msg = call("search-docs", json!({ "query": "volumes" }));
+        assert!(!inject_link_context(
+            &link(),
+            &params_for("search-docs", &["query"]),
+            &mut msg
+        ));
+        assert_eq!(
+            msg.pointer("/params/arguments").unwrap(),
+            &json!({ "query": "volumes" })
+        );
+    }
+
+    #[test]
+    fn does_nothing_before_tools_list_has_been_seen() {
+        let mut msg = call("list-services", json!({}));
+        assert!(!inject_link_context(&link(), &HashMap::new(), &mut msg));
+        assert_eq!(msg.pointer("/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn does_nothing_without_a_linked_project() {
+        let mut msg = call("list-services", json!({}));
+        assert!(!inject_link_context(
+            &LinkContext::default(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(msg.pointer("/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn creates_the_arguments_object_when_the_caller_sent_none() {
+        let mut msg = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "list-services" },
+        });
+        assert!(inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(
+            msg.pointer("/params/arguments/projectId").unwrap(),
+            "proj-1"
+        );
+    }
+
+    #[test]
+    fn ignores_messages_that_are_not_tool_calls() {
+        let mut msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        assert!(!inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert!(msg.pointer("/params").is_none());
+    }
+
+    #[test]
+    fn does_not_inject_into_a_jsonrpc_batch() {
+        let mut msg = json!([
+            { "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": { "name": "list-services", "arguments": {} } }
+        ]);
+        assert!(!inject_link_context(
+            &link(),
+            &params_for("list-services", CTX),
+            &mut msg
+        ));
+        assert_eq!(msg.pointer("/0/params/arguments").unwrap(), &json!({}));
+    }
+
+    #[test]
+    fn survives_malformed_params_and_arguments() {
+        let declared = params_for("list-services", CTX);
+        let mut a = json!({ "method": "tools/call", "params": "nope" });
+        assert!(!inject_link_context(&link(), &declared, &mut a));
+
+        let mut b = json!({
+            "method": "tools/call",
+            "params": { "name": "list-services", "arguments": [1, 2] }
+        });
+        assert!(!inject_link_context(&link(), &declared, &mut b));
+        assert_eq!(b.pointer("/params/arguments").unwrap(), &json!([1, 2]));
+
+        let mut c = json!({ "method": "tools/call", "params": { "arguments": {} } });
+        assert!(!inject_link_context(&link(), &declared, &mut c));
+    }
+
+    #[test]
+    fn resolves_only_a_project_so_there_is_nothing_to_mix() {
+        // The earlier shape carried environment and service too, which is how
+        // a linked environment ended up attached to another project's id.
+        let ctx = LinkContext {
+            project_id: Some("proj-1".into()),
+        };
+        assert_eq!(ctx.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(LinkContext::default().project_id, None);
+    }
+
+    #[test]
+    fn learns_declared_parameters_from_a_tools_list_result() {
+        let mut session = SessionMeta::default();
+        record_tool_params(
+            &mut session,
+            &json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "tools": [
+                    { "name": "list-services", "inputSchema": { "properties": {
+                        "projectId": {}, "environmentId": {}
+                    }}},
+                    { "name": "whoami", "inputSchema": { "properties": {} } }
+                ]}
+            }),
+        );
+        assert!(session.tool_params["list-services"].contains("projectId"));
+        assert!(session.tool_params["whoami"].is_empty());
+    }
+
+    #[test]
+    fn ignores_results_that_are_not_tool_listings() {
+        let mut session = SessionMeta::default();
+        record_tool_params(&mut session, &json!({ "result": { "content": [] } }));
+        assert!(session.tool_params.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Barrier, Notify, Semaphore};
+
+    struct Fixture {
+        url: String,
+        initialize_count: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<()>,
+        initialize_started: Arc<Notify>,
+        initialize_gate: Arc<Semaphore>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl Fixture {
+        async fn start(
+            rejection: u16,
+            callers: usize,
+            stateful: bool,
+            retry_fails: bool,
+            handshake_failure: Option<&'static str>,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let initialize_count = Arc::new(AtomicUsize::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let initial_calls = Arc::new(Barrier::new(callers));
+            let initialized = Arc::new(AtomicUsize::new(0));
+            let initialize_started = Arc::new(Notify::new());
+            let initialize_gate = Arc::new(Semaphore::new(1));
+            let server = tokio::spawn({
+                let initialize_started = initialize_started.clone();
+                let initialize_gate = initialize_gate.clone();
+                let initialize_count = initialize_count.clone();
+                let calls = calls.clone();
+                async move {
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let initialize_count = initialize_count.clone();
+                        let calls = calls.clone();
+                        let initial_calls = initial_calls.clone();
+                        let initialized = initialized.clone();
+                        let initialize_started = initialize_started.clone();
+                        let initialize_gate = initialize_gate.clone();
+                        tokio::spawn(async move {
+                            let mut socket = BufReader::new(socket);
+                            let mut headers = HashMap::new();
+                            let mut line = String::new();
+                            socket.read_line(&mut line).await.unwrap();
+                            assert!(line.starts_with("POST "));
+                            loop {
+                                line.clear();
+                                socket.read_line(&mut line).await.unwrap();
+                                if line == "\r\n" {
+                                    break;
+                                }
+                                let (name, value) = line.trim().split_once(':').unwrap();
+                                headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
+                            }
+                            let len: usize = headers["content-length"].parse().unwrap();
+                            let mut body = vec![0; len];
+                            socket.read_exact(&mut body).await.unwrap();
+                            let msg: JsonValue = serde_json::from_slice(&body).unwrap();
+                            let method = method_of(&msg).unwrap();
+                            assert_eq!(headers["authorization"], "Bearer test-token");
+                            assert_eq!(headers[MCP_METHOD_HEADER], method);
+                            assert_eq!(headers[MCP_CLIENT_HEADER], "claude_code");
+                            // The handshake name beats the detected harness.
+                            assert_eq!(headers[RAILWAY_CALLER_HEADER], "claude_code");
+                            assert_eq!(headers[RAILWAY_AGENT_SESSION_HEADER], "agent-session-1");
+                            assert_eq!(headers[MCP_TRANSPORT_HEADER], MCP_TRANSPORT_VALUE);
+                            let (status, session_header) = match method {
+                                "initialize" => {
+                                    initialize_count.fetch_add(1, Ordering::SeqCst);
+                                    initialize_started.notify_one();
+                                    let _permit = initialize_gate.acquire().await.unwrap();
+                                    assert!(!headers.contains_key("mcp-session-id"));
+                                    (
+                                        if handshake_failure == Some(method) {
+                                            500
+                                        } else {
+                                            200
+                                        },
+                                        if stateful {
+                                            "mcp-session-id: fresh\r\n"
+                                        } else {
+                                            ""
+                                        },
+                                    )
+                                }
+                                "notifications/initialized" => {
+                                    assert_eq!(
+                                        headers.get("mcp-session-id").map(String::as_str),
+                                        stateful.then_some("fresh")
+                                    );
+                                    initialized.fetch_add(1, Ordering::SeqCst);
+                                    (
+                                        if handshake_failure == Some(method) {
+                                            500
+                                        } else {
+                                            202
+                                        },
+                                        "",
+                                    )
+                                }
+                                "tools/call" => {
+                                    assert_eq!(headers[MCP_NAME_HEADER], "test-tool");
+                                    assert_eq!(headers[MCP_INJECTED_HEADER], "projectId");
+                                    assert_eq!(
+                                        msg.pointer("/params/arguments/projectId"),
+                                        Some(&json!("project"))
+                                    );
+                                    let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                                    if attempt < callers {
+                                        assert_eq!(
+                                            headers.get("mcp-session-id").map(String::as_str),
+                                            stateful.then_some("expired")
+                                        );
+                                        // Every caller has sent using the old generation before
+                                        // any rejection starts recovery.
+                                        initial_calls.wait().await;
+                                        (rejection, "")
+                                    } else {
+                                        assert_eq!(initialized.load(Ordering::SeqCst), 1);
+                                        assert_eq!(
+                                            headers.get("mcp-session-id").map(String::as_str),
+                                            stateful.then_some("fresh")
+                                        );
+                                        (if retry_fails { rejection } else { 200 }, "")
+                                    }
+                                }
+                                _ => panic!("unexpected method {method}"),
+                            };
+                            let body = if status == 202 {
+                                String::new()
+                            } else {
+                                json!({"jsonrpc": "2.0", "id": msg["id"], "result": {"ok": true}})
+                                    .to_string()
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{session_header}connection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            socket.write_all(response.as_bytes()).await.unwrap();
+                        });
+                    }
+                }
+            });
+            Self {
+                url,
+                initialize_count,
+                calls,
+                server,
+                initialize_started,
+                initialize_gate,
+            }
+        }
+    }
+
+    async fn exercise_recovery(
+        rejection: u16,
+        callers: usize,
+        stateful: bool,
+        retry_fails: bool,
+        handshake_failure: Option<&'static str>,
+    ) {
+        let fixture =
+            Fixture::start(rejection, callers, stateful, retry_fails, handshake_failure).await;
+        let config_dir = tempfile::tempdir().unwrap();
+        let state = ProxyState {
+            http: reqwest::Client::new(),
+            url: fixture.url.clone(),
+            configs: Mutex::new(Configs::for_test(config_dir.path().join("config.json"))),
+            session: Mutex::new(SessionMeta {
+                id: stateful.then(|| "expired".to_string()),
+                init_request: Some(
+                    json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}}),
+                ),
+                client_name: Some("claude_code".to_string()),
+                injected_ids: (1..=callers).map(|id| id.to_string()).collect(),
+                ..SessionMeta::default()
+            }),
+            recovery: Mutex::new(()),
+            link: LinkContext::default(),
+            harness: HarnessAttribution {
+                caller: Some("codex".to_string()),
+                agent_session_id: Some("agent-session-1".to_string()),
+            },
+            health: std::sync::Mutex::new(SessionHealth::default()),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let requests = (1..=callers).map(|id| {
+            let state = &state;
+            let tx = &tx;
+            async move {
+                let msg = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "test-tool", "arguments": {"projectId": "project"}}});
+                forward(state, &msg, "test-token", tx).await
+            }
+        });
+        // Hold the upstream initialize response so metadata access is checked
+        // while recovery is awaiting network I/O, not just after it returns.
+        let initialize_permit = fixture.initialize_gate.acquire().await.unwrap();
+        let check_metadata_access = async {
+            fixture.initialize_started.notified().await;
+            let session = state.session.lock().await;
+            assert_eq!(session.generation, 0);
+            assert_eq!(session.id.as_deref(), stateful.then_some("expired"));
+            drop(session);
+            drop(initialize_permit);
+        };
+        let work = async {
+            let (results, ()) =
+                tokio::join!(futures::future::join_all(requests), check_metadata_access);
+            results
+        };
+        let results = tokio::time::timeout(Duration::from_secs(5), work)
+            .await
+            .expect("recovery deadlocked");
+        for result in results {
+            if let Some(method) = handshake_failure {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("500"), "{method}: {error}");
+                assert_eq!(
+                    UpstreamFailure::from_error(&error),
+                    UpstreamFailure::Http(500)
+                );
+            } else if retry_fails {
+                let error = result.unwrap_err();
+                assert!(
+                    error.to_string().contains(&rejection.to_string()),
+                    "{error}"
+                );
+                assert_eq!(
+                    UpstreamFailure::from_error(&error),
+                    UpstreamFailure::Http(rejection)
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+        // A rejection the proxy recovered from transparently is not a failure.
+        if !retry_fails && handshake_failure.is_none() {
+            assert!(session_result(&state).is_ok());
+        }
+        assert_eq!(fixture.initialize_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.calls.load(Ordering::SeqCst),
+            callers * if handshake_failure.is_some() { 1 } else { 2 }
+        );
+        let session = state.session.lock().await;
+        assert_eq!(session.generation, u64::from(handshake_failure.is_none()));
+        if !retry_fails && handshake_failure.is_none() {
+            let mut ids = HashSet::new();
+            while let Ok(line) = rx.try_recv() {
+                let response: JsonValue = serde_json::from_str(&line).unwrap();
+                assert_eq!(response["result"]["ok"], true);
+                ids.insert(response["id"].as_u64().unwrap());
+            }
+            assert_eq!(ids, (1..=callers as u64).collect());
+        } else {
+            assert!(
+                rx.try_recv().is_err(),
+                "internal handshake leaked a response"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovers_from_http_400_and_404() {
+        for status in [400, 404] {
+            exercise_recovery(status, 1, true, false, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_http_400_and_404_only_once() {
+        for status in [400, 404] {
+            exercise_recovery(status, 1, false, true, None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_handshake_returns_error_without_retrying() {
+        for method in ["initialize", "notifications/initialized"] {
+            exercise_recovery(404, 1, true, false, Some(method)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_calls_share_recovery_with_and_without_session_ids() {
+        for status in [400, 404] {
+            for stateful in [true, false] {
+                exercise_recovery(status, 2, stateful, false, None).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_health_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    /// An upstream that answers each POST with the next status in `statuses`
+    /// (the last one repeats). 2xx answers carry a JSON-RPC result body.
+    async fn upstream(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let statuses = Arc::new(Mutex::new(VecDeque::from(statuses)));
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let statuses = statuses.clone();
+                tokio::spawn(async move {
+                    let mut socket = BufReader::new(socket);
+                    let mut line = String::new();
+                    let mut len = 0usize;
+                    loop {
+                        line.clear();
+                        socket.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.trim().split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            len = value.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; len];
+                    socket.read_exact(&mut body).await.unwrap();
+                    let status = {
+                        let mut statuses = statuses.lock().await;
+                        if statuses.len() > 1 {
+                            statuses.pop_front().unwrap()
+                        } else {
+                            statuses[0]
+                        }
+                    };
+                    let body = if (200..300).contains(&status) {
+                        r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
+                    } else {
+                        r#"{"error":"upstream failed for proj_123"}"#
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        (url, server)
+    }
+
+    fn state(url: String, config_dir: &std::path::Path) -> ProxyState {
+        ProxyState {
+            http: reqwest::Client::new(),
+            url,
+            configs: Mutex::new(Configs::for_test(config_dir.join("config.json"))),
+            session: Mutex::new(SessionMeta::default()),
+            recovery: Mutex::new(()),
+            link: LinkContext::default(),
+            harness: HarnessAttribution::default(),
+            health: std::sync::Mutex::new(SessionHealth::default()),
+        }
+    }
+
+    /// What `handle_message` does with a forwarded request, minus the token
+    /// lookup (tests have no stored login).
+    async fn call(state: &ProxyState, id: u64) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let msg = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        if let Err(e) = forward(state, &msg, "test-token", &tx).await {
+            state
+                .health()
+                .record_failure(UpstreamFailure::from_error(&e));
+        }
+    }
+
+    fn session_error(state: &ProxyState) -> String {
+        format!("{:#}", session_result(state).unwrap_err())
+    }
+
+    #[test]
+    fn a_later_success_clears_an_outstanding_failure() {
+        let mut health = SessionHealth::default();
+        health.record_failure(UpstreamFailure::Http(502));
+        health.record_success();
+        assert_eq!(health.unrecovered, None);
+    }
+
+    #[test]
+    fn the_most_severe_outstanding_failure_is_reported() {
+        let mut health = SessionHealth::default();
+        health.record_failure(UpstreamFailure::Rejected(401));
+        health.record_failure(UpstreamFailure::Http(502));
+        assert_eq!(health.unrecovered, Some(UpstreamFailure::Rejected(401)));
+        // Equal severity: the newer one wins.
+        health.record_failure(UpstreamFailure::Rejected(403));
+        assert_eq!(health.unrecovered, Some(UpstreamFailure::Rejected(403)));
+    }
+
+    #[tokio::test]
+    async fn a_clean_session_still_succeeds() {
+        let (url, server) = upstream(vec![200]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        assert!(session_result(&state).is_ok());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unrecovered_5xx_fails_the_session() {
+        let (url, server) = upstream(vec![200, 502]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        let error = session_error(&state);
+        assert!(error.contains("(HTTP 502)"), "{error}");
+        // The upstream body (which can carry ids) never reaches telemetry.
+        assert!(!error.contains("proj_123"), "{error}");
+        assert_eq!(telemetry::error_class(Some(&error)), "UPSTREAM");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_transient_5xx_that_recovers_does_not_fail_the_session() {
+        let (url, server) = upstream(vec![503, 200]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(url, dir.path());
+        call(&state, 1).await;
+        call(&state, 2).await;
+        assert!(session_result(&state).is_ok());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn auth_rejection_that_never_recovers_fails_the_session() {
+        for (status, class) in [(401, "AUTHENTICATION"), (403, "AUTHORIZATION")] {
+            let (url, server) = upstream(vec![status]).await;
+            let dir = tempfile::tempdir().unwrap();
+            let state = state(url, dir.path());
+            call(&state, 1).await;
+            let error = session_error(&state);
+            assert!(error.contains(&format!("(HTTP {status})")), "{error}");
+            assert_eq!(telemetry::error_class(Some(&error)), class, "{error}");
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_upstream_fails_the_session() {
+        // Bind then drop, so the port refuses connections.
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(format!("http://{addr}"), dir.path());
+        call(&state, 1).await;
+        assert_eq!(
+            state.health().unrecovered,
+            Some(UpstreamFailure::Unreachable)
+        );
+        let error = session_error(&state);
+        assert!(!error.contains(&addr.port().to_string()), "{error}");
+        assert_eq!(telemetry::error_class(Some(&error)), "NETWORK");
+    }
+
+    #[test]
+    fn not_logged_in_and_rate_limits_land_in_existing_classes() {
+        let class = |f: UpstreamFailure| telemetry::error_class(Some(&f.telemetry_message()));
+        assert_eq!(class(UpstreamFailure::NotLoggedIn), "AUTHENTICATION");
+        assert_eq!(class(UpstreamFailure::TimedOut), "TIMEOUT");
+        assert_eq!(class(UpstreamFailure::RateLimited), "RATE_LIMITED");
+        assert_eq!(class(UpstreamFailure::ConnectionLost), "NETWORK");
+        assert_eq!(class(UpstreamFailure::Http(400)), "UPSTREAM");
+    }
+}

@@ -1,0 +1,3467 @@
+//! `railway {postgres,mysql} pitr` -- point-in-time recovery / continuous
+//! backups, for every engine whose registry entry declares a PITR contract.
+//!
+//! The engine declaration decides three things here: which composable
+//! template the enable overlay deploys (`PitrSpec::template_code`), whether
+//! the rolling HA enable/disable workflow exists at all (`supports_ha` --
+//! Postgres and MySQL both roll their clusters; an engine that declares
+//! neither gets a refusal, not a workflow), and which live coverage probe
+//! backs `status` (`probe_kind` -- only pgBackRest ships one, so MySQL's
+//! `status` has no coverage section). Which images may adopt the overlay is not
+//! decided here at all: that rule ships with the enable template
+//! (`adoptionImageEligibility`) and is read off the fetched record, so
+//! widening it is a template update rather than a CLI release. Backups,
+//! schedules and restore ride the volume-instance mutations, which are
+//! engine-agnostic server-side.
+
+use std::{collections::BTreeMap, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use chrono::Utc;
+use clap::Parser;
+use colored::Colorize;
+use serde::Serialize;
+use tokio::time::{sleep, timeout};
+
+use crate::{
+    client::post_graphql,
+    commands::ssh::get_service_instance_id,
+    controllers::{
+        adoption_eligibility::AdoptionTarget,
+        config::{EnvironmentConfig, fetch_environment_config},
+        database::DatabaseType,
+        database_engines::{DatabaseEngine, PitrProbeKind, PitrSpec},
+        database_plugins,
+        db_stats::{diagnose_db_stats_failure, preflight_db_stats_ssh},
+        exec::exec_probe_in_container,
+        patroni::{self, PatroniMember},
+        project::{ServiceContext, resolve_service_context},
+        template_apply::{self, ApplyKind, ApplyTemplateParams, RevertTemplateParams},
+    },
+    errors::RailwayError,
+    gql::{mutations, queries},
+    util::time::parse_time,
+};
+
+use super::{
+    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label, yes_no,
+};
+
+/// Manage point-in-time recovery (continuous backups)
+#[derive(Parser)]
+#[clap(
+    after_help = "Examples (any database command with PITR works the same way):\n\n  railway postgres pitr status --service postgres\n  railway mysql pitr enable --service mysql\n  railway postgres pitr disable --service postgres --yes\n  railway postgres pitr restore --service postgres --at 2026-07-20T12:00:00Z\n  railway mysql pitr backup create --service mysql --name pre-migration\n  railway postgres pitr schedule set --daily --weekly\n\nAutomation notes:\n  <time> for `restore` accepts RFC3339 (2026-07-20T12:00:00Z), `YYYY-MM-DD HH:MM:SS`/`YYYY-MM-DD HH:MM` (interpreted in your local timezone), or a relative offset back from now (30m, 2h, 1d, 1w).\n  `enable`/`disable` auto-detect whether the target is a standalone database or the root of an HA cluster.\n  `progress`/`cancel`/`clear` only apply to HA clusters (the rolling enable/disable workflow), on engines whose PITR supports HA.\n  `status`'s coverage/archiver section is a best-effort live probe over SSH into the running container, on engines that ship one; it degrades to \"unavailable\" instead of failing the command if the service isn't reachable."
+)]
+pub struct Args {
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Parser)]
+enum Commands {
+    /// Show PITR status
+    Status,
+
+    /// Enable point-in-time recovery
+    Enable(EnableArgs),
+
+    /// Disable point-in-time recovery
+    Disable(DisableArgs),
+
+    /// Show HA PITR enable/disable workflow progress (HA clusters only)
+    Progress(ProgressArgs),
+
+    /// Cancel a stuck HA PITR enable/disable workflow (HA clusters only)
+    Cancel,
+
+    /// Clear a completed HA PITR workflow's progress snapshot (HA clusters only)
+    Clear,
+
+    /// Restore to a point in time into a new service
+    Restore(RestoreArgs),
+
+    /// Manage on-demand backups
+    Backup(BackupArgs),
+
+    /// Manage the automatic backup schedule
+    Schedule(ScheduleArgs),
+}
+
+#[derive(Parser)]
+struct EnableArgs {
+    /// Commit the config change without triggering deploys -- it applies on
+    /// the next deploy (standalone only; HA enable always applies live)
+    #[clap(long)]
+    no_deploy: bool,
+}
+
+#[derive(Parser)]
+struct DisableArgs {
+    /// Skip the confirmation prompt
+    #[clap(long, short = 'y')]
+    yes: bool,
+
+    /// Commit the config change without triggering deploys -- it applies on
+    /// the next deploy (standalone only; HA disable always applies live)
+    #[clap(long)]
+    no_deploy: bool,
+}
+
+#[derive(Parser)]
+struct ProgressArgs {
+    /// Poll until the workflow reaches a terminal phase
+    #[clap(long)]
+    watch: bool,
+}
+
+#[derive(Parser)]
+struct RestoreArgs {
+    /// Point in time to restore to: RFC3339 (2026-07-20T12:00:00Z), "YYYY-MM-DD HH:MM:SS"
+    /// (local timezone), or a relative offset back from now (30m, 2h, 1d)
+    #[clap(long = "at")]
+    at: String,
+
+    /// Name for the new restored service (defaults to "<source>-restored-YYYYMMDD-HHMM")
+    #[clap(long = "new-service-name")]
+    new_service_name: Option<String>,
+
+    /// Restore from a specific archive sub-prefix (multi-history picker)
+    #[clap(long = "source-repo-path")]
+    source_repo_path: Option<String>,
+
+    /// Skip the confirmation prompt
+    #[clap(long, short = 'y')]
+    yes: bool,
+}
+
+#[derive(Parser)]
+struct BackupArgs {
+    #[clap(subcommand)]
+    command: BackupCommands,
+}
+
+#[derive(Parser)]
+enum BackupCommands {
+    /// List backups
+    List,
+
+    /// Create an on-demand backup
+    Create(BackupCreateArgs),
+
+    /// Delete one or more backups
+    Delete(BackupDeleteArgs),
+
+    /// Remove a backup's expiration (keep it indefinitely)
+    Lock(BackupIdArgs),
+
+    /// Restore from a backup
+    Restore(BackupRestoreArgs),
+}
+
+#[derive(Parser)]
+struct BackupCreateArgs {
+    /// Optional name/label for the backup (defaults to "Manual")
+    #[clap(long)]
+    name: Option<String>,
+}
+
+#[derive(Parser)]
+struct BackupDeleteArgs {
+    /// Backup ID(s) to delete
+    #[clap(required = true)]
+    ids: Vec<String>,
+
+    /// Skip the confirmation prompt
+    #[clap(long, short = 'y')]
+    yes: bool,
+}
+
+#[derive(Parser)]
+struct BackupIdArgs {
+    /// Backup ID
+    id: String,
+}
+
+#[derive(Parser)]
+struct BackupRestoreArgs {
+    /// Backup ID to restore from
+    id: String,
+
+    /// Skip the confirmation prompt
+    #[clap(long, short = 'y')]
+    yes: bool,
+}
+
+#[derive(Parser)]
+struct ScheduleArgs {
+    #[clap(subcommand)]
+    command: ScheduleCommands,
+}
+
+#[derive(Parser)]
+enum ScheduleCommands {
+    /// Set the automatic backup schedule (any combination)
+    Set(ScheduleSetArgs),
+
+    /// List the configured backup schedule(s)
+    List,
+}
+
+#[derive(Parser)]
+#[clap(group(
+    clap::ArgGroup::new("kinds")
+        .args(["daily", "weekly", "monthly", "none"])
+        .required(true)
+        .multiple(true)
+))]
+struct ScheduleSetArgs {
+    /// Keep a daily backup
+    #[clap(long)]
+    daily: bool,
+
+    /// Keep a weekly backup
+    #[clap(long)]
+    weekly: bool,
+
+    /// Keep a monthly backup
+    #[clap(long)]
+    monthly: bool,
+
+    /// Remove every automatic backup schedule (existing backups are kept)
+    #[clap(long, conflicts_with_all = ["daily", "weekly", "monthly"])]
+    none: bool,
+}
+
+pub async fn command(
+    engine: &'static DatabaseEngine,
+    args: Args,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    // The per-engine command trees only route here for engines that declare a
+    // PITR contract; a miss is a wiring bug, not a user error.
+    let pitr = engine.pitr.with_context(|| {
+        format!(
+            "{} does not support point-in-time recovery",
+            engine.display_name
+        )
+    })?;
+    match args.command {
+        Commands::Status => status(engine, pitr, project, service, environment, json).await,
+        Commands::Enable(a) => enable(engine, pitr, project, service, environment, json, a).await,
+        Commands::Disable(a) => disable(engine, pitr, project, service, environment, json, a).await,
+        Commands::Progress(a) => {
+            progress(engine, pitr, project, service, environment, json, a).await
+        }
+        Commands::Cancel => cancel(engine, pitr, project, service, environment, json).await,
+        Commands::Clear => clear(engine, pitr, project, service, environment, json).await,
+        Commands::Restore(a) => restore(project, service, environment, json, a).await,
+        Commands::Backup(a) => match a.command {
+            BackupCommands::List => backup_list(project, service, environment, json).await,
+            BackupCommands::Create(a) => {
+                backup_create(engine, project, service, environment, json, a).await
+            }
+            BackupCommands::Delete(a) => {
+                backup_delete(project, service, environment, json, a).await
+            }
+            BackupCommands::Lock(a) => backup_lock(project, service, environment, json, a).await,
+            BackupCommands::Restore(a) => {
+                backup_restore(engine, project, service, environment, json, a).await
+            }
+        },
+        Commands::Schedule(a) => match a.command {
+            ScheduleCommands::Set(a) => schedule_set(project, service, environment, json, a).await,
+            ScheduleCommands::List => schedule_list(project, service, environment, json).await,
+        },
+    }
+}
+
+async fn status(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    print_status(engine, pitr, &ctx, &config, json, true).await
+}
+
+/// `include_live == false` skips the SSH coverage/archiver probe -- used
+/// right after `enable`/`disable`, where the deployment triggered by that
+/// change hasn't rolled out yet, so a live probe would only report stale or
+/// "unavailable" noise (mirrors `pgbouncer`'s post-mutation status print).
+async fn print_status(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    ctx: &ServiceContext,
+    config: &EnvironmentConfig,
+    json: bool,
+    include_live: bool,
+) -> Result<()> {
+    let root = resolve_root(ctx, config);
+    let names = service_name_map(ctx);
+    let ha_state = database_plugins::compute_ha_state(config, &root.root_id, &names, engine);
+
+    let root_pitr = config
+        .services
+        .get(&root.root_id)
+        .map(|s| database_plugins::compute_pitr_state(s, &pitr))
+        .unwrap_or_default();
+
+    let mut members: Vec<PitrMemberStatus> = if ha_state.is_cluster {
+        ha_state
+            .members
+            .iter()
+            .filter(|m| matches!(m.cluster_role.as_deref(), Some("root") | Some("replica")))
+            .map(|m| {
+                let state = config
+                    .services
+                    .get(&m.service_id)
+                    .map(|s| database_plugins::compute_pitr_state(s, &pitr))
+                    .unwrap_or_default();
+                PitrMemberStatus {
+                    service: ResourceRef {
+                        id: m.service_id.clone(),
+                        name: m.service_name.clone(),
+                    },
+                    cluster_role: m.cluster_role.clone(),
+                    live_role: None,
+                    enabled: state.enabled,
+                    bucket_wired: state.bucket_wired,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // The blockers preview reads the enable template's own declared rules, so
+    // it needs the record. Best-effort on purpose: status must keep working
+    // when that fetch fails (the blockers are advisory here; `enable` does the
+    // hard check itself), so a fetch error just renders no blockers.
+    let blockers = match template_apply::fetch_adoption_rules(ctx, pitr.template_code).await {
+        Ok(rules) => rules.blockers(&AdoptionTarget {
+            image: root_pitr.image.as_deref(),
+            has_start_command: root_pitr.has_start_command,
+        }),
+        Err(_) => Vec::new(),
+    };
+
+    // Live coverage/archiver probe is best-effort and only meaningful once the
+    // overlay is actually applied -- skip it entirely for a service that never
+    // had PITR enabled rather than spending a ~5s SSH round trip to learn
+    // nothing. An engine that declares no probe implementation renders no
+    // coverage section at all: there is nothing to run, which is not the same
+    // as "unavailable".
+    //
+    // `cluster_role` is structural: after a Patroni failover the root is a
+    // replica whose pg_stat_archiver is frozen, so an HA cluster reads the
+    // archiver from the member Patroni names as leader (see `probe_pitr_ha`).
+    let live = if include_live && root_pitr.enabled && live_probe_applies(&pitr) {
+        if ha_state.is_cluster {
+            let nodes = ha_nodes(&members, config, &root.root_id);
+            Some(
+                probe_pitr_ha(
+                    &mut members,
+                    &nodes,
+                    || discover_ha_cluster(ctx, &nodes),
+                    |instance_id, parts| async move {
+                        probe_pitr_live_on_instance(&instance_id, parts).await
+                    },
+                )
+                .await,
+            )
+        } else {
+            Some(probe_pitr_live(ctx, &root.root_id).await)
+        }
+    } else {
+        None
+    };
+
+    let output = PitrStatusOutput {
+        service: ResourceRef {
+            id: ctx.service_id.clone(),
+            name: ctx.service_name.clone(),
+        },
+        environment: ResourceRef {
+            id: ctx.environment_id.clone(),
+            name: ctx.environment_name.clone(),
+        },
+        root: ResourceRef {
+            id: root.root_id.clone(),
+            name: root.root_name.clone(),
+        },
+        is_ha_cluster: ha_state.is_cluster,
+        enabled: root_pitr.enabled,
+        bucket_wired: root_pitr.bucket_wired,
+        blockers,
+        members,
+        live,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_pitr_status(&output);
+    }
+    Ok(())
+}
+
+fn print_pitr_status(output: &PitrStatusOutput) {
+    println!("{}", "Point-in-time recovery (PITR)".bold());
+    println!();
+    print_field("Service:", &output.service.name.green().bold());
+    print_field("Environment:", &output.environment.name.blue().bold());
+    if output.root.id != output.service.id {
+        print_field("Cluster root:", &output.root.name);
+    }
+    print_field("HA cluster:", &yes_no(output.is_ha_cluster));
+    print_field("Status:", &status_label(output.enabled));
+    print_field("Bucket wired:", &yes_no(output.bucket_wired));
+
+    for blocker in &output.blockers {
+        println!();
+        print_field("Blocker:", &blocker.yellow());
+    }
+
+    if !output.members.is_empty() {
+        println!();
+        println!("{}", "Members:".bold());
+        for member in &output.members {
+            let role = member.cluster_role.as_deref().unwrap_or("-");
+            let role = match &member.live_role {
+                Some(live) => format!("{role}, {live}"),
+                None => role.to_string(),
+            };
+            println!(
+                "  {:<24} {:<16} {}",
+                member.service.name,
+                role,
+                status_label(member.enabled)
+            );
+        }
+    }
+
+    if let Some(live) = &output.live {
+        println!();
+        println!("{}", "Live coverage (best effort):".bold());
+        if !live.available {
+            print_field(
+                "Probe:",
+                &live
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "unavailable".to_string())
+                    .dimmed(),
+            );
+            return;
+        }
+        match &live.backup_coverage_error {
+            Some(err) => print_field("Backup coverage:", &format!("unavailable ({err})").dimmed()),
+            None => {
+                print_field(
+                    "Backup sets:",
+                    &live
+                        .backup_set_count
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                );
+                print_field(
+                    "Latest backup:",
+                    &live.latest_backup_at.as_deref().unwrap_or("-"),
+                );
+                print_field(
+                    "WAL coverage:",
+                    &format!(
+                        "{} .. {}",
+                        live.wal_min.as_deref().unwrap_or("-"),
+                        live.wal_max.as_deref().unwrap_or("-")
+                    ),
+                );
+            }
+        }
+        match &live.archiver_error {
+            Some(err) => print_field("Archiver:", &format!("unavailable ({err})").dimmed()),
+            None => {
+                let healthy = live.archiver_healthy.unwrap_or(false);
+                print_field(
+                    "Archiver:",
+                    &if live.archiver_healthy.is_some() {
+                        status_label(healthy)
+                    } else {
+                        "unknown".dimmed().bold()
+                    },
+                );
+                print_field(
+                    "Last archived at:",
+                    &live.archiver_last_archived_at.as_deref().unwrap_or("-"),
+                );
+                print_field(
+                    "Restorable up to:",
+                    &live.max_restore_time.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+    }
+}
+
+/// Why the rolling HA enable/disable workflow does not exist for this engine,
+/// or `None` for engines whose archiver runs inside a cluster. Everything that
+/// would take (or follow) the HA path checks this first, so the refusal is one
+/// clear sentence instead of a server error from a workflow that was never
+/// going to start.
+fn ha_pitr_unsupported_reason(engine: &DatabaseEngine, pitr: &PitrSpec) -> Option<String> {
+    if pitr.supports_ha {
+        return None;
+    }
+    Some(format!(
+        "{} PITR is standalone-only: its archiver does not run on HA cluster members",
+        engine.display_name
+    ))
+}
+
+/// Whether `status` has a live coverage probe implementation for this engine.
+/// Selected by the declared probe kind, never by engine name -- an engine
+/// declaring none gets no coverage section rather than a fake "unavailable".
+fn live_probe_applies(pitr: &PitrSpec) -> bool {
+    matches!(pitr.probe_kind, Some(PitrProbeKind::PgBackRest))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enable(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: EnableArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+
+    let target_service = config.services.get(&root.root_id).with_context(|| {
+        format!(
+            "Service \"{}\" not found in environment config",
+            root.root_name
+        )
+    })?;
+    let pitr_state = database_plugins::compute_pitr_state(target_service, &pitr);
+
+    if pitr_state.enabled {
+        // Stdout must stay pure JSON under --json; the human note goes to
+        // stderr so `railway ... --json | jq` keeps working.
+        if json {
+            eprintln!("PITR is already enabled for {}.", root.root_name);
+        } else {
+            println!("PITR is already enabled for {}.", root.root_name.bold());
+        }
+        return print_status(engine, pitr, &ctx, &config, json, true).await;
+    }
+
+    // Pre-flight only, for a fast error with the remedy attached before the
+    // confirmation/deploy machinery runs -- templateDeployV2 enforces the
+    // same template-declared rules server-side before creating anything.
+    let rules = template_apply::fetch_adoption_rules(&ctx, pitr.template_code)
+        .await
+        .context("Failed to check PITR eligibility")?;
+    let blockers = rules.blockers(&AdoptionTarget {
+        image: pitr_state.image.as_deref(),
+        has_start_command: pitr_state.has_start_command,
+    });
+    if !blockers.is_empty() {
+        bail!(
+            "Cannot enable PITR for {}:\n  - {}",
+            root.root_name,
+            blockers.join("\n  - ")
+        );
+    }
+
+    if ha_state.is_cluster {
+        if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+            bail!(
+                "Cannot enable PITR for {}: it is the root of an HA cluster, and {reason}.",
+                root.root_name
+            );
+        }
+        if args.no_deploy {
+            eprintln!(
+                "Note: --no-deploy has no effect here -- enabling PITR on an HA cluster runs a live rolling restart with no staging step."
+            );
+        }
+        let response = post_graphql::<mutations::EnablePitrForHaCluster, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            mutations::enable_pitr_for_ha_cluster::Variables {
+                input: mutations::enable_pitr_for_ha_cluster::EnablePitrForHaClusterInput {
+                    environment_id: ctx.environment_id.clone(),
+                    project_id: ctx.project_id.clone(),
+                    root_service_id: root.root_id.clone(),
+                },
+            },
+        )
+        .await
+        .context("Failed to enable PITR on the HA cluster")?;
+
+        follow_started_ha_workflow(
+            engine,
+            &ctx,
+            &root,
+            json,
+            response.enable_pitr_for_ha_cluster.workflow_id,
+            "enable",
+        )
+        .await?;
+        if !json {
+            println!(
+                "Enabled PITR for {} in environment {}.",
+                root.root_name.bold(),
+                ctx.environment_name.bold()
+            );
+        }
+    } else {
+        let result = template_apply::apply_composable_template(
+            &ctx,
+            ApplyTemplateParams {
+                template_code: pitr.template_code.to_string(),
+                service_id: root.root_id.clone(),
+                // Overlay applies never take the pre-conversion safety
+                // backup, so no volume-instance resolution is needed.
+                volume_instance_id: None,
+                replica_count: None,
+                internal_count: None,
+                edge_count: None,
+                edge_variables: None,
+                kind: ApplyKind::Overlay,
+                auto_deploy: !args.no_deploy,
+            },
+        )
+        .await
+        .context("Failed to enable PITR")?;
+
+        if !json {
+            let verb = if result.deployed {
+                "Enabled and deployed"
+            } else {
+                "Enabled (deploys skipped -- applies on the next deploy)"
+            };
+            println!(
+                "{verb} PITR for {} in environment {} (project {}).",
+                root.root_name.bold(),
+                ctx.environment_name.bold(),
+                result.project_id
+            );
+        }
+    }
+
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    print_status(engine, pitr, &ctx, &config, json, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn disable(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: DisableArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+
+    // Mirror enable's idempotence: a second disable must not revert a
+    // non-applied overlay (confusing server error at best, a pointless
+    // database redeploy at worst) nor kick another rolling HA workflow.
+    let root_pitr = config
+        .services
+        .get(&root.root_id)
+        .map(|s| database_plugins::compute_pitr_state(s, &pitr))
+        .unwrap_or_default();
+    if !root_pitr.enabled {
+        if json {
+            eprintln!("PITR is already disabled for {}.", root.root_name);
+        } else {
+            println!("PITR is already disabled for {}.", root.root_name.bold());
+        }
+        return print_status(engine, pitr, &ctx, &config, json, true).await;
+    }
+
+    // The rolling HA disable drives engine-specific server-side machinery
+    // that only exists where the archiver runs inside a cluster -- refuse
+    // with the reason instead of surfacing that workflow's own error.
+    if ha_state.is_cluster
+        && let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr)
+    {
+        bail!(
+            "Cannot disable PITR for {} via the rolling HA workflow: {reason}.",
+            root.root_name
+        );
+    }
+
+    if !confirm_or_bail(
+        &format!(
+            "Disable PITR for {}? This stops continuous archiving; existing backups are kept.",
+            root.root_name.red()
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    if ha_state.is_cluster {
+        match post_graphql::<queries::GetPitrHaClusterReplicationHealth, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            queries::get_pitr_ha_cluster_replication_health::Variables {
+                environment_id: ctx.environment_id.clone(),
+                root_service_id: root.root_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(response) => {
+                if let Some(health) = response.pitr_ha_cluster_replication_health
+                    && health.reachable
+                    && !health.all_healthy
+                {
+                    let unhealthy: Vec<String> = health
+                        .members
+                        .iter()
+                        .filter(|m| !m.healthy)
+                        .map(|m| m.service_name.clone())
+                        .collect();
+                    bail!(
+                        "Cannot disable PITR: replication is not caught up on {}. Wait for replicas to catch up and try again.",
+                        unhealthy.join(", ")
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "Warning: could not check replication health before disabling PITR: {err:#}"
+                );
+            }
+        }
+
+        if args.no_deploy {
+            eprintln!(
+                "Note: --no-deploy has no effect here -- disabling PITR on an HA cluster runs a live rolling restart with no staging step."
+            );
+        }
+        let response = post_graphql::<mutations::DisablePitrForHaCluster, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            mutations::disable_pitr_for_ha_cluster::Variables {
+                input: mutations::disable_pitr_for_ha_cluster::DisablePitrForHaClusterInput {
+                    environment_id: ctx.environment_id.clone(),
+                    project_id: ctx.project_id.clone(),
+                    root_service_id: root.root_id.clone(),
+                },
+            },
+        )
+        .await
+        .context("Failed to disable PITR on the HA cluster")?;
+
+        follow_started_ha_workflow(
+            engine,
+            &ctx,
+            &root,
+            json,
+            response.disable_pitr_for_ha_cluster.workflow_id,
+            "disable",
+        )
+        .await?;
+        if !json {
+            println!(
+                "Disabled PITR for {} in environment {}.",
+                root.root_name.bold(),
+                ctx.environment_name.bold()
+            );
+        }
+    } else {
+        let result = template_apply::revert_template(
+            &ctx,
+            RevertTemplateParams {
+                template_code: pitr.template_code.to_string(),
+                root_service_id: root.root_id.clone(),
+                auto_deploy: !args.no_deploy,
+            },
+        )
+        .await
+        .context("Failed to disable PITR")?;
+
+        if !json {
+            let verb = if result.deployed {
+                "Disabled and deployed"
+            } else {
+                "Disabled (deploys skipped -- applies on the next deploy)"
+            };
+            println!(
+                "{verb} PITR on {} in environment {} (project {}).",
+                root.root_name.bold(),
+                ctx.environment_name.bold(),
+                result.project_id
+            );
+        }
+    }
+
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    print_status(engine, pitr, &ctx, &config, json, false).await
+}
+
+async fn cancel(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow to cancel.");
+    }
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+    if !ha_state.is_cluster {
+        bail!(
+            "{} is not an HA cluster; there is no PITR workflow to cancel.",
+            root.root_name
+        );
+    }
+
+    post_graphql::<mutations::CancelPitrHaWorkflow, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::cancel_pitr_ha_workflow::Variables {
+            environment_id: ctx.environment_id.clone(),
+            root_service_id: root.root_id.clone(),
+        },
+    )
+    .await
+    .context("Failed to cancel the PITR workflow")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"cancelled": true}))?
+        );
+    } else {
+        println!("Cancelled the PITR workflow for {}.", root.root_name.bold());
+    }
+    Ok(())
+}
+
+async fn clear(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow progress to clear.");
+    }
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+    if !ha_state.is_cluster {
+        bail!(
+            "{} is not an HA cluster; there is no PITR workflow progress to clear.",
+            root.root_name
+        );
+    }
+
+    post_graphql::<mutations::ClearPitrHaWorkflowProgress, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::clear_pitr_ha_workflow_progress::Variables {
+            environment_id: ctx.environment_id.clone(),
+            root_service_id: root.root_id.clone(),
+        },
+    )
+    .await
+    .context("Failed to clear the PITR workflow progress")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"cleared": true}))?
+        );
+    } else {
+        println!(
+            "Cleared PITR workflow progress for {}.",
+            root.root_name.bold()
+        );
+    }
+    Ok(())
+}
+
+/// Max time `progress --watch` polls before giving up (the workflow itself
+/// may still finish later -- this only bounds the CLI's own wait).
+const PROGRESS_WATCH_TIMEOUT_SECS: u64 = 600;
+const PROGRESS_POLL_INTERVAL_SECS: u64 = 2;
+
+/// Debug-build-only env override so the e2e harness can exercise the watch
+/// loop's timeout branch in seconds instead of minutes (same pattern as the
+/// `RAILWAY_BACKBOARD_URL` testkit escape hatch -- compiled out of releases).
+/// The `RAILWAY_POSTGRES_*` names are a shipped knob and apply to every
+/// engine's watch loop -- renaming them per engine would silently break
+/// existing harnesses.
+fn progress_watch_timeout_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_WATCH_TIMEOUT_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_WATCH_TIMEOUT_SECS
+}
+
+/// Debug-build-only override for the poll cadence (see
+/// [`progress_watch_timeout_secs`]).
+fn progress_poll_interval_secs() -> u64 {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("RAILWAY_POSTGRES_POLL_INTERVAL_SECS")
+        && let Ok(parsed) = value.parse()
+    {
+        return parsed;
+    }
+    PROGRESS_POLL_INTERVAL_SECS
+}
+/// Follow deadline for a workflow this command just started (`pitr
+/// enable`/`disable` on an HA cluster). Deliberately much longer than the
+/// generic ~2-minute `wait_for_workflow` cap: the rolling enable/disable
+/// restarts every member one at a time and its server-side activities allow
+/// up to 20 minutes each.
+const HA_WORKFLOW_FOLLOW_TIMEOUT_SECS: u64 = 1800;
+/// How long a just-started workflow gets to make its progress record
+/// visible before the follower falls back to the generic workflow wait.
+const PROGRESS_VISIBILITY_GRACE_SECS: u64 = 60;
+
+#[allow(clippy::too_many_arguments)]
+async fn progress(
+    engine: &'static DatabaseEngine,
+    pitr: PitrSpec,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ProgressArgs,
+) -> Result<()> {
+    if let Some(reason) = ha_pitr_unsupported_reason(engine, &pitr) {
+        bail!("{reason}, so there is no rolling PITR workflow progress to show.");
+    }
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+    if !ha_state.is_cluster {
+        bail!(
+            "{} is not an HA cluster; there is no PITR workflow progress to show.",
+            root.root_name
+        );
+    }
+
+    let observed = follow_progress(
+        engine,
+        &ctx,
+        &root,
+        &ProgressFollow {
+            watch: args.watch,
+            expected_workflow_id: None,
+            deadline: Duration::from_secs(progress_watch_timeout_secs()),
+            fail_on_failed: false,
+            render: true,
+            json,
+        },
+    )
+    .await?;
+
+    if observed.is_none() {
+        if json {
+            println!("{}", serde_json::json!({"active": false}));
+        } else {
+            println!(
+                "No PITR enable/disable workflow found for {}.",
+                root.root_name.bold()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Options for [`follow_progress`].
+struct ProgressFollow {
+    /// Keep polling until a terminal phase; `false` renders at most one
+    /// snapshot and returns.
+    watch: bool,
+    /// Only accept the progress record for this specific workflow id.
+    /// Protects a just-started follow from latching onto a stale (already
+    /// terminal) record from a previous run that was never `clear`ed.
+    expected_workflow_id: Option<String>,
+    deadline: Duration,
+    /// Treat a FAILED terminal phase as a command failure (`enable`/
+    /// `disable`) instead of a state to display (`progress`).
+    fail_on_failed: bool,
+    /// Render snapshots as they change. Disabled for `enable`/`disable`
+    /// under `--json`, where only the final status document may reach
+    /// stdout.
+    render: bool,
+    json: bool,
+}
+
+/// Polls `pitrHaWorkflowProgress` and renders snapshots as they change.
+/// Returns `Ok(Some(<final phase>))` once a (matching) progress record was
+/// observed, or `Ok(None)` if none became visible in time.
+async fn follow_progress(
+    engine: &'static DatabaseEngine,
+    ctx: &ServiceContext,
+    root: &super::RootContext,
+    opts: &ProgressFollow,
+) -> Result<Option<String>> {
+    let start = std::time::Instant::now();
+    let deadline = start + opts.deadline;
+    let visibility_deadline = start + Duration::from_secs(PROGRESS_VISIBILITY_GRACE_SECS);
+    let mut last_printed: Option<String> = None;
+    let mut consecutive_transport_errors = 0_u8;
+
+    loop {
+        let response = match post_graphql::<queries::GetPitrHaWorkflowProgress, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            queries::get_pitr_ha_workflow_progress::Variables {
+                environment_id: ctx.environment_id.clone(),
+                root_service_id: root.root_id.clone(),
+            },
+        )
+        .await
+        {
+            Ok(response) => {
+                consecutive_transport_errors = 0;
+                response
+            }
+            Err(err)
+                if is_transient_progress_transport_error(&err)
+                    && consecutive_transport_errors < 5
+                    && std::time::Instant::now() < deadline =>
+            {
+                consecutive_transport_errors += 1;
+                sleep(Duration::from_secs(progress_poll_interval_secs())).await;
+                continue;
+            }
+            Err(err) => {
+                return Err(err).context("Failed to fetch the PITR workflow progress");
+            }
+        };
+
+        let progress = response.pitr_ha_workflow_progress.filter(|p| {
+            opts.expected_workflow_id
+                .as_deref()
+                .is_none_or(|expected| p.workflow_id == expected)
+        });
+
+        let Some(progress) = progress else {
+            if opts.expected_workflow_id.is_some()
+                && std::time::Instant::now() < visibility_deadline
+            {
+                sleep(Duration::from_secs(progress_poll_interval_secs())).await;
+                continue;
+            }
+            return Ok(None);
+        };
+
+        let output = build_progress_output(root, &progress);
+        if opts.render {
+            let rendered = serde_json::to_string(&output)?;
+            if last_printed.as_deref() != Some(rendered.as_str()) {
+                if opts.json {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    print_progress(&output);
+                }
+                last_printed = Some(rendered);
+            }
+        }
+
+        if output.phase == "failed" {
+            if opts.fail_on_failed {
+                let detail = output
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "no error detail reported".to_string());
+                bail!(
+                    "The PITR workflow failed{}: {detail}",
+                    output
+                        .failed_at_phase
+                        .as_deref()
+                        .map(|phase| format!(" during {phase}"))
+                        .unwrap_or_default()
+                );
+            }
+            return Ok(Some(output.phase));
+        }
+        if output.phase == "done" || !opts.watch {
+            return Ok(Some(output.phase));
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Timed out after {}s waiting for the workflow to reach a terminal phase. It keeps running server-side -- follow it with `railway {} pitr progress --watch`.",
+                opts.deadline.as_secs(),
+                engine.key
+            );
+        }
+
+        sleep(Duration::from_secs(progress_poll_interval_secs())).await;
+    }
+}
+
+fn is_transient_progress_transport_error(err: &RailwayError) -> bool {
+    matches!(err, RailwayError::FetchError(_))
+}
+
+/// Follows a rolling HA PITR enable/disable workflow this command just
+/// started. Prefers the dedicated progress record (rich phase/member
+/// rendering, a deadline sized for a full rolling restart); falls back to
+/// the generic workflow-status wait if the progress record never becomes
+/// visible, rather than reporting success blind.
+async fn follow_started_ha_workflow(
+    engine: &'static DatabaseEngine,
+    ctx: &ServiceContext,
+    root: &super::RootContext,
+    json: bool,
+    workflow_id: Option<String>,
+    direction: &str,
+) -> Result<()> {
+    let Some(workflow_id) = workflow_id else {
+        return Ok(());
+    };
+
+    if !json {
+        println!(
+            "Rolling the cluster to {direction} PITR -- members restart one at a time; this can take several minutes. Following progress (the workflow keeps running server-side if you interrupt)..."
+        );
+    }
+
+    let observed = follow_progress(
+        engine,
+        ctx,
+        root,
+        &ProgressFollow {
+            watch: true,
+            expected_workflow_id: Some(workflow_id.clone()),
+            deadline: Duration::from_secs(HA_WORKFLOW_FOLLOW_TIMEOUT_SECS),
+            fail_on_failed: true,
+            render: !json,
+            json,
+        },
+    )
+    .await?;
+
+    if observed.is_none() {
+        use crate::controllers::workflow::{WorkflowError, wait_for_workflow};
+        wait_for_workflow(&ctx.client, &ctx.configs, workflow_id)
+            .await
+            .map_err(|err| match err {
+                WorkflowError::Timeout => anyhow::anyhow!(
+                    "The PITR workflow is still running (the CLI stopped waiting). Follow it with `railway {} pitr progress --watch`.",
+                    engine.key
+                ),
+                other => other.into(),
+            })?;
+    }
+    Ok(())
+}
+
+fn build_progress_output(
+    root: &super::RootContext,
+    progress: &queries::get_pitr_ha_workflow_progress::GetPitrHaWorkflowProgressPitrHaWorkflowProgress,
+) -> PitrProgressOutput {
+    use queries::get_pitr_ha_workflow_progress::{
+        PitrHaWorkflowDirection, PitrHaWorkflowMemberStatus, PitrHaWorkflowPhase,
+    };
+
+    let phase_str = |phase: &PitrHaWorkflowPhase| -> String {
+        match phase {
+            PitrHaWorkflowPhase::PLANNING => "planning".to_string(),
+            PitrHaWorkflowPhase::CREATING_BUCKET => "creating_bucket".to_string(),
+            PitrHaWorkflowPhase::WRITING_VARIABLES => "writing_variables".to_string(),
+            PitrHaWorkflowPhase::PATCHING_DCS => "patching_dcs".to_string(),
+            PitrHaWorkflowPhase::ROLLING_REPLICAS => "rolling_replicas".to_string(),
+            PitrHaWorkflowPhase::SWITCHING_OVER => "switching_over".to_string(),
+            PitrHaWorkflowPhase::ROLLING_EX_LEADER => "rolling_ex_leader".to_string(),
+            PitrHaWorkflowPhase::REMOVING_VARIABLES => "removing_variables".to_string(),
+            PitrHaWorkflowPhase::VERIFYING => "verifying".to_string(),
+            PitrHaWorkflowPhase::DONE => "done".to_string(),
+            PitrHaWorkflowPhase::FAILED => "failed".to_string(),
+            PitrHaWorkflowPhase::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+    let direction_str = |direction: &PitrHaWorkflowDirection| -> String {
+        match direction {
+            PitrHaWorkflowDirection::ENABLE => "enable".to_string(),
+            PitrHaWorkflowDirection::DISABLE => "disable".to_string(),
+            PitrHaWorkflowDirection::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+    let member_status_str = |status: &PitrHaWorkflowMemberStatus| -> String {
+        match status {
+            PitrHaWorkflowMemberStatus::HEALTHY => "healthy".to_string(),
+            PitrHaWorkflowMemberStatus::PENDING => "pending".to_string(),
+            PitrHaWorkflowMemberStatus::RESTARTING => "restarting".to_string(),
+            PitrHaWorkflowMemberStatus::SKIPPED => "skipped".to_string(),
+            PitrHaWorkflowMemberStatus::Other(other) => other.to_ascii_lowercase(),
+        }
+    };
+
+    PitrProgressOutput {
+        root: ResourceRef {
+            id: root.root_id.clone(),
+            name: root.root_name.clone(),
+        },
+        workflow_id: progress.workflow_id.clone(),
+        direction: direction_str(&progress.direction),
+        phase: phase_str(&progress.phase),
+        started_at: progress.started_at.clone(),
+        updated_at: progress.updated_at.clone(),
+        completed_at: progress.completed_at.clone(),
+        error_message: progress.error_message.clone(),
+        failed_at_phase: progress.failed_at_phase.as_ref().map(phase_str),
+        current_member_service_id: progress.current_member_service_id.clone(),
+        new_leader_service_id: progress.new_leader_service_id.clone(),
+        cluster_mutated: progress.cluster_mutated,
+        members: progress
+            .members
+            .iter()
+            .map(|m| PitrProgressMemberOutput {
+                service_id: m.service_id.clone(),
+                service_name: m.service_name.clone(),
+                is_leader: m.is_leader,
+                status: member_status_str(&m.status),
+            })
+            .collect(),
+    }
+}
+
+fn print_progress(output: &PitrProgressOutput) {
+    println!("{}", "PITR HA workflow progress".bold());
+    println!();
+    print_field("Root:", &output.root.name);
+    print_field("Direction:", &output.direction);
+    print_field("Phase:", &output.phase.bold());
+    print_field("Started:", &output.started_at);
+    print_field("Updated:", &output.updated_at);
+    if let Some(completed_at) = &output.completed_at {
+        print_field("Completed:", completed_at);
+    }
+    if let Some(error) = &output.error_message {
+        print_field("Error:", &error.red());
+    }
+    if let Some(failed_at) = &output.failed_at_phase {
+        print_field("Failed at phase:", &failed_at.red());
+    }
+
+    if !output.members.is_empty() {
+        println!();
+        println!("{}", "Members:".bold());
+        for member in &output.members {
+            println!(
+                "  {:<28} {:<6} {}",
+                member.service_name,
+                if member.is_leader { "leader" } else { "-" },
+                member.status
+            );
+        }
+    }
+}
+
+async fn restore(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: RestoreArgs,
+) -> Result<()> {
+    let target_timestamp =
+        parse_time(&args.at).with_context(|| format!("Invalid --at value \"{}\"", args.at))?;
+
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    let new_service_note = args
+        .new_service_name
+        .clone()
+        .unwrap_or_else(|| format!("{}-restored-<timestamp>", root.root_name));
+
+    if !confirm_or_bail(
+        &format!(
+            "Restore {} to {}? This creates a brand-new service ({new_service_note}) from the point-in-time snapshot -- {} keeps running untouched.",
+            root.root_name.yellow(),
+            target_timestamp.to_rfc3339(),
+            root.root_name
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let response = post_graphql::<mutations::VolumeInstancePitrRestore, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_pitr_restore::Variables {
+            volume_instance_id,
+            target_timestamp,
+            new_service_name: args.new_service_name.clone(),
+            source_repo_path: args.source_repo_path.clone(),
+        },
+    )
+    .await
+    .context("Failed to start the point-in-time restore")?;
+
+    let workflow_id = response.volume_instance_pitr_restore.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root": { "id": root.root_id, "name": root.root_name },
+                "targetTimestamp": target_timestamp.to_rfc3339(),
+                "workflowId": workflow_id,
+            }))?
+        );
+    } else {
+        println!(
+            "Started a point-in-time restore of {} to {}.",
+            root.root_name.bold(),
+            target_timestamp.to_rfc3339()
+        );
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+        println!(
+            "This runs in the background; the new service will appear in the dashboard once provisioning completes."
+        );
+    }
+    Ok(())
+}
+
+/// Shared by every `backup`/`schedule` subcommand: resolves the target root
+/// service's live VOLUME-INSTANCE id via the environment's volumeInstances.
+/// Deliberately NOT the environment config's `volumeMounts` key -- that map
+/// is keyed by VOLUME id, which the backup/restore mutations reject
+/// (confirmed live: the auth scope can't resolve a volume id as an instance
+/// and the call reads back as Not Authorized).
+async fn resolve_volume_instance_id(
+    ctx: &ServiceContext,
+    root: &super::RootContext,
+) -> Result<String> {
+    let instances = crate::controllers::project::get_environment_instances(
+        &ctx.client,
+        &ctx.configs,
+        &ctx.project_id,
+        &ctx.environment_id,
+    )
+    .await?;
+
+    instances
+        .volume_instances
+        .iter()
+        .find(|edge| edge.node.service_id.as_deref() == Some(root.root_id.as_str()))
+        .map(|edge| edge.node.id.clone())
+        .with_context(|| {
+            format!(
+                "{} has no volume attached -- PITR backups require a volume.",
+                root.root_name
+            )
+        })
+}
+
+async fn backup_list(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    let response = post_graphql::<queries::VolumeInstanceBackupList, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::volume_instance_backup_list::Variables { volume_instance_id },
+    )
+    .await
+    .context("Failed to list backups")?;
+    let backups = response.volume_instance_backup_list;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&backups)?);
+        return Ok(());
+    }
+
+    if backups.is_empty() {
+        println!("No backups found for {}.", root.root_name.bold());
+        return Ok(());
+    }
+
+    println!(
+        "{:<26} {:<20} {:<26} {:>10} {:<12} EXPIRES",
+        "ID", "NAME", "CREATED", "SIZE (MB)", "SCHEDULE"
+    );
+    for backup in &backups {
+        println!(
+            "{:<26} {:<20} {:<26} {:>10} {:<12} {}",
+            backup.id,
+            backup.name.as_deref().unwrap_or("-"),
+            backup.created_at.to_rfc3339(),
+            backup
+                .used_mb
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            backup.schedule_id.as_deref().unwrap_or("manual"),
+            backup
+                .expires_at
+                .map(|v| v.to_rfc3339())
+                .unwrap_or_else(|| "never".to_string()),
+        );
+    }
+    Ok(())
+}
+
+async fn backup_create(
+    engine: &'static DatabaseEngine,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupCreateArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupCreate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_create::Variables {
+            volume_instance_id,
+            name: args.name.clone(),
+        },
+    )
+    .await
+    .context("Failed to create a backup")?;
+    let workflow_id = response.volume_instance_backup_create.workflow_id;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "workflowId": workflow_id})
+            )?
+        );
+    } else {
+        println!("Started an on-demand backup for {}.", root.root_name.bold());
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+        println!(
+            "Check `railway {} pitr backup list` once it completes.",
+            engine.key
+        );
+    }
+    Ok(())
+}
+
+async fn backup_delete(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupDeleteArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    if !confirm_or_bail(
+        &format!(
+            "Delete {} backup(s) forever ({})? This cannot be undone.",
+            args.ids.len(),
+            args.ids.join(", ").red()
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    // One delete mutation per id -- the batch mutation is Internal-subgraph
+    // only. Sequential on purpose: each returns its own deletion workflow,
+    // and a mid-list failure reports exactly which ids already started.
+    let mut workflow_ids: Vec<Option<String>> = Vec::with_capacity(args.ids.len());
+    for (index, backup_id) in args.ids.iter().enumerate() {
+        let response = post_graphql::<mutations::VolumeInstanceBackupDelete, _>(
+            &ctx.client,
+            ctx.configs.get_backboard(),
+            mutations::volume_instance_backup_delete::Variables {
+                volume_instance_id: volume_instance_id.clone(),
+                volume_instance_backup_id: backup_id.clone(),
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to delete backup {backup_id}{}",
+                if index > 0 {
+                    format!(
+                        " (deletion already started for: {})",
+                        args.ids[..index].join(", ")
+                    )
+                } else {
+                    String::new()
+                }
+            )
+        })?;
+        workflow_ids.push(response.volume_instance_backup_delete.workflow_id);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"deletedIds": args.ids, "workflowIds": workflow_ids})
+            )?
+        );
+    } else {
+        println!(
+            "Started deleting {} backup(s) -- deletion runs in the background.",
+            args.ids.len()
+        );
+        for id in workflow_ids.iter().flatten() {
+            print_field("Workflow:", id);
+        }
+    }
+    Ok(())
+}
+
+async fn backup_lock(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupIdArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupLock, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_lock::Variables {
+            volume_instance_id,
+            volume_instance_backup_id: args.id.clone(),
+        },
+    )
+    .await
+    .context("Failed to lock the backup")?;
+    let locked = response.volume_instance_backup_lock;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"id": args.id, "locked": locked}))?
+        );
+    } else if locked {
+        println!(
+            "Backup {} will now be kept indefinitely (expiration removed).",
+            args.id.bold()
+        );
+    } else {
+        println!("Could not lock backup {}.", args.id.bold());
+    }
+    Ok(())
+}
+
+async fn backup_restore(
+    engine: &'static DatabaseEngine,
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: BackupRestoreArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+
+    // An in-place backup restore replaces only the root's volume. On an HA
+    // cluster the replicas would keep their newer data and diverge from the
+    // restored leader, so refuse outright -- the dashboard restore knows how
+    // to reseed replicas as part of the same operation.
+    let names = service_name_map(&ctx);
+    let ha_state = database_plugins::compute_ha_state(&config, &root.root_id, &names, engine);
+    if ha_state.is_cluster {
+        bail!(
+            "{} is an HA cluster: restoring a backup in place would leave its replicas diverged from the restored leader. Use the dashboard, which reseeds replicas as part of the restore.",
+            root.root_name
+        );
+    }
+
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    if !confirm_or_bail(
+        &format!(
+            "Restore {} from backup {}? This overwrites the current data with the backup's contents.",
+            root.root_name.red(),
+            args.id
+        ),
+        args.yes,
+    )? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    // The restore commits the environment's staged patch at the end (see
+    // below), so anything already staged rides along.
+    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
+
+    let response = post_graphql::<mutations::VolumeInstanceBackupRestore, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_restore::Variables {
+            volume_instance_id,
+            volume_instance_backup_id: args.id.clone(),
+            replica_service_ids: None,
+            wipe_service_ids: None,
+        },
+    )
+    .await
+    .context("Failed to restore from the backup")?;
+    let workflow_id = response.volume_instance_backup_restore.workflow_id;
+
+    // The server-side workflow copies the backup into a fresh volume and then
+    // only STAGES the volume swap (the dashboard has the user apply staged
+    // changes as a second step). Wait for the copy, then commit + deploy so
+    // the CLI restore is end-to-end like every other subcommand here.
+    let mut deployed = false;
+    if let Some(workflow_id) = &workflow_id {
+        if !json {
+            println!(
+                "Copying backup {} into a fresh volume -- this scales with the volume's size...",
+                args.id
+            );
+        }
+        use crate::controllers::workflow::{WorkflowError, wait_for_workflow_up_to};
+        wait_for_workflow_up_to(
+            &ctx.client,
+            &ctx.configs,
+            workflow_id.clone(),
+            BACKUP_RESTORE_WAIT_ATTEMPTS,
+        )
+        .await
+        .map_err(|err| match err {
+            WorkflowError::Timeout => anyhow::anyhow!(
+                "The restore is still copying data server-side. When it finishes, the volume swap appears as staged changes on the environment -- apply them to finish the restore."
+            ),
+            other => other.into(),
+        })?;
+
+        deployed = template_apply::commit_staged_patch(&ctx, true)
+            .await
+            .context("The backup was copied, but applying the staged volume swap failed -- apply the environment's staged changes to finish the restore")?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({"root": {"id": root.root_id, "name": root.root_name}, "backupId": args.id, "workflowId": workflow_id, "deployed": deployed})
+            )?
+        );
+    } else if deployed {
+        println!(
+            "Restored {} from backup {} and deployed.",
+            root.root_name.bold(),
+            args.id
+        );
+    } else {
+        println!(
+            "Started restoring {} from backup {}.",
+            root.root_name.bold(),
+            args.id
+        );
+        if let Some(id) = &workflow_id {
+            print_field("Workflow:", id);
+        }
+    }
+    Ok(())
+}
+
+/// Attempt budget (~1s each) for the backup-copy phase of an in-place
+/// restore. Sized for real volumes, not the ~2-minute generic cap: the copy
+/// replicates the full backup into a fresh volume.
+const BACKUP_RESTORE_WAIT_ATTEMPTS: u32 = 1800;
+
+async fn schedule_set(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+    args: ScheduleSetArgs,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    use mutations::volume_instance_backup_schedule_update::VolumeInstanceBackupScheduleKind as ScheduleKind;
+    let mut kinds = Vec::new();
+    if args.daily {
+        kinds.push(ScheduleKind::DAILY);
+    }
+    if args.weekly {
+        kinds.push(ScheduleKind::WEEKLY);
+    }
+    if args.monthly {
+        kinds.push(ScheduleKind::MONTHLY);
+    }
+
+    post_graphql::<mutations::VolumeInstanceBackupScheduleUpdate, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        mutations::volume_instance_backup_schedule_update::Variables {
+            volume_instance_id,
+            kinds,
+        },
+    )
+    .await
+    .context("Failed to update the backup schedule")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "daily": args.daily,
+                "weekly": args.weekly,
+                "monthly": args.monthly,
+                "cleared": args.none,
+            }))?
+        );
+    } else if args.none {
+        println!(
+            "Removed every automatic backup schedule for {} (existing backups are kept).",
+            root.root_name.bold()
+        );
+    } else {
+        let mut labels = Vec::new();
+        if args.daily {
+            labels.push("daily");
+        }
+        if args.weekly {
+            labels.push("weekly");
+        }
+        if args.monthly {
+            labels.push("monthly");
+        }
+        println!(
+            "Updated the backup schedule for {}: {}.",
+            root.root_name.bold(),
+            labels.join(", ")
+        );
+    }
+    Ok(())
+}
+
+async fn schedule_list(
+    project: Option<String>,
+    service: Option<String>,
+    environment: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let ctx = resolve_service_context(project, service, environment).await?;
+    let config = fetch_environment_config(&ctx.client, &ctx.configs, &ctx.environment_id, true)
+        .await?
+        .config;
+    let root = resolve_root(&ctx, &config);
+    let volume_instance_id = resolve_volume_instance_id(&ctx, &root).await?;
+
+    let response = post_graphql::<queries::VolumeInstanceBackupScheduleList, _>(
+        &ctx.client,
+        ctx.configs.get_backboard(),
+        queries::volume_instance_backup_schedule_list::Variables { volume_instance_id },
+    )
+    .await
+    .context("Failed to list backup schedules")?;
+    let schedules = response.volume_instance_backup_schedule_list;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&schedules)?);
+        return Ok(());
+    }
+
+    if schedules.is_empty() {
+        println!(
+            "No backup schedule configured for {}.",
+            root.root_name.bold()
+        );
+        return Ok(());
+    }
+
+    println!("{:<10} {:<24} {:<26} RETENTION", "KIND", "NAME", "CREATED");
+    for s in &schedules {
+        println!(
+            "{:<10} {:<24} {:<26} {}",
+            format!("{:?}", s.kind),
+            s.name,
+            s.created_at.to_rfc3339(),
+            s.retention_seconds
+                .map(|r| format!("{r}s"))
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    Ok(())
+}
+
+/// Time budget for each stage of `status`'s live probe. Kept short -- this
+/// is a best-effort addition to `status`, never worth making the whole
+/// command feel slow (or hang) when the service isn't reachable -- but wide
+/// enough for the coverage half's backup.info read from the S3 archive
+/// bucket, which shares the stage with the archiver query. A standalone
+/// service runs one stage; an HA cluster runs two (Patroni leader discovery,
+/// then the probe on the leader), so its worst case is about twice this.
+const LIVE_PROBE_TIMEOUT_SECS: u64 = 10;
+
+/// Which halves of the live probe to run on a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeParts {
+    /// `pgbackrest info` plus the `pg_stat_archiver` query.
+    Full,
+    /// `pgbackrest info` only. The archive is cluster-wide, so coverage reads
+    /// the same from any member, while archiver counters only mean something
+    /// on the leader.
+    CoverageOnly,
+}
+
+/// Standalone path: resolve the service's live instance and run the full
+/// probe there, inside one time budget.
+async fn probe_pitr_live(ctx: &ServiceContext, service_id: &str) -> PitrLiveProbe {
+    // A missing local SSH key is by far the most common reason this probe
+    // can't run at all -- check for it up front (no network call) so the
+    // failure reason is specific instead of a generic SSH timeout/refusal.
+    if let Err(reason) = preflight_db_stats_ssh().await {
+        return unavailable(reason);
+    }
+    let attempt = async {
+        let instance_id =
+            get_service_instance_id(&ctx.client, &ctx.configs, &ctx.environment_id, service_id)
+                .await
+                .context("No live deployment found for this service")?;
+        Ok::<_, anyhow::Error>(run_pitr_probes(&instance_id, ProbeParts::Full).await)
+    };
+    finish_probe(timeout(Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS), attempt).await)
+}
+
+/// HA path: the instance was resolved (and the SSH preflight ran) during
+/// leader discovery, so only the probe itself is budgeted here.
+async fn probe_pitr_live_on_instance(instance_id: &str, parts: ProbeParts) -> PitrLiveProbe {
+    finish_probe(
+        timeout(
+            Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS),
+            run_pitr_probes(instance_id, parts),
+        )
+        .await
+        .map(Ok),
+    )
+}
+
+/// The two independent sub-probes, joined: `pgbackrest info` (an S3 read of
+/// the archive) and the `pg_stat_archiver` query. Either half failing leaves
+/// the other's data intact.
+async fn run_pitr_probes(instance_id: &str, parts: ProbeParts) -> PitrLiveProbe {
+    let archiver = async {
+        match parts {
+            ProbeParts::Full => Some(
+                exec_probe_in_container(instance_id, ARCHIVER_PROBE_QUERY, PITR_PROBE_TIMEOUT)
+                    .await,
+            ),
+            ProbeParts::CoverageOnly => None,
+        }
+    };
+    let (pgbackrest_result, archiver_result) = tokio::join!(
+        exec_probe_in_container(instance_id, PGBACKREST_INFO_PROBE, PITR_PROBE_TIMEOUT),
+        archiver,
+    );
+
+    let mut probe = PitrLiveProbe {
+        available: true,
+        ..PitrLiveProbe::default()
+    };
+    match pgbackrest_result {
+        Ok(output) => apply_pgbackrest_info(&mut probe, &output),
+        Err(err) => {
+            probe.backup_coverage_error =
+                Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+        }
+    }
+    match archiver_result {
+        Some(Ok(output)) => apply_archiver_output(&mut probe, &output),
+        Some(Err(err)) => {
+            probe.archiver_error = Some(diagnose_db_stats_failure(&err, &DatabaseType::PostgreSQL))
+        }
+        None => {}
+    }
+    probe
+}
+
+fn finish_probe(
+    outcome: Result<Result<PitrLiveProbe>, tokio::time::error::Elapsed>,
+) -> PitrLiveProbe {
+    match outcome {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(err)) => unavailable(format!("{err:#}")),
+        Err(_) => unavailable(format!("probe timed out after {LIVE_PROBE_TIMEOUT_SECS}s")),
+    }
+}
+
+fn unavailable(reason: String) -> PitrLiveProbe {
+    PitrLiveProbe {
+        available: false,
+        unavailable_reason: Some(reason),
+        ..PitrLiveProbe::default()
+    }
+}
+
+/// One data node of an HA cluster: its Railway identity and the name its
+/// coordinator knows it by (`database_plugins::member_identity_name`). Built
+/// in the same order as the `PitrMemberStatus` list it describes.
+#[derive(Debug, Clone)]
+struct HaNode {
+    service_id: String,
+    service_name: String,
+    node_name: String,
+}
+
+/// Each listed member's coordinator identity, in the same order.
+fn ha_nodes(
+    members: &[PitrMemberStatus],
+    config: &EnvironmentConfig,
+    root_id: &str,
+) -> Vec<HaNode> {
+    members
+        .iter()
+        .map(|m| HaNode {
+            service_id: m.service.id.clone(),
+            service_name: m.service.name.clone(),
+            node_name: database_plugins::member_identity_name(
+                config,
+                root_id,
+                &m.service.id,
+                &m.service.name,
+            ),
+        })
+        .collect()
+}
+
+/// `live_role` of a member Patroni's cluster view does not list: its Patroni
+/// is down or it never joined, so it holds no role at all right now.
+const LIVE_ROLE_ABSENT: &str = "absent";
+
+/// Why Patroni's cluster view could not be read, plus -- when any member has
+/// a live deployment -- one instance to read the cluster-wide archive
+/// coverage from anyway.
+#[derive(Debug)]
+struct HaDiscoveryFailure {
+    reason: String,
+    coverage_from: Option<String>,
+}
+
+impl HaDiscoveryFailure {
+    fn without_coverage(reason: String) -> Self {
+        Self {
+            reason,
+            coverage_from: None,
+        }
+    }
+}
+
+/// Patroni's live view of an HA cluster, joined to Railway's member list.
+struct HaClusterView {
+    /// Live deployment instance per member service id; a member with no
+    /// live deployment is absent.
+    instance_ids: BTreeMap<String, String>,
+    /// The instance whose Patroni answered `/cluster`. Coverage can be read
+    /// from here even when no member holds leadership.
+    answered_by: String,
+    members: Vec<PatroniMember>,
+}
+
+/// Resolve every data node's live instance and read Patroni's `/cluster`
+/// view from the first member that answers. Every failure path names the
+/// member(s) involved: an unreachable member can mean anything from a wedged
+/// cluster to the caller's own SSH setup, and only the underlying error tells
+/// those apart.
+async fn discover_ha_cluster(
+    ctx: &ServiceContext,
+    nodes: &[HaNode],
+) -> Result<HaClusterView, HaDiscoveryFailure> {
+    preflight_db_stats_ssh()
+        .await
+        .map_err(HaDiscoveryFailure::without_coverage)?;
+    let service_ids: Vec<String> = nodes.iter().map(|n| n.service_id.clone()).collect();
+    let instance_ids = patroni::resolve_instance_ids(ctx, &service_ids)
+        .await
+        .map_err(|err| {
+            HaDiscoveryFailure::without_coverage(format!(
+                "could not resolve the members' live deployments: {err:#}"
+            ))
+        })?;
+    let live: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| instance_ids.get(&n.service_id).cloned())
+        .collect();
+    if live.is_empty() {
+        return Err(HaDiscoveryFailure::without_coverage(
+            "no HA member has a live deployment".to_string(),
+        ));
+    }
+    match patroni::probe_first_available(&live, Duration::from_secs(LIVE_PROBE_TIMEOUT_SECS)).await
+    {
+        Ok((answered_by, members)) => Ok(HaClusterView {
+            instance_ids,
+            answered_by,
+            members,
+        }),
+        Err(failures) => Err(HaDiscoveryFailure {
+            reason: describe_discovery_failures(nodes, &instance_ids, &failures),
+            // A container can run Postgres and pgBackRest with its Patroni
+            // API down; the archive coverage does not need Patroni.
+            coverage_from: live.first().cloned(),
+        }),
+    }
+}
+
+/// One line naming every member and why Patroni could not be read from it.
+fn describe_discovery_failures(
+    nodes: &[HaNode],
+    instance_ids: &BTreeMap<String, String>,
+    failures: &[(String, String)],
+) -> String {
+    let parts: Vec<String> = nodes
+        .iter()
+        .map(|node| {
+            let reason = match instance_ids.get(&node.service_id) {
+                None => "no live deployment".to_string(),
+                Some(instance_id) => failures
+                    .iter()
+                    .find(|(id, _)| id == instance_id)
+                    .map(|(_, reason)| reason.clone())
+                    .unwrap_or_else(|| "not probed".to_string()),
+            };
+            format!("{}: {reason}", node.service_name)
+        })
+        .collect();
+    format!(
+        "Patroni could not be reached on any HA member ({})",
+        parts.join("; ")
+    )
+}
+
+/// Join Patroni's member list onto the Railway members (case-insensitive
+/// node-name match, as `ha status` does), record every member's live role,
+/// and pick the one member Patroni calls `leader`. `Err` when Patroni
+/// reports no leader or more than one: both leave the archiver counters
+/// without an owner, and picking a member anyway would report a frozen or
+/// divergent pg_stat_archiver as the cluster's.
+fn select_ha_leader(
+    members: &mut [PitrMemberStatus],
+    nodes: &[HaNode],
+    view: &[PatroniMember],
+) -> Result<usize, String> {
+    debug_assert_eq!(members.len(), nodes.len());
+    let mut leaders = Vec::new();
+    for (index, (member, node)) in members.iter_mut().zip(nodes).enumerate() {
+        let entry = view
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&node.node_name));
+        member.live_role = match entry {
+            Some(m) if m.role.is_empty() => None,
+            Some(m) => Some(m.role.clone()),
+            None => Some(LIVE_ROLE_ABSENT.to_string()),
+        };
+        if entry.is_some_and(|m| m.role == "leader") {
+            leaders.push(index);
+        }
+    }
+    match leaders.as_slice() {
+        [index] => Ok(*index),
+        [] => {
+            let unmatched: Vec<&str> = view
+                .iter()
+                .filter(|m| m.role == "leader")
+                .map(|m| m.name.as_str())
+                .collect();
+            if unmatched.is_empty() {
+                Err(
+                    "Patroni reports no leader, so no member is archiving WAL right now"
+                        .to_string(),
+                )
+            } else {
+                Err(format!(
+                    "Patroni's leader ({}) matches no member of this cluster",
+                    unmatched.join(", ")
+                ))
+            }
+        }
+        many => Err(format!(
+            "Patroni reports {} leaders ({}); archiver health has no single owner",
+            many.len(),
+            many.iter()
+                .map(|i| members[*i].service.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Probe an HA cluster: establish the leader through Patroni, then read
+/// coverage and archiver health from that member only. Without a single
+/// leader, or without any Patroni answer, the cluster-wide archive coverage
+/// is still read from a live member and only the archiver half is withheld;
+/// the structural root is never substituted for the leader.
+async fn probe_pitr_ha<D, DFut, P, PFut>(
+    members: &mut [PitrMemberStatus],
+    nodes: &[HaNode],
+    discover: D,
+    probe_instance: P,
+) -> PitrLiveProbe
+where
+    D: FnOnce() -> DFut,
+    DFut: std::future::Future<Output = Result<HaClusterView, HaDiscoveryFailure>>,
+    P: Fn(String, ProbeParts) -> PFut,
+    PFut: std::future::Future<Output = PitrLiveProbe>,
+{
+    let view = match discover().await {
+        Ok(view) => view,
+        Err(failure) => {
+            return match failure.coverage_from {
+                Some(instance_id) => coverage_only(
+                    probe_instance(instance_id, ProbeParts::CoverageOnly).await,
+                    failure.reason,
+                ),
+                None => unavailable(failure.reason),
+            };
+        }
+    };
+    match select_ha_leader(members, nodes, &view.members) {
+        Ok(index) => {
+            let leader_name = members[index].service.name.clone();
+            let Some(instance_id) = view.instance_ids.get(&members[index].service.id) else {
+                return unavailable(format!(
+                    "{leader_name} is the Patroni leader but has no live deployment"
+                ));
+            };
+            let mut probe = probe_instance(instance_id.clone(), ProbeParts::Full).await;
+            // Leadership can change between discovery and the probe. Coverage
+            // belongs to the shared archive, but archiver data is valid only
+            // while pg_is_in_recovery() still says primary.
+            if probe.available && probe.in_recovery != Some(false) {
+                let reason = match probe.in_recovery {
+                    Some(true) => format!("{leader_name} is no longer the primary"),
+                    _ => format!("could not confirm {leader_name} is still the primary"),
+                };
+                discard_archiver_data(&mut probe, reason);
+                if probe.in_recovery == Some(true) {
+                    members[index].live_role = Some("replica".to_string());
+                }
+            }
+            probe
+        }
+        Err(reason) => {
+            // No single owner for the archiver counters, but the archive is
+            // cluster-wide: read coverage from the member that answered
+            // Patroni and say why archiver health is missing.
+            coverage_only(
+                probe_instance(view.answered_by.clone(), ProbeParts::CoverageOnly).await,
+                reason,
+            )
+        }
+    }
+}
+
+/// A coverage-only probe, with `reason` saying why the archiver half is
+/// missing -- or, when even coverage could not be read, why nothing was.
+fn coverage_only(mut probe: PitrLiveProbe, reason: String) -> PitrLiveProbe {
+    if probe.available {
+        discard_archiver_data(&mut probe, reason);
+    } else {
+        probe.unavailable_reason = Some(match probe.unavailable_reason.take() {
+            Some(existing) => format!("{reason}; coverage probe failed: {existing}"),
+            None => reason,
+        });
+    }
+    probe
+}
+
+/// Drop archiver-derived fields that no longer describe the cluster's
+/// primary, keeping a probe-level error already recorded over `reason`.
+fn discard_archiver_data(probe: &mut PitrLiveProbe, reason: String) {
+    probe.archiver_healthy = None;
+    probe.archiver_last_archived_at = None;
+    probe.max_restore_time = None;
+    if probe.archiver_error.is_none() {
+        probe.archiver_error = Some(reason);
+    }
+}
+
+/// Loosely parses `pgbackrest info --output=json`'s shape (an array of
+/// stanzas, each with a `backup` list and an `archive` list) -- deliberately
+/// tolerant of missing fields since this runs against whatever pgBackRest
+/// version/config the image ships, not a pinned schema.
+fn apply_pgbackrest_info(probe: &mut PitrLiveProbe, output: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+        probe.backup_coverage_error = Some("could not parse pgbackrest output".to_string());
+        return;
+    };
+    let Some(stanza) = value.as_array().and_then(|arr| arr.first()) else {
+        probe.backup_coverage_error = Some("pgbackrest reported no stanzas".to_string());
+        return;
+    };
+
+    if let Some(backups) = stanza.get("backup").and_then(|b| b.as_array()) {
+        probe.backup_set_count = Some(backups.len());
+        probe.latest_backup_at = backups
+            .last()
+            .and_then(|b| b.get("timestamp"))
+            .and_then(|t| t.get("stop"))
+            .and_then(|v| v.as_i64())
+            .and_then(|epoch| chrono::DateTime::<Utc>::from_timestamp(epoch, 0))
+            .map(|dt| dt.to_rfc3339());
+    }
+    if let Some(archive) = stanza
+        .get("archive")
+        .and_then(|a| a.as_array())
+        .and_then(|a| a.first())
+    {
+        probe.wal_min = archive
+            .get("min")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        probe.wal_max = archive
+            .get("max")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
+}
+
+/// Coverage probe: `pgbackrest info` against the service's archive bucket.
+/// Mirrors the backend monitor's proven setup rather than a bare invocation,
+/// which failed on every PITR service in two ways:
+///
+/// - The SSH session lands as root, and pgbackrest refuses `info` as root
+///   (`ERROR: [031]: the 'info' command must not be run as the root user`) --
+///   hence `gosu postgres`. The refusal is printed to STDOUT (the image sets
+///   `log-level-console=info`), which is why the old failure surfaced as
+///   `backupCoverageError: "SSH command failed (exit code: 31): "` with an
+///   empty message.
+/// - The image's rendered `/etc/pgbackrest/pgbackrest.conf` carries the bare
+///   `repo1-path` (e.g. `/pgbackrest`), but the archive-push wrapper actually
+///   pushes under a per-cluster `cluster-<system id>` sub-prefix. Resolve the
+///   real path the same way the wrapper does: the `.pgbackrest_repo_path`
+///   marker in PGDATA when present (written by the wrapper on the node that
+///   archives), else `pg_control_system()`'s system identifier, else the bare
+///   `WAL_ARCHIVE_PATH` (pgbackrest then reports stanza-not-found, which is
+///   loud and diagnosable rather than silently reading the wrong prefix).
+///
+/// The `WAL_ARCHIVE_*` -> `PGBACKREST_REPO1_*` exports are a no-op on
+/// postgres-ssl (the conf already carries the same values; env wins) but are
+/// required on the HA image, whose patroni-runner sets them only inside
+/// `archive_command`, never at the container level.
+///
+/// Runs via `sh -s` over native SSH -- multi-line is fine on this transport.
+/// Per-attempt budget for the live PITR probes (pgBackRest walks the S3
+/// repo; 15s covers a slow bucket without letting a hung relay stall
+/// `pitr status`). The retrying wrapper applies it per attempt.
+const PITR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+const PGBACKREST_INFO_PROBE: &str = r#"
+export PGBACKREST_REPO1_TYPE=s3 \
+  PGBACKREST_REPO1_S3_BUCKET="${WAL_ARCHIVE_BUCKET:-}" \
+  PGBACKREST_REPO1_S3_KEY="${WAL_ARCHIVE_KEY:-}" \
+  PGBACKREST_REPO1_S3_KEY_SECRET="${WAL_ARCHIVE_SECRET:-}" \
+  PGBACKREST_REPO1_S3_REGION="${WAL_ARCHIVE_REGION:-}" \
+  PGBACKREST_REPO1_S3_ENDPOINT="${WAL_ARCHIVE_ENDPOINT:-}"
+if [ -n "${PGDATA:-}" ] && [ -f "${PGDATA}/.pgbackrest_repo_path" ]; then
+  export PGBACKREST_REPO1_PATH="$(cat "${PGDATA}/.pgbackrest_repo_path")"
+elif [ -n "${WAL_ARCHIVE_PATH:-}" ]; then
+  _sysid=$(PSQL_PAGER='' PAGER='' PGOPTIONS='-c client_min_messages=error' PGHOST=127.0.0.1 PGPORT=5432 timeout 5 gosu postgres psql -U "${PGUSER:-postgres}" -w -P pager=off -tAXq -c 'SELECT system_identifier FROM pg_control_system()' 2>/dev/null | tr -d '[:space:]')
+  if [ -n "${_sysid}" ]; then
+    export PGBACKREST_REPO1_PATH="${WAL_ARCHIVE_PATH}/cluster-${_sysid}"
+  else
+    export PGBACKREST_REPO1_PATH="${WAL_ARCHIVE_PATH}"
+  fi
+fi
+exec gosu postgres pgbackrest --stanza=main info --output=json
+"#;
+
+const ARCHIVER_PROBE_QUERY: &str = concat!(
+    "PGHOST=localhost PGPORT=5432 PGSSLMODE=disable psql -t -A -F',' -q -c \"",
+    "SELECT archived_count, coalesce(last_archived_time::text, ''), failed_count, ",
+    "coalesce(last_failed_time::text, ''), coalesce(((pg_last_committed_xact()).timestamp)::text, ''), ",
+    "pg_is_in_recovery() ",
+    "FROM pg_stat_archiver\"",
+);
+
+/// Parses the single CSV-ish line `ARCHIVER_PROBE_QUERY` prints and applies
+/// the sticky-field gate from prior PITR incident work: `pg_stat_archiver`'s
+/// `last_failed_*` columns never clear on their own (only a Postgres restart
+/// resets them), so a failure from days ago would otherwise permanently read
+/// as "unhealthy" -- only treat it as current if it's newer than the last
+/// successful archive.
+fn apply_archiver_output(probe: &mut PitrLiveProbe, output: &str) {
+    let line = output.lines().next().unwrap_or("").trim();
+    let fields: Vec<&str> = line.split(',').collect();
+    if fields.len() < 5 {
+        probe.archiver_error = Some("unexpected archiver probe output".to_string());
+        return;
+    }
+
+    let last_archived_time = non_empty(fields[1]);
+    let last_failed_time = non_empty(fields[3]);
+    let last_committed_at = non_empty(fields[4]);
+
+    probe.archiver_last_archived_at = last_archived_time.clone();
+    probe.max_restore_time = last_committed_at;
+    // psql prints booleans as `t`/`f`; anything else leaves the role unknown.
+    probe.in_recovery = match fields.get(5).map(|f| f.trim()) {
+        Some("t") => Some(true),
+        Some("f") => Some(false),
+        _ => None,
+    };
+
+    // "Field empty" (no failure/archive ever recorded) and "field present but
+    // unparseable" are different things: the first is a definitive state, the
+    // second means the sticky-failure gate can't be evaluated -- report
+    // `None` ("unknown") rather than guessing either way.
+    probe.archiver_healthy = match &last_failed_time {
+        None => Some(true), // no failure recorded at all
+        Some(failed_raw) => match (parse_pg_timestamp(failed_raw), &last_archived_time) {
+            (Some(_), None) => Some(false), // failed, and never successfully archived
+            // An unparseable archive timestamp leaves the gate unevaluable,
+            // which is unknown rather than a verdict either way.
+            (Some(failed), Some(archived_raw)) => {
+                parse_pg_timestamp(archived_raw).map(|archived| failed <= archived)
+            }
+            (None, _) => None, // failure timestamp unparseable -- unknown
+        },
+    };
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parses Postgres's `timestamptz::text` output (e.g.
+/// `2026-07-28 10:00:00.123456+00`), which isn't quite RFC3339 (space instead
+/// of `T`, no colon in the offset).
+fn parse_pg_timestamp(s: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
+        .ok()
+        .or_else(|| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrProgressMemberOutput {
+    service_id: String,
+    service_name: String,
+    is_leader: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrProgressOutput {
+    root: ResourceRef,
+    workflow_id: String,
+    direction: String,
+    phase: String,
+    started_at: String,
+    updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed_at_phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_member_service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_leader_service_id: Option<String>,
+    cluster_mutated: bool,
+    members: Vec<PitrProgressMemberOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrMemberStatus {
+    service: ResourceRef,
+    cluster_role: Option<String>,
+    /// Live coordinator role (`leader`, `replica`, `sync_standby`, ...) from
+    /// Patroni's cluster view, when the probe read it; `absent` when that view
+    /// does not list the member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_role: Option<String>,
+    enabled: bool,
+    bucket_wired: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrStatusOutput {
+    service: ResourceRef,
+    environment: ResourceRef,
+    root: ResourceRef,
+    is_ha_cluster: bool,
+    enabled: bool,
+    bucket_wired: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blockers: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    members: Vec<PitrMemberStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<PitrLiveProbe>,
+}
+
+/// Best-effort live coverage/archiver probe (`pgbackrest info` + `pg_stat_archiver`
+/// over SSH into the Patroni leader of an HA cluster, or into a standalone
+/// service). `available == false` means the probe couldn't run at all (no
+/// live deployment, no SSH key, unreachable, timed out) or, for a cluster,
+/// that neither Patroni nor the archive could be read from any member;
+/// `backup_coverage_error`/`archiver_error` mean the
+/// probe connected but one half of the two independent sub-probes failed
+/// (e.g. `pgbackrest` not installed on a non-official image, or the Postgres
+/// user lacks `pg_monitor`) while the other still reports.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PitrLiveProbe {
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_coverage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_set_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_backup_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_min: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wal_max: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_error: Option<String>,
+    /// `None` when the archiver query ran but the sticky-failure gate
+    /// couldn't be evaluated (one or both timestamps failed to parse) --
+    /// printed as "unknown" rather than a false "healthy"/"unhealthy".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_healthy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archiver_last_archived_at: Option<String>,
+    /// Approximate PITR restore ceiling (`(pg_last_committed_xact()).timestamp`).
+    /// Deliberately simpler than the backend's authoritative
+    /// `GREATEST(pg_last_committed_xact, pg_xact_commit_timestamp)` -- this is
+    /// a best-effort CLI probe, not a replacement for the admin fleet monitor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_restore_time: Option<String>,
+    /// `pg_is_in_recovery()` on the probed member -- `Some(false)` is the
+    /// primary, whose pg_stat_archiver is the only one that advances.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_recovery: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_top_level_verbs() {
+        assert!(matches!(
+            Args::parse_from(["pitr", "status"]).command,
+            Commands::Status
+        ));
+        assert!(matches!(
+            Args::parse_from(["pitr", "enable"]).command,
+            Commands::Enable(_)
+        ));
+        assert!(matches!(
+            Args::parse_from(["pitr", "disable", "--yes"]).command,
+            Commands::Disable(DisableArgs {
+                yes: true,
+                no_deploy: false
+            })
+        ));
+        assert!(matches!(
+            Args::parse_from(["pitr", "progress"]).command,
+            Commands::Progress(_)
+        ));
+        assert!(matches!(
+            Args::parse_from(["pitr", "cancel"]).command,
+            Commands::Cancel
+        ));
+        assert!(matches!(
+            Args::parse_from(["pitr", "clear"]).command,
+            Commands::Clear
+        ));
+    }
+
+    #[test]
+    fn parses_restore_flags() {
+        let args = Args::parse_from([
+            "pitr",
+            "restore",
+            "--at",
+            "2026-07-20T12:00:00Z",
+            "--new-service-name",
+            "restored-db",
+            "--yes",
+        ]);
+        let Commands::Restore(restore) = args.command else {
+            panic!("expected restore");
+        };
+        assert_eq!(restore.at, "2026-07-20T12:00:00Z");
+        assert_eq!(restore.new_service_name.as_deref(), Some("restored-db"));
+        assert!(restore.yes);
+    }
+
+    #[test]
+    fn parses_backup_subcommands() {
+        assert!(matches!(
+            Args::parse_from(["pitr", "backup", "list"]).command,
+            Commands::Backup(BackupArgs {
+                command: BackupCommands::List
+            })
+        ));
+        let args = Args::parse_from(["pitr", "backup", "create", "--name", "pre-migration"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Create(create),
+        }) = args.command
+        else {
+            panic!("expected backup create");
+        };
+        assert_eq!(create.name.as_deref(), Some("pre-migration"));
+
+        let args = Args::parse_from(["pitr", "backup", "delete", "id1", "id2", "--yes"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Delete(delete),
+        }) = args.command
+        else {
+            panic!("expected backup delete");
+        };
+        assert_eq!(delete.ids, vec!["id1".to_string(), "id2".to_string()]);
+        assert!(delete.yes);
+    }
+
+    #[test]
+    fn schedule_set_requires_at_least_one_kind() {
+        assert!(Args::try_parse_from(["pitr", "schedule", "set"]).is_err());
+        let args = Args::parse_from(["pitr", "schedule", "set", "--daily", "--weekly"]);
+        let Commands::Schedule(ScheduleArgs {
+            command: ScheduleCommands::Set(set),
+        }) = args.command
+        else {
+            panic!("expected schedule set");
+        };
+        assert!(set.daily);
+        assert!(set.weekly);
+        assert!(!set.monthly);
+        assert!(!set.none);
+    }
+
+    #[test]
+    fn schedule_set_none_clears_and_conflicts_with_kinds() {
+        let args = Args::parse_from(["pitr", "schedule", "set", "--none"]);
+        let Commands::Schedule(ScheduleArgs {
+            command: ScheduleCommands::Set(set),
+        }) = args.command
+        else {
+            panic!("expected schedule set");
+        };
+        assert!(set.none);
+        assert!(!set.daily && !set.weekly && !set.monthly);
+
+        assert!(Args::try_parse_from(["pitr", "schedule", "set", "--none", "--daily"]).is_err());
+        assert!(Args::try_parse_from(["pitr", "schedule", "set", "--none", "--monthly"]).is_err());
+    }
+
+    #[test]
+    fn parses_schedule_list() {
+        assert!(matches!(
+            Args::parse_from(["pitr", "schedule", "list"]).command,
+            Commands::Schedule(ScheduleArgs {
+                command: ScheduleCommands::List
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_progress_watch_flag() {
+        let args = Args::parse_from(["pitr", "progress", "--watch"]);
+        let Commands::Progress(progress) = args.command else {
+            panic!("expected progress");
+        };
+        assert!(progress.watch);
+
+        let args = Args::parse_from(["pitr", "progress"]);
+        let Commands::Progress(progress) = args.command else {
+            panic!("expected progress");
+        };
+        assert!(!progress.watch);
+    }
+
+    #[test]
+    fn parses_backup_lock_and_restore() {
+        let args = Args::parse_from(["pitr", "backup", "lock", "backup-1"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Lock(lock),
+        }) = args.command
+        else {
+            panic!("expected backup lock");
+        };
+        assert_eq!(lock.id, "backup-1");
+
+        let args = Args::parse_from(["pitr", "backup", "restore", "backup-1", "--yes"]);
+        let Commands::Backup(BackupArgs {
+            command: BackupCommands::Restore(restore),
+        }) = args.command
+        else {
+            panic!("expected backup restore");
+        };
+        assert_eq!(restore.id, "backup-1");
+        assert!(restore.yes);
+    }
+
+    #[test]
+    fn parse_pg_timestamp_handles_postgres_text_format() {
+        let parsed = parse_pg_timestamp("2026-07-28 10:00:00.123456+00").unwrap();
+        assert_eq!(parsed.to_rfc3339(), "2026-07-28T10:00:00.123456+00:00");
+        assert!(parse_pg_timestamp("not-a-timestamp").is_none());
+        // RFC3339 fallback.
+        assert!(parse_pg_timestamp("2026-07-28T10:00:00+00:00").is_some());
+    }
+
+    #[test]
+    fn apply_archiver_output_flags_malformed_line() {
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "garbage-with-no-commas");
+        assert!(probe.archiver_error.is_some());
+        assert!(probe.archiver_healthy.is_none());
+    }
+
+    // The coverage probe's load-bearing pieces: pgbackrest must run as the
+    // postgres user (it refuses `info` as root, error [031]), and the repo
+    // path must resolve through the archive wrapper's marker/system-id
+    // ladder — the rendered conf's bare repo1-path is not where the wrapper
+    // actually pushes WAL.
+    #[test]
+    fn pgbackrest_info_probe_runs_as_postgres_with_repo_path_resolution() {
+        assert!(
+            PGBACKREST_INFO_PROBE
+                .contains("gosu postgres pgbackrest --stanza=main info --output=json")
+        );
+        assert!(PGBACKREST_INFO_PROBE.contains(".pgbackrest_repo_path"));
+        assert!(PGBACKREST_INFO_PROBE.contains("cluster-${_sysid}"));
+        assert!(
+            PGBACKREST_INFO_PROBE
+                .contains("PGBACKREST_REPO1_S3_BUCKET=\"${WAL_ARCHIVE_BUCKET:-}\"")
+        );
+    }
+
+    fn progress_fixture(
+        phase: queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase,
+    ) -> queries::get_pitr_ha_workflow_progress::GetPitrHaWorkflowProgressPitrHaWorkflowProgress
+    {
+        use queries::get_pitr_ha_workflow_progress::*;
+        GetPitrHaWorkflowProgressPitrHaWorkflowProgress {
+            workflow_id: "wf-1".to_string(),
+            phase,
+            direction: PitrHaWorkflowDirection::ENABLE,
+            started_at: "2026-08-07T00:00:00Z".to_string(),
+            updated_at: "2026-08-07T00:01:00Z".to_string(),
+            completed_at: None,
+            error_message: None,
+            failed_at_phase: None,
+            current_member_service_id: Some("replica-1".to_string()),
+            new_leader_service_id: None,
+            cluster_mutated: true,
+            members: vec![
+                GetPitrHaWorkflowProgressPitrHaWorkflowProgressMembers {
+                    service_id: "root".to_string(),
+                    service_name: "postgres".to_string(),
+                    is_leader: true,
+                    status: PitrHaWorkflowMemberStatus::HEALTHY,
+                },
+                GetPitrHaWorkflowProgressPitrHaWorkflowProgressMembers {
+                    service_id: "replica-1".to_string(),
+                    service_name: "postgres-replica-1".to_string(),
+                    is_leader: false,
+                    status: PitrHaWorkflowMemberStatus::RESTARTING,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn build_progress_output_maps_phases_directions_and_members() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        let output = build_progress_output(
+            &root,
+            &progress_fixture(PitrHaWorkflowPhase::ROLLING_REPLICAS),
+        );
+        assert_eq!(output.phase, "rolling_replicas");
+        assert_eq!(output.direction, "enable");
+        assert_eq!(output.workflow_id, "wf-1");
+        assert_eq!(output.members.len(), 2);
+        assert!(output.members[0].is_leader);
+        assert_eq!(output.members[0].status, "healthy");
+        assert_eq!(output.members[1].status, "restarting");
+    }
+
+    #[test]
+    fn build_progress_output_lowercases_unknown_enum_values() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        let mut progress = progress_fixture(PitrHaWorkflowPhase::Other("NEW_PHASE".to_string()));
+        progress.failed_at_phase = Some(PitrHaWorkflowPhase::Other("ODD_PHASE".to_string()));
+        let output = build_progress_output(&root, &progress);
+        assert_eq!(output.phase, "new_phase");
+        assert_eq!(output.failed_at_phase.as_deref(), Some("odd_phase"));
+    }
+
+    #[test]
+    fn build_progress_output_terminal_phases_map_to_done_and_failed() {
+        use queries::get_pitr_ha_workflow_progress::PitrHaWorkflowPhase;
+
+        let root = super::super::RootContext {
+            root_id: "root".to_string(),
+            root_name: "postgres".to_string(),
+        };
+        assert_eq!(
+            build_progress_output(&root, &progress_fixture(PitrHaWorkflowPhase::DONE)).phase,
+            "done"
+        );
+        assert_eq!(
+            build_progress_output(&root, &progress_fixture(PitrHaWorkflowPhase::FAILED)).phase,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn progress_transport_retry_does_not_match_graphql_failures() {
+        assert!(!is_transient_progress_transport_error(
+            &RailwayError::GraphQLError("forbidden".to_string())
+        ));
+    }
+
+    #[test]
+    fn non_empty_treats_blank_and_whitespace_as_none() {
+        assert_eq!(non_empty("  "), None);
+        assert_eq!(non_empty(""), None);
+        assert_eq!(non_empty(" value "), Some("value".to_string()));
+    }
+
+    #[test]
+    fn apply_archiver_output_gates_sticky_failure_on_recency() {
+        // A failure strictly before the last successful archive is stale
+        // (pg_stat_archiver never clears last_failed_* on its own) -- healthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,1,2026-07-27 09:00:00+00,2026-07-28 10:00:05+00",
+        );
+        assert_eq!(probe.archiver_healthy, Some(true));
+        assert_eq!(
+            probe.archiver_last_archived_at.as_deref(),
+            Some("2026-07-28 10:00:00+00")
+        );
+
+        // A failure after the last successful archive is current -- unhealthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,2,2026-07-28 11:00:00+00,",
+        );
+        assert_eq!(probe.archiver_healthy, Some(false));
+
+        // No failure recorded at all -- healthy regardless of archive state.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,");
+        assert_eq!(probe.archiver_healthy, Some(true));
+
+        // A recorded failure that never archived is definitively unhealthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "0,,3,2026-07-28 11:00:00+00,");
+        assert_eq!(probe.archiver_healthy, Some(false));
+    }
+
+    #[test]
+    fn apply_archiver_output_reports_unknown_when_timestamps_do_not_parse() {
+        // Failure recorded but unparseable (e.g. non-ISO DateStyle): the
+        // sticky gate can't be evaluated -- unknown, never a false healthy.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,2026-07-28 10:00:00+00,1,Mon Jul 28 09:00:00 2026,",
+        );
+        assert_eq!(probe.archiver_healthy, None);
+
+        // Failure parses but the archive timestamp doesn't: also unknown
+        // (guessing unhealthy would be as wrong as guessing healthy).
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(
+            &mut probe,
+            "5,Mon Jul 28 10:00:00 2026,1,2026-07-28 09:00:00+00,",
+        );
+        assert_eq!(probe.archiver_healthy, None);
+    }
+
+    #[test]
+    fn apply_archiver_output_parses_recovery_flag() {
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,,f");
+        assert_eq!(probe.in_recovery, Some(false));
+
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,,t");
+        assert_eq!(probe.in_recovery, Some(true));
+
+        // Older five-column output still parses; the role is just unknown.
+        let mut probe = PitrLiveProbe::default();
+        apply_archiver_output(&mut probe, "5,2026-07-28 10:00:00+00,0,,");
+        assert!(probe.archiver_error.is_none());
+        assert_eq!(probe.in_recovery, None);
+    }
+
+    fn ha_probe_members() -> (Vec<PitrMemberStatus>, Vec<HaNode>) {
+        let members = [
+            ("root", "Postgres", "root"),
+            ("member-2", "Postgres-2", "replica"),
+        ]
+        .into_iter()
+        .map(|(id, name, role)| PitrMemberStatus {
+            service: ResourceRef {
+                id: id.to_string(),
+                name: name.to_string(),
+            },
+            cluster_role: Some(role.to_string()),
+            live_role: None,
+            enabled: true,
+            bucket_wired: true,
+        })
+        .collect();
+        // The root's Patroni name is template-authored ("postgres-1"), never
+        // its own service name -- the case `member_identity_name` exists for.
+        let nodes = vec![
+            HaNode {
+                service_id: "root".to_string(),
+                service_name: "Postgres".to_string(),
+                node_name: "postgres-1".to_string(),
+            },
+            HaNode {
+                service_id: "member-2".to_string(),
+                service_name: "Postgres-2".to_string(),
+                node_name: "postgres-2".to_string(),
+            },
+        ];
+        (members, nodes)
+    }
+
+    fn patroni_member(name: &str, role: &str) -> PatroniMember {
+        PatroniMember {
+            name: name.to_string(),
+            role: role.to_string(),
+            state: "running".to_string(),
+            ..PatroniMember::default()
+        }
+    }
+
+    fn cluster_view(
+        instances: &[(&str, &str)],
+        answered_by: &str,
+        members: Vec<PatroniMember>,
+    ) -> HaClusterView {
+        HaClusterView {
+            instance_ids: instances
+                .iter()
+                .map(|(service, instance)| (service.to_string(), instance.to_string()))
+                .collect(),
+            answered_by: answered_by.to_string(),
+            members,
+        }
+    }
+
+    fn two_member_view(leader: &str) -> HaClusterView {
+        cluster_view(
+            &[("root", "inst-root"), ("member-2", "inst-2")],
+            "inst-root",
+            vec![
+                patroni_member(
+                    "postgres-1",
+                    if leader == "root" {
+                        "leader"
+                    } else {
+                        "replica"
+                    },
+                ),
+                patroni_member(
+                    "postgres-2",
+                    if leader == "member-2" {
+                        "leader"
+                    } else {
+                        "replica"
+                    },
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn select_ha_leader_joins_patroni_roles_by_node_name() {
+        // Case-insensitive on Patroni's side, like `ha status`.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("POSTGRES-1", "replica"),
+            patroni_member("postgres-2", "leader"),
+        ];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(1));
+        assert_eq!(members[0].live_role.as_deref(), Some("replica"));
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+
+        // The root can be the live leader too; the structural role never decides,
+        // and Patroni's own vocabulary is kept.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "leader"),
+            patroni_member("postgres-2", "sync_standby"),
+        ];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(0));
+        assert_eq!(members[1].live_role.as_deref(), Some("sync_standby"));
+    }
+
+    #[test]
+    fn select_ha_leader_refuses_zero_or_many_leaders() {
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "replica"),
+            patroni_member("postgres-2", "replica"),
+        ];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(err.contains("no leader"), "{err}");
+        // Roles are still recorded so the Members listing stays truthful.
+        assert_eq!(members[0].live_role.as_deref(), Some("replica"));
+
+        let (mut members, nodes) = ha_probe_members();
+        let view = [
+            patroni_member("postgres-1", "leader"),
+            patroni_member("postgres-2", "leader"),
+        ];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(
+            err.contains("2 leaders") && err.contains("Postgres, Postgres-2"),
+            "{err}"
+        );
+
+        // A leader Patroni knows but Railway doesn't is never adopted.
+        let (mut members, nodes) = ha_probe_members();
+        let view = [patroni_member("postgres-9", "leader")];
+        let err = select_ha_leader(&mut members, &nodes, &view).unwrap_err();
+        assert!(err.contains("postgres-9"), "{err}");
+        assert!(
+            members
+                .iter()
+                .all(|m| m.live_role.as_deref() == Some(LIVE_ROLE_ABSENT))
+        );
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reads_only_the_patroni_leader() {
+        for leader in ["root", "member-2"] {
+            let (mut members, nodes) = ha_probe_members();
+            let probes = std::cell::RefCell::new(Vec::new());
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || std::future::ready(Ok(two_member_view(leader))),
+                |instance_id, parts| {
+                    probes.borrow_mut().push((instance_id, parts));
+                    std::future::ready(PitrLiveProbe {
+                        available: true,
+                        in_recovery: Some(false),
+                        archiver_healthy: Some(true),
+                        backup_set_count: Some(3),
+                        ..PitrLiveProbe::default()
+                    })
+                },
+            )
+            .await;
+            let expected = if leader == "root" {
+                "inst-root"
+            } else {
+                "inst-2"
+            };
+            assert_eq!(
+                *probes.borrow(),
+                vec![(expected.to_string(), ProbeParts::Full)]
+            );
+            assert_eq!(live.archiver_healthy, Some(true));
+            assert_eq!(live.backup_set_count, Some(3));
+            assert!(live.archiver_error.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reports_discovery_failure_without_probing() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Err(HaDiscoveryFailure::without_coverage(
+                    "Patroni could not be reached on any HA member (Postgres: no SSH keys found)"
+                        .to_string(),
+                )))
+            },
+            |_, _| -> std::future::Ready<PitrLiveProbe> {
+                panic!("nothing to probe without a cluster view")
+            },
+        )
+        .await;
+        assert!(!live.available);
+        assert!(
+            live.unavailable_reason
+                .unwrap()
+                .contains("no SSH keys found")
+        );
+        assert!(members.iter().all(|m| m.live_role.is_none()));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_keeps_coverage_when_no_single_leader() {
+        let (mut members, nodes) = ha_probe_members();
+        let probes = std::cell::RefCell::new(Vec::new());
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Ok(cluster_view(
+                    &[("root", "inst-root"), ("member-2", "inst-2")],
+                    "inst-2",
+                    vec![
+                        patroni_member("postgres-1", "replica"),
+                        patroni_member("postgres-2", "replica"),
+                    ],
+                )))
+            },
+            |instance_id, parts| {
+                probes.borrow_mut().push((instance_id, parts));
+                std::future::ready(PitrLiveProbe {
+                    available: true,
+                    backup_set_count: Some(3),
+                    ..PitrLiveProbe::default()
+                })
+            },
+        )
+        .await;
+        // Coverage is read once, from the member that answered Patroni,
+        // without the archiver half.
+        assert_eq!(
+            *probes.borrow(),
+            vec![("inst-2".to_string(), ProbeParts::CoverageOnly)]
+        );
+        assert!(live.available);
+        assert_eq!(live.backup_set_count, Some(3));
+        assert!(
+            live.archiver_error
+                .as_deref()
+                .unwrap()
+                .contains("no leader")
+        );
+        let json = serde_json::to_value(&live).unwrap();
+        for field in [
+            "archiverHealthy",
+            "archiverLastArchivedAt",
+            "maxRestoreTime",
+        ] {
+            assert!(json.get(field).is_none(), "{field} must not reach JSON");
+        }
+    }
+
+    #[tokio::test]
+    async fn ha_probe_does_not_fall_back_when_leader_probe_fails() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || std::future::ready(Ok(two_member_view("member-2"))),
+            |instance_id, _| {
+                assert_eq!(instance_id, "inst-2", "must not retry on the root");
+                std::future::ready(unavailable("probe timed out".to_string()))
+            },
+        )
+        .await;
+        assert!(!live.available);
+        assert_eq!(live.unavailable_reason.as_deref(), Some("probe timed out"));
+        // Patroni's view still stands in the Members listing.
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_leader_without_live_deployment_is_unavailable() {
+        let (mut members, nodes) = ha_probe_members();
+        let live = probe_pitr_ha(
+            &mut members,
+            &nodes,
+            || {
+                std::future::ready(Ok(cluster_view(
+                    &[("root", "inst-root")],
+                    "inst-root",
+                    vec![
+                        patroni_member("postgres-1", "replica"),
+                        patroni_member("postgres-2", "leader"),
+                    ],
+                )))
+            },
+            |_, _| -> std::future::Ready<PitrLiveProbe> { panic!("no instance to probe") },
+        )
+        .await;
+        assert!(!live.available);
+        assert!(live.unavailable_reason.unwrap().contains("Postgres-2"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_discards_archiver_data_if_leader_is_no_longer_primary() {
+        for role in [Some(true), None] {
+            let (mut members, nodes) = ha_probe_members();
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || std::future::ready(Ok(two_member_view("member-2"))),
+                |_, _| {
+                    std::future::ready(PitrLiveProbe {
+                        available: true,
+                        in_recovery: role,
+                        backup_set_count: Some(3),
+                        archiver_healthy: Some(true),
+                        archiver_last_archived_at: Some("stale archive time".to_string()),
+                        max_restore_time: Some("stale restore time".to_string()),
+                        ..PitrLiveProbe::default()
+                    })
+                },
+            )
+            .await;
+            assert!(live.available);
+            assert_eq!(live.backup_set_count, Some(3));
+            assert!(live.archiver_error.is_some());
+            let json = serde_json::to_value(&live).unwrap();
+            for field in [
+                "archiverHealthy",
+                "archiverLastArchivedAt",
+                "maxRestoreTime",
+            ] {
+                assert!(
+                    json.get(field).is_none(),
+                    "stale {field} must not reach JSON"
+                );
+            }
+            let expected_role = if role == Some(true) {
+                "replica"
+            } else {
+                "leader"
+            };
+            assert_eq!(members[1].live_role.as_deref(), Some(expected_role));
+        }
+    }
+
+    #[test]
+    fn select_ha_leader_marks_members_patroni_does_not_list() {
+        let (mut members, nodes) = ha_probe_members();
+        let view = [patroni_member("postgres-2", "leader")];
+        assert_eq!(select_ha_leader(&mut members, &nodes, &view), Ok(1));
+        assert_eq!(members[0].live_role.as_deref(), Some(LIVE_ROLE_ABSENT));
+        assert_eq!(members[1].live_role.as_deref(), Some("leader"));
+    }
+
+    #[tokio::test]
+    async fn ha_probe_reads_coverage_when_patroni_answers_nowhere() {
+        for coverage_ok in [true, false] {
+            let (mut members, nodes) = ha_probe_members();
+            let probes = std::cell::RefCell::new(Vec::new());
+            let live = probe_pitr_ha(
+                &mut members,
+                &nodes,
+                || {
+                    std::future::ready(Err(HaDiscoveryFailure {
+                        reason: "Patroni could not be reached on any HA member".to_string(),
+                        coverage_from: Some("inst-root".to_string()),
+                    }))
+                },
+                |instance_id, parts| {
+                    probes.borrow_mut().push((instance_id, parts));
+                    std::future::ready(if coverage_ok {
+                        PitrLiveProbe {
+                            available: true,
+                            backup_set_count: Some(3),
+                            ..PitrLiveProbe::default()
+                        }
+                    } else {
+                        unavailable("probe timed out after 10s".to_string())
+                    })
+                },
+            )
+            .await;
+            assert_eq!(
+                *probes.borrow(),
+                vec![("inst-root".to_string(), ProbeParts::CoverageOnly)]
+            );
+            if coverage_ok {
+                assert!(live.available);
+                assert_eq!(live.backup_set_count, Some(3));
+                assert!(
+                    live.archiver_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("could not be reached")
+                );
+            } else {
+                assert!(!live.available);
+                let reason = live.unavailable_reason.unwrap();
+                assert!(
+                    reason.contains("could not be reached") && reason.contains("timed out"),
+                    "{reason}"
+                );
+            }
+            assert!(members.iter().all(|m| m.live_role.is_none()));
+        }
+    }
+
+    #[test]
+    fn ha_nodes_use_the_declared_patroni_identity() {
+        use crate::controllers::config::{ClusterWiring, ServiceInstance, Variable};
+
+        let var = |value: &str| {
+            Some(Variable {
+                value: Some(value.to_string()),
+                ..Variable::default()
+            })
+        };
+        let mut root = ServiceInstance {
+            cluster_role: Some("root".to_string()),
+            cluster_wiring: Some(ClusterWiring {
+                replica_node_name_variable: Some("PATRONI_NAME".to_string()),
+                ..ClusterWiring::default()
+            }),
+            ..ServiceInstance::default()
+        };
+        root.variables
+            .insert("PATRONI_NAME".to_string(), var("postgres-1"));
+        let mut replica = ServiceInstance {
+            parent_service_id: Some("root".to_string()),
+            cluster_role: Some("replica".to_string()),
+            ..ServiceInstance::default()
+        };
+        replica
+            .variables
+            .insert("PATRONI_NAME".to_string(), var("postgres-2"));
+        let mut config = EnvironmentConfig::default();
+        config.services.insert("root".to_string(), root);
+        config.services.insert("member-2".to_string(), replica);
+
+        let (members, _) = ha_probe_members();
+        let nodes = ha_nodes(&members, &config, "root");
+        // The root joins Patroni by its template-authored name, never by its
+        // display name ("Postgres").
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|n| n.node_name.as_str())
+                .collect::<Vec<_>>(),
+            ["postgres-1", "postgres-2"]
+        );
+    }
+
+    #[test]
+    fn describe_discovery_failures_names_every_member() {
+        let (_, nodes) = ha_probe_members();
+        let instances: BTreeMap<String, String> = [("root".to_string(), "inst-root".to_string())]
+            .into_iter()
+            .collect();
+        let failures = [(
+            "inst-root".to_string(),
+            "Patroni probe timed out after 10s".to_string(),
+        )];
+        let text = describe_discovery_failures(&nodes, &instances, &failures);
+        assert!(
+            text.contains("Postgres: Patroni probe timed out after 10s"),
+            "{text}"
+        );
+        assert!(text.contains("Postgres-2: no live deployment"), "{text}");
+    }
+
+    #[test]
+    fn apply_pgbackrest_info_extracts_backup_count_and_wal_range() {
+        let output = serde_json::json!([
+            {
+                "backup": [
+                    { "timestamp": { "start": 1700000000, "stop": 1700000100 } },
+                    { "timestamp": { "start": 1700003600, "stop": 1700003700 } }
+                ],
+                "archive": [
+                    { "min": "000000010000000000000001", "max": "000000010000000000000005" }
+                ]
+            }
+        ])
+        .to_string();
+
+        let mut probe = PitrLiveProbe::default();
+        apply_pgbackrest_info(&mut probe, &output);
+        assert_eq!(probe.backup_set_count, Some(2));
+        assert_eq!(probe.wal_min.as_deref(), Some("000000010000000000000001"));
+        assert_eq!(probe.wal_max.as_deref(), Some("000000010000000000000005"));
+        assert!(probe.latest_backup_at.is_some());
+    }
+
+    #[test]
+    fn apply_pgbackrest_info_degrades_on_unparseable_output() {
+        let mut probe = PitrLiveProbe::default();
+        apply_pgbackrest_info(&mut probe, "not json");
+        assert!(probe.backup_coverage_error.is_some());
+        assert_eq!(probe.backup_set_count, None);
+    }
+
+    // The archive variable contract each engine's enabled-state detection and
+    // overlay ride on: the same gate suffix over an engine-specific prefix. A
+    // drift here would make `status` read the wrong engine's variables and
+    // report a configured database as having no archive at all.
+    #[test]
+    fn archive_variable_names_resolve_per_engine() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES};
+
+        let postgres = POSTGRES.pitr.unwrap();
+        assert_eq!(postgres.archive_gate_variable(), "WAL_ARCHIVE_BUCKET");
+        assert_eq!(postgres.template_code, "postgres-pitr");
+
+        let mysql = MYSQL.pitr.unwrap();
+        assert_eq!(mysql.archive_gate_variable(), "BINLOG_ARCHIVE_BUCKET");
+        assert_eq!(mysql.template_code, "mysql-pitr");
+    }
+
+    // The gate in front of every HA-workflow path (enable/disable's cluster
+    // branches, progress/cancel/clear) follows the declaration: both shipped
+    // engines roll their clusters, and an engine that declares no rolling
+    // workflow is refused with the reason, never routed into the workflow's
+    // GraphQL operations.
+    #[test]
+    fn ha_workflow_gate_follows_the_engine_declaration() {
+        use crate::controllers::database_engines::{DatabaseEngine, MYSQL, POSTGRES, PitrSpec};
+
+        assert!(ha_pitr_unsupported_reason(&POSTGRES, &POSTGRES.pitr.unwrap()).is_none());
+        assert!(ha_pitr_unsupported_reason(&MYSQL, &MYSQL.pitr.unwrap()).is_none());
+
+        let standalone_only = PitrSpec {
+            supports_ha: false,
+            ..MYSQL.pitr.unwrap()
+        };
+        let engine = DatabaseEngine {
+            display_name: "Widget",
+            ..MYSQL
+        };
+        let reason = ha_pitr_unsupported_reason(&engine, &standalone_only).unwrap();
+        assert!(reason.contains("Widget"));
+        assert!(reason.contains("standalone-only"));
+    }
+
+    // The coverage probe is selected by the declared probe kind: an engine
+    // that ships none renders no coverage section instead of a fake
+    // "unavailable" (or a probe run with another engine's tooling).
+    #[test]
+    fn live_probe_runs_only_for_engines_declaring_one() {
+        use crate::controllers::database_engines::{MYSQL, POSTGRES};
+
+        assert!(live_probe_applies(&POSTGRES.pitr.unwrap()));
+        assert!(!live_probe_applies(&MYSQL.pitr.unwrap()));
+    }
+}

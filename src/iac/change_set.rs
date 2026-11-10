@@ -1,0 +1,2219 @@
+use std::collections::{BTreeMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+use crate::controllers::regions::BucketRegion;
+
+use super::functions::{
+    decode_function_code, function_code_of, is_function_resource, source_code_diff_lines,
+};
+use super::graph::{
+    RailwayGraph, VariablePolicyReport, resource_addr, resource_address, resource_name,
+    resource_type,
+};
+use super::json::{field, field_str, stable_stringify};
+use super::partial::{
+    IacPartials, effective_partial, foreign_resource_message, has_named_partials,
+    nameless_file_message, owner_of,
+};
+
+pub const RAILWAY_CHANGE_SET_VERSION: u32 = 1;
+const MASKED_CREDENTIAL_VALUE: &str = "*****";
+const REDACTED_VARIABLE_VALUE: &str = "«hidden»";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ChangeSet {
+    pub version: u32,
+    pub changes: Vec<Value>,
+    pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<ChangeSetTelemetry>,
+}
+
+/// Authoring language is the only adoption dimension the server cannot observe
+/// on its own: CLI version arrives in the request headers, the engine is
+/// implied by the change set API, and CI is already on the `config` command
+/// event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeSetTelemetry {
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Diagnostic {
+    pub severity: String,
+    pub path: String,
+    pub message: String,
+}
+
+pub struct DiffOptions<'a> {
+    pub current: &'a RailwayGraph,
+    pub desired: &'a RailwayGraph,
+    pub reveal_values: bool,
+    pub partial: Option<&'a str>,
+    pub owners: Option<&'a IacPartials>,
+}
+
+/// PR environment plus repo default branches, used when a branch-less
+/// `github()` source is created. Updates never consult this: an omitted
+/// branch is owned by the environment.
+pub struct BranchFollow<'a> {
+    pub in_pr_environment: bool,
+    pub pr_branch: Option<&'a str>,
+    pub pr_repo: Option<&'a str>,
+    pub default_branches: &'a BTreeMap<String, String>,
+}
+
+pub fn diff_graphs(options: DiffOptions<'_>) -> ChangeSet {
+    diff_graphs_following(options, None)
+}
+
+pub fn diff_graphs_following(
+    options: DiffOptions<'_>,
+    follow: Option<&BranchFollow<'_>>,
+) -> ChangeSet {
+    let mut changes = Vec::new();
+    let mut diagnostics = Vec::new();
+    let desired_by: Map<String, Value> = options
+        .desired
+        .resources
+        .iter()
+        .map(|resource| (resource_addr(resource), resource.clone()))
+        .collect();
+    let current_by: Map<String, Value> = options
+        .current
+        .resources
+        .iter()
+        .map(|resource| (paired_address(resource, &desired_by), resource.clone()))
+        .collect();
+    let p = effective_partial(options.partial).to_string();
+    let declared: Vec<String> = options
+        .desired
+        .resources
+        .iter()
+        .map(resource_addr)
+        .collect();
+
+    if p == super::partial::PROJECT_PARTIAL && has_named_partials(options.owners) {
+        diagnostics.push(Diagnostic {
+            severity: "error".into(),
+            path: "partial".into(),
+            message: nameless_file_message(),
+        });
+        return change_set_result(changes, diagnostics, options.partial, declared);
+    }
+
+    let mut compiled = compile_variable_policy(options.current, options.desired);
+    diagnostics.append(&mut compiled.diagnostics);
+
+    for resource in &options.desired.resources {
+        let address = resource_addr(resource);
+        let previous = current_by.get(&address);
+        if let Some(owner) = owner_of(options.owners, &address) {
+            if owner != p {
+                diagnostics.push(Diagnostic {
+                    severity: "error".into(),
+                    path: format!("resources.{address}"),
+                    message: foreign_resource_message(&address, owner),
+                });
+                continue;
+            }
+        }
+        if let Some(previous) = previous {
+            if is_managed_by_repo_config(previous) {
+                let config_file = field_str(previous, "configFile").unwrap_or("repo config");
+                diagnostics.push(Diagnostic {
+                    severity: "error".into(),
+                    path: format!("resources.{address}.configFile"),
+                    message: format!(
+                        "{} is already managed by {config_file}. Remove or migrate the repo config before managing this service from .railway/railway.ts.",
+                        resource_name(previous)
+                    ),
+                });
+                continue;
+            }
+        }
+        diagnose_variable_declarations(resource, &compiled, &mut diagnostics);
+        if previous.is_none() {
+            diagnose_unsupported_custom_domains(resource, &mut diagnostics, None);
+            diagnose_new_bucket_region(resource, &mut diagnostics);
+            let mut created = without_ignored_variables(resource, &compiled);
+            let mut branch_line = None;
+            if let Some(follow) = follow {
+                match resolve_create_branch(&created, follow) {
+                    CreateBranch::Keep => {}
+                    CreateBranch::Set { branch, line } => {
+                        if let Some(source) =
+                            created.get_mut("source").and_then(Value::as_object_mut)
+                        {
+                            source.insert("branch".into(), json!(branch));
+                        }
+                        branch_line = Some(line);
+                    }
+                    CreateBranch::Error(message) => {
+                        diagnostics.push(Diagnostic {
+                            severity: "error".into(),
+                            path: format!("resources.{address}.source.branch"),
+                            message,
+                        });
+                        continue;
+                    }
+                }
+            }
+            let summary = match &branch_line {
+                Some(line) => format!(
+                    "Create {} {} ({line})",
+                    resource_type(resource),
+                    resource_name(resource)
+                ),
+                None => format!(
+                    "Create {} {}",
+                    resource_type(resource),
+                    resource_name(resource)
+                ),
+            };
+            let mut change = json!({
+                "kind": "resource.create",
+                "address": address,
+                "resource": created,
+                "path": format!("resources.{address}"),
+                "summary": summary,
+                "severity": "safe",
+                "deployEffect": if matches!(resource_type(resource), "service" | "database") { "deploy" } else { "none" },
+            });
+            let mut details: Vec<String> = branch_line.into_iter().collect();
+            if is_function_resource(resource) {
+                if let Some(code) = resource.get("deploy").and_then(function_code_of) {
+                    details.push(format!("source code ({} lines)", code.lines().count()));
+                }
+            }
+            if !details.is_empty() {
+                change["details"] = json!(details);
+            }
+            changes.push(change);
+            continue;
+        }
+        let mut previous = previous.unwrap().clone();
+        if resource_type(&previous) != resource_type(resource) {
+            // Paired across service/database: same service on Railway, only
+            // the CLI's classification differs. Diff it as the declared kind so
+            // edits still apply; the server never sees a type change.
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                path: format!("resources.{address}"),
+                message: format!(
+                    "{} exists on Railway as a {} but is declared as a {}. Changes are still applied; declare it with {}() so the config matches Railway.",
+                    resource_name(resource),
+                    resource_type(&previous),
+                    resource_type(resource),
+                    resource_type(&previous)
+                ),
+            });
+            // Database nodes carry the image as top-level `image`; service
+            // nodes as `source.image`. Mirror it so the source diff is honest.
+            let image = field_str(&previous, "image")
+                .or_else(|| field_str(previous.get("source").unwrap_or(&Value::Null), "image"))
+                .map(str::to_string);
+            if let Some(image) = image {
+                previous["image"] = json!(image);
+                if previous.get("source").is_none() {
+                    previous["source"] = json!({ "type": "image", "image": image });
+                }
+            }
+            previous["type"] = json!(resource_type(resource));
+            previous["address"] = json!(address);
+        }
+        let previous = &previous;
+        if let Some(follow) = follow.filter(|follow| follow.in_pr_environment) {
+            if let Some(message) = pr_branch_pin_error(previous, resource, follow.pr_repo) {
+                diagnostics.push(Diagnostic {
+                    severity: "error".into(),
+                    path: format!("resources.{address}.source.branch"),
+                    message,
+                });
+            }
+        }
+        if field_str(previous, "name") != field_str(resource, "name") {
+            changes.push(update(
+                &address,
+                "name",
+                json!(field_str(previous, "name")),
+                json!(field_str(resource, "name")),
+                format!(
+                    "Rename {} {} to {}",
+                    resource_type(resource),
+                    resource_name(previous),
+                    resource_name(resource)
+                ),
+                None,
+                "safe",
+            ));
+        }
+        diff_variables(
+            previous,
+            resource,
+            &mut changes,
+            &desired_by,
+            options.reveal_values,
+            &compiled,
+            &mut diagnostics,
+        );
+        diff_top_level_field(previous, resource, "source", &mut changes);
+        diff_top_level_field(previous, resource, "build", &mut changes);
+        if resource_type(previous) == "database" && resource_type(resource) == "database" {
+            diff_database_deploy(previous, resource, &mut changes);
+        } else if resource_type(previous) == "service" && resource_type(resource) == "service" {
+            diff_service_deploy(previous, resource, &mut changes, &mut diagnostics);
+        } else {
+            diff_top_level_field(previous, resource, "deploy", &mut changes);
+        }
+        diff_top_level_field(previous, resource, "groupId", &mut changes);
+        if resource_type(resource) == "service" {
+            diff_top_level_field(previous, resource, "tracing", &mut changes);
+            diff_top_level_field(previous, resource, "cdn", &mut changes);
+        }
+        diff_networking(previous, resource, &mut changes, &mut diagnostics);
+        if resource_type(previous) == "bucket" && resource_type(resource) == "bucket" {
+            if bucket_region(previous) != bucket_region(resource) {
+                diagnostics.push(Diagnostic {
+                    severity: "error".into(),
+                    path: format!("resources.{address}.config.region"),
+                    message: format!(
+                        "Bucket region cannot be changed after creation. Create a new bucket in {} and migrate data instead.",
+                        bucket_region(resource).unwrap_or_else(|| "the desired region".to_string())
+                    ),
+                });
+            } else {
+                diff_top_level_field(previous, resource, "config", &mut changes);
+            }
+        } else if resource_type(previous) == "volume" && resource_type(resource) == "volume" {
+            diff_volume_config(previous, resource, &mut changes);
+        } else {
+            diff_top_level_field(previous, resource, "config", &mut changes);
+        }
+        diff_volume_attachments(previous, resource, &mut changes);
+    }
+
+    for resource in &options.current.resources {
+        let address = paired_address(resource, &desired_by);
+        if desired_by.contains_key(&address) {
+            continue;
+        }
+        if p != super::partial::PROJECT_PARTIAL
+            && owner_of(options.owners, &address) != Some(p.as_str())
+        {
+            continue;
+        }
+        if resource_type(resource) == "volume" {
+            let mounted = options.current.edges.iter().any(|edge| {
+                edge.kind == "mount" && edge.to == address && desired_by.contains_key(&edge.from)
+            });
+            if mounted {
+                diagnostics.push(Diagnostic {
+                    severity: "warning".into(),
+                    path: format!("resources.{address}"),
+                    message: format!(
+                        "Volume {} exists on Railway but is not declared in the config. Volumes are never deleted by config apply; delete it from the dashboard if that is intended.",
+                        resource_name(resource)
+                    ),
+                });
+            }
+            continue;
+        }
+        changes.push(json!({
+            "kind": "resource.delete",
+            "address": address,
+            "previous": resource,
+            "path": format!("resources.{address}"),
+            "summary": format!("Delete {} {}", resource_type(resource), resource_name(resource)),
+            "severity": "destructive",
+            "deployEffect": if matches!(resource_type(resource), "service" | "database") { "deploy" } else { "none" },
+        }));
+    }
+
+    change_set_result(changes, diagnostics, options.partial, declared)
+}
+
+/// A Railway-managed database and a plain service with the same name are the
+/// same service on Railway; only the CLI's classification differs. Match them
+/// by name so the plan never proposes deleting one to create the other.
+fn paired_address(resource: &Value, desired_by: &Map<String, Value>) -> String {
+    let address = resource_addr(resource);
+    if desired_by.contains_key(&address) {
+        return address;
+    }
+    let sibling = match resource_type(resource) {
+        "service" => "database",
+        "database" => "service",
+        _ => return address,
+    };
+    let sibling = resource_address(sibling, resource_name(resource));
+    if desired_by.contains_key(&sibling) {
+        sibling
+    } else {
+        address
+    }
+}
+
+fn change_set_result(
+    changes: Vec<Value>,
+    diagnostics: Vec<Diagnostic>,
+    partial: Option<&str>,
+    declared: Vec<String>,
+) -> ChangeSet {
+    ChangeSet {
+        version: RAILWAY_CHANGE_SET_VERSION,
+        changes,
+        diagnostics,
+        partial: partial.map(str::to_string),
+        declared,
+        telemetry: None,
+    }
+}
+
+pub fn render_change_set(change_set: &ChangeSet) -> String {
+    if change_set.changes.is_empty() {
+        return "No changes.".to_string();
+    }
+    change_set
+        .changes
+        .iter()
+        .map(|change| {
+            let marker = match field_str(change, "kind") {
+                Some("resource.create") | Some("domain.create") => "+",
+                Some("resource.delete") => "-",
+                _ => "~",
+            };
+            format!(
+                "{marker} {}",
+                field_str(change, "summary").unwrap_or("change")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct ParsedPattern {
+    raw: String,
+    service: Option<String>,
+    glob: String,
+}
+
+impl ParsedPattern {
+    fn matches(&self, resource_name: &str, key: &str) -> bool {
+        if let Some(service) = &self.service {
+            if service != resource_name {
+                return false;
+            }
+        }
+        glob_match(&self.glob, key)
+    }
+}
+
+struct CompiledVariables {
+    managed: bool,
+    parse_error: bool,
+    patterns: Vec<ParsedPattern>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+enum PatternFault {
+    Empty,
+    Slash,
+    EmptyKey,
+}
+
+pub fn variable_policy_report(
+    current: &RailwayGraph,
+    desired: &RailwayGraph,
+) -> VariablePolicyReport {
+    let compiled = compile_variable_policy(current, desired);
+    let mut by_pattern = BTreeMap::new();
+    for pattern in &compiled.patterns {
+        by_pattern.insert(pattern.raw.clone(), count_matches(pattern, current));
+    }
+    VariablePolicyReport {
+        managed: desired.variables.managed,
+        ignore: desired.variables.ignore.clone(),
+        default: desired.variables.default,
+        ignored_count: count_ignored(&compiled.patterns, current),
+        by_pattern,
+    }
+}
+
+fn compile_variable_policy(current: &RailwayGraph, desired: &RailwayGraph) -> CompiledVariables {
+    let policy = &desired.variables;
+    let mut diagnostics = Vec::new();
+    if let Some(message) = &policy.error {
+        diagnostics.push(Diagnostic {
+            severity: "error".into(),
+            path: "variables".into(),
+            message: message.clone(),
+        });
+        return CompiledVariables {
+            managed: policy.managed,
+            parse_error: true,
+            patterns: Vec::new(),
+            diagnostics,
+        };
+    }
+    let names = resource_names(current, desired);
+    let mut patterns = Vec::new();
+    for raw in &policy.ignore {
+        match parse_pattern(raw) {
+            Ok(pattern) => {
+                if let Some(service) = &pattern.service {
+                    if !names.contains(service) {
+                        diagnostics.push(Diagnostic {
+                            severity: "error".into(),
+                            path: "variables.ignore".into(),
+                            message: format!(
+                                "variables.ignore pattern \"{raw}\" names \"{service}\", which is neither in the file nor on Railway."
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                patterns.push(pattern);
+            }
+            Err(fault) => diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: "variables.ignore".into(),
+                message: pattern_fault_message(raw, fault),
+            }),
+        }
+    }
+    for pattern in &patterns {
+        if !pattern_matches_any(pattern, current) && !pattern_matches_any(pattern, desired) {
+            diagnostics.push(Diagnostic {
+                severity: "warning".into(),
+                path: "variables.ignore".into(),
+                message: format!(
+                    "variables.ignore pattern \"{}\" matches no variable.",
+                    pattern.raw
+                ),
+            });
+        }
+    }
+    CompiledVariables {
+        managed: policy.managed,
+        parse_error: false,
+        patterns,
+        diagnostics,
+    }
+}
+
+fn parse_pattern(raw: &str) -> Result<ParsedPattern, PatternFault> {
+    if raw.is_empty() {
+        return Err(PatternFault::Empty);
+    }
+    if raw.matches('/').count() > 1 {
+        return Err(PatternFault::Slash);
+    }
+    if let Some((service, key)) = raw.split_once('/') {
+        if service.is_empty() || key.is_empty() {
+            return Err(PatternFault::EmptyKey);
+        }
+        return Ok(ParsedPattern {
+            raw: raw.to_string(),
+            service: Some(service.to_string()),
+            glob: key.to_string(),
+        });
+    }
+    Ok(ParsedPattern {
+        raw: raw.to_string(),
+        service: None,
+        glob: raw.to_string(),
+    })
+}
+
+fn pattern_fault_message(raw: &str, fault: PatternFault) -> String {
+    match fault {
+        PatternFault::Empty => "variables.ignore contains an empty pattern.".into(),
+        PatternFault::Slash => {
+            format!("variables.ignore pattern \"{raw}\" has more than one '/'.")
+        }
+        PatternFault::EmptyKey => {
+            format!("variables.ignore pattern \"{raw}\" has an empty key.")
+        }
+    }
+}
+
+fn resource_names(current: &RailwayGraph, desired: &RailwayGraph) -> HashSet<String> {
+    current
+        .resources
+        .iter()
+        .chain(desired.resources.iter())
+        .map(|resource| resource_name(resource).to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn pattern_matches_any(pattern: &ParsedPattern, graph: &RailwayGraph) -> bool {
+    graph.resources.iter().any(|resource| {
+        let name = resource_name(resource);
+        resource
+            .get("variables")
+            .and_then(Value::as_object)
+            .is_some_and(|vars| vars.keys().any(|key| pattern.matches(name, key)))
+    })
+}
+
+fn count_matches(pattern: &ParsedPattern, graph: &RailwayGraph) -> usize {
+    graph
+        .resources
+        .iter()
+        .map(|resource| {
+            let name = resource_name(resource);
+            resource
+                .get("variables")
+                .and_then(Value::as_object)
+                .map(|vars| vars.keys().filter(|key| pattern.matches(name, key)).count())
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn count_ignored(patterns: &[ParsedPattern], graph: &RailwayGraph) -> usize {
+    graph
+        .resources
+        .iter()
+        .map(|resource| {
+            let name = resource_name(resource);
+            resource
+                .get("variables")
+                .and_then(Value::as_object)
+                .map(|vars| {
+                    vars.keys()
+                        .filter(|key| patterns.iter().any(|pattern| pattern.matches(name, key)))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum()
+}
+
+fn first_match<'a>(patterns: &'a [ParsedPattern], name: &str, key: &str) -> Option<&'a str> {
+    patterns
+        .iter()
+        .find(|pattern| pattern.matches(name, key))
+        .map(|pattern| pattern.raw.as_str())
+}
+
+fn has_variables_object(resource: &Value) -> bool {
+    resource.get("variables").is_some_and(Value::is_object)
+}
+
+fn filtered_variables(
+    variables: Option<&Value>,
+    patterns: &[ParsedPattern],
+    name: &str,
+) -> Map<String, Value> {
+    variables
+        .and_then(Value::as_object)
+        .map(|vars| {
+            vars.iter()
+                .filter(|(key, _)| first_match(patterns, name, key).is_none())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn non_ignored_keys(
+    variables: Option<&Value>,
+    patterns: &[ParsedPattern],
+    name: &str,
+) -> Vec<String> {
+    let mut keys: Vec<String> = variables
+        .and_then(Value::as_object)
+        .map(|vars| {
+            vars.keys()
+                .filter(|key| first_match(patterns, name, key).is_none())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn missing_env_message(name: &str, keys: &[String]) -> String {
+    let list = if keys.len() > 8 {
+        format!(
+            "{}\u{2026}",
+            keys.iter()
+                .take(8)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        keys.join(", ")
+    };
+    format!(
+        "{name} declares no env but Railway has {} variables ({list}). Declare them, mark them preserve(), or add them to variables.ignore.",
+        keys.len()
+    )
+}
+
+fn diagnose_variable_declarations(
+    resource: &Value,
+    policy: &CompiledVariables,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if policy.parse_error {
+        return;
+    }
+    let Some(vars) = resource.get("variables").and_then(Value::as_object) else {
+        return;
+    };
+    if !policy.managed {
+        if resource_type(resource) == "service" {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables", resource_addr(resource)),
+                message: format!(
+                    "Variables are unmanaged (project variables.managed is false). Remove env from {} or set managed: true.",
+                    resource_name(resource)
+                ),
+            });
+        }
+        return;
+    }
+    for key in vars.keys() {
+        if let Some(pattern) = first_match(&policy.patterns, resource_name(resource), key) {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables.{key}", resource_addr(resource)),
+                message: format!(
+                    "{}.{} is declared and also ignored by \"{pattern}\".",
+                    resource_name(resource),
+                    key
+                ),
+            });
+        }
+    }
+}
+
+fn without_ignored_variables(resource: &Value, policy: &CompiledVariables) -> Value {
+    if !policy.managed || policy.parse_error {
+        return resource.clone();
+    }
+    let mut resource = resource.clone();
+    let name = resource_name(&resource).to_string();
+    let empty = resource
+        .get("variables")
+        .and_then(Value::as_object)
+        .is_some_and(|vars| {
+            vars.keys()
+                .all(|key| first_match(&policy.patterns, &name, key).is_some())
+        });
+    if let Some(vars) = resource.get_mut("variables").and_then(Value::as_object_mut) {
+        vars.retain(|key, _| first_match(&policy.patterns, &name, key).is_none());
+    }
+    if empty {
+        if let Some(obj) = resource.as_object_mut() {
+            obj.remove("variables");
+        }
+    }
+    resource
+}
+
+/// `*` is the only metacharacter and matches any run of characters, including
+/// empty. The match is case-sensitive and covers the whole key.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut p = 0;
+    let mut t = 0;
+    let mut star_p = None;
+    let mut star_t = 0;
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == text[t] {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star_p = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+fn diff_variables(
+    previous: &Value,
+    resource: &Value,
+    changes: &mut Vec<Value>,
+    resources_by_address: &Map<String, Value>,
+    reveal_values: bool,
+    policy: &CompiledVariables,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if policy.parse_error || !policy.managed {
+        return;
+    }
+    let name = resource_name(resource);
+    // Template databases do not carry variables on the imported graph. Only
+    // services are asked to declare env; a database with no variables key
+    // keeps today's diff, which sees nothing to delete.
+    if resource_type(resource) == "service" && !has_variables_object(resource) {
+        let keys = non_ignored_keys(previous.get("variables"), &policy.patterns, name);
+        if !keys.is_empty() {
+            diagnostics.push(Diagnostic {
+                severity: "error".into(),
+                path: format!("resources.{}.variables", resource_addr(resource)),
+                message: missing_env_message(name, &keys),
+            });
+        }
+        return;
+    }
+    if previous.get("variables").is_none() && resource.get("variables").is_none() {
+        return;
+    }
+    let before = filtered_variables(previous.get("variables"), &policy.patterns, name);
+    let after = filtered_variables(resource.get("variables"), &policy.patterns, name);
+    for (key, value) in &after {
+        if is_preserved_variable(value) {
+            continue;
+        }
+        let current = before.get(key);
+        if !is_unknown_current_variable(current)
+            && stable_stringify(&normalize_variable_for_diff(current, resources_by_address))
+                == stable_stringify(&normalize_variable_for_diff(
+                    Some(value),
+                    resources_by_address,
+                ))
+        {
+            continue;
+        }
+        let mut change = json!({
+            "kind": "variable.set",
+            "address": resource_addr(resource),
+            "variable": key,
+            "after": value,
+            "path": format!("resources.{}.variables.{key}", resource_addr(resource)),
+            "summary": format!("{} variable {}.{}", if current.is_some() { "Update" } else { "Set" }, resource_name(resource), key),
+            "details": [format!(
+                "{}.{} ({} → {})",
+                resource_name(resource),
+                key,
+                format_variable_diff_value(current, resources_by_address, reveal_values),
+                format_variable_diff_value(Some(value), resources_by_address, reveal_values)
+            )],
+            "severity": "safe",
+            "deployEffect": "deploy",
+        });
+        if let Some(current) = current {
+            change["before"] = current.clone();
+        }
+        changes.push(change);
+    }
+    for (key, value) in &before {
+        if after.contains_key(key) {
+            continue;
+        }
+        changes.push(json!({
+            "kind": "variable.delete",
+            "address": resource_addr(resource),
+            "variable": key,
+            "previous": value,
+            "path": format!("resources.{}.variables.{key}", resource_addr(resource)),
+            "summary": format!("Delete variable {}.{}", resource_name(resource), key),
+            "severity": "destructive",
+            "deployEffect": "deploy",
+        }));
+    }
+}
+
+fn diff_networking(
+    previous: &Value,
+    resource: &Value,
+    changes: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let before = previous.get("networking");
+    let after = resource.get("networking");
+    // The database helpers take no networking, and pulled files only author it
+    // when a proxy exists, so a database node without a networking block keeps
+    // whatever exposure it has.
+    if resource_type(resource) == "database" && after.is_none() {
+        return;
+    }
+    let before_domains = before.and_then(|n| n.get("customDomains"));
+    diagnose_unsupported_custom_domains(resource, diagnostics, before_domains);
+    let mut before_copy = before.cloned().unwrap_or(json!({}));
+    let mut after_copy = after.cloned().unwrap_or(json!({}));
+    if let Some(obj) = before_copy.as_object_mut() {
+        obj.remove("customDomains");
+        obj.remove("serviceDomains");
+    }
+    if let Some(obj) = after_copy.as_object_mut() {
+        obj.remove("customDomains");
+        obj.remove("serviceDomains");
+    }
+    diagnose_unremovable_tcp_proxies(resource, diagnostics, &before_copy, &after_copy);
+    let normalized_before = normalize_for_diff("networking", &before_copy);
+    let normalized_after = normalize_for_diff("networking", &after_copy);
+    // Plan the change only when applying the authored block moves something.
+    // The block is a sparse patch, so what the plan promises is its effect,
+    // while the change set still carries the block as written: that is the
+    // payload the apply sends, and a `null` entry is how a proxy is deleted.
+    let applied = normalize_for_diff(
+        "networking",
+        &networking_after_apply(&before_copy, &after_copy),
+    );
+    if stable_stringify(&normalized_before) != stable_stringify(&applied) {
+        changes.push(update(
+            &resource_addr(resource),
+            "networking",
+            normalized_before,
+            normalized_after,
+            format!("Update {} networking", resource_name(resource)),
+            None,
+            "safe",
+        ));
+    }
+}
+
+/// What `networking` looks like once Railway has applied the authored block.
+///
+/// `environmentApplyChangeSet` reads the block as a sparse patch: a key the
+/// author leaves out stays as Railway has it, and inside `tcpProxies` an entry
+/// keeps or creates a proxy, a `null` entry deletes one, and an unmentioned port
+/// is left alone — so an empty map changes nothing. The plan diffs against that
+/// same effect, because a plan that plans anything else promises work the apply
+/// will not do and then plans it again after every apply.
+fn networking_after_apply(before: &Value, after: &Value) -> Value {
+    let mut effective = before.as_object().cloned().unwrap_or_default();
+    let Some(authored) = after.as_object() else {
+        return Value::Object(effective);
+    };
+    for (key, value) in authored {
+        if key != "tcpProxies" {
+            effective.insert(key.clone(), value.clone());
+            continue;
+        }
+        let mut proxies = before
+            .get("tcpProxies")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (port, entry) in value.as_object().into_iter().flatten() {
+            if entry.is_null() {
+                proxies.remove(port);
+            } else {
+                proxies.entry(port.clone()).or_insert_with(|| entry.clone());
+            }
+        }
+        effective.insert(key.clone(), Value::Object(proxies));
+    }
+    Value::Object(effective)
+}
+
+/// An empty `tcpProxies` map — what `tcp: []` compiles to — cannot take a proxy
+/// away, because the apply leaves every port the block does not mention alone.
+/// Say that out loud instead of leaving the author with a file that reads
+/// "private" next to a proxy that is still serving traffic.
+fn diagnose_unremovable_tcp_proxies(
+    resource: &Value,
+    diagnostics: &mut Vec<Diagnostic>,
+    before: &Value,
+    after: &Value,
+) {
+    let authored_empty = after
+        .get("tcpProxies")
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty);
+    if !authored_empty {
+        return;
+    }
+    let live = before.get("tcpProxies").and_then(Value::as_object);
+    let Some(live) = live.filter(|proxies| !proxies.is_empty()) else {
+        return;
+    };
+    let ports = live
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let removals = live
+        .keys()
+        .map(|port| format!("\"{port}\": null"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    diagnostics.push(Diagnostic {
+        severity: "warning".into(),
+        path: format!(
+            "resources.{}.networking.tcpProxies",
+            resource_addr(resource)
+        ),
+        message: format!(
+            "{} has a public TCP proxy on port {ports}, and an empty tcpProxies map does not remove it. Author networking.tcpProxies = {{ {removals} }} to remove the proxy, or remove it from the dashboard.",
+            resource_name(resource)
+        ),
+    });
+}
+
+fn diagnose_unsupported_custom_domains(
+    resource: &Value,
+    diagnostics: &mut Vec<Diagnostic>,
+    existing_domains: Option<&Value>,
+) {
+    let desired = resource
+        .get("networking")
+        .and_then(|n| n.get("customDomains"))
+        .and_then(Value::as_object);
+    let Some(desired) = desired else {
+        return;
+    };
+    let existing = existing_domains.and_then(Value::as_object);
+    for domain in desired.keys() {
+        if existing.is_some_and(|map| map.contains_key(domain)) {
+            continue;
+        }
+        diagnostics.push(Diagnostic {
+            severity: "error".into(),
+            path: format!("resources.{}.domains.{domain}", resource_addr(resource)),
+            message: format!(
+                "Custom-domain registration is not supported by Railway configuration. Add {domain} in the dashboard, then run railway config pull."
+            ),
+        });
+    }
+}
+
+fn diff_volume_attachments(previous: &Value, resource: &Value, changes: &mut Vec<Value>) {
+    let before = previous.get("volumeAttachments");
+    let after = resource.get("volumeAttachments");
+    let normalized_before = normalize_for_diff("volumeAttachments", before.unwrap_or(&Value::Null));
+    let normalized_after = normalize_for_diff("volumeAttachments", after.unwrap_or(&Value::Null));
+    if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
+        return;
+    }
+    let destructive = before
+        .and_then(Value::as_object)
+        .map(|before| {
+            let after = after
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            before.keys().any(|key| !after.contains_key(key))
+        })
+        .unwrap_or(false);
+    let details = changed_leaf_paths(&normalized_before, &normalized_after, "volumeAttachments");
+    changes.push(update(
+        &resource_addr(resource),
+        "volumeAttachments",
+        before.cloned().unwrap_or(Value::Null),
+        after.cloned().unwrap_or(Value::Null),
+        summary_for_field(
+            resource,
+            "volumeAttachments",
+            &normalized_before,
+            &normalized_after,
+        ),
+        Some(details),
+        if destructive { "destructive" } else { "safe" },
+    ));
+}
+
+enum CreateBranch {
+    Keep,
+    Set { branch: String, line: String },
+    Error(String),
+}
+
+fn resolve_create_branch(resource: &Value, follow: &BranchFollow<'_>) -> CreateBranch {
+    let Some(source) = resource.get("source") else {
+        return CreateBranch::Keep;
+    };
+    let Some(repo) = github_repo(source) else {
+        return CreateBranch::Keep;
+    };
+    if pinned_branch(source).is_some() {
+        return CreateBranch::Keep;
+    }
+    if follow.in_pr_environment
+        && follow
+            .pr_repo
+            .is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo))
+    {
+        return match follow.pr_branch.filter(|branch| !branch.is_empty()) {
+            Some(branch) => CreateBranch::Set {
+                branch: branch.to_string(),
+                line: format!("branch: {branch} (PR branch)"),
+            },
+            None => CreateBranch::Error(missing_branch_message(resource)),
+        };
+    }
+    if let Some(branch) = follow
+        .default_branches
+        .get(&repo.to_ascii_lowercase())
+        .cloned()
+        .filter(|branch| !branch.is_empty())
+    {
+        return CreateBranch::Set {
+            line: format!("branch: {branch} (repo default)"),
+            branch,
+        };
+    }
+    CreateBranch::Error(missing_branch_message(resource))
+}
+
+fn missing_branch_message(resource: &Value) -> String {
+    format!(
+        "{} is new and its github() source has no branch. Set branch for the first deploy; it can be removed afterwards.",
+        resource_name(resource)
+    )
+}
+
+fn pr_branch_pin_error(
+    previous: &Value,
+    resource: &Value,
+    pr_repo: Option<&str>,
+) -> Option<String> {
+    let desired = resource.get("source")?;
+    let pinned = pinned_branch(desired)?;
+    let repo = github_repo(desired)?;
+    // Only the PR's repo is rewritten to the PR branch. Other services keep their own.
+    if !pr_repo.is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo)) {
+        return None;
+    }
+    let current = previous.get("source").and_then(pinned_branch)?;
+    if pinned == current {
+        return None;
+    }
+    Some(format!(
+        "{} pins branch \"{pinned}\" but this PR environment deploys \"{current}\". Remove branch to follow the environment.",
+        resource_name(resource)
+    ))
+}
+
+fn github_repo(source: &Value) -> Option<&str> {
+    let obj = source.as_object()?;
+    if let Some(kind) = obj.get("type").and_then(Value::as_str) {
+        if kind != "github" {
+            return None;
+        }
+    } else if obj.get("image").and_then(Value::as_str).is_some() {
+        return None;
+    }
+    let repo = obj.get("repo").and_then(Value::as_str)?;
+    if repo.is_empty() { None } else { Some(repo) }
+}
+
+fn pinned_branch(source: &Value) -> Option<&str> {
+    source
+        .get("branch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+}
+
+fn source_omits_branch(source: &Value) -> bool {
+    github_repo(source).is_some() && pinned_branch(source).is_none()
+}
+
+fn drop_branch_key(value: &mut Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("branch");
+    }
+}
+
+pub fn needs_default_branch_lookup(
+    current: &RailwayGraph,
+    desired: &RailwayGraph,
+    in_pr_environment: bool,
+    pr_branch: Option<&str>,
+    pr_repo: Option<&str>,
+) -> bool {
+    let desired_by: Map<String, Value> = desired
+        .resources
+        .iter()
+        .map(|resource| (resource_addr(resource), resource.clone()))
+        .collect();
+    let current_by: HashSet<String> = current
+        .resources
+        .iter()
+        .map(|resource| paired_address(resource, &desired_by))
+        .collect();
+    desired.resources.iter().any(|resource| {
+        if current_by.contains(&resource_addr(resource)) {
+            return false;
+        }
+        let Some(source) = resource.get("source") else {
+            return false;
+        };
+        let Some(repo) = github_repo(source) else {
+            return false;
+        };
+        if pinned_branch(source).is_some() {
+            return false;
+        }
+        !(in_pr_environment
+            && pr_repo.is_some_and(|pr_repo| pr_repo.eq_ignore_ascii_case(repo))
+            && pr_branch.is_some_and(|branch| !branch.is_empty()))
+    })
+}
+
+/// Preview rewrites the change list. Keep the branch chosen for a new service,
+/// and the plan line that records why, so apply still creates a deploy trigger.
+pub fn preserve_resolved_create_branches(local: &[Value], previewed: &mut [Value]) {
+    for change in local {
+        let Some(line) = change
+            .get("details")
+            .and_then(Value::as_array)
+            .and_then(|details| {
+                details.iter().find_map(|detail| {
+                    let text = detail.as_str()?;
+                    text.starts_with("branch: ").then_some(text)
+                })
+            })
+        else {
+            continue;
+        };
+        let Some(address) = field_str(change, "address") else {
+            continue;
+        };
+        let Some(target) = previewed.iter_mut().find(|item| {
+            field_str(item, "address") == Some(address)
+                && field_str(item, "kind") == Some("resource.create")
+        }) else {
+            continue;
+        };
+        if let Some(branch) = change
+            .get("resource")
+            .and_then(|resource| resource.get("source"))
+            .and_then(|source| source.get("branch"))
+            .filter(|branch| branch.as_str().is_some())
+        {
+            if let Some(source) = target
+                .get_mut("resource")
+                .and_then(|resource| resource.get_mut("source"))
+                .and_then(Value::as_object_mut)
+            {
+                if source.get("branch").and_then(Value::as_str).is_none() {
+                    source.insert("branch".into(), branch.clone());
+                }
+            }
+        }
+        let mut details = target
+            .get("details")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !details.iter().any(|detail| detail.as_str() == Some(line)) {
+            details.insert(0, json!(line));
+            target["details"] = json!(details);
+        }
+        if field_str(target, "summary").is_none_or(|summary| !summary.contains(line)) {
+            if let Some(summary) = field_str(change, "summary") {
+                target["summary"] = json!(summary);
+            }
+        }
+    }
+}
+
+fn diff_top_level_field(
+    previous: &Value,
+    resource: &Value,
+    field_name: &str,
+    changes: &mut Vec<Value>,
+) {
+    let mut before = previous.get(field_name).cloned().unwrap_or(Value::Null);
+    let mut after = resource.get(field_name).cloned().unwrap_or(Value::Null);
+    if field_name == "source"
+        && resource_type(previous) == "database"
+        && is_equivalent_database_source(previous, &after)
+    {
+        return;
+    }
+    if field_name == "source"
+        && resource_type(resource) == "service"
+        && !source_supports_auto_updates(resource.get("source"))
+    {
+        before = without_auto_updates(&before);
+        after = without_auto_updates(&after);
+    }
+    // Omit the key. `branch: null` clears the branch and deletes the deploy trigger.
+    if field_name == "source" && source_omits_branch(&after) {
+        drop_branch_key(&mut before);
+        drop_branch_key(&mut after);
+    }
+    if field_name == "deploy" {
+        let stripped = strip_write_only_registry_credentials(&before, &after);
+        before = stripped.0;
+        after = stripped.1;
+    }
+    let normalized_before = normalize_for_diff(field_name, &before);
+    let normalized_after = normalize_for_diff(field_name, &after);
+    if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
+        return;
+    }
+    let details = changed_leaf_paths(&normalized_before, &normalized_after, field_name);
+    changes.push(update(
+        &resource_addr(resource),
+        field_name,
+        before,
+        after,
+        summary_for_field(resource, field_name, &normalized_before, &normalized_after),
+        Some(details),
+        "safe",
+    ));
+}
+
+fn diff_service_deploy(
+    previous: &Value,
+    resource: &Value,
+    changes: &mut Vec<Value>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let desired_deploy =
+        service_deploy_with_current_region(previous.get("deploy"), resource.get("deploy"));
+    let switching_away_from_image =
+        field_str(previous.get("source").unwrap_or(&Value::Null), "type") == Some("image")
+            && field_str(resource.get("source").unwrap_or(&Value::Null), "type") != Some("image");
+    let (before, after) = if switching_away_from_image
+        && previous
+            .get("deploy")
+            .and_then(|d| d.get("registryCredentials"))
+            .is_some()
+    {
+        (
+            without_registry_credentials(previous.get("deploy").unwrap_or(&Value::Null)),
+            {
+                let mut copy = desired_deploy.clone();
+                if copy.is_null() {
+                    copy = json!({});
+                }
+                copy["registryCredentials"] = Value::Null;
+                copy
+            },
+        )
+    } else {
+        strip_write_only_registry_credentials(
+            previous.get("deploy").unwrap_or(&Value::Null),
+            &desired_deploy,
+        )
+    };
+    let normalized_before = normalize_for_diff("deploy", &before);
+    let normalized_after = normalize_for_diff("deploy", &after);
+    if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
+        return;
+    }
+    let mut details = changed_leaf_paths(&normalized_before, &normalized_after, "deploy");
+    let mut summary = summary_for_field(resource, "deploy", &normalized_before, &normalized_after);
+    if is_function_resource(previous) || is_function_resource(resource) {
+        describe_function_code_change(
+            previous,
+            resource,
+            &normalized_before,
+            &normalized_after,
+            &mut details,
+            &mut summary,
+            diagnostics,
+        );
+    }
+    changes.push(update(
+        &resource_addr(resource),
+        "deploy",
+        before,
+        after,
+        summary,
+        Some(details),
+        "safe",
+    ));
+}
+
+/// Longest source diff a plan prints before eliding the rest.
+const MAX_SOURCE_DIFF_LINES: usize = 200;
+
+/// A function's source travels base64-encoded inside `deploy.startCommand`.
+/// Swap the opaque `startCommand (... → ...)` detail for a decoded source diff,
+/// and warn when the authored side would drop the code altogether.
+fn describe_function_code_change(
+    previous: &Value,
+    resource: &Value,
+    before: &Value,
+    after: &Value,
+    details: &mut Vec<String>,
+    summary: &mut String,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let before_command = field_str(before, "startCommand");
+    let after_command = field_str(after, "startCommand");
+    if before_command == after_command {
+        return;
+    }
+    let before_code = before_command.and_then(decode_function_code);
+    let after_code = after_command.and_then(decode_function_code);
+    if before_code.is_none() && after_code.is_none() {
+        return;
+    }
+    let Some(index) = details
+        .iter()
+        .position(|detail| detail.starts_with("deploy.startCommand ("))
+    else {
+        return;
+    };
+
+    let (headline, diff_lines) = match (&before_code, &after_code) {
+        (Some(before_code), Some(after_code)) => {
+            let (lines, insertions, deletions) = source_code_diff_lines(before_code, after_code);
+            (format!("source code (+{insertions} -{deletions})"), lines)
+        }
+        (Some(before_code), None) => {
+            let line_count = before_code.lines().count();
+            let rest = match after_command {
+                Some(command) => format!("replaced by {}", format_diff_value(&json!(command))),
+                None => "removed".to_string(),
+            };
+            (
+                format!("source code ({line_count} lines, {rest})"),
+                Vec::new(),
+            )
+        }
+        (None, Some(after_code)) => {
+            let line_count = after_code.lines().count();
+            let rest = match before_command {
+                Some(command) => format!("replaces {}", format_diff_value(&json!(command))),
+                None => "added".to_string(),
+            };
+            (
+                format!("source code ({line_count} lines, {rest})"),
+                Vec::new(),
+            )
+        }
+        (None, None) => unreachable!("handled above"),
+    };
+    details[index] = headline;
+
+    // Paths first, so the summary reads the same way `summary_for_field` does.
+    let shown = details
+        .iter()
+        .take(3)
+        .map(|detail| detail_path_for_summary(detail))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = details.len().saturating_sub(3);
+    *summary = format!(
+        "Update {} {shown}{}",
+        resource_name(resource),
+        if remaining > 0 {
+            format!(" and {remaining} more")
+        } else {
+            String::new()
+        }
+    );
+
+    if before_code.is_some() && after_command.is_none() {
+        diagnostics.push(Diagnostic {
+            severity: "warning".into(),
+            path: format!("resources.{}.deploy.startCommand", resource_addr(resource)),
+            message: format!(
+                "Function {} is declared without code. Applying removes its start command, and with it the source deployed on Railway. Pass `codeFile` (`code_file` in Python) to fn() to keep it, or run `railway config pull` to import the deployed source into `functions/`.",
+                resource_name(previous)
+            ),
+        });
+    }
+
+    let elided = diff_lines.len().saturating_sub(MAX_SOURCE_DIFF_LINES);
+    let insert_at = index + 1;
+    let mut inserted: Vec<String> = diff_lines.into_iter().take(MAX_SOURCE_DIFF_LINES).collect();
+    if elided > 0 {
+        inserted.push(format!("... ({elided} more lines)"));
+    }
+    details.splice(insert_at..insert_at, inserted);
+}
+
+fn service_deploy_with_current_region(previous: Option<&Value>, desired: Option<&Value>) -> Value {
+    let desired = desired.cloned().unwrap_or(Value::Null);
+    if desired.get("numReplicas").is_none() || desired.get("multiRegionConfig").is_some() {
+        return desired;
+    }
+    let Some(region) = single_deploy_region(previous) else {
+        return desired;
+    };
+    let mut rest = desired.clone();
+    let replicas = rest.get("numReplicas").cloned();
+    if let Some(obj) = rest.as_object_mut() {
+        obj.remove("numReplicas");
+        if let Some(replicas) = replicas {
+            obj.insert(
+                "multiRegionConfig".into(),
+                json!({ region: { "numReplicas": replicas } }),
+            );
+        }
+    }
+    rest
+}
+
+fn single_deploy_region(deploy: Option<&Value>) -> Option<String> {
+    let regions = deploy
+        .and_then(|d| d.get("multiRegionConfig"))
+        .and_then(Value::as_object)?;
+    let present: Vec<_> = regions
+        .iter()
+        .filter(|(_, config)| !config.is_null())
+        .collect();
+    if present.len() != 1 {
+        return None;
+    }
+    Some(present[0].0.clone())
+}
+
+fn diff_volume_config(previous: &Value, resource: &Value, changes: &mut Vec<Value>) {
+    let previous_config = drop_unauthored_platform_fields(
+        previous.get("config").unwrap_or(&Value::Null),
+        resource.get("config").unwrap_or(&Value::Null),
+        &["alerts", "allowOnlineResize"],
+    );
+    let before = normalize_for_diff("config", &previous_config);
+    let after = normalize_for_diff("config", resource.get("config").unwrap_or(&Value::Null));
+    if stable_stringify(&before) == stable_stringify(&after) {
+        return;
+    }
+    let previous_size = previous_config.get("sizeMB").and_then(Value::as_i64);
+    let desired_size = resource
+        .get("config")
+        .and_then(|c| c.get("sizeMB"))
+        .and_then(Value::as_i64);
+    let severity = if previous_config.get("region")
+        != resource.get("config").and_then(|c| c.get("region"))
+        || matches!((previous_size, desired_size), (Some(prev), Some(next)) if next < prev)
+    {
+        "destructive"
+    } else {
+        "safe"
+    };
+    let details = changed_leaf_paths(&before, &after, "config");
+    let summary = if let (Some(prev), Some(next)) = (previous_size, desired_size) {
+        if next > prev {
+            format!(
+                "Resize volume {} from {prev}MB to {next}MB",
+                resource_name(resource)
+            )
+        } else {
+            summary_for_field(resource, "config", &before, &after)
+        }
+    } else {
+        summary_for_field(resource, "config", &before, &after)
+    };
+    changes.push(update(
+        &resource_addr(resource),
+        "config",
+        previous_config,
+        resource.get("config").cloned().unwrap_or(Value::Null),
+        summary,
+        Some(details),
+        severity,
+    ));
+}
+
+fn diff_database_deploy(previous: &Value, resource: &Value, changes: &mut Vec<Value>) {
+    let (mut previous_deploy, resource_deploy) = strip_write_only_registry_credentials(
+        previous.get("deploy").unwrap_or(&Value::Null),
+        resource.get("deploy").unwrap_or(&Value::Null),
+    );
+    previous_deploy = drop_platform_start_command(&previous_deploy, &resource_deploy);
+    let previous_region = database_region(previous);
+    let desired_region = database_region(resource);
+    if desired_region.is_some() && desired_region != previous_region {
+        let details = changed_leaf_paths(
+            &normalize_database_deploy(&previous_deploy),
+            &normalize_database_deploy(&resource_deploy),
+            "deploy",
+        );
+        changes.push(update(
+            &resource_addr(resource),
+            "deploy",
+            previous_deploy,
+            resource_deploy,
+            format!(
+                "Move database {} to {}",
+                resource_name(resource),
+                desired_region.unwrap()
+            ),
+            Some(details),
+            "destructive",
+        ));
+        return;
+    }
+    let before = normalize_database_deploy(&previous_deploy);
+    let after = normalize_database_deploy(&resource_deploy);
+    if stable_stringify(&before) == stable_stringify(&after) {
+        return;
+    }
+    let details = changed_leaf_paths(&before, &after, "deploy");
+    changes.push(update(
+        &resource_addr(resource),
+        "deploy",
+        previous_deploy,
+        resource_deploy,
+        summary_for_field(resource, "deploy", &before, &after),
+        Some(details),
+        "safe",
+    ));
+}
+
+fn drop_unauthored_platform_fields(
+    previous_value: &Value,
+    desired_value: &Value,
+    fields: &[&str],
+) -> Value {
+    let Some(obj) = previous_value.as_object() else {
+        return previous_value.clone();
+    };
+    let desired = desired_value.as_object().cloned().unwrap_or_default();
+    let mut copy = obj.clone();
+    let mut changed = false;
+    for field_name in fields {
+        if copy.contains_key(*field_name) && !desired.contains_key(*field_name) {
+            copy.remove(*field_name);
+            changed = true;
+        } else if copy.contains_key(*field_name)
+            && desired.get(*field_name).is_none_or(Value::is_null)
+        {
+            copy.remove(*field_name);
+            changed = true;
+        }
+    }
+    if !changed {
+        return previous_value.clone();
+    }
+    if copy.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(copy)
+    }
+}
+
+fn drop_platform_start_command(previous_deploy: &Value, resource_deploy: &Value) -> Value {
+    drop_unauthored_platform_fields(previous_deploy, resource_deploy, &["startCommand"])
+}
+
+fn is_masked_registry_credentials(value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    if value.is_null() {
+        return true;
+    }
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    obj.get("username").and_then(Value::as_str) == Some(MASKED_CREDENTIAL_VALUE)
+        || obj.get("password").and_then(Value::as_str) == Some(MASKED_CREDENTIAL_VALUE)
+}
+
+fn strip_write_only_registry_credentials(before: &Value, after: &Value) -> (Value, Value) {
+    let before_credentials = before.get("registryCredentials");
+    let after_credentials = after.get("registryCredentials");
+    let desired_credentials = real_credential_fields(after_credentials);
+    let with_credentials = |value: &Value, credentials: Option<&Value>| {
+        if !value.is_object() {
+            return value.clone();
+        }
+        let mut copy = value.as_object().cloned().unwrap();
+        match credentials {
+            None => {
+                copy.remove("registryCredentials");
+            }
+            Some(credentials) => {
+                copy.insert("registryCredentials".into(), credentials.clone());
+            }
+        }
+        if copy.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(copy)
+        }
+    };
+    let desired_side = if after_credentials.is_none() {
+        after.clone()
+    } else {
+        with_credentials(after, desired_credentials.as_ref())
+    };
+    if desired_credentials.is_some() && is_masked_registry_credentials(after_credentials) {
+        return (with_credentials(before, None), desired_side);
+    }
+    if desired_credentials.is_some() && !is_masked_registry_credentials(before_credentials) {
+        return (before.clone(), desired_side);
+    }
+    let stripped_before = if before_credentials.is_none() {
+        before.clone()
+    } else {
+        with_credentials(before, None)
+    };
+    let stripped_after = if desired_credentials.is_none() {
+        desired_side
+    } else {
+        with_credentials(&desired_side, None)
+    };
+    (stripped_before, stripped_after)
+}
+
+fn source_supports_auto_updates(source: Option<&Value>) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    if field_str(source, "type") != Some("image") {
+        return false;
+    }
+    let Some(image) = field_str(source, "image")
+        .map(str::trim)
+        .map(str::to_lowercase)
+    else {
+        return false;
+    };
+    if image.is_empty() {
+        return false;
+    }
+    if !image.contains('/') {
+        return true;
+    }
+    let registry = image.split('/').next().unwrap_or("");
+    (!registry.contains('.') && !registry.contains(':') && registry != "localhost")
+        || registry == "docker.io"
+        || registry == "ghcr.io"
+}
+
+fn without_auto_updates(source: &Value) -> Value {
+    let Some(obj) = source.as_object() else {
+        return source.clone();
+    };
+    let mut copy = obj.clone();
+    copy.remove("autoUpdates");
+    if copy.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(copy)
+    }
+}
+
+fn without_registry_credentials(deploy: &Value) -> Value {
+    let Some(obj) = deploy.as_object() else {
+        return deploy.clone();
+    };
+    let mut copy = obj.clone();
+    copy.remove("registryCredentials");
+    if copy.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(copy)
+    }
+}
+
+fn real_credential_fields(credentials: Option<&Value>) -> Option<Value> {
+    let obj = credentials.and_then(Value::as_object)?;
+    let entries: Map<String, Value> = obj
+        .iter()
+        .filter(|(_, value)| !value.is_null() && value.as_str() != Some(MASKED_CREDENTIAL_VALUE))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(Value::Object(entries))
+    }
+}
+
+fn normalize_database_deploy(value: &Value) -> Value {
+    let mut normalized = normalize_for_diff("deploy", value);
+    if let Some(obj) = normalized.as_object_mut() {
+        obj.remove("requiredMountPath");
+        if obj.is_empty() {
+            return Value::Null;
+        }
+    }
+    normalized
+}
+
+fn summary_for_field(resource: &Value, field_name: &str, before: &Value, after: &Value) -> String {
+    let details = changed_leaf_paths(before, after, field_name);
+    if !details.is_empty() {
+        let shown = details
+            .iter()
+            .take(3)
+            .map(|detail| detail_path_for_summary(detail))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let remaining = details.len().saturating_sub(3);
+        return format!(
+            "Update {} {shown}{}",
+            resource_name(resource),
+            if remaining > 0 {
+                format!(" and {remaining} more")
+            } else {
+                String::new()
+            }
+        );
+    }
+    format!("Update {} {field_name}", resource_name(resource))
+}
+
+fn detail_path_for_summary(detail: &str) -> String {
+    detail.split(" (").next().unwrap_or(detail).to_string()
+}
+
+fn changed_leaf_paths(before: &Value, after: &Value, prefix: &str) -> Vec<String> {
+    let before_flat = flatten_for_diff(before, "");
+    let after_flat = flatten_for_diff(after, "");
+    let mut keys: Vec<_> = before_flat
+        .keys()
+        .chain(after_flat.keys())
+        .cloned()
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let changed: Vec<_> = keys
+        .into_iter()
+        .filter(|key| {
+            stable_stringify(before_flat.get(key).unwrap_or(&Value::Null))
+                != stable_stringify(after_flat.get(key).unwrap_or(&Value::Null))
+        })
+        .collect();
+    changed
+        .iter()
+        .filter(|key| key.is_empty() && changed.len() == 1 || !key.is_empty())
+        .filter(|key| {
+            key.is_empty()
+                || !changed
+                    .iter()
+                    .any(|other| *other != **key && other.starts_with(&format!("{key}.")))
+        })
+        .map(|key| {
+            let path = if key.is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            if path.contains("registryCredentials") {
+                return format!(
+                    "{} ({REDACTED_VARIABLE_VALUE} → {REDACTED_VARIABLE_VALUE})",
+                    friendly_path(&path)
+                );
+            }
+            format!(
+                "{} ({} → {})",
+                friendly_path(&path),
+                format_diff_value(before_flat.get(key).unwrap_or(&Value::Null)),
+                format_diff_value(after_flat.get(key).unwrap_or(&Value::Null))
+            )
+        })
+        .collect()
+}
+
+fn flatten_for_diff(value: &Value, prefix: &str) -> Map<String, Value> {
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            let mut out = Map::new();
+            for (key, child) in map {
+                let next = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                out.extend(flatten_for_diff(child, &next));
+            }
+            out
+        }
+        other => {
+            let mut out = Map::new();
+            out.insert(prefix.to_string(), other.clone());
+            out
+        }
+    }
+}
+
+fn friendly_path(path: &str) -> String {
+    if let Some(caps) = regex::Regex::new(r"^deploy\.multiRegionConfig\.([^.]+)\.numReplicas$")
+        .ok()
+        .and_then(|re| re.captures(path))
+    {
+        return format!("regions.{}", &caps[1]);
+    }
+    path.to_string()
+}
+
+fn format_diff_value(value: &Value) -> String {
+    if value.is_null() {
+        return "null".to_string();
+    }
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn update(
+    address: &str,
+    field_name: &str,
+    before: Value,
+    after: Value,
+    summary: String,
+    details: Option<Vec<String>>,
+    severity: &str,
+) -> Value {
+    let mut change = json!({
+        "kind": "resource.update",
+        "address": address,
+        "field": field_name,
+        "before": before,
+        "after": after,
+        "path": format!("resources.{address}.{field_name}"),
+        "summary": summary,
+        "severity": severity,
+        "deployEffect": deploy_effect_for_update(field_name, details.as_deref()),
+    });
+    if let Some(details) = details.filter(|details| !details.is_empty()) {
+        change["details"] = json!(details);
+    }
+    change
+}
+
+/// Auto-instrumentation reaches running containers live; only
+/// `tracing.enabled` needs a deploy, for the OpenTelemetry variables. CDN
+/// settings live on the edge and never reach the container. Mirrors
+/// backboard's `changesThatSkipRedeploy`.
+fn deploy_effect_for_update(field_name: &str, details: Option<&[String]>) -> &'static str {
+    if field_name == "config" || field_name == "groupId" || field_name == "cdn" {
+        return "none";
+    }
+    if field_name == "tracing" {
+        if let Some(details) = details.filter(|details| !details.is_empty()) {
+            if details
+                .iter()
+                .all(|detail| detail.starts_with("tracing.autoInstrumentation"))
+            {
+                return "none";
+            }
+        }
+    }
+    "deploy"
+}
+
+fn format_variable_diff_value(
+    value: Option<&Value>,
+    resources_by_address: &Map<String, Value>,
+    reveal_values: bool,
+) -> String {
+    let Some(value) = value else {
+        return "unset".to_string();
+    };
+    match field_str(value, "type") {
+        Some("preserve") => "preserve()".into(),
+        Some("reference") => {
+            let resource = field_str(value, "resource").unwrap_or("");
+            let name = resources_by_address
+                .get(resource)
+                .map(resource_name)
+                .unwrap_or_else(|| resource.split('.').nth(1).unwrap_or(resource));
+            format!("{name}.{}", field_str(value, "output").unwrap_or(""))
+        }
+        Some("sharedReference") => format!("shared.{}", field_str(value, "name").unwrap_or("")),
+        _ if !reveal_values => REDACTED_VARIABLE_VALUE.into(),
+        Some("literal") => format_diff_value(value.get("value").unwrap_or(&Value::Null)),
+        _ => format_diff_value(&normalize_variable_for_diff(
+            Some(value),
+            resources_by_address,
+        )),
+    }
+}
+
+fn normalize_variable_for_diff(
+    value: Option<&Value>,
+    resources_by_address: &Map<String, Value>,
+) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    if field_str(value, "type") == Some("sharedReference") {
+        return json!({
+            "type": "literal",
+            "value": format!("${{{{shared.{}}}}}", field_str(value, "name").unwrap_or("")),
+        });
+    }
+    if field_str(value, "type") != Some("reference") {
+        return value.clone();
+    }
+    let resource = field_str(value, "resource").unwrap_or("");
+    let name = resources_by_address
+        .get(resource)
+        .map(resource_name)
+        .unwrap_or_else(|| resource.split('.').nth(1).unwrap_or(resource));
+    json!({
+        "type": "literal",
+        "value": format!("${{{{{}.{}}}}}", name, field_str(value, "output").unwrap_or("")),
+    })
+}
+
+fn is_managed_by_repo_config(resource: &Value) -> bool {
+    if !matches!(resource_type(resource), "service" | "database") {
+        return false;
+    }
+    field_str(resource, "configFile").is_some_and(|path| {
+        regex::Regex::new(r"railway\.(json|toml)$")
+            .unwrap()
+            .is_match(path)
+    })
+}
+
+fn bucket_region(resource: &Value) -> Option<String> {
+    field(resource, "config")
+        .and_then(|config| field_str(config, "region"))
+        .map(str::to_string)
+}
+
+fn diagnose_new_bucket_region(resource: &Value, diagnostics: &mut Vec<Diagnostic>) {
+    if resource_type(resource) != "bucket" {
+        return;
+    }
+
+    let region = field(resource, "config").and_then(|config| field(config, "region"));
+    let supported = BucketRegion::all();
+    if region
+        .and_then(Value::as_str)
+        .is_some_and(|value| supported.iter().any(|region| region.code() == value))
+    {
+        return;
+    }
+
+    let valid_regions = supported
+        .iter()
+        .map(|region| region.code())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let name = resource_name(resource);
+    let message = match region {
+        None | Some(Value::Null) => {
+            format!("Bucket {name} is missing a region. Set one of: {valid_regions}.")
+        }
+        Some(value) => format!(
+            "Bucket {name} has an invalid region {value}. Valid object-storage regions are {valid_regions}."
+        ),
+    };
+    diagnostics.push(Diagnostic {
+        severity: "error".into(),
+        path: format!("resources.{}.config.region", resource_addr(resource)),
+        message,
+    });
+}
+
+fn database_region(resource: &Value) -> Option<String> {
+    let regions = field(resource, "deploy")
+        .and_then(|d| d.get("multiRegionConfig"))
+        .and_then(Value::as_object)?;
+    let present: Vec<_> = regions
+        .iter()
+        .filter(|(_, config)| !config.is_null())
+        .collect();
+    if present.len() != 1 {
+        return None;
+    }
+    Some(present[0].0.clone())
+}
+
+fn is_equivalent_database_source(previous: &Value, after: &Value) -> bool {
+    if resource_type(previous) != "database" || !after.is_object() {
+        return false;
+    }
+    field_str(after, "type") == Some("image")
+        && normalize_image_tag(field_str(after, "image").unwrap_or(""))
+            == normalize_image_tag(field_str(previous, "image").unwrap_or(""))
+}
+
+fn is_preserved_variable(value: &Value) -> bool {
+    field_str(value, "type") == Some("preserve")
+}
+
+fn is_unknown_current_variable(value: Option<&Value>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    field_str(value, "type") == Some("preserve")
+        || (field_str(value, "type") == Some("literal") && field_str(value, "value") == Some(""))
+}
+
+/// What the edge applies for every CDN knob the block leaves out. Mirrors
+/// `SERVICE_CDN_DEFAULTS` in `@railway/models`.
+fn cdn_default(key: &str) -> Option<Value> {
+    match key {
+        "defaultTtlSeconds" => Some(json!(7200)),
+        "htmlCaching" => Some(json!("auto")),
+        "staleWhileRevalidate" => Some(json!(true)),
+        "purgeOnDeploy" => Some(json!("html")),
+        _ => None,
+    }
+}
+
+/// Railway serialises a `cdn` block only while caching is on, and only the
+/// knobs that differ from the edge defaults. So `enabled: false`, `null` and
+/// no block are all the same thing, and `{ enabled: true }` is a service
+/// caching with the defaults.
+pub fn normalize_cdn(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return Value::Null;
+    };
+    let normalized = normalize_cdn_object(object);
+    if normalized.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(normalized)
+    }
+}
+
+fn normalize_cdn_object(object: &Map<String, Value>) -> Map<String, Value> {
+    if object.get("enabled").and_then(Value::as_bool) != Some(true) {
+        return Map::new();
+    }
+    object
+        .iter()
+        .filter(|(key, child)| !child.is_null() && cdn_default(key).as_ref() != Some(*child))
+        .map(|(key, child)| (key.clone(), child.clone()))
+        .collect()
+}
+
+fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
+    if !value.is_object() {
+        return value.clone();
+    }
+    let mut copy = value.as_object().cloned().unwrap();
+    if field_name == "source" {
+        if copy.get("checkSuites") == Some(&json!(false)) {
+            copy.remove("checkSuites");
+        }
+        if copy.get("branch") == Some(&json!("main")) {
+            copy.remove("branch");
+        }
+        copy.remove("commitSha");
+        copy.remove("upstreamUrl");
+        if copy.get("rootDirectory") == Some(&json!("")) {
+            copy.remove("rootDirectory");
+        }
+        if let Some(image) = copy.get("image").and_then(Value::as_str) {
+            copy.insert("image".into(), json!(normalize_image_tag(image)));
+        }
+    }
+    if field_name == "build" {
+        if copy.get("builder") == Some(&json!("RAILPACK")) {
+            copy.remove("builder");
+        }
+        if copy.get("buildEnvironment") == Some(&json!("V3")) {
+            copy.remove("buildEnvironment");
+        }
+        if copy.get("buildCommand") == Some(&json!("")) {
+            copy.remove("buildCommand");
+        }
+        if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
+            copy.remove("dockerfilePath");
+        }
+        if copy.get("watchPatterns") == Some(&json!([])) {
+            copy.remove("watchPatterns");
+        }
+    }
+    if field_name == "tracing" {
+        // Railway serialises only the switches that are on, so a false or null
+        // switch is the same as no switch, and no switches is no block.
+        copy.retain(|_, child| child.as_bool() == Some(true));
+    }
+    if field_name == "cdn" {
+        copy = normalize_cdn_object(&copy);
+    }
+    if field_name == "networking" {
+        // `tcp: []` compiles to `tcpProxies: {}`; Railway serializes a service
+        // with no proxy as no `tcpProxies` at all. Both mean the same thing.
+        copy.retain(|_, child| !child.is_null() && !child.as_object().is_some_and(Map::is_empty));
+    }
+    if field_name == "deploy" {
+        if copy.get("useLegacyStacker") == Some(&json!(false)) {
+            copy.remove("useLegacyStacker");
+        }
+        if copy.get("ipv6EgressEnabled") == Some(&json!(false)) {
+            copy.remove("ipv6EgressEnabled");
+        }
+        if copy.get("runtime") == Some(&json!("V2")) {
+            copy.remove("runtime");
+        }
+        if copy.get("sleepApplication") == Some(&json!(false)) {
+            copy.remove("sleepApplication");
+        }
+        if copy.get("restartPolicyType") == Some(&json!("ON_FAILURE")) {
+            copy.remove("restartPolicyType");
+        }
+        if copy.get("restartPolicyMaxRetries") == Some(&json!(10)) {
+            copy.remove("restartPolicyMaxRetries");
+        }
+        if let Some(multi) = copy.remove("multiRegionConfig") {
+            let normalized = normalize_multi_region_config(&multi);
+            if !is_default_multi_region_config(&normalized)
+                && normalized.as_object().is_some_and(|obj| !obj.is_empty())
+            {
+                copy.insert("multiRegionConfig".into(), normalized);
+            }
+        }
+    }
+    if copy.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(copy)
+    }
+}
+
+fn normalize_multi_region_config(value: &Value) -> Value {
+    let Some(obj) = value.as_object() else {
+        return value.clone();
+    };
+    Value::Object(
+        obj.iter()
+            .filter(|(_, config)| {
+                if !config.is_object() {
+                    return true;
+                }
+                !config.get("numReplicas").is_none_or(Value::is_null)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    )
+}
+
+fn is_default_multi_region_config(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.len() != 1 {
+        return false;
+    }
+    let Some(config) = obj.values().next().and_then(Value::as_object) else {
+        return false;
+    };
+    config.iter().all(|(key, child)| {
+        (key == "numReplicas" && child == &json!(1))
+            || (key == "stackerAssignment" && child.is_null())
+    })
+}
+
+fn normalize_image_tag(image: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"^(?:railwayapp/|ghcr\.io/railwayapp-templates/)?(redis|mysql|mongo|postgres)(?:-ssl)?:(\d+)(?:\.\d+)*$")
+            .unwrap()
+    });
+    if let Some(caps) = re.captures(image) {
+        format!("{}:{}", &caps[1], &caps[2])
+    } else {
+        image.to_string()
+    }
+}

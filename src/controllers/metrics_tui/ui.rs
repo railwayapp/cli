@@ -11,48 +11,29 @@ use crate::controllers::metrics::{
     MetricDataPoint, MetricSummary, format_count, format_cpu, format_gb, format_mb, pct,
     utilization,
 };
+use crate::tui_theme::Theme;
 
 use super::app::{ActiveTab, MetricsApp, ProjectApp};
 
-// ─── Colors (matching Railway dashboard) ─────────────────────────────────────
-
-/// CPU + Memory use a blue-purple in the dashboard; closest 256-color match
-const CPU_COLOR: Color = Color::Indexed(63); // blue-purple (#5f5fff)
-const MEMORY_COLOR: Color = Color::Indexed(63); // same blue-purple as dashboard
-const EGRESS_COLOR: Color = Color::Yellow;
-const INGRESS_COLOR: Color = Color::Blue;
-const DISK_COLOR: Color = Color::Magenta;
-// Response Time percentile colors (matching dashboard legend exactly)
-const P50_COLOR: Color = Color::Blue; // p50 (median) — blue
-const P90_COLOR: Color = Color::Yellow; // p90 — yellow/orange
-const P95_COLOR: Color = Color::Magenta; // p95 — purple
-const P99_COLOR: Color = Color::Red; // p99 — red
-// HTTP status codes (matching dashboard stacked bar legend)
-const STATUS_2XX: Color = Color::Blue; // blue in dashboard
-const STATUS_3XX: Color = Color::Magenta; // purple in dashboard
-const STATUS_4XX: Color = Color::Yellow; // yellow/gold in dashboard
-const STATUS_5XX: Color = Color::Red; // dark red in dashboard
-const ERROR_RATE_COLOR: Color = Color::Red; // error rate line — red/pink
-const BORDER_COLOR: Color = Color::DarkGray;
-const LABEL_COLOR: Color = Color::DarkGray;
-
-fn health_color(pct: f64) -> Color {
+/// A gauge/percentage reads as increasingly urgent as it climbs — good
+/// (`running`), then a warning (`pending`), then `danger`.
+fn health_color(theme: &Theme, pct: f64) -> Color {
     if pct >= 85.0 {
-        Color::Red
+        theme.danger
     } else if pct >= 60.0 {
-        Color::Yellow
+        theme.pending
     } else {
-        Color::Green
+        theme.running
     }
 }
 
-fn error_rate_color(rate: f64) -> Color {
+fn error_rate_color(theme: &Theme, rate: f64) -> Color {
     if rate >= 10.0 {
-        Color::Red
+        theme.danger
     } else if rate >= 5.0 {
-        Color::Yellow
+        theme.pending
     } else {
-        Color::Green
+        theme.running
     }
 }
 
@@ -108,12 +89,12 @@ fn time_bounds_and_labels_from_range(start_ts: i64, end_ts: i64) -> (f64, f64, V
 }
 
 /// Create a consistent card block with inner padding
-fn card_block(title: &str) -> Block<'_> {
+fn card_block<'a>(theme: &Theme, title: &'a str) -> Block<'a> {
     Block::default()
         .title(format!(" {title} "))
         .title_style(Style::default().add_modifier(Modifier::BOLD))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER_COLOR))
+        .border_style(Style::default().fg(theme.accent_dim))
         .padding(Padding::new(2, 2, 1, 1)) // left, right, top, bottom
 }
 
@@ -135,16 +116,22 @@ fn chart_left_pad(y_labels: &[String], x_labels: &[String]) -> String {
 }
 
 /// Build a togglable legend entry: colored dot + label + key hint
-fn make_legend_item<'a>(active: bool, color: Color, label: &str, key: &str) -> Vec<Span<'a>> {
+fn make_legend_item<'a>(
+    theme: &Theme,
+    active: bool,
+    color: Color,
+    label: &str,
+    key: &str,
+) -> Vec<Span<'a>> {
     let dot_style = if active {
         Style::default().fg(color)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dim)
     };
     let text_style = if active {
         Style::default()
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.dim)
     };
     vec![
         Span::styled("●", dot_style),
@@ -152,7 +139,7 @@ fn make_legend_item<'a>(active: bool, color: Color, label: &str, key: &str) -> V
         Span::styled(
             format!(" [{key}]"),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.pending)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -162,11 +149,12 @@ fn make_legend_item<'a>(active: bool, color: Color, label: &str, key: &str) -> V
 // ─── Single-service rendering ────────────────────────────────────────────────
 
 pub fn render_service(app: &MetricsApp, frame: &mut Frame) {
+    let theme = app.theme;
     let area = frame.area();
 
     if area.width < 60 || area.height < 10 {
         let msg = Paragraph::new("Terminal too small. Please resize (min 60x10).")
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(theme.pending));
         frame.render_widget(msg, area);
         return;
     }
@@ -206,16 +194,17 @@ pub fn render_service(app: &MetricsApp, frame: &mut Frame) {
     }
 
     if app.show_help {
-        render_help_overlay(frame, area);
+        render_help_overlay(theme, frame, area);
     }
 }
 
 fn render_tab_bar(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let active = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
+        .fg(theme.on_accent)
+        .bg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let inactive = Style::default().fg(Color::DarkGray);
+    let inactive = Style::default().fg(theme.dim);
 
     let line = Line::from(vec![
         Span::raw("  "),
@@ -330,13 +319,15 @@ fn render_metrics_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     if let Some(ref err) = app.error_message {
         let filler_idx = chunks.len() - 1;
         if idx <= filler_idx {
-            let err_line = Paragraph::new(format!(" {err}")).style(Style::default().fg(Color::Red));
+            let err_line =
+                Paragraph::new(format!(" {err}")).style(Style::default().fg(app.theme.danger));
             frame.render_widget(err_line, chunks[filler_idx]);
         }
     }
 }
 
 fn render_stats_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     if app.db_stats.is_some() {
         render_db_stats(app, frame, area);
     } else {
@@ -352,15 +343,16 @@ fn render_stats_content(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             "  Loading database stats...".to_string()
         };
         let style = if app.db_stats_error.is_some() {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme.pending)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.dim)
         };
         frame.render_widget(Paragraph::new(msg).style(style), area);
     }
 }
 
 fn render_header(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let refresh_str = app
         .last_refresh
         .map(|t| t.format("%H:%M:%S").to_string())
@@ -370,20 +362,20 @@ fn render_header(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         Span::styled(
             format!("  {}", app.service_name),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::raw(format!("env {}", app.environment_name)),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::raw(format!("last {}", app.time_range_label())),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::styled(
             format!("refreshed {refresh_str}"),
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ),
         if app.refreshing {
-            Span::styled("  ·  refreshing", Style::default().fg(Color::Yellow))
+            Span::styled("  ·  refreshing", Style::default().fg(theme.pending))
         } else {
             Span::raw("")
         },
@@ -397,12 +389,14 @@ fn render_cpu_memory(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         .spacing(CARD_SPACING)
         .split(area);
 
+    let theme = app.theme;
     if app.show_cpu {
         render_metric_chart(
+            theme,
             frame,
             cols[0],
             "CPU",
-            CPU_COLOR,
+            theme.accent,
             app.cpu.as_ref(),
             app.cpu_limit.as_ref(),
             format_cpu,
@@ -413,10 +407,11 @@ fn render_cpu_memory(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     if app.show_memory {
         let col = if app.show_cpu { cols[1] } else { cols[0] };
         render_metric_chart(
+            theme,
             frame,
             col,
             "Memory",
-            MEMORY_COLOR,
+            theme.accent,
             app.memory.as_ref(),
             app.memory_limit.as_ref(),
             format_gb,
@@ -427,6 +422,7 @@ fn render_cpu_memory(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 
 #[allow(clippy::too_many_arguments)]
 fn render_metric_chart(
+    theme: &Theme,
     frame: &mut Frame,
     area: Rect,
     title: &str,
@@ -436,7 +432,7 @@ fn render_metric_chart(
     format_fn: fn(f64) -> String,
     _unit: &str,
 ) {
-    let block = card_block(title);
+    let block = card_block(theme, title);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -473,13 +469,13 @@ fn render_metric_chart(
                     Dataset::default()
                         .marker(symbols::Marker::Braille)
                         .graph_type(GraphType::Line)
-                        .style(Style::default().fg(LABEL_COLOR))
+                        .style(Style::default().fg(theme.dim))
                         .data(&limit_data),
                 );
             }
 
             let x_axis = Axis::default()
-                .style(Style::default().fg(LABEL_COLOR))
+                .style(Style::default().fg(theme.dim))
                 .bounds([x_min, x_max])
                 .labels(x_labels.to_vec());
 
@@ -487,7 +483,7 @@ fn render_metric_chart(
             let pad = chart_left_pad(&y_label_strs, x_labels);
 
             let y_axis = Axis::default()
-                .style(Style::default().fg(LABEL_COLOR))
+                .style(Style::default().fg(theme.dim))
                 .bounds([0.0, y_max])
                 .labels(
                     y_label_strs
@@ -510,13 +506,13 @@ fn render_metric_chart(
             .map(|p| {
                 Span::styled(
                     format!(" ({:.0}%)", p),
-                    Style::default().fg(health_color(p)),
+                    Style::default().fg(health_color(theme, p)),
                 )
             });
 
             let mut spans = vec![
                 Span::raw(pad),
-                Span::styled("Now: ", Style::default().fg(LABEL_COLOR)),
+                Span::styled("Now: ", Style::default().fg(theme.dim)),
                 Span::styled(format_fn(m.current), Style::default().fg(color)),
                 Span::raw(limit_str),
             ];
@@ -524,9 +520,9 @@ fn render_metric_chart(
                 spans.push(u);
             }
             spans.extend([
-                Span::styled("  Avg: ", Style::default().fg(LABEL_COLOR)),
+                Span::styled("  Avg: ", Style::default().fg(theme.dim)),
                 Span::raw(format_fn(m.average)),
-                Span::styled("  Max: ", Style::default().fg(LABEL_COLOR)),
+                Span::styled("  Max: ", Style::default().fg(theme.dim)),
                 Span::raw(format_fn(m.max)),
             ]);
 
@@ -534,7 +530,7 @@ fn render_metric_chart(
         }
         _ => {
             let msg =
-                Paragraph::new(format!(" No {title} data")).style(Style::default().fg(LABEL_COLOR));
+                Paragraph::new(format!(" No {title} data")).style(Style::default().fg(theme.dim));
             frame.render_widget(msg, inner);
         }
     }
@@ -563,11 +559,15 @@ fn render_network_http(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
-    let block = card_block(if app.is_db {
-        "Public Network Traffic — use private networking for service→db"
-    } else {
-        "Public Network Traffic"
-    });
+    let theme = app.theme;
+    let block = card_block(
+        theme,
+        if app.is_db {
+            "Public Network Traffic — use private networking for service→db"
+        } else {
+            "Public Network Traffic"
+        },
+    );
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -582,7 +582,7 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         .is_some_and(|r| !r.raw_values.is_empty());
 
     if !has_tx && !has_rx {
-        let msg = Paragraph::new(" No network data").style(Style::default().fg(LABEL_COLOR));
+        let msg = Paragraph::new(" No network data").style(Style::default().fg(theme.dim));
         frame.render_widget(msg, inner);
         return;
     }
@@ -629,6 +629,8 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     }
     y_max = (y_max * 1.15).max(0.001);
 
+    let egress_color = theme.series[0];
+    let ingress_color = theme.series[1];
     let mut datasets = Vec::new();
     if !tx_data.is_empty() {
         datasets.push(
@@ -636,7 +638,7 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("Egress")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(EGRESS_COLOR))
+                .style(Style::default().fg(egress_color))
                 .data(&tx_data),
         );
     }
@@ -646,13 +648,13 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("Ingress")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(INGRESS_COLOR))
+                .style(Style::default().fg(ingress_color))
                 .data(&rx_data),
         );
     }
 
     let x_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([x_min, x_max])
         .labels(x_labels.clone());
 
@@ -660,7 +662,7 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     let pad = chart_left_pad(&y_label_strs, &x_labels);
 
     let y_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([0.0, y_max])
         .labels(
             y_label_strs
@@ -677,14 +679,16 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 
     let mut spans = vec![Span::raw(pad)];
     spans.extend(make_legend_item(
+        theme,
         app.show_egress,
-        EGRESS_COLOR,
+        egress_color,
         "Egress",
         "e",
     ));
     spans.extend(make_legend_item(
+        theme,
         app.show_ingress,
-        INGRESS_COLOR,
+        ingress_color,
         "Ingress",
         "i",
     ));
@@ -692,6 +696,7 @@ fn render_network_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let http = app.http.as_ref();
 
     let title = match http {
@@ -699,14 +704,14 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         None => "Requests".to_string(),
     };
 
-    let block = card_block(&title);
+    let block = card_block(theme, &title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let http = match http {
         Some(h) => h,
         None => {
-            let msg = Paragraph::new(" No HTTP data").style(Style::default().fg(LABEL_COLOR));
+            let msg = Paragraph::new(" No HTTP data").style(Style::default().fg(theme.dim));
             frame.render_widget(msg, inner);
             return;
         }
@@ -767,6 +772,13 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         }
         y_max = (y_max * 1.15).max(1.0);
 
+        let [status_2xx, status_3xx, status_4xx, status_5xx] = [
+            theme.series[0],
+            theme.series[1],
+            theme.series[2],
+            theme.series[3],
+        ];
+
         let mut datasets = vec![];
         if !data_2xx.is_empty() {
             datasets.push(
@@ -774,7 +786,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                     .name("2xx")
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(Style::default().fg(STATUS_2XX))
+                    .style(Style::default().fg(status_2xx))
                     .data(&data_2xx),
             );
         }
@@ -784,7 +796,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                     .name("3xx")
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(Style::default().fg(STATUS_3XX))
+                    .style(Style::default().fg(status_3xx))
                     .data(&data_3xx),
             );
         }
@@ -794,7 +806,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                     .name("4xx")
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(Style::default().fg(STATUS_4XX))
+                    .style(Style::default().fg(status_4xx))
                     .data(&data_4xx),
             );
         }
@@ -804,13 +816,13 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                     .name("5xx")
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(Style::default().fg(STATUS_5XX))
+                    .style(Style::default().fg(status_5xx))
                     .data(&data_5xx),
             );
         }
 
         let x_axis = Axis::default()
-            .style(Style::default().fg(LABEL_COLOR))
+            .style(Style::default().fg(theme.dim))
             .bounds([x_min, x_max])
             .labels(x_labels.clone());
 
@@ -822,7 +834,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         pad = chart_left_pad(&y_label_strs, &x_labels);
 
         let y_axis = Axis::default()
-            .style(Style::default().fg(LABEL_COLOR))
+            .style(Style::default().fg(theme.dim))
             .bounds([0.0, y_max])
             .labels(
                 y_label_strs
@@ -836,16 +848,22 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     } else {
         let msg = Line::from(vec![
             Span::raw(format!(" {} total", format_count(http.total))),
-            Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+            Span::styled("  ·  ", Style::default().fg(theme.dim)),
             Span::raw("Err: "),
             Span::styled(
                 format!("{:.1}%", http.error_rate),
-                Style::default().fg(error_rate_color(http.error_rate)),
+                Style::default().fg(error_rate_color(theme, http.error_rate)),
             ),
         ]);
         frame.render_widget(Paragraph::new(msg), parts[0]);
     }
 
+    let [status_2xx, status_3xx, status_4xx, status_5xx] = [
+        theme.series[0],
+        theme.series[1],
+        theme.series[2],
+        theme.series[3],
+    ];
     let total = http.total;
     let status_line = Line::from(vec![
         Span::raw(pad.clone()),
@@ -855,7 +873,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 format_count(http.status_counts[2]),
                 pct(http.status_counts[2], total)
             ),
-            Style::default().fg(STATUS_2XX),
+            Style::default().fg(status_2xx),
         ),
         Span::raw("   "),
         Span::styled(
@@ -864,7 +882,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 format_count(http.status_counts[3]),
                 pct(http.status_counts[3], total)
             ),
-            Style::default().fg(STATUS_3XX),
+            Style::default().fg(status_3xx),
         ),
         Span::raw("   "),
         Span::styled(
@@ -873,7 +891,7 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 format_count(http.status_counts[4]),
                 pct(http.status_counts[4], total)
             ),
-            Style::default().fg(STATUS_4XX),
+            Style::default().fg(status_4xx),
         ),
         Span::raw("   "),
         Span::styled(
@@ -882,22 +900,47 @@ fn render_http_requests(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 format_count(http.status_counts[5]),
                 pct(http.status_counts[5], total)
             ),
-            Style::default().fg(STATUS_5XX),
+            Style::default().fg(status_5xx),
         ),
     ]);
     frame.render_widget(Paragraph::new(status_line), parts[2]);
 
     let mut spans = vec![Span::raw(pad)];
-    spans.extend(make_legend_item(app.show_2xx, STATUS_2XX, "2xx", "6"));
-    spans.extend(make_legend_item(app.show_3xx, STATUS_3XX, "3xx", "7"));
-    spans.extend(make_legend_item(app.show_4xx, STATUS_4XX, "4xx", "8"));
-    spans.extend(make_legend_item(app.show_5xx, STATUS_5XX, "5xx", "9"));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_2xx,
+        status_2xx,
+        "2xx",
+        "6",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_3xx,
+        status_3xx,
+        "3xx",
+        "7",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_4xx,
+        status_4xx,
+        "4xx",
+        "8",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_5xx,
+        status_5xx,
+        "5xx",
+        "9",
+    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), parts[4]);
 }
 
 fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
-    let block = card_block("Request Error Rate");
+    let theme = app.theme;
+    let block = card_block(theme, "Request Error Rate");
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -910,14 +953,14 @@ fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 Span::raw(" Error Rate: "),
                 Span::styled(
                     format!("{:.1}%", h.error_rate),
-                    Style::default().fg(error_rate_color(h.error_rate)),
+                    Style::default().fg(error_rate_color(theme, h.error_rate)),
                 ),
             ]);
             frame.render_widget(Paragraph::new(msg), inner);
             return;
         }
         None => {
-            let msg = Paragraph::new(" No error data").style(Style::default().fg(LABEL_COLOR));
+            let msg = Paragraph::new(" No error data").style(Style::default().fg(theme.dim));
             frame.render_widget(msg, inner);
             return;
         }
@@ -967,17 +1010,17 @@ fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(ERROR_RATE_COLOR))
+            .style(Style::default().fg(theme.danger))
             .data(chart_data),
     ];
 
     let x_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([x_min, x_max])
         .labels(x_labels.clone());
 
     let y_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([0.0, y_max])
         .labels(vec![
             Span::raw("0.0%"),
@@ -990,7 +1033,8 @@ fn render_error_rate_chart(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
-    let block = card_block("Response Time");
+    let theme = app.theme;
+    let block = card_block(theme, "Response Time");
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -998,7 +1042,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     let http = match app.http.as_ref() {
         Some(h) if h.time_series.is_some() => h,
         _ => {
-            let msg = Paragraph::new(" No latency data").style(Style::default().fg(LABEL_COLOR));
+            let msg = Paragraph::new(" No latency data").style(Style::default().fg(theme.dim));
             frame.render_widget(msg, inner);
             return;
         }
@@ -1058,6 +1102,13 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         }
     };
 
+    let [p50_color, p90_color, p95_color, p99_color] = [
+        theme.series[0],
+        theme.series[1],
+        theme.series[2],
+        theme.series[3],
+    ];
+
     let mut datasets = vec![];
     if !p50_data.is_empty() {
         datasets.push(
@@ -1065,7 +1116,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("p50")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(P50_COLOR))
+                .style(Style::default().fg(p50_color))
                 .data(p50_data),
         );
     }
@@ -1075,7 +1126,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("p90")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(P90_COLOR))
+                .style(Style::default().fg(p90_color))
                 .data(p90_data),
         );
     }
@@ -1085,7 +1136,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("p95")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(P95_COLOR))
+                .style(Style::default().fg(p95_color))
                 .data(p95_data),
         );
     }
@@ -1095,13 +1146,13 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 .name("p99")
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(P99_COLOR))
+                .style(Style::default().fg(p99_color))
                 .data(p99_data),
         );
     }
 
     let x_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([x_min, x_max])
         .labels(x_labels.clone());
 
@@ -1113,7 +1164,7 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     let pad = chart_left_pad(&y_label_strs, &x_labels);
 
     let y_axis = Axis::default()
-        .style(Style::default().fg(LABEL_COLOR))
+        .style(Style::default().fg(theme.dim))
         .bounds([0.0, y_max])
         .labels(
             y_label_strs
@@ -1126,22 +1177,47 @@ fn render_http_latency(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(chart, parts[0]);
 
     let mut spans = vec![Span::raw(pad)];
-    spans.extend(make_legend_item(app.show_p50, P50_COLOR, "p50", "F1"));
-    spans.extend(make_legend_item(app.show_p90, P90_COLOR, "p90", "F2"));
-    spans.extend(make_legend_item(app.show_p95, P95_COLOR, "p95", "F3"));
-    spans.extend(make_legend_item(app.show_p99, P99_COLOR, "p99", "F4"));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_p50,
+        p50_color,
+        "p50",
+        "F1",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_p90,
+        p90_color,
+        "p90",
+        "F2",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_p95,
+        p95_color,
+        "p95",
+        "F3",
+    ));
+    spans.extend(make_legend_item(
+        theme,
+        app.show_p99,
+        p99_color,
+        "p99",
+        "F4",
+    ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), parts[2]);
 }
 
 fn render_volume(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let vol_name = app
         .volumes
         .first()
         .map(|v| format!("Volume: {}", v.mount_path))
         .unwrap_or_else(|| "Disk".to_string());
 
-    let block = card_block(&vol_name);
+    let block = card_block(theme, &vol_name);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1151,7 +1227,7 @@ fn render_volume(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     } else if let Some(ref disk) = app.disk {
         (disk.current * 1024.0, 0.0) // disk is in GB, convert to MB
     } else {
-        let msg = Paragraph::new(" No volume data").style(Style::default().fg(LABEL_COLOR));
+        let msg = Paragraph::new(" No volume data").style(Style::default().fg(theme.dim));
         frame.render_widget(msg, inner);
         return;
     };
@@ -1175,9 +1251,9 @@ fn render_volume(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     };
 
     let gauge_color = if limit_mb > 0.0 {
-        health_color(pct_val)
+        health_color(theme, pct_val)
     } else {
-        DISK_COLOR
+        theme.accent
     };
 
     let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
@@ -1195,9 +1271,9 @@ fn render_volume(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 
     if let Some(ref disk) = app.disk {
         let stats = Line::from(vec![
-            Span::styled(" Avg: ", Style::default().fg(LABEL_COLOR)),
+            Span::styled(" Avg: ", Style::default().fg(theme.dim)),
             Span::raw(format_gb(disk.average)),
-            Span::styled("  Max: ", Style::default().fg(LABEL_COLOR)),
+            Span::styled("  Max: ", Style::default().fg(theme.dim)),
             Span::raw(format_gb(disk.max)),
         ]);
         frame.render_widget(Paragraph::new(stats), parts[1]);
@@ -1219,34 +1295,35 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         DatabaseStats::MongoDB(_) => "Database Stats (MongoDB)",
     };
 
-    let block = card_block(title);
+    let theme = app.theme;
+    let block = card_block(theme, title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let l = Style::default().fg(LABEL_COLOR);
-    let v = Style::default().fg(Color::White);
-    let a = Style::default().fg(Color::Cyan);
+    let l = Style::default().fg(theme.dim);
+    let v = Style::default().fg(theme.fg);
+    let a = Style::default().fg(theme.accent);
     let hint_style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(theme.dim)
         .add_modifier(Modifier::ITALIC);
 
-    fn hs(value: f64, warn: f64, crit: f64, inverted: bool) -> Style {
+    let hs = |value: f64, warn: f64, crit: f64, inverted: bool| -> Style {
         if inverted {
             if value < crit {
-                Style::default().fg(Color::Red)
+                Style::default().fg(theme.danger)
             } else if value < warn {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(theme.pending)
             } else {
-                Style::default().fg(Color::Green)
+                Style::default().fg(theme.running)
             }
         } else if value > crit {
-            Style::default().fg(Color::Red)
+            Style::default().fg(theme.danger)
         } else if value > warn {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme.pending)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default().fg(theme.running)
         }
-    }
+    };
 
     fn fb(bytes: i64) -> String {
         if bytes >= 1_073_741_824 {
@@ -1308,7 +1385,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 Span::styled(
                     format!("{}", pg.deadlocks),
                     if pg.deadlocks > 0 {
-                        Style::default().fg(Color::Red)
+                        Style::default().fg(theme.danger)
                     } else {
                         v
                     },
@@ -1328,7 +1405,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                     Span::styled("Indexes      ", l),
                     Span::styled(
                         format!("{} unused", pg.index_health.unused_indexes.len()),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme.pending),
                     ),
                     Span::styled(
                         format!(
@@ -1345,7 +1422,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("{} tables may need an index", pg.missing_indexes.len()),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme.pending),
                     ),
                     Span::styled("  (high seq scans, no index scans, >1K rows)", hint_style),
                 ]));
@@ -1399,7 +1476,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                             Span::styled(format!("  {:>8}", fmt_duration(q.mean_time_ms)), v),
                             Span::styled(
                                 format!("  {}", truncate_str(&q.query, 55)),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme.dim),
                             ),
                         ]));
                     }
@@ -1428,14 +1505,14 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 if !needs_vacuum.is_empty() {
                     spans.push(Span::styled(
                         format!("{} tables need vacuum", needs_vacuum.len()),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme.pending),
                     ));
                     spans.push(Span::styled("  ", l));
                 }
                 if !needs_freeze.is_empty() {
                     spans.push(Span::styled(
                         format!("{} need freeze (XID wraparound risk)", needs_freeze.len()),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(theme.danger),
                     ));
                 }
                 lines.push(Line::from(spans));
@@ -1540,7 +1617,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
                 Span::styled(
                     format!("{} slow", my.queries.slow_queries),
                     if my.queries.slow_queries > 0 {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(theme.pending)
                     } else {
                         l
                     },
@@ -1601,7 +1678,7 @@ fn render_db_stats(app: &MetricsApp, frame: &mut Frame, area: Rect) {
     if total_lines > visible {
         // Add scroll hint at the bottom of the block title
         let scroll_hint = format!(" ↑↓ {}/{} ", scroll + 1, max_scroll + 1);
-        let hint_span = Span::styled(scroll_hint, Style::default().fg(Color::DarkGray));
+        let hint_span = Span::styled(scroll_hint, Style::default().fg(theme.dim));
         let hint_width = hint_span.width() as u16;
         let hint_area = Rect {
             x: area.x + area.width.saturating_sub(hint_width + 2),
@@ -1640,11 +1717,12 @@ fn fmt_duration(ms: f64) -> String {
 }
 
 fn render_service_help_bar(app: &MetricsApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let key_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let on_style = Style::default().fg(Color::White);
-    let off_style = Style::default().fg(Color::DarkGray);
+    let on_style = Style::default().fg(theme.fg);
+    let off_style = Style::default().fg(theme.dim);
 
     let cpu_style = if app.show_cpu { on_style } else { off_style };
     let mem_style = if app.show_memory { on_style } else { off_style };
@@ -1672,7 +1750,7 @@ fn render_service_help_bar(app: &MetricsApp, frame: &mut Frame, area: Rect) {
         Span::styled(" vol ", vol_style),
         Span::styled("5", key_style),
         Span::styled(" http ", http_style),
-        Span::styled(" · ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" · ", Style::default().fg(theme.dim)),
         Span::styled(if app.db_stats_supported { "Tab" } else { "" }, key_style),
         Span::styled(
             if app.db_stats_supported {
@@ -1680,19 +1758,21 @@ fn render_service_help_bar(app: &MetricsApp, frame: &mut Frame, area: Rect) {
             } else {
                 ""
             },
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ),
         Span::styled("t", key_style),
         Span::styled(
             format!(" {} ", app.time_range_label()),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.fg),
         ),
         Span::styled("r", key_style),
-        Span::styled(" refresh ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" refresh ", Style::default().fg(theme.dim)),
+        Span::styled("v", key_style),
+        Span::styled(" theme ", Style::default().fg(theme.dim)),
         Span::styled("?", key_style),
-        Span::styled(" help ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" help ", Style::default().fg(theme.dim)),
         Span::styled("q", key_style),
-        Span::styled(" quit", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" quit", Style::default().fg(theme.dim)),
     ]);
 
     frame.render_widget(Paragraph::new(help), area);
@@ -1701,11 +1781,12 @@ fn render_service_help_bar(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 // ─── Project-wide rendering ──────────────────────────────────────────────────
 
 pub fn render_project(app: &ProjectApp, frame: &mut Frame) {
+    let theme = app.theme;
     let area = frame.area();
 
     if area.width < 60 || area.height < 20 {
         let msg = Paragraph::new("Terminal too small. Please resize (min 60x20).")
-            .style(Style::default().fg(Color::Yellow));
+            .style(Style::default().fg(theme.pending));
         frame.render_widget(msg, area);
         return;
     }
@@ -1724,7 +1805,7 @@ pub fn render_project(app: &ProjectApp, frame: &mut Frame) {
     .split(area);
 
     render_project_header(app, frame, chunks[0]);
-    render_table_header(frame, chunks[1]);
+    render_table_header(theme, frame, chunks[1]);
     render_scrollable_services_table(app, frame, chunks[2]);
     render_detail_panel(app, frame, chunks[3]);
     render_project_help_bar(app, frame, chunks[4]);
@@ -1735,16 +1816,17 @@ pub fn render_project(app: &ProjectApp, frame: &mut Frame) {
             height: 1,
             ..chunks[3]
         };
-        let err_line = Paragraph::new(format!(" {err}")).style(Style::default().fg(Color::Red));
+        let err_line = Paragraph::new(format!(" {err}")).style(Style::default().fg(theme.danger));
         frame.render_widget(err_line, err_area);
     }
 
     if app.show_help {
-        render_help_overlay(frame, area);
+        render_help_overlay(theme, frame, area);
     }
 }
 
 fn render_project_header(app: &ProjectApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let refresh_str = app
         .last_refresh
         .map(|t| t.format("%H:%M:%S").to_string())
@@ -1754,34 +1836,32 @@ fn render_project_header(app: &ProjectApp, frame: &mut Frame, area: Rect) {
         Span::styled(
             format!("  {}", app.project_name),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::raw(format!("env {}", app.environment_name)),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::raw(format!("last {}", app.time_range_label())),
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::styled(
             format!("refreshed {refresh_str}"),
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         ),
         if app.refreshing {
-            Span::styled("  ·  refreshing", Style::default().fg(Color::Yellow))
+            Span::styled("  ·  refreshing", Style::default().fg(theme.pending))
         } else {
             Span::raw("")
         },
-        Span::styled("  ·  ", Style::default().fg(LABEL_COLOR)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
         Span::raw(format!("{} services", app.services.len())),
     ]);
 
     frame.render_widget(Paragraph::new(vec![header, Line::from("")]), area);
 }
 
-fn render_table_header(frame: &mut Frame, area: Rect) {
-    let header_style = Style::default()
-        .fg(LABEL_COLOR)
-        .add_modifier(Modifier::BOLD);
+fn render_table_header(theme: &Theme, frame: &mut Frame, area: Rect) {
+    let header_style = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
 
     let header = Line::from(vec![
         Span::styled(format!("    {:<22}", "Service"), header_style),
@@ -1801,8 +1881,9 @@ fn render_table_header(frame: &mut Frame, area: Rect) {
 }
 
 fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     if app.services.is_empty() {
-        let msg = Paragraph::new("  No services found.").style(Style::default().fg(LABEL_COLOR));
+        let msg = Paragraph::new("  No services found.").style(Style::default().fg(theme.dim));
         frame.render_widget(msg, area);
         return;
     }
@@ -1839,11 +1920,11 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
                     .as_ref()
                     .filter(|l| l.current > 0.0)
                     .and_then(|l| utilization(c.current, Some(l.current)))
-                    .map(health_color)
-                    .unwrap_or(Color::White);
+                    .map(|p| health_color(theme, p))
+                    .unwrap_or(theme.fg);
                 (val, color)
             })
-            .unwrap_or(("—".to_string(), LABEL_COLOR));
+            .unwrap_or(("—".to_string(), theme.dim));
 
         let mem_str = svc
             .memory
@@ -1855,11 +1936,11 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
                     .as_ref()
                     .filter(|l| l.current > 0.0)
                     .and_then(|l| utilization(m.current, Some(l.current)))
-                    .map(health_color)
-                    .unwrap_or(Color::White);
+                    .map(|p| health_color(theme, p))
+                    .unwrap_or(theme.fg);
                 (val, color)
             })
-            .unwrap_or(("—".to_string(), LABEL_COLOR));
+            .unwrap_or(("—".to_string(), theme.dim));
 
         let disk_str = if let Some(vol) = svc.volumes.first() {
             format_mb(vol.current_size_mb)
@@ -1868,42 +1949,36 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
         };
 
         let (reqs_str, err_str, err_color, p50_str) = if svc.is_database {
-            ("—".into(), "—".into(), LABEL_COLOR, "—".into())
+            ("—".into(), "—".into(), theme.dim, "—".into())
         } else if let Some(ref http) = svc.http {
             (
                 format_count(http.total),
                 format!("{:.1}%", http.error_rate),
-                error_rate_color(http.error_rate),
+                error_rate_color(theme, http.error_rate),
                 format!("{}ms", http.p50_ms),
             )
         } else {
-            ("—".into(), "—".into(), LABEL_COLOR, "—".into())
+            ("—".into(), "—".into(), theme.dim, "—".into())
         };
 
         let cursor = if is_selected { "▸" } else { " " };
         let name_style = if is_selected {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.dim)
         };
 
         let line = Line::from(vec![
-            Span::styled(format!(" {cursor} "), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {cursor} "), Style::default().fg(theme.pending)),
             Span::styled(format!("{:<22}", name), name_style),
             Span::styled(format!("{:<16}", cpu_str.0), Style::default().fg(cpu_str.1)),
             Span::styled(format!("{:<16}", mem_str.0), Style::default().fg(mem_str.1)),
-            Span::styled(
-                format!("{:<10}", disk_str),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(
-                format!("{:<10}", reqs_str),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(format!("{:<10}", disk_str), Style::default().fg(theme.fg)),
+            Span::styled(format!("{:<10}", reqs_str), Style::default().fg(theme.fg)),
             Span::styled(format!("{:<8}", err_str), Style::default().fg(err_color)),
-            Span::styled(p50_str, Style::default().fg(Color::White)),
+            Span::styled(p50_str, Style::default().fg(theme.fg)),
         ]);
 
         frame.render_widget(Paragraph::new(line), rows[row_idx]);
@@ -1911,7 +1986,7 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
 
     // Scroll indicators
     if start > 0 {
-        let indicator = Span::styled(" ▴", Style::default().fg(LABEL_COLOR));
+        let indicator = Span::styled(" ▴", Style::default().fg(theme.dim));
         let r = Rect {
             x: area.x + area.width.saturating_sub(3),
             y: area.y,
@@ -1921,7 +1996,7 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
         frame.render_widget(Paragraph::new(Line::from(indicator)), r);
     }
     if end < app.services.len() {
-        let indicator = Span::styled(" ▾", Style::default().fg(LABEL_COLOR));
+        let indicator = Span::styled(" ▾", Style::default().fg(theme.dim));
         let r = Rect {
             x: area.x + area.width.saturating_sub(3),
             y: area.y + area.height.saturating_sub(1),
@@ -1933,11 +2008,11 @@ fn render_scrollable_services_table(app: &ProjectApp, frame: &mut Frame, area: R
 }
 
 fn render_detail_panel(app: &ProjectApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let svc = match app.selected_service() {
         Some(s) => s,
         None => {
-            let msg =
-                Paragraph::new("  No service selected").style(Style::default().fg(LABEL_COLOR));
+            let msg = Paragraph::new("  No service selected").style(Style::default().fg(theme.dim));
             frame.render_widget(msg, area);
             return;
         }
@@ -1947,7 +2022,7 @@ fn render_detail_panel(app: &ProjectApp, frame: &mut Frame, area: Rect) {
         Some(entry) if entry.time_range_idx == app.time_range_idx => entry,
         _ => {
             let msg = Paragraph::new(format!("  Loading {}...", svc.service_name))
-                .style(Style::default().fg(LABEL_COLOR));
+                .style(Style::default().fg(theme.dim));
             frame.render_widget(msg, area);
             return;
         }
@@ -1960,7 +2035,7 @@ fn render_detail_panel(app: &ProjectApp, frame: &mut Frame, area: Rect) {
     let detail_header = Line::from(vec![Span::styled(
         format!("  {}{db_label}", svc.service_name),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )]);
     frame.render_widget(Paragraph::new(detail_header), parts[0]);
@@ -2006,6 +2081,7 @@ fn render_detail_panel(app: &ProjectApp, frame: &mut Frame, area: Rect) {
         show_help: false,
         force_refresh: false,
         refreshing: false,
+        theme,
     };
 
     render_detail_charts(&temp_app, frame, parts[1]);
@@ -2073,11 +2149,12 @@ fn render_detail_charts(app: &MetricsApp, frame: &mut Frame, area: Rect) {
 }
 
 fn render_project_help_bar(app: &ProjectApp, frame: &mut Frame, area: Rect) {
+    let theme = app.theme;
     let key_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let on_style = Style::default().fg(Color::White);
-    let off_style = Style::default().fg(Color::DarkGray);
+    let on_style = Style::default().fg(theme.fg);
+    let off_style = Style::default().fg(theme.dim);
 
     let cpu_style = if app.show_cpu { on_style } else { off_style };
     let mem_style = if app.show_memory { on_style } else { off_style };
@@ -2091,7 +2168,7 @@ fn render_project_help_bar(app: &ProjectApp, frame: &mut Frame, area: Rect) {
     let help = Line::from(vec![
         Span::raw(" "),
         Span::styled("j/k", key_style),
-        Span::styled(" nav ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" nav ", Style::default().fg(theme.dim)),
         Span::styled("1", key_style),
         Span::styled(" cpu ", cpu_style),
         Span::styled("2", key_style),
@@ -2100,18 +2177,20 @@ fn render_project_help_bar(app: &ProjectApp, frame: &mut Frame, area: Rect) {
         Span::styled(" net ", net_style),
         Span::styled("5", key_style),
         Span::styled(" http ", http_style),
-        Span::styled(" · ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" · ", Style::default().fg(theme.dim)),
         Span::styled("t", key_style),
         Span::styled(
             format!(" {} ", app.time_range_label()),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.fg),
         ),
         Span::styled("r", key_style),
-        Span::styled(" refresh ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" refresh ", Style::default().fg(theme.dim)),
+        Span::styled("v", key_style),
+        Span::styled(" theme ", Style::default().fg(theme.dim)),
         Span::styled("?", key_style),
-        Span::styled(" help ", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" help ", Style::default().fg(theme.dim)),
         Span::styled("q", key_style),
-        Span::styled(" quit", Style::default().fg(LABEL_COLOR)),
+        Span::styled(" quit", Style::default().fg(theme.dim)),
     ]);
 
     frame.render_widget(Paragraph::new(help), area);
@@ -2119,7 +2198,7 @@ fn render_project_help_bar(app: &ProjectApp, frame: &mut Frame, area: Rect) {
 
 // ─── Shared widgets ──────────────────────────────────────────────────────────
 
-fn render_help_overlay(frame: &mut Frame, area: Rect) {
+fn render_help_overlay(theme: &Theme, frame: &mut Frame, area: Rect) {
     let width = 52u16.min(area.width.saturating_sub(4));
     let height = 26u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -2127,28 +2206,26 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let overlay = Rect::new(x, y, width, height);
 
     let clear = Paragraph::new(vec![Line::from(""); height as usize])
-        .style(Style::default().bg(Color::Black));
+        .style(Style::default().bg(theme.surface));
     frame.render_widget(clear, overlay);
 
     let block = Block::default()
         .title(" Help ")
         .title_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme.accent));
 
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
 
     let key_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let section = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::BOLD);
+    let section = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
 
     let lines = vec![
         Line::from(""),
@@ -2196,13 +2273,17 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
             Span::raw("Force refresh now"),
         ]),
         Line::from(vec![
+            Span::styled("  v      ", key_style),
+            Span::raw("Cycle colour theme"),
+        ]),
+        Line::from(vec![
             Span::styled("  q/Esc  ", key_style),
             Span::raw("Quit"),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
             "  Press any key to close",
-            Style::default().fg(LABEL_COLOR),
+            Style::default().fg(theme.dim),
         )]),
     ];
 

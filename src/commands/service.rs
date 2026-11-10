@@ -69,6 +69,11 @@ enum Commands {
     Logs(crate::commands::logs::Args),
 
     /// Redeploy the latest deployment of a service
+    ///
+    /// By default the existing build or image is redeployed as-is. Pass
+    /// `--from-source` to pull the latest commit or image from the configured
+    /// source instead, or `--commit <SHA>` to deploy one specific commit once,
+    /// without pinning it in the environment config.
     Redeploy(crate::commands::redeploy::Args),
 
     /// Restart the latest deployment of a service
