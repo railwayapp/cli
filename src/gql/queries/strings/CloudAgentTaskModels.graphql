@@ -1,0 +1,13 @@
+query CloudAgentTaskModels($projectId: String!, $environmentId: String!) {
+  cloudAgentTaskModels(projectId: $projectId, environmentId: $environmentId) {
+    defaultModel
+    defaultReasoningEffort
+    models {
+      id
+      displayName
+      provider
+      isDefault
+      reasoningEfforts
+    }
+  }
+}

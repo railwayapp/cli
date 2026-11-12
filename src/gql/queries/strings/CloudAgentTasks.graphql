@@ -1,0 +1,38 @@
+query CloudAgentTasks(
+  $environmentId: String!
+  $status: CloudAgentTaskStatus
+  $cloudAgentId: String
+  $limit: Int
+  $cursor: String
+) {
+  cloudAgentTasks(
+    environmentId: $environmentId
+    status: $status
+    cloudAgentId: $cloudAgentId
+    limit: $limit
+    cursor: $cursor
+  ) {
+    nextCursor
+    tasks {
+      id
+      status
+      cloudAgentId
+      sessionId
+      promptPreview
+      createdVia
+      model
+      error
+      text
+      structuredOutput
+      attachments {
+        id
+        url
+        filename
+        contentType
+        bytes
+      }
+      createdAt
+      completedAt
+    }
+  }
+}

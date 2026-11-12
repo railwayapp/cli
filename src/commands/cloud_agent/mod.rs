@@ -21,6 +21,7 @@ pub mod prefs;
 pub(crate) mod remote_threads;
 pub mod setup;
 pub mod skills_sync;
+pub mod task;
 pub mod telemetry;
 pub mod tui;
 
@@ -127,6 +128,9 @@ Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
 
     /// Show cloud agents in herdr as machines (herdr 0.9+)
     Herdr(herdr::Args),
+
+    /// Run and manage tasks: hand work to a cloud agent and get the result back
+    Task(task::Args),
 }
 
 /// Shared launch arguments have different help in CA's in-VM execution path.
@@ -181,6 +185,7 @@ pub async fn command(args: Args) -> Result<()> {
         Some(Command::Delete(a)) => tracked("delete", lifecycle::delete(a)).await,
         // Untracked: herdr runs these as hooks many times an hour.
         Some(Command::Herdr(a)) => herdr::command(a).await,
+        Some(Command::Task(a)) => tracked(task::kind(&a), task::command(a)).await,
         None if args.launch.is_bare() && is_stdout_terminal() => browse().await,
         // Flags given, or no terminal to draw on: behave like `railway code`,
         // which means the pane on a terminal and a plain ssh session off one.

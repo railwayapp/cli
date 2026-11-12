@@ -1,0 +1,10 @@
+mutation CloudAgentTaskDispatch($input: CloudAgentTaskDispatchInput!) {
+  cloudAgentTaskDispatch(input: $input) {
+    taskId
+    cloudAgentId
+    sessionId
+    status
+    replayed
+    deliveredAsReply
+  }
+}

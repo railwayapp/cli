@@ -953,6 +953,22 @@ mod cli_tests {
                 assert_parses(&["ca", "herdr", verb]);
             }
             assert_parses(&["ca", "herdr", "bootstrap"]);
+            assert_parses(&["ca", "task", "run", "fix the bug"]);
+            assert_parses(&["ca", "task", "run", "fix the bug", "--accept", "--json"]);
+            assert_parses(&[
+                "ca",
+                "task",
+                "run",
+                "more",
+                "--conversation",
+                "k",
+                "--accept",
+            ]);
+            assert_parses(&["ca", "task", "status", "t1", "--wait"]);
+            assert_parses(&["ca", "task", "list", "--status", "awaiting-input"]);
+            assert_parses(&["ca", "task", "respond", "t1", "allow"]);
+            assert_parses(&["ca", "task", "cancel", "t1"]);
+            assert_parses(&["ca", "task", "models"]);
             assert_parses(&["ca", "herdr", "install", "--print"]);
             assert_parses(&["ca", "herdr", "install", "--remove"]);
             assert_parses(&["ca", "herdr", "new", "--dry-run"]);

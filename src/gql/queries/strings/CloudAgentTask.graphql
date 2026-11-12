@@ -1,0 +1,39 @@
+query CloudAgentTask($cloudAgentId: String!, $sessionId: String!, $taskId: String) {
+  cloudAgentTask(cloudAgentId: $cloudAgentId, sessionId: $sessionId, taskId: $taskId) {
+    taskId
+    cloudAgentId
+    sessionId
+    status
+    sessionState
+    text
+    structuredOutput
+    error
+    completedAt
+    model
+    reasoningEffort
+    attachments {
+      id
+      url
+      filename
+      contentType
+      bytes
+    }
+    pendingInteractions {
+      requestId
+      kind
+      tool
+      server
+      message
+      fields
+      actions
+      expiresAt
+    }
+    progress {
+      steps
+      tools
+      todos
+      attempt
+      updatedAt
+    }
+  }
+}

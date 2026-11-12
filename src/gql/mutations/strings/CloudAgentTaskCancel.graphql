@@ -1,0 +1,6 @@
+mutation CloudAgentTaskCancel($taskId: String!) {
+  cloudAgentTaskCancel(taskId: $taskId) {
+    taskId
+    status
+  }
+}
