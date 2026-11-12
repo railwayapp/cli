@@ -1,0 +1,6 @@
+mutation CloudAgentTaskRespond($input: CloudAgentTaskRespondInput!) {
+  cloudAgentTaskRespond(input: $input) {
+    taskId
+    outcome
+  }
+}

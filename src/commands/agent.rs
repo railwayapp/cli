@@ -1,41 +1,46 @@
-use std::io::Write;
+//! `railway agent`: ask the Railway Agent something, from the terminal.
+//!
+//! Each message is a task run on a cloud agent (see `railway ca task`). Every
+//! conversation in an environment shares one agent, named `railway-agent`:
+//! the first conversation creates it, which is billed, so the command says so
+//! and asks first. A thread is one session on that agent, and its session ID
+//! is the thread ID, which stays the same for as long as the thread lives.
 
-use colored::ColoredString;
+use std::collections::HashSet;
+
+use chrono::{DateTime, Utc};
 use is_terminal::IsTerminal;
-use rand::Rng;
-use serde::Serialize;
-
-const THINKING_MESSAGES: &[&str] = &[
-    "Chugging along...",
-    "Full steam ahead...",
-    "Leaving the station...",
-    "Building up steam...",
-    "Coupling the cars...",
-    "Switching tracks...",
-    "Rolling down the line...",
-    "Stoking the engine...",
-    "Pulling into the yard...",
-    "All aboard...",
-];
-
-use chrono::{DateTime, Local};
+use serde_json::{Value, json};
 
 use crate::{
-    controllers::{
-        chat::{
-            ChatEvent, ChatMessage, ChatMessagePart, ChatRequest, ChatThread, build_chat_client,
-            get_chat_url, get_thread_messages, get_thread_messages_url, get_threads_url,
-            list_threads, stream_chat,
-        },
-        environment::get_matched_environment,
-        project::get_project,
-        service::get_or_prompt_service,
+    commands::{
+        cloud_agent::task::{self, Answer, Interrupted},
+        sandbox::resolve_project_and_env,
     },
+    controllers::{cloud_agent as ca, project::get_project},
+    gql::mutations::cloud_agent_task_dispatch::CloudAgentTaskDispatchInput,
     interact_or,
-    util::progress::create_spinner,
+    util::prompt::prompt_confirm_with_default,
 };
 
 use super::*;
+
+/// The cloud agent every `railway agent` thread in an environment runs on.
+const AGENT_NAME: &str = "railway-agent";
+
+/// What the user accepts before the first thread in an environment creates
+/// that agent.
+const NEW_AGENT_NOTICE: &str = "Railway Agent runs on a cloud agent. This will start a cloud agent VM named railway-agent in this environment and use Railway Agent credits. The VM is billed while it is active and sleeps after five minutes idle. Later sessions reuse it.";
+
+/// How long a new agent's notice stays up before the agent is started.
+const NEW_AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many extra polls to give an approval to register before handing the
+/// task back as still waiting.
+const ANSWER_SETTLE_POLLS: usize = 20;
+
+/// How many earlier turns a resumed thread shows.
+const RESUME_TURNS: usize = 3;
 
 /// Interact with the Railway Agent
 #[derive(Parser)]
@@ -45,6 +50,7 @@ use super::*;
       railway agent                                             # Interactive mode\n\
       railway agent -p \"what's the status of my deployment?\"    # Single prompt\n\
       railway agent -p \"why is my service crashing?\" --json     # JSON output\n\
+      railway agent -p \"summarize today's errors\" --accept      # Skip the cloud agent prompt\n\
       railway agent --list                                      # List existing threads\n\
       railway agent --thread-id <ID>                            # Continue a thread"
 )]
@@ -57,7 +63,7 @@ pub struct Args {
     #[clap(long)]
     json: bool,
 
-    /// Continue an existing chat thread
+    /// Continue an existing thread (see --list)
     #[clap(long, value_name = "ID")]
     thread_id: Option<String>,
 
@@ -69,479 +75,718 @@ pub struct Args {
     #[clap(short, long)]
     environment: Option<String>,
 
+    /// Project ID (defaults to the linked project)
+    #[clap(long)]
+    project: Option<String>,
+
     /// List existing agent threads for the current environment
     #[clap(long, conflicts_with_all = ["prompt", "thread_id", "service"])]
     list: bool,
-}
 
-#[derive(Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JsonResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread_id: Option<String>,
-    response: String,
-    tool_calls: Vec<JsonToolCall>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JsonToolCall {
-    tool_name: String,
-    args: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<serde_json::Value>,
-    is_error: bool,
+    /// Start the environment's cloud agent VM, which is billed, without the
+    /// notice and five-second wait that come before it is first created
+    #[clap(long, short = 'y', visible_alias = "yes")]
+    accept: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    let configs = Configs::new()?;
-    let linked_project = configs.get_linked_project().await?;
-    let project_id = linked_project.project.clone();
-
-    let client = GQLClient::new_authorized(&configs)?;
-    let project = get_project(&client, &configs, project_id.clone()).await?;
-
-    let environment_id = match args.environment.clone() {
-        Some(env) => get_matched_environment(&project, env)?.id,
-        None => linked_project.environment_id()?.to_string(),
-    };
-
-    let chat_client = build_chat_client(&configs)?;
-
-    if args.list {
-        let threads = list_threads(
-            &chat_client,
-            &get_threads_url(&configs),
-            &environment_id,
-            None,
-        )
-        .await?;
-        render_threads(&threads, args.json)?;
-        return Ok(());
+    if let Some(prompt) = &args.prompt {
+        if prompt.trim().is_empty() {
+            bail!("The prompt is empty. Say what you want to ask.");
+        }
     }
 
-    let service_id = get_or_prompt_service(Some(linked_project), project, args.service).await?;
+    let mut configs = Configs::new()?;
+    let client = GQLClient::new_authorized(&configs)?;
+    let (project_id, environment_id) = resolve_project_and_env(
+        &mut configs,
+        &client,
+        args.project.clone(),
+        args.environment.clone(),
+    )
+    .await?;
+    let backboard = configs.get_backboard();
 
-    let url = get_chat_url(&configs);
-    let is_tty = std::io::stdout().is_terminal();
+    let agent = shared_agent(&client, &backboard, &environment_id).await?;
 
-    if let Some(message) = args.prompt {
-        run_single_shot(
-            &chat_client,
-            &url,
-            &ChatRequest {
-                project_id,
-                environment_id,
-                message,
-                thread_id: args.thread_id,
-                service_id,
-            },
-            args.json,
-            is_tty,
-        )
-        .await
-    } else {
-        let history = match args.thread_id.as_deref() {
-            Some(tid) => {
-                let messages_url = get_thread_messages_url(&configs, tid);
-                get_thread_messages(&chat_client, &messages_url, Some(10))
-                    .await
-                    .unwrap_or_else(|e| {
-                        eprintln!("{}", format!("Could not load thread history: {e}").dimmed());
-                        Vec::new()
-                    })
+    if args.list {
+        let records = match &agent {
+            Some(agent) => {
+                task::recent_tasks(&client, &backboard, &environment_id, Some(&agent.id)).await?
             }
             None => Vec::new(),
         };
+        return render_threads(&threads(&records), args.json);
+    }
 
-        run_repl(
-            &chat_client,
-            &url,
-            &project_id,
-            &environment_id,
-            service_id.as_deref(),
-            args.thread_id,
-            history,
-            args.json,
-            is_tty,
-        )
-        .await
+    // The agent can see the whole environment, so a service only narrows what
+    // the conversation is about: use the one named or linked, never ask.
+    let project = get_project(&client, &configs, project_id.clone()).await?;
+    let named = |id: &str| {
+        project
+            .services
+            .edges
+            .iter()
+            .find(|edge| edge.node.id == id)
+            .map(|edge| edge.node.name.clone())
+    };
+    let service = match args.service.as_deref() {
+        Some(selector) => Some(
+            project
+                .services
+                .edges
+                .iter()
+                .find(|edge| edge.node.name == selector || edge.node.id == selector)
+                .map(|edge| (edge.node.id.clone(), Some(edge.node.name.clone())))
+                .with_context(|| format!("Service {selector} not found in this project"))?,
+        ),
+        None => configs
+            .get_linked_project()
+            .await
+            .ok()
+            .filter(|linked| linked.project == project_id)
+            .and_then(|linked| linked.service)
+            .map(|id| {
+                let name = named(&id);
+                (id, name)
+            }),
+    };
+
+    // A thread to continue is found before anything is asked or sent, so a
+    // mistyped ID is an error here rather than a surprise later.
+    let mut history = Vec::new();
+    let (agent_id, session_id) = match args.thread_id.as_deref() {
+        Some(thread) => {
+            let records = task::recent_tasks(&client, &backboard, &environment_id, None).await?;
+            let (agent_id, session_id) = locate_thread(&records, thread).with_context(|| {
+                format!(
+                    "No thread {thread} in this environment. `railway agent --list` shows yours."
+                )
+            })?;
+            history = records
+                .into_iter()
+                .filter(|record| task::text(record, "sessionId") == Some(&session_id))
+                .collect();
+            history.reverse();
+            (Some(agent_id), Some(session_id))
+        }
+        None => (agent.map(|agent| agent.id), None),
+    };
+
+    let mut session = Session {
+        client: &client,
+        backboard,
+        project_id,
+        environment_id,
+        service,
+        agent_id,
+        session_id,
+        json: args.json,
+        // Only a person at a terminal can answer the agent mid-task.
+        interactive: args.prompt.is_none(),
+    };
+
+    match args.prompt {
+        Some(message) => {
+            if session.agent_id.is_none() {
+                announce_new_agent(args.accept).await?;
+            }
+            let turn = match session.turn(message).await {
+                Ok(turn) => turn,
+                Err(error) if error.is::<Interrupted>() => {
+                    eprintln!("{}", session.interrupted_hint());
+                    std::process::exit(130);
+                }
+                Err(error) => return Err(error),
+            };
+            session.render(&turn)?;
+            let thread = session.session_id.as_deref().unwrap_or_default();
+            match task::outcome(&turn) {
+                "FAILED" => bail!(
+                    "The agent failed: {}",
+                    task::text(&turn, "error").unwrap_or("no reason given")
+                ),
+                "CANCELLED" => bail!("The request was cancelled."),
+                "AWAITING_INPUT" => bail!(
+                    "The agent is waiting on an answer. Reply with `railway agent --thread-id {thread} -p \"<answer>\"`."
+                ),
+                _ => Ok(()),
+            }
+        }
+        None => session.repl(args.accept, &history).await,
     }
 }
 
-fn render_history(messages: &[ChatMessage], thread_id: Option<&str>) {
-    let banner = match thread_id {
-        Some(id) => format!("── resuming thread {id} ──"),
-        None => "── resuming thread ──".to_string(),
-    };
-    println!("{}", banner.dimmed());
+/// Say that a billed cloud agent is about to be created, and give a moment
+/// to stop it. `accepted` skips both.
+///
+/// A wait rather than a question, so a script that ran `railway agent -p`
+/// before it started agents keeps working: it sees the notice and carries on.
+/// At a terminal, Enter starts at once and Ctrl-C or Esc backs out.
+async fn announce_new_agent(accepted: bool) -> Result<()> {
+    if accepted {
+        return Ok(());
+    }
+    let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+    eprintln!("{}", textwrap::fill(NEW_AGENT_NOTICE, width.clamp(40, 100)));
 
-    let skin = termimad::MadSkin::default();
-
-    for message in messages {
-        let is_assistant = message.role == "assistant";
-        let role_label = match message.role.as_str() {
-            "user" => "You:".bold(),
-            "assistant" => "Railway Agent:".purple().bold(),
-            other => other.bold(),
-        };
-        println!("{}", role_label);
-
-        let text_parts: Vec<&str> = message
-            .parts
-            .iter()
-            .filter_map(|part| match part {
-                ChatMessagePart::Text { content } => Some(content.as_str()),
-                _ => None,
-            })
-            .collect();
-
-        let text = if text_parts.is_empty() {
-            message.content.clone()
-        } else {
-            text_parts.join("")
-        };
-        if !text.trim().is_empty() {
-            if is_assistant {
-                skin.print_text(&text);
-            } else {
-                println!("{}", text);
-            }
+    let seconds = NEW_AGENT_WAIT.as_secs();
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        eprintln!("Starting in {seconds} seconds. Pass --accept to skip this wait.");
+        tokio::select! {
+            _ = tokio::time::sleep(NEW_AGENT_WAIT) => return Ok(()),
+            _ = tokio::signal::ctrl_c() => bail!("Cancelled. No agent was started."),
         }
-
-        for part in &message.parts {
-            match part {
-                ChatMessagePart::Tool {
-                    tool_name,
-                    is_error,
-                    ..
-                } => {
-                    let label = if *is_error {
-                        format!("[tool failed: {tool_name}]")
-                    } else {
-                        format!("[used tool: {tool_name}]")
-                    };
-                    println!("{}", label.dimmed().italic());
-                }
-                ChatMessagePart::Attachment { name, .. } => {
-                    println!("{}", format!("[attachment: {name}]").dimmed().italic());
-                }
-                ChatMessagePart::Text { .. } => {}
-            }
-        }
-
-        println!();
     }
 
+    // Keys are read raw so Enter and Ctrl-C act the moment they are pressed,
+    // and nothing typed during the wait is left for the prompt that follows.
+    let started = tokio::task::spawn_blocking(move || -> Result<bool> {
+        use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+        use std::io::Write;
+
+        crossterm::terminal::enable_raw_mode()?;
+        let deadline = std::time::Instant::now() + NEW_AGENT_WAIT;
+        let outcome = loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break Ok(true);
+            }
+            eprint!(
+                "\r{}",
+                format!(
+                    "Starting in {}s. Press Enter to start now, Ctrl-C to cancel. ",
+                    left.as_secs() + 1
+                )
+                .dimmed()
+            );
+            let _ = std::io::stderr().flush();
+            match crossterm::event::poll(left.min(std::time::Duration::from_millis(200))) {
+                Ok(false) => continue,
+                Err(error) => break Err(error.into()),
+                Ok(true) => {}
+            }
+            match crossterm::event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Enter => break Ok(true),
+                    KeyCode::Esc => break Ok(false),
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break Ok(false);
+                    }
+                    _ => {}
+                },
+                Ok(_) => {}
+                Err(error) => break Err(error.into()),
+            }
+        };
+        let _ = crossterm::terminal::disable_raw_mode();
+        // Clear the countdown line so what follows starts clean.
+        eprint!("\r{}\r", " ".repeat(70));
+        let _ = std::io::stderr().flush();
+        outcome
+    })
+    .await??;
+
+    if !started {
+        bail!("Cancelled. No agent was started.");
+    }
+    Ok(())
+}
+
+/// The environment's shared agent, if it has been created. Two first runs at
+/// once can leave more than one; the oldest wins so every caller agrees.
+async fn shared_agent(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+) -> Result<Option<ca::Agent>> {
+    Ok(
+        ca::list_in_environment(client, backboard, environment_id, true)
+            .await?
+            .into_iter()
+            .filter(|agent| agent.name == AGENT_NAME)
+            .min_by_key(|agent| agent.created_at),
+    )
+}
+
+/// The agent and session a thread ID names. A task ID is accepted too, and
+/// names the thread that task belongs to.
+fn locate_thread(records: &[Value], thread: &str) -> Option<(String, String)> {
+    records
+        .iter()
+        .find(|record| {
+            task::text(record, "sessionId") == Some(thread)
+                || task::text(record, "id") == Some(thread)
+        })
+        .and_then(|record| {
+            Some((
+                task::text(record, "cloudAgentId")?.to_string(),
+                task::text(record, "sessionId")?.to_string(),
+            ))
+        })
+}
+
+/// One row of `--list`: a session and what happened on it.
+#[derive(Debug, PartialEq)]
+struct Thread {
+    id: String,
+    turns: usize,
+    first_prompt: String,
+    status: String,
+    last_active: String,
+}
+
+/// Group task records (newest first) into threads, most recently active first.
+fn threads(records: &[Value]) -> Vec<Thread> {
+    let mut out: Vec<Thread> = Vec::new();
+    for record in records {
+        let Some(session) = task::text(record, "sessionId") else {
+            continue;
+        };
+        let prompt = task::text(record, "promptPreview").unwrap_or_default();
+        match out.iter_mut().find(|thread| thread.id == session) {
+            // Records arrive newest first, so each later one is an earlier
+            // turn: it is the thread's opening prompt until an older shows up.
+            Some(thread) => {
+                thread.turns += 1;
+                thread.first_prompt = prompt.to_string();
+            }
+            None => out.push(Thread {
+                id: session.to_string(),
+                turns: 1,
+                first_prompt: prompt.to_string(),
+                status: task::outcome(record).to_string(),
+                last_active: task::text(record, "createdAt")
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+        }
+    }
+    out
+}
+
+fn render_threads(threads: &[Thread], as_json: bool) -> Result<()> {
+    if as_json {
+        let out: Vec<Value> = threads
+            .iter()
+            .map(|thread| {
+                json!({
+                    "threadId": thread.id,
+                    "turns": thread.turns,
+                    "status": thread.status,
+                    "lastActiveAt": thread.last_active,
+                    "firstPrompt": thread.first_prompt,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if threads.is_empty() {
+        println!("No agent threads in this environment. Start one with `railway agent`.");
+        return Ok(());
+    }
+    println!(
+        "{:<18}  {:<5}  {:<8}  {}",
+        "THREAD".dimmed(),
+        "TURNS".dimmed(),
+        "ACTIVE".dimmed(),
+        "STARTED WITH".dimmed()
+    );
+    for thread in threads {
+        let active = DateTime::parse_from_rfc3339(&thread.last_active)
+            .map(|at| ca::humanize_age(at.with_timezone(&Utc)))
+            .unwrap_or_default();
+        println!(
+            "{:<18}  {:<5}  {:<8}  {}",
+            thread.id,
+            thread.turns,
+            active,
+            task::truncate(&thread.first_prompt, 60)
+        );
+    }
+    println!(
+        "\n{}",
+        "Continue one with `railway agent --thread-id <THREAD>`.".dimmed()
+    );
+    Ok(())
+}
+
+struct Session<'a> {
+    client: &'a reqwest::Client,
+    backboard: String,
+    project_id: String,
+    environment_id: String,
+    /// The service the conversation is scoped to: its ID and, when known, name.
+    service: Option<(String, Option<String>)>,
+    /// The shared agent, once it exists. `None` means the next message
+    /// creates it.
+    agent_id: Option<String>,
+    /// The thread. `None` means the next message starts one.
+    session_id: Option<String>,
+    json: bool,
+    interactive: bool,
+}
+
+impl Session<'_> {
+    /// Send one message and wait for the agent to answer, ask, or fail.
+    async fn turn(&mut self, message: String) -> Result<Value> {
+        let input = CloudAgentTaskDispatchInput {
+            cloud_agent_id: self.agent_id.clone(),
+            session_id: self.session_id.clone(),
+            // Only the message that creates the agent names it.
+            agent_name: self.agent_id.is_none().then(|| AGENT_NAME.to_string()),
+            interactive: Some(self.interactive),
+            context: service_context(self.service.as_ref()),
+            ..task::blank_input(
+                self.project_id.clone(),
+                self.environment_id.clone(),
+                message,
+            )
+        };
+        let handle = task::dispatch(self.client, &self.backboard, input)
+            .await
+            .map_err(|error| {
+                if format!("{error:#}").contains("Cloud agent not found") {
+                    anyhow::anyhow!(
+                        "The agent behind this thread was deleted. Start a new thread with `railway agent`."
+                    )
+                } else {
+                    task::explain(error, None)
+                }
+            })?;
+        self.agent_id = Some(handle.agent_id.clone());
+        self.session_id = Some(handle.session_id.clone());
+
+        let mut answered: HashSet<String> = HashSet::new();
+        let mut settling = 0;
+        loop {
+            let turn = task::wait(
+                self.client,
+                &self.backboard,
+                &handle.agent_id,
+                &handle.session_id,
+                &handle.task_id,
+                !self.json,
+            )
+            .await?;
+            if task::text(&turn, "status") != Some("AWAITING_INPUT") {
+                return Ok(turn);
+            }
+
+            let open: Vec<Value> = task::pending(&turn)
+                .into_iter()
+                .filter(|request| !answered.contains(request_id(request)))
+                .collect();
+            if open.is_empty() {
+                // An approval just sent has not registered yet.
+                settling += 1;
+                if settling > ANSWER_SETTLE_POLLS {
+                    return Ok(turn);
+                }
+                tokio::time::sleep(task::POLL_INTERVAL).await;
+                continue;
+            }
+            settling = 0;
+
+            // An approval is a yes or no the person can give right here. A
+            // question goes back to the caller, whose next message answers it.
+            let approvals: Vec<&Value> = open.iter().filter(|r| task::is_approval(r)).collect();
+            if !self.interactive || approvals.is_empty() {
+                return Ok(turn);
+            }
+            for request in approvals {
+                let what = task::text(request, "message")
+                    .or_else(|| task::text(request, "tool"))
+                    .unwrap_or("an action");
+                println!("{} {what}", "The agent wants approval:".yellow().bold());
+                let allow = prompt_confirm_with_default("Allow?", true)?;
+                let id = request_id(request).to_string();
+                task::answer(
+                    self.client,
+                    &self.backboard,
+                    &handle.task_id,
+                    id.clone(),
+                    if allow { Answer::Allow } else { Answer::Deny },
+                    None,
+                )
+                .await?;
+                answered.insert(id);
+            }
+        }
+    }
+
+    fn render(&self, turn: &Value) -> Result<()> {
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_response(turn, self.session_id.as_deref()))?
+            );
+            return Ok(());
+        }
+        // The header is for a person reading a terminal. Piped, the output is
+        // the answer and nothing else.
+        let to_terminal = std::io::stdout().is_terminal();
+        let header = || {
+            if to_terminal {
+                println!("{}", "Railway Agent:".purple().bold());
+            }
+        };
+        match task::outcome(turn) {
+            "FAILED" | "CANCELLED" => {}
+            "AWAITING_INPUT" => {
+                header();
+                for request in task::pending(turn) {
+                    println!(
+                        "{}",
+                        task::text(&request, "message").unwrap_or("(the agent asked a question)")
+                    );
+                }
+            }
+            _ => {
+                header();
+                let answer = task::text(turn, "text").unwrap_or("(no response)");
+                if to_terminal {
+                    termimad::MadSkin::default().print_text(answer);
+                } else {
+                    println!("{answer}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn interrupted_hint(&self) -> String {
+        match &self.session_id {
+            Some(thread) => format!(
+                "Stopped waiting. The agent is still working. Pick the thread back up with: railway agent --thread-id {thread}"
+            ),
+            None => "Stopped waiting.".to_string(),
+        }
+    }
+
+    async fn repl(&mut self, accepted: bool, history: &[Value]) -> Result<()> {
+        interact_or!(
+            "Interactive mode requires a terminal. Use `railway agent -p \"your message\"` for non-interactive use."
+        );
+
+        if self.agent_id.is_none() {
+            announce_new_agent(accepted).await?;
+        }
+        if let Some(thread) = &self.session_id {
+            show_resumed(thread, history);
+        }
+
+        println!(
+            "{}",
+            "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed()
+        );
+        println!();
+
+        loop {
+            let input = inquire::Text::new("You:")
+                .with_render_config(Configs::get_render_config())
+                .prompt();
+
+            let message = match input {
+                Ok(msg)
+                    if msg.trim().eq_ignore_ascii_case("exit")
+                        || msg.trim().eq_ignore_ascii_case("quit") =>
+                {
+                    break;
+                }
+                Ok(msg) if msg.trim().is_empty() => continue,
+                Ok(msg) => msg,
+                Err(inquire::InquireError::OperationInterrupted) => break,
+                Err(e) => return Err(e.into()),
+            };
+
+            println!();
+            // A failed or abandoned turn ends the turn, not the conversation.
+            match self.turn(message).await {
+                Ok(turn) => {
+                    self.render(&turn)?;
+                    match task::outcome(&turn) {
+                        "FAILED" => eprintln!(
+                            "{}: {}",
+                            "Error".red().bold(),
+                            task::text(&turn, "error").unwrap_or("the agent failed")
+                        ),
+                        "CANCELLED" => eprintln!("{}", "The request was cancelled.".yellow()),
+                        _ => {}
+                    }
+                }
+                Err(error) if error.is::<Interrupted>() => eprintln!(
+                    "{}",
+                    "Stopped waiting. The agent is still working on that.".yellow()
+                ),
+                Err(error) => eprintln!("{}: {error:#}", "Error".red().bold()),
+            }
+            println!();
+        }
+
+        if let Some(thread) = &self.session_id {
+            println!(
+                "{}",
+                format!("Continue later with `railway agent --thread-id {thread}`.").dimmed()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Show where a resumed thread left off: its last few turns, oldest first.
+fn show_resumed(thread: &str, history: &[Value]) {
+    println!("{}", format!("── resuming thread {thread} ──").dimmed());
+    let skin = termimad::MadSkin::default();
+    for record in history
+        .iter()
+        .skip(history.len().saturating_sub(RESUME_TURNS))
+    {
+        if let Some(prompt) = task::text(record, "promptPreview") {
+            println!("{}\n{prompt}", "You:".bold());
+        }
+        if let Some(answer) = task::text(record, "text").filter(|text| !text.is_empty()) {
+            println!("{}", "Railway Agent:".purple().bold());
+            skin.print_text(answer);
+        }
+    }
     println!("{}", "── end of history ──".dimmed());
 }
 
-fn render_threads(threads: &[ChatThread], json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(threads)?);
-        return Ok(());
-    }
-
-    if threads.is_empty() {
-        println!("No agent threads found for this environment.");
-        return Ok(());
-    }
-
-    println!("{}", "Agent Threads".bold());
-    for thread in threads {
-        let title = thread.title.as_deref().unwrap_or("(untitled)");
-        let updated = DateTime::parse_from_rfc3339(&thread.updated_at)
-            .map(|t| {
-                t.with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S %Z")
-                    .to_string()
-            })
-            .unwrap_or_else(|_| thread.updated_at.clone());
-        println!("  {} | {} | {}", thread.id, title, updated.dimmed(),);
-    }
-    Ok(())
-}
-
-async fn run_single_shot(
-    client: &reqwest::Client,
-    url: &str,
-    request: &ChatRequest,
-    json: bool,
-    is_tty: bool,
-) -> Result<()> {
-    if json {
-        let response = stream_json(client, url, request).await?;
-        println!("{}", serde_json::to_string_pretty(&response).unwrap());
-    } else {
-        stream_human(client, url, request, is_tty).await?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_repl(
-    client: &reqwest::Client,
-    url: &str,
-    project_id: &str,
-    environment_id: &str,
-    service_id: Option<&str>,
-    initial_thread_id: Option<String>,
-    history: Vec<ChatMessage>,
-    json: bool,
-    is_tty: bool,
-) -> Result<()> {
-    interact_or!(
-        "Interactive mode requires a terminal. Use `railway -p \"your message\"` for non-interactive use."
-    );
-
-    println!(
-        "{}",
-        "Railway Agent (type 'exit' or Ctrl+C to quit)".dimmed()
-    );
-    println!();
-
-    if !history.is_empty() {
-        render_history(&history, initial_thread_id.as_deref());
-        println!();
-    }
-
-    let mut thread_id = initial_thread_id;
-
-    loop {
-        let input = inquire::Text::new("You:")
-            .with_render_config(Configs::get_render_config())
-            .prompt();
-
-        let message = match input {
-            Ok(msg)
-                if msg.trim().eq_ignore_ascii_case("exit")
-                    || msg.trim().eq_ignore_ascii_case("quit") =>
-            {
-                break;
-            }
-            Ok(msg) if msg.trim().is_empty() => continue,
-            Ok(msg) => msg,
-            Err(inquire::InquireError::OperationInterrupted) => break,
-            Err(e) => return Err(e.into()),
+/// `--service` as background for the agent: what the conversation is about,
+/// not an instruction.
+fn service_context(service: Option<&(String, Option<String>)>) -> Option<Value> {
+    service.map(|(id, name)| {
+        let named = match name {
+            Some(name) => format!("\"{name}\" (ID {id})"),
+            None => format!("with ID {id}"),
         };
-
-        let request = ChatRequest {
-            project_id: project_id.to_string(),
-            environment_id: environment_id.to_string(),
-            message,
-            thread_id: thread_id.clone(),
-            service_id: service_id.map(|s| s.to_string()),
-        };
-
-        if json {
-            let response = stream_json(client, url, &request).await?;
-            if let Some(tid) = response.thread_id.clone() {
-                thread_id = Some(tid);
-            }
-            println!("{}", serde_json::to_string_pretty(&response).unwrap());
-        } else if let Some(new_tid) = stream_human(client, url, &request, is_tty).await? {
-            thread_id = Some(new_tid);
-        }
-
-        println!();
-    }
-
-    Ok(())
-}
-
-async fn stream_human(
-    client: &reqwest::Client,
-    url: &str,
-    request: &ChatRequest,
-    is_tty: bool,
-) -> Result<Option<String>> {
-    let mut renderer = HumanRenderer::new(is_tty);
-    let mut thread_id = None;
-    renderer.start_thinking();
-
-    stream_chat(client, url, request, |event| {
-        if let ChatEvent::Metadata {
-            thread_id: ref tid, ..
-        } = event
-        {
-            thread_id = Some(tid.clone());
-        }
-        renderer.handle(event);
+        json!([{
+            "type": "service",
+            "serviceId": id,
+            "text": format!("The user scoped this conversation to the Railway service {named}."),
+        }])
     })
-    .await?;
-
-    Ok(thread_id)
 }
 
-async fn stream_json(
-    client: &reqwest::Client,
-    url: &str,
-    request: &ChatRequest,
-) -> Result<JsonResponse> {
-    let mut response = JsonResponse::default();
-    stream_chat(client, url, request, |event| {
-        accumulate_json_event(event, &mut response);
-    })
-    .await?;
-    Ok(response)
+fn request_id(request: &Value) -> &str {
+    task::text(request, "requestId").unwrap_or_default()
 }
 
-struct HumanRenderer {
-    spinner: Option<indicatif::ProgressBar>,
-    has_printed_text: bool,
-    pending_markdown: String,
-    block_start_pos: Option<(u16, u16)>,
-    is_tty: bool,
+/// The `--json` shape for one turn. `threadId` is what `--thread-id` takes to
+/// continue.
+fn json_response(turn: &Value, thread: Option<&str>) -> Value {
+    let status = task::outcome(turn);
+    let mut out = json!({
+        "threadId": thread,
+        "taskId": task::text(turn, "taskId"),
+        "status": status,
+        "response": task::text(turn, "text").unwrap_or_default(),
+        "toolCalls": turn["progress"]["tools"]
+            .as_array()
+            .map(|tools| tools.iter().map(|tool| json!({ "toolName": tool })).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    });
+    if let Some(error) = task::text(turn, "error").filter(|_| status == "FAILED") {
+        out["error"] = json!(error);
+    }
+    if status == "AWAITING_INPUT" {
+        out["questions"] = json!(task::pending(turn));
+    }
+    out
 }
 
-impl HumanRenderer {
-    fn new(is_tty: bool) -> Self {
-        Self {
-            spinner: None,
-            has_printed_text: false,
-            pending_markdown: String::new(),
-            block_start_pos: None,
-            is_tty,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_response_keeps_the_old_keys() {
+        let turn = json!({
+            "status": "COMPLETED",
+            "taskId": "t1",
+            "text": "all good",
+            "progress": { "steps": 2, "tools": ["get-logs"] }
+        });
+        let out = json_response(&turn, Some("task-abc"));
+        assert_eq!(out["threadId"], "task-abc");
+        assert_eq!(out["taskId"], "t1");
+        assert_eq!(out["response"], "all good");
+        assert_eq!(out["toolCalls"][0]["toolName"], "get-logs");
+        assert!(out.get("error").is_none());
+        assert!(out.get("questions").is_none());
     }
 
-    fn start_thinking(&mut self) {
-        if self.is_tty {
-            let msg = THINKING_MESSAGES[rand::thread_rng().gen_range(0..THINKING_MESSAGES.len())];
-            println!();
-            self.spinner = Some(create_spinner(msg.dimmed().to_string()));
-        }
+    #[test]
+    fn json_response_carries_failures_and_questions() {
+        let failed = json_response(&json!({ "status": "FAILED", "error": "boom" }), None);
+        assert_eq!(failed["error"], "boom");
+        assert_eq!(failed["response"], "");
+
+        let cancelled = json_response(
+            &json!({ "status": "FAILED", "error": "The task was cancelled" }),
+            None,
+        );
+        assert_eq!(cancelled["status"], "CANCELLED");
+        assert!(cancelled.get("error").is_none());
+
+        let asking = json_response(
+            &json!({
+                "status": "AWAITING_INPUT",
+                "pendingInteractions": [{ "requestId": "r1", "message": "Which service?" }]
+            }),
+            Some("task-abc"),
+        );
+        assert_eq!(asking["questions"][0]["requestId"], "r1");
     }
 
-    fn clear_spinner(&mut self) -> bool {
-        self.spinner.take().map(|s| s.finish_and_clear()).is_some()
+    #[test]
+    fn service_scope_is_sent_as_context() {
+        assert!(service_context(None).is_none());
+        let service = ("svc_1".to_string(), Some("api".to_string()));
+        let context = service_context(Some(&service)).unwrap();
+        assert_eq!(context[0]["type"], "service");
+        assert_eq!(context[0]["serviceId"], "svc_1");
+        assert!(context[0]["text"].as_str().unwrap().contains("\"api\""));
     }
 
-    fn handle(&mut self, event: ChatEvent) {
-        match event {
-            ChatEvent::Chunk { text } => {
-                let cleared = self.clear_spinner();
-                if !self.has_printed_text {
-                    if !cleared {
-                        // Two newlines to guarantee one visible blank line between
-                        // this response and whatever came before.
-                        print!("\n\n");
-                    }
-                    if self.is_tty {
-                        let _ = std::io::stdout().flush();
-                        self.block_start_pos = crossterm::cursor::position().ok();
-                    }
-                    print!("{} ", "Railway Agent:".purple().bold());
-                    self.has_printed_text = true;
-                    self.pending_markdown.clear();
-                }
-                self.pending_markdown.push_str(&text);
-                print!("{}", text);
-                let _ = std::io::stdout().flush();
-            }
-            ChatEvent::ToolCallReady { tool_name, .. } => {
-                if !self.is_tty {
-                    return;
-                }
-                self.flush_pending();
-                self.clear_spinner();
-                self.has_printed_text = false;
-                self.spinner = Some(create_spinner(format!(
-                    "{} {}",
-                    "╰─".dimmed(),
-                    tool_badge(&format!(" Agent Tool: {tool_name} "))
-                )));
-            }
-            ChatEvent::ToolExecutionComplete { is_error, .. } => {
-                self.clear_spinner();
-                if self.is_tty {
-                    let label = if is_error {
-                        " ✗ Tool failed "
-                    } else {
-                        " ✓ Done "
-                    };
-                    println!("{}", tool_badge(label));
-                }
-            }
-            ChatEvent::Error { message } => {
-                self.clear_spinner();
-                eprintln!("{}: {}", "Error".red().bold(), message);
-            }
-            ChatEvent::Aborted { reason } => {
-                self.clear_spinner();
-                let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
-                eprintln!("{}: {}", "Aborted".yellow().bold(), msg);
-            }
-            ChatEvent::WorkflowCompleted { .. } => {
-                if !self.flush_pending() {
-                    println!();
-                }
-            }
-            ChatEvent::Metadata { .. } => {}
-        }
+    fn record(id: &str, session: &str, prompt: &str, at: &str) -> Value {
+        json!({
+            "id": id,
+            "sessionId": session,
+            "cloudAgentId": "agent-1",
+            "promptPreview": prompt,
+            "status": "COMPLETED",
+            "createdAt": at,
+        })
     }
 
-    fn flush_pending(&mut self) -> bool {
-        if self.pending_markdown.is_empty() {
-            return false;
-        }
-
-        if let Some((col, row)) = self.block_start_pos.take() {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::cursor::MoveTo(col, row),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
-            );
-        } else {
-            println!();
-        }
-
-        println!("{}", "Railway Agent:".purple().bold());
-        termimad::MadSkin::default().print_text(&self.pending_markdown);
-
-        self.pending_markdown.clear();
-        let _ = std::io::stdout().flush();
-        true
+    #[test]
+    fn tasks_group_into_threads_by_session() {
+        // Newest first, as the API returns them.
+        let records = vec![
+            record("t4", "task-b", "and then?", "2026-01-01T00:04:00Z"),
+            record("t3", "task-a", "follow up", "2026-01-01T00:03:00Z"),
+            record("t2", "task-b", "second thread", "2026-01-01T00:02:00Z"),
+            record("t1", "task-a", "first thread", "2026-01-01T00:01:00Z"),
+            json!({ "id": "t0", "status": "FAILED" }),
+        ];
+        let threads = threads(&records);
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].id, "task-b");
+        assert_eq!(threads[0].turns, 2);
+        assert_eq!(threads[0].first_prompt, "second thread");
+        assert_eq!(threads[0].last_active, "2026-01-01T00:04:00Z");
+        assert_eq!(threads[1].first_prompt, "first thread");
     }
-}
 
-fn tool_badge(text: &str) -> ColoredString {
-    text.truecolor(255, 255, 255).on_truecolor(68, 68, 68)
-}
-
-fn accumulate_json_event(event: ChatEvent, response: &mut JsonResponse) {
-    match event {
-        ChatEvent::Metadata { thread_id, .. } => {
-            response.thread_id = Some(thread_id);
-        }
-        ChatEvent::Chunk { text } => {
-            response.response.push_str(&text);
-        }
-        ChatEvent::ToolCallReady {
-            tool_name, args, ..
-        } => {
-            response.tool_calls.push(JsonToolCall {
-                tool_name,
-                args,
-                result: None,
-                is_error: false,
-            });
-        }
-        ChatEvent::ToolExecutionComplete {
-            result, is_error, ..
-        } => {
-            if let Some(last) = response.tool_calls.last_mut() {
-                last.result = Some(result);
-                last.is_error = is_error;
-            }
-        }
-        ChatEvent::Error { message } => {
-            response.response.push_str(&format!("\nError: {message}"));
-        }
-        ChatEvent::Aborted { reason } => {
-            let msg = reason.unwrap_or_else(|| "Request was aborted".to_string());
-            response.response.push_str(&format!("\nAborted: {msg}"));
-        }
-        ChatEvent::WorkflowCompleted { .. } => {}
+    #[test]
+    fn a_thread_is_found_by_session_or_task_id() {
+        let records = vec![record("t1", "task-a", "hi", "2026-01-01T00:01:00Z")];
+        let found = Some(("agent-1".to_string(), "task-a".to_string()));
+        assert_eq!(locate_thread(&records, "task-a"), found);
+        assert_eq!(locate_thread(&records, "t1"), found);
+        assert_eq!(locate_thread(&records, "nope"), None);
     }
 }
