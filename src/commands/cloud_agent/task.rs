@@ -32,6 +32,13 @@ use crate::util::prompt::prompt_confirm_with_default;
 /// What the user accepts before `run` starts a new cloud agent.
 const NEW_AGENT_NOTICE: &str = "This will start a new cloud agent VM in this environment and use Railway Agent credits to run the task. The VM is billed while it is active and sleeps after five minutes idle.";
 
+/// The same, for a conversation key: only its first task starts an agent, and
+/// whether this is the first cannot be told from here.
+const CONVERSATION_NOTICE: &str = "If this is the first task on this conversation, it will start a new cloud agent VM in this environment. Either way it uses Railway Agent credits. The VM is billed while it is active and sleeps after five minutes idle.";
+
+/// How the API reports a cancelled task until it has a status of its own.
+const CANCELLED_ERROR: &str = "The task was cancelled";
+
 /// How often a waiting command asks for the task's state.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -86,9 +93,11 @@ struct TargetArgs {
 #[derive(Parser)]
 struct RunArgs {
     /// What the agent should do
-    prompt: String,
+    prompt: Option<String>,
 
-    /// Run on this existing agent (name or ID) instead of starting a new one
+    /// Run on this existing agent (name or ID) instead of starting a new one.
+    /// Each run is a fresh session: use --reply-to to keep an earlier task's
+    /// context
     #[clap(long, value_name = "AGENT", conflicts_with_all = ["reply_to", "conversation"])]
     agent: Option<String>,
 
@@ -149,9 +158,14 @@ struct RunArgs {
     #[clap(long)]
     no_wait: bool,
 
+    /// Let the agent ask you a question and wait for the answer, instead of
+    /// deciding on its own
+    #[clap(long)]
+    interactive: bool,
+
     /// Accept that this may start a new, billed cloud agent VM, without
     /// being asked
-    #[clap(long)]
+    #[clap(long, short = 'y', visible_alias = "yes")]
     accept: bool,
 
     /// Output as JSON
@@ -304,7 +318,8 @@ pub(crate) fn confirm_new_agent(accepted: bool, notice: &str) -> Result<()> {
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         bail!("{notice} Pass --accept to proceed.");
     }
-    println!("{notice}");
+    let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+    println!("{}", textwrap::fill(notice, width.clamp(40, 100)));
     if !prompt_confirm_with_default("Continue?", true)? {
         bail!("Cancelled. No agent was started.");
     }
@@ -312,6 +327,29 @@ pub(crate) fn confirm_new_agent(accepted: bool, notice: &str) -> Result<()> {
 }
 
 async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> Result<()> {
+    // Everything that can be wrong with the request itself is checked before
+    // anything is asked or sent.
+    let prompt = required_prompt(args.prompt.as_deref(), args.target.project.as_deref())?;
+    let images = args
+        .images
+        .iter()
+        .map(|image| image_input(image))
+        .collect::<Result<Vec<_>>>()?;
+    if images.len() > 4 {
+        bail!("A task takes at most four images.");
+    }
+    let output_schema = match &args.output_schema {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("Could not read {}", path.display()))?;
+            Some(
+                serde_json::from_str::<Value>(&raw)
+                    .with_context(|| format!("{} is not valid JSON", path.display()))?,
+            )
+        }
+        None => None,
+    };
+
     let (project_id, environment_id) = resolve_project_and_env(
         configs,
         client,
@@ -331,29 +369,13 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
         None => None,
     };
 
-    // Only a task with no target is certain to start an agent. A conversation
-    // key may too, on its first use, and there is no way to tell from here, so
-    // it gets the same notice.
-    if cloud_agent_id.is_none() && args.reply_to.is_none() {
+    // A task with no target is certain to start an agent. A conversation key
+    // starts one only on its first use.
+    if args.conversation.is_some() {
+        confirm_new_agent(args.accept, CONVERSATION_NOTICE)?;
+    } else if cloud_agent_id.is_none() && args.reply_to.is_none() {
         confirm_new_agent(args.accept, NEW_AGENT_NOTICE)?;
     }
-
-    let images = args
-        .images
-        .iter()
-        .map(|image| image_input(image))
-        .collect::<Result<Vec<_>>>()?;
-    let output_schema = match &args.output_schema {
-        Some(path) => {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("Could not read {}", path.display()))?;
-            Some(
-                serde_json::from_str::<Value>(&raw)
-                    .with_context(|| format!("{} is not valid JSON", path.display()))?,
-            )
-        }
-        None => None,
-    };
     let source = (args.repo.is_some() || args.service.is_some()).then(|| {
         cloud_agent_task_dispatch::CloudAgentSourceInput {
             repo: args.repo.clone(),
@@ -374,10 +396,13 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
         images: (!images.is_empty()).then_some(images),
         output_schema,
         idempotency_key: args.idempotency_key.clone(),
-        ..blank_input(project_id, environment_id, args.prompt.clone())
+        interactive: args.interactive.then_some(true),
+        ..blank_input(project_id, environment_id, prompt)
     };
 
-    let handle = dispatch(client, &backboard, input).await?;
+    let handle = dispatch(client, &backboard, input)
+        .await
+        .map_err(|error| explain(error, args.reply_to.as_deref()))?;
 
     if args.no_wait {
         if args.json {
@@ -414,9 +439,86 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
         &handle.task_id,
         !args.json,
     )
-    .await?;
-    finish(&result, args.json)
+    .await;
+    finish(&or_exit_on_interrupt(result)?, args.json)
 }
+
+/// The prompt, or why there isn't a usable one. `-p` is `--prompt` on
+/// `railway agent` and `--project` here, so a prompt that landed in
+/// `--project` gets pointed out rather than reported as a missing argument.
+fn required_prompt(prompt: Option<&str>, project: Option<&str>) -> Result<String> {
+    match prompt.map(str::trim) {
+        Some(prompt) if !prompt.is_empty() => Ok(prompt.to_string()),
+        Some(_) => bail!("The prompt is empty. Say what the agent should do."),
+        None => match project {
+            Some(project) if project.contains(char::is_whitespace) => bail!(
+                "On `railway ca task`, -p is --project. Pass the prompt as an argument: railway ca task run \"{project}\""
+            ),
+            _ => bail!("A prompt is required: railway ca task run \"<what the agent should do>\""),
+        },
+    }
+}
+
+/// Rewrite the API's wording for the errors a person can act on.
+pub(crate) fn explain(error: anyhow::Error, replied_to: Option<&str>) -> anyhow::Error {
+    let message = format!("{error:#}");
+    if message.contains("Reply task not found") {
+        return anyhow::anyhow!(
+            "No task {} in this environment. Pass --environment if it ran somewhere else.",
+            replied_to.unwrap_or("with that ID")
+        );
+    }
+    if message.contains("Cloud agent not found") {
+        return anyhow::anyhow!(
+            "The cloud agent this would run on no longer exists. Start a new one by leaving out the target."
+        );
+    }
+    if message.contains("cloudAgentTaskModels") {
+        return anyhow::anyhow!(
+            "{}",
+            message.replace(
+                "list the available ones with cloudAgentTaskModels",
+                "list the available ones with `railway ca task models`"
+            )
+        );
+    }
+    if message.contains("reasoningEffort must be") {
+        return anyhow::anyhow!("{}", message.replace("reasoningEffort", "--effort"));
+    }
+    error
+}
+
+/// Ctrl-C during a wait leaves the task running. Say so, with the way back,
+/// and exit the way an interrupted command does.
+fn or_exit_on_interrupt(result: Result<Value>) -> Result<Value> {
+    match result {
+        Err(error) => match error.downcast_ref::<Interrupted>() {
+            Some(interrupted) => {
+                eprintln!(
+                    "Stopped waiting. The task is still running: railway ca task status {} --wait",
+                    interrupted.task_id
+                );
+                std::process::exit(130);
+            }
+            None => Err(error),
+        },
+        ok => ok,
+    }
+}
+
+/// A wait ended by Ctrl-C. The task it was waiting on is still running.
+#[derive(Debug)]
+pub(crate) struct Interrupted {
+    pub task_id: String,
+}
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Stopped waiting on task {}", self.task_id)
+    }
+}
+
+impl std::error::Error for Interrupted {}
 
 /// Where a dispatched task landed.
 pub(crate) struct Handle {
@@ -492,15 +594,17 @@ async fn status(configs: &mut Configs, client: &reqwest::Client, args: StatusArg
     let (agent_id, session_id) = placement(&record)?;
 
     let result = if args.wait {
-        wait(
-            client,
-            &backboard,
-            &agent_id,
-            &session_id,
-            &args.task,
-            !args.json,
-        )
-        .await?
+        or_exit_on_interrupt(
+            wait(
+                client,
+                &backboard,
+                &agent_id,
+                &session_id,
+                &args.task,
+                !args.json,
+            )
+            .await,
+        )?
     } else {
         fetch(client, &backboard, &agent_id, &session_id, &args.task).await?
     };
@@ -587,7 +691,7 @@ pub(crate) async fn show_tasks(
         .into_iter()
         .flatten()
     {
-        let status = text(task, "status").unwrap_or("UNKNOWN");
+        let status = outcome(task);
         let age = text(task, "createdAt")
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
             .map(|at| ca::humanize_age(at.with_timezone(&Utc)))
@@ -719,11 +823,27 @@ async fn cancel(configs: &Configs, client: &reqwest::Client, args: CancelArgs) -
             task_id: args.task.clone(),
         },
     )
-    .await?
+    .await
+    .map_err(|error| {
+        // The API answers the same for a task that does not exist and one
+        // that is not the caller's.
+        if format!("{error:#}").contains("do not have access") {
+            anyhow::anyhow!("No task {} that you can cancel.", args.task)
+        } else {
+            error.into()
+        }
+    })?
     .cloud_agent_task_cancel;
+    let result = serde_json::to_value(result)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if finished(&result) {
+        // The status is the one the task had when cancel was requested.
+        println!(
+            "Task {} had already finished. Nothing was cancelled.",
+            args.task.cyan()
+        );
     } else {
         println!("Cancel requested for task {}.", args.task.cyan());
     }
@@ -828,6 +948,41 @@ pub(crate) async fn find_task(
     bail!("No task {task_id} in this environment. Pass --environment if it ran somewhere else.")
 }
 
+/// An environment's task records, newest first, optionally only one agent's.
+/// Bounded: a very long history is cut off at the oldest page read.
+pub(crate) async fn recent_tasks(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    cloud_agent_id: Option<&str>,
+) -> Result<Vec<Value>> {
+    let mut records = Vec::new();
+    let mut cursor = None;
+    for _ in 0..FIND_TASK_PAGES {
+        let page = post_graphql::<queries::CloudAgentTasks, _>(
+            client,
+            backboard,
+            cloud_agent_tasks::Variables {
+                environment_id: environment_id.to_string(),
+                status: None,
+                cloud_agent_id: cloud_agent_id.map(str::to_string),
+                limit: Some(100),
+                cursor,
+            },
+        )
+        .await?
+        .cloud_agent_tasks;
+        if let Value::Array(tasks) = serde_json::to_value(&page.tasks)? {
+            records.extend(tasks);
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(records)
+}
+
 /// The agent and session a task record points at.
 fn placement(record: &Value) -> Result<(String, String)> {
     match (text(record, "cloudAgentId"), text(record, "sessionId")) {
@@ -840,10 +995,22 @@ fn placement(record: &Value) -> Result<(String, String)> {
 }
 
 fn finished(task: &Value) -> bool {
-    matches!(text(task, "status"), Some("COMPLETED" | "FAILED"))
+    matches!(
+        text(task, "status"),
+        Some("COMPLETED" | "FAILED" | "CANCELLED")
+    )
 }
 
-async fn fetch(
+/// A task's status, with a cancelled task told apart from a failed one.
+pub(crate) fn outcome(task: &Value) -> &str {
+    match text(task, "status") {
+        Some("FAILED") if text(task, "error") == Some(CANCELLED_ERROR) => "CANCELLED",
+        Some(status) => status,
+        None => "UNKNOWN",
+    }
+}
+
+pub(crate) async fn fetch(
     client: &reqwest::Client,
     backboard: &str,
     agent_id: &str,
@@ -876,35 +1043,71 @@ pub(crate) async fn wait(
 ) -> Result<Value> {
     let spinner = (show_progress && std::io::stderr().is_terminal())
         .then(|| create_spinner("Starting".to_string()));
-    let result = loop {
-        let task = match fetch(client, backboard, agent_id, session_id, task_id).await {
-            Ok(task) => task,
-            Err(error) => {
-                if let Some(spinner) = &spinner {
-                    spinner.finish_and_clear();
-                }
-                return Err(error);
-            }
+    let started = std::time::Instant::now();
+    // The API drops a task's progress once it finishes, so the last progress
+    // seen while it ran is kept and handed back with the result.
+    let mut last_progress: Option<Value> = None;
+    let mut tools_shown = 0;
+    let outcome = loop {
+        let task = tokio::select! {
+            task = fetch(client, backboard, agent_id, session_id, task_id) => task,
+            _ = tokio::signal::ctrl_c() => Err(Interrupted { task_id: task_id.to_string() }.into()),
         };
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => break Err(error),
+        };
+        if !task["progress"].is_null() {
+            // Each tool the agent reaches for gets a line of its own, so a
+            // long wait shows what it has been doing.
+            if let Some(spinner) = &spinner {
+                let tools = task["progress"]["tools"].as_array();
+                for tool in tools.into_iter().flatten().skip(tools_shown) {
+                    spinner.println(format!(
+                        "  {} {}",
+                        "↳".dimmed(),
+                        tool.as_str().unwrap_or("tool").dimmed()
+                    ));
+                }
+                tools_shown = tools.map_or(tools_shown, Vec::len);
+            }
+            last_progress = Some(task["progress"].clone());
+        }
         if settled(&task) {
-            break task;
+            break Ok(task);
         }
         if let Some(spinner) = &spinner {
-            spinner.set_message(progress_line(&task));
+            spinner.set_message(format!(
+                "{} · {}s",
+                progress_line(&task),
+                started.elapsed().as_secs()
+            ));
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::select! {
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            _ = tokio::signal::ctrl_c() => break Err(Interrupted { task_id: task_id.to_string() }.into()),
+        }
     };
     if let Some(spinner) = &spinner {
         spinner.finish_and_clear();
     }
-    Ok(result)
+    let mut task = outcome?;
+    if task["progress"].is_null() {
+        if let Some(progress) = last_progress {
+            task["progress"] = progress;
+        }
+    }
+    Ok(task)
 }
 
 fn settled(task: &Value) -> bool {
-    matches!(
-        text(task, "status"),
-        Some("COMPLETED" | "FAILED" | "AWAITING_INPUT")
-    )
+    match text(task, "status") {
+        Some("COMPLETED" | "FAILED" | "CANCELLED") => true,
+        // Waiting with nothing left to answer is the moment between an answer
+        // being sent and the agent picking it up, not a place to stop.
+        Some("AWAITING_INPUT") => !pending(task).is_empty(),
+        _ => false,
+    }
 }
 
 fn progress_line(task: &Value) -> String {
@@ -918,17 +1121,18 @@ fn progress_line(task: &Value) -> String {
         .as_array()
         .and_then(|tools| tools.last())
         .and_then(Value::as_str);
+    let counted = if steps == 1 { "step" } else { "steps" };
     match (steps, tool) {
         (0, _) => state.to_string(),
-        (steps, Some(tool)) => format!("{state} · {steps} steps · {tool}"),
-        (steps, None) => format!("{state} · {steps} steps"),
+        (steps, Some(tool)) => format!("{state} · {steps} {counted} · {tool}"),
+        (steps, None) => format!("{state} · {steps} {counted}"),
     }
 }
 
 /// Print a settled (or snapshotted) task and turn a failure into a non-zero
 /// exit.
 fn finish(task: &Value, as_json: bool) -> Result<()> {
-    let status = text(task, "status").unwrap_or("UNKNOWN");
+    let status = outcome(task);
     let task_id = text(task, "taskId").unwrap_or_default();
 
     if as_json {
@@ -936,7 +1140,7 @@ fn finish(task: &Value, as_json: bool) -> Result<()> {
     } else {
         match status {
             "COMPLETED" => {
-                if let Some(result) = text(task, "text") {
+                if let Some(result) = text(task, "text").filter(|text| !text.is_empty()) {
                     println!("{result}");
                 }
                 if let Some(structured) = task.get("structuredOutput").filter(|v| !v.is_null()) {
@@ -956,16 +1160,18 @@ fn finish(task: &Value, as_json: bool) -> Result<()> {
             }
             "AWAITING_INPUT" => {
                 println!("Task {} is waiting on an answer:", task_id.cyan());
-                print_interactions(&pending(task));
-                println!(
-                    "{}",
+                let requests = pending(task);
+                print_interactions(&requests);
+                let hint = if requests.iter().any(is_approval) {
+                    format!("Answer with `railway ca task respond {task_id} <allow|deny>`.")
+                } else {
                     format!(
-                        "Answer with `railway ca task respond {task_id} <allow|deny|accept|decline|cancel>`."
+                        "Answer with `railway ca task run \"<your answer>\" --reply-to {task_id}`."
                     )
-                    .dimmed()
-                );
+                };
+                println!("{}", hint.dimmed());
             }
-            "FAILED" => {}
+            "FAILED" | "CANCELLED" => {}
             other => {
                 println!("Task {} is {}.", task_id.cyan(), colorize_status(other));
                 let line = progress_line(task);
@@ -976,13 +1182,21 @@ fn finish(task: &Value, as_json: bool) -> Result<()> {
         }
     }
 
-    if status == "FAILED" {
-        bail!(
+    match status {
+        "FAILED" => bail!(
             "Task {task_id} failed: {}",
             text(task, "error").unwrap_or("no reason given")
-        );
+        ),
+        "CANCELLED" => bail!("Task {task_id} was cancelled."),
+        _ => Ok(()),
     }
-    Ok(())
+}
+
+/// Whether a pending request is a yes-or-no approval rather than a question.
+pub(crate) fn is_approval(request: &Value) -> bool {
+    request["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| action == "ALLOW"))
 }
 
 pub(crate) fn pending(task: &Value) -> Vec<Value> {
@@ -997,12 +1211,18 @@ fn print_interactions(interactions: &[Value]) {
         let what = text(interaction, "message")
             .or_else(|| text(interaction, "tool"))
             .unwrap_or("(no description)");
-        println!(
-            "  {}  {}  {}",
-            text(interaction, "requestId").unwrap_or_default().dimmed(),
-            text(interaction, "kind").unwrap_or_default(),
-            what
-        );
+        println!("  {what}");
+        // A request ID only matters when there is a choice of which to answer.
+        if interactions.len() > 1 {
+            println!(
+                "    {}",
+                format!(
+                    "--request {}",
+                    text(interaction, "requestId").unwrap_or_default()
+                )
+                .dimmed()
+            );
+        }
     }
 }
 
@@ -1046,18 +1266,18 @@ pub(crate) fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
 
-fn colorize_status(status: &str) -> colored::ColoredString {
+pub(crate) fn colorize_status(status: &str) -> colored::ColoredString {
     let label = status.to_ascii_lowercase().replace('_', " ");
     match status {
         "COMPLETED" => label.green(),
         "FAILED" => label.red(),
-        "AWAITING_INPUT" => label.yellow(),
+        "AWAITING_INPUT" | "CANCELLED" => label.yellow(),
         "RUNNING" => label.cyan(),
         _ => label.dimmed(),
     }
 }
 
-fn truncate(value: &str, width: usize) -> String {
+pub(crate) fn truncate(value: &str, width: usize) -> String {
     let single_line = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if single_line.chars().count() <= width {
         return single_line;
@@ -1075,9 +1295,16 @@ mod tests {
 
     #[test]
     fn settles_on_terminal_and_waiting_states() {
-        for status in ["COMPLETED", "FAILED", "AWAITING_INPUT"] {
+        for status in ["COMPLETED", "FAILED", "CANCELLED"] {
             assert!(settled(&json!({ "status": status })), "{status}");
         }
+        let asking = json!({
+            "status": "AWAITING_INPUT",
+            "pendingInteractions": [{ "requestId": "r1" }]
+        });
+        assert!(settled(&asking));
+        let answered = json!({ "status": "AWAITING_INPUT", "pendingInteractions": [] });
+        assert!(!settled(&answered));
         for status in ["PENDING", "RUNNING"] {
             assert!(!settled(&json!({ "status": status })), "{status}");
         }
@@ -1090,6 +1317,8 @@ mod tests {
             "progress": { "steps": 3, "tools": ["read", "bash"] }
         });
         assert_eq!(progress_line(&task), "Working · 3 steps · bash");
+        let one = json!({ "status": "RUNNING", "progress": { "steps": 1, "tools": [] } });
+        assert_eq!(progress_line(&one), "Working · 1 step");
         assert_eq!(progress_line(&json!({ "status": "PENDING" })), "Starting");
     }
 
@@ -1108,6 +1337,64 @@ mod tests {
         assert!(placement(&json!({ "taskId": "t1", "cloudAgentId": null })).is_err());
         assert!(finished(&json!({ "status": "FAILED" })));
         assert!(!finished(&json!({ "status": "AWAITING_INPUT" })));
+    }
+
+    #[test]
+    fn cancelled_is_told_apart_from_failed() {
+        let cancelled = json!({ "status": "FAILED", "taskId": "t1", "error": CANCELLED_ERROR });
+        assert_eq!(outcome(&cancelled), "CANCELLED");
+        assert_eq!(
+            finish(&cancelled, true).unwrap_err().to_string(),
+            "Task t1 was cancelled."
+        );
+        assert_eq!(outcome(&json!({ "status": "CANCELLED" })), "CANCELLED");
+        assert_eq!(
+            outcome(&json!({ "status": "FAILED", "error": "boom" })),
+            "FAILED"
+        );
+        assert!(finished(&json!({ "status": "CANCELLED" })));
+    }
+
+    #[test]
+    fn a_prompt_in_the_project_flag_is_pointed_out() {
+        assert_eq!(required_prompt(Some(" fix it "), None).unwrap(), "fix it");
+        assert!(
+            required_prompt(Some("   "), None)
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
+        let hint = required_prompt(None, Some("fix the bug"))
+            .unwrap_err()
+            .to_string();
+        assert!(hint.contains("-p is --project"), "{hint}");
+        let plain = required_prompt(None, Some("0b1c")).unwrap_err().to_string();
+        assert!(plain.contains("A prompt is required"), "{plain}");
+    }
+
+    #[test]
+    fn api_wording_is_rewritten_for_the_cli() {
+        let model = explain(
+            anyhow::anyhow!("Unknown model x; list the available ones with cloudAgentTaskModels"),
+            None,
+        );
+        assert!(model.to_string().contains("`railway ca task models`"));
+        let effort = explain(anyhow::anyhow!("reasoningEffort must be one of low"), None);
+        assert_eq!(effort.to_string(), "--effort must be one of low");
+        let reply = explain(anyhow::anyhow!("Reply task not found"), Some("t9"));
+        assert!(
+            reply
+                .to_string()
+                .starts_with("No task t9 in this environment")
+        );
+        assert_eq!(explain(anyhow::anyhow!("other"), None).to_string(), "other");
+    }
+
+    #[test]
+    fn approvals_are_told_apart_from_questions() {
+        assert!(is_approval(&json!({ "actions": ["ALLOW", "DENY"] })));
+        assert!(!is_approval(&json!({ "actions": ["ACCEPT", "DECLINE"] })));
+        assert!(!is_approval(&json!({})));
     }
 
     #[test]
