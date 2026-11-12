@@ -18,7 +18,7 @@ use colored::Colorize;
 use is_terminal::IsTerminal;
 use serde_json::Value;
 
-use crate::client::{GQLClient, post_graphql};
+use crate::client::{GQLClient, post_graphql, post_graphql_raw};
 use crate::commands::sandbox::resolve_project_and_env;
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
@@ -200,6 +200,7 @@ enum StatusFilter {
     AwaitingInput,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Parser)]
@@ -370,10 +371,8 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
     };
 
     // A task with no target is certain to start an agent. A conversation key
-    // starts one only on its first use.
-    if args.conversation.is_some() {
-        confirm_new_agent(args.accept, CONVERSATION_NOTICE)?;
-    } else if cloud_agent_id.is_none() && args.reply_to.is_none() {
+    // starts one only on its first use, which the API is asked about below.
+    if args.conversation.is_none() && cloud_agent_id.is_none() && args.reply_to.is_none() {
         confirm_new_agent(args.accept, NEW_AGENT_NOTICE)?;
     }
     let source = (args.repo.is_some() || args.service.is_some()).then(|| {
@@ -400,9 +399,13 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
         ..blank_input(project_id, environment_id, prompt)
     };
 
-    let handle = dispatch(client, &backboard, input)
-        .await
-        .map_err(|error| explain(error, args.reply_to.as_deref()))?;
+    let input = serde_json::to_value(input)?;
+    let dispatched = if args.conversation.is_some() && !args.accept {
+        dispatch_asking_first(client, &backboard, input).await
+    } else {
+        dispatch_value(client, &backboard, input).await
+    };
+    let handle = dispatched.map_err(|error| explain(error, args.reply_to.as_deref()))?;
 
     if args.no_wait {
         if args.json {
@@ -547,6 +550,7 @@ pub(crate) fn blank_input(
         external_ref: None,
         idempotency_key: None,
         images: None,
+        allow_create: None,
         interactive: None,
         metadata: None,
         mode: None,
@@ -567,10 +571,55 @@ pub(crate) async fn dispatch(
     backboard: &str,
     input: cloud_agent_task_dispatch::CloudAgentTaskDispatchInput,
 ) -> Result<Handle> {
-    let handle = post_graphql::<mutations::CloudAgentTaskDispatch, _>(
+    dispatch_value(client, backboard, serde_json::to_value(input)?).await
+}
+
+/// Dispatch on a conversation key without having been told a new agent is
+/// fine: ask the API to refuse rather than create one, and only if it would
+/// have to, ask the person and send the task again.
+async fn dispatch_asking_first(
+    client: &reqwest::Client,
+    backboard: &str,
+    input: Value,
+) -> Result<Handle> {
+    let mut asking = input.clone();
+    asking["allowCreate"] = Value::Bool(false);
+    let refusal = match dispatch_value(client, backboard, asking).await {
+        Ok(handle) => return Ok(handle),
+        Err(error) => error,
+    };
+    match create_refusal(&format!("{refusal:#}")) {
+        Some(notice) => {
+            confirm_new_agent(false, notice)?;
+            dispatch_value(client, backboard, input).await
+        }
+        None => Err(refusal),
+    }
+}
+
+/// Why a dispatch that asked not to create an agent was turned down, as the
+/// notice to put to the person. `None` for any other error.
+fn create_refusal(message: &str) -> Option<&'static str> {
+    if message.contains("would start a new cloud agent") {
+        // The API checked: this conversation has no agent yet.
+        Some(NEW_AGENT_NOTICE)
+    } else if message.contains("allowCreate") {
+        // An API from before it could be asked. Whether an agent would be
+        // created is unknown, so the notice says so.
+        Some(CONVERSATION_NOTICE)
+    } else {
+        None
+    }
+}
+
+/// Dispatch an input already in its wire form, so a field can be set on it
+/// between attempts.
+async fn dispatch_value(client: &reqwest::Client, backboard: &str, input: Value) -> Result<Handle> {
+    let handle = post_graphql_raw::<cloud_agent_task_dispatch::ResponseData, _>(
         client,
         backboard,
-        cloud_agent_task_dispatch::Variables { input },
+        cloud_agent_task_dispatch::QUERY,
+        serde_json::json!({ "input": input }),
     )
     .await?
     .cloud_agent_task_dispatch;
@@ -631,51 +680,62 @@ async fn list(configs: &mut Configs, client: &reqwest::Client, args: ListArgs) -
             StatusFilter::AwaitingInput => S::AWAITING_INPUT,
             StatusFilter::Completed => S::COMPLETED,
             StatusFilter::Failed => S::FAILED,
+            StatusFilter::Cancelled => S::CANCELLED,
         }
     });
+    let only = match args.status {
+        Some(StatusFilter::Failed) => Some("FAILED"),
+        Some(StatusFilter::Cancelled) => Some("CANCELLED"),
+        _ => None,
+    };
 
-    show_tasks(
-        client,
-        &backboard,
-        environment_id,
-        status,
-        cloud_agent_id,
-        args.limit,
-        args.json,
-    )
-    .await
-}
-
-/// Print one page of an environment's tasks, newest first.
-pub(crate) async fn show_tasks(
-    client: &reqwest::Client,
-    backboard: &str,
-    environment_id: String,
-    status: Option<cloud_agent_tasks::CloudAgentTaskStatus>,
-    cloud_agent_id: Option<String>,
-    limit: i64,
-    as_json: bool,
-) -> Result<()> {
-    let page = post_graphql::<queries::CloudAgentTasks, _>(
-        client,
-        backboard,
-        cloud_agent_tasks::Variables {
-            environment_id,
-            status,
-            cloud_agent_id,
-            limit: Some(limit),
-            cursor: None,
-        },
-    )
-    .await?
+    let (limit, as_json) = (args.limit, args.json);
+    let backboard = backboard.as_str();
+    let query = |status| {
+        post_graphql::<queries::CloudAgentTasks, _>(
+            client,
+            backboard,
+            cloud_agent_tasks::Variables {
+                environment_id: environment_id.clone(),
+                status,
+                cloud_agent_id: cloud_agent_id.clone(),
+                limit: Some(limit),
+                cursor: None,
+            },
+        )
+    };
+    let page = match query(status).await {
+        // An API from before CANCELLED was a status lists cancelled tasks as
+        // failed. Ask it for those; they are told apart below either way.
+        Err(error) if only == Some("CANCELLED") && format!("{error:#}").contains("CANCELLED") => {
+            query(Some(cloud_agent_tasks::CloudAgentTaskStatus::FAILED)).await?
+        }
+        page => page?,
+    }
     .cloud_agent_tasks;
 
+    // Each record reads as what happened to it, whichever way the API said so.
+    let mut tasks = match serde_json::to_value(&page.tasks)? {
+        Value::Array(tasks) => tasks,
+        _ => Vec::new(),
+    };
+    for task in &mut tasks {
+        let status = outcome(task).to_string();
+        task["status"] = Value::String(status);
+    }
+    if let Some(only) = only {
+        tasks.retain(|task| text(task, "status") == Some(only));
+    }
+
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&page.tasks)?);
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
         return Ok(());
     }
-    if page.tasks.is_empty() {
-        println!("No tasks in this environment.");
+    if tasks.is_empty() {
+        println!(
+            "No tasks in this environment{}.",
+            if only.is_some() { " in that state" } else { "" }
+        );
         return Ok(());
     }
 
@@ -686,11 +746,7 @@ pub(crate) async fn show_tasks(
         "AGE".dimmed(),
         "PROMPT".dimmed()
     );
-    for task in serde_json::to_value(&page.tasks)?
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
+    for task in &tasks {
         let status = outcome(task);
         let age = text(task, "createdAt")
             .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
@@ -1388,6 +1444,20 @@ mod tests {
                 .starts_with("No task t9 in this environment")
         );
         assert_eq!(explain(anyhow::anyhow!("other"), None).to_string(), "other");
+    }
+
+    #[test]
+    fn a_refused_create_is_put_to_the_person() {
+        let checked =
+            "This task would start a new cloud agent; send it again with allowCreate to start one";
+        assert_eq!(create_refusal(checked), Some(NEW_AGENT_NOTICE));
+        let older_api =
+            "Field \"allowCreate\" is not defined by type \"CloudAgentTaskDispatchInput\".";
+        assert_eq!(create_refusal(older_api), Some(CONVERSATION_NOTICE));
+        assert_eq!(
+            create_refusal("Cloud agent not found in this environment"),
+            None
+        );
     }
 
     #[test]
