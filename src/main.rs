@@ -97,6 +97,7 @@ commands!(
     upgrade,
     usage,
     variable(variables, vars, var),
+    verifier(verifiers),
     waf,
     whoami,
     volume,
@@ -862,6 +863,28 @@ mod cli_tests {
         #[test]
         fn add_repo_branch() {
             assert_parses(&["add", "--repo", "owner/repo", "--branch", "main"]);
+        }
+
+        #[test]
+        fn verifier_subcommands() {
+            assert!(parse(&["verifier"]).is_err());
+            assert_subcommand(&["verifier", "list"], "verifier");
+            assert_subcommand(&["verifiers", "list"], "verifier");
+            assert_parses(&["verifier", "list", "--status", "failed", "--json"]);
+            assert_parses(&["verifier", "ls", "--all"]);
+            assert_parses(&["verifier", "get", "ver_1"]);
+            assert_parses(&["verifier", "run", "ver_1", "--json"]);
+            assert_parses(&[
+                "verifier",
+                "create",
+                "checkout-200",
+                "--intent",
+                "checkout returns 200",
+                "--kind",
+                "script",
+                "--deployment",
+                "dep_1",
+            ]);
         }
 
         #[test]

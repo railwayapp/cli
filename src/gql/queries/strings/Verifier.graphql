@@ -1,0 +1,29 @@
+query Verifier($id: String!) {
+  verifier(id: $id) {
+    id
+    name
+    intent
+    kind
+    status
+    projectId
+    environmentId
+    workloadKind
+    workloadId
+    revisionId
+    clonedFromId
+    config
+    holdSeconds
+    heldSeconds
+    deadline
+    createdAt
+    resolvedAt
+    runs {
+      id
+      verdict
+      reason
+      evidence
+      startedAt
+      completedAt
+    }
+  }
+}

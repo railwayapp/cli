@@ -610,3 +610,33 @@ pub struct Traces;
     skip_serializing_none
 )]
 pub struct Trace;
+
+/// Used by `railway verifier list`. The fields are not in the public
+/// introspection snapshot, so this query is checked against a slice of the
+/// internal schema.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/verifier-schema.json",
+    query_path = "src/gql/queries/strings/Verifiers.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct Verifiers;
+
+/// Used by `railway verifier get`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/verifier-schema.json",
+    query_path = "src/gql/queries/strings/Verifier.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct Verifier;
+
+/// Used when `railway verifier create` omits --deployment.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/LatestDeployment.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct LatestDeployment;

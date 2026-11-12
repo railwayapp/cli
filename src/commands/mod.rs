@@ -67,6 +67,7 @@ pub mod up;
 pub mod upgrade;
 pub mod usage;
 pub mod variable;
+pub mod verifier;
 pub mod volume;
 pub mod waf;
 pub mod whoami;
