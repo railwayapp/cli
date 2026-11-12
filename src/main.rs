@@ -967,6 +967,10 @@ mod cli_tests {
             assert_parses(&["ca", "task", "run", "more", "--interactive", "-y"]);
             assert_parses(&["ca", "task", "run", "more", "--yes"]);
             assert_parses(&["ca", "task", "status", "t1", "--wait"]);
+            assert_parses(&["ca", "task", "status", "t1", "--watch"]);
+            assert_parses(&["ca", "task", "run", "fix the bug", "--watch"]);
+            assert_parses(&["ca", "task", "run", "fix the bug", "-w", "-y"]);
+            assert_parses(&["ca", "task", "run", "fix the bug", "--no-wait"]);
             assert_parses(&["ca", "task", "list", "--status", "awaiting-input"]);
             assert_parses(&["ca", "task", "list", "--status", "cancelled"]);
             assert_parses(&["ca", "task", "respond", "t1", "allow"]);
