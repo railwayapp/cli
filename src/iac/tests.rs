@@ -206,6 +206,59 @@ fn count_only_replica_changes_keep_current_region() {
 }
 
 #[test]
+fn single_replica_region_move_is_planned_and_settles() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "deploy": {
+        "multiRegionConfig": { "us-east4": { "numReplicas": 1 } }
+    } }),
+    )]);
+    let desired = graph_from(vec![service(
+        "web",
+        json!({ "deploy": {
+        "multiRegionConfig": { "europe-west4": { "numReplicas": 1 } }
+    } }),
+    )]);
+    let change_set = diff(&current, &desired);
+    assert_eq!(change_set.changes.len(), 1);
+    let change = &change_set.changes[0];
+    assert_eq!(change["field"], "deploy");
+    assert_eq!(
+        change["after"]["multiRegionConfig"],
+        json!({
+            "europe-west4": { "numReplicas": 1 }
+        })
+    );
+    let details = change["details"].to_string();
+    assert!(details.contains("us-east4"), "{details}");
+    assert!(details.contains("europe-west4"), "{details}");
+    assert!(diff(&desired, &desired).changes.is_empty());
+    let current_with_null_default = graph_from(vec![service(
+        "web",
+        json!({ "deploy": { "multiRegionConfig": {
+            "europe-west4": { "numReplicas": 1, "stackerAssignment": null }
+        } } }),
+    )]);
+    assert!(
+        diff(&current_with_null_default, &desired)
+            .changes
+            .is_empty()
+    );
+}
+
+#[test]
+fn omitted_single_replica_region_remains_a_default() {
+    let current = graph_from(vec![service(
+        "web",
+        json!({ "deploy": {
+        "multiRegionConfig": { "us-east4": { "numReplicas": 1 } }
+    } }),
+    )]);
+    let desired = graph_from(vec![service("web", json!({}))]);
+    assert!(diff(&current, &desired).changes.is_empty());
+}
+
+#[test]
 fn dockerfile_build_defaults_do_not_drift() {
     let current = graph_from(vec![service(
         "backend",
