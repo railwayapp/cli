@@ -6,10 +6,18 @@ on:
 env:
   MACOSX_DEPLOYMENT_TARGET: 10.7
 
+# The repo's default GITHUB_TOKEN permission is read-only, so every job that
+# writes declares it below rather than relying on a repo-wide write default.
+permissions:
+  contents: read
+
 jobs:
   create-release:
     name: Create Draft Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft GitHub release
+      pull-requests: read # changelog builder lists the merged PRs
     outputs:
       railway_version: ${{ env.CLI_VERSION }}
 
@@ -50,6 +58,8 @@ jobs:
     name: Build Release Assets
     needs: ["create-release"]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write # gh release upload
     env:
         RUSTFLAGS: ${{ matrix.rustflags || '' }}
     strategy:
@@ -204,6 +214,8 @@ jobs:
     name: Publish Release
     needs: ["create-release", "build-release", "publish-crates"]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release edit --draft=false
 
     steps:
       - name: Publish Release
