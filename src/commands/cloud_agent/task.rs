@@ -1,9 +1,11 @@
 //! `railway ca task`: hand a piece of work to a cloud agent and get the result
 //! back, without connecting to it.
 //!
-//! A task is one request and its result. `run` dispatches it, and unless told
-//! otherwise waits for the outcome; the task itself lives on Railway, so
-//! leaving the wait (Ctrl-C, a closed terminal) never stops the work.
+//! A task is one request and its result. `run` hands it to Railway and
+//! returns: the task runs in the background, and `status` picks it up later.
+//! `--watch` stays and follows it to the outcome instead. The task lives on
+//! Railway either way, so leaving a watch (Ctrl-C, a closed terminal) never
+//! stops the work.
 //!
 //! A task with no target starts a new cloud agent VM, which is billed. `run`
 //! says so and asks first; `--accept` accepts ahead of time for scripts.
@@ -50,8 +52,9 @@ const FIND_TASK_PAGES: usize = 10;
 #[clap(after_help = r#"Examples:
   railway ca task run "Fix the failing test in api/ and open a PR" --repo acme/api
   railway ca task run "Now add a changelog entry" --conversation release-42
-  railway ca task run "Summarize yesterday's errors" --accept --json
-  railway ca task status <TASK_ID> --wait
+  railway ca task run "Summarize yesterday's errors" --watch
+  railway ca task status <TASK_ID>
+  railway ca task status <TASK_ID> --watch
   railway ca task list --status running
   railway ca task respond <TASK_ID> allow
   railway ca task cancel <TASK_ID>"#)]
@@ -154,8 +157,13 @@ struct RunArgs {
     #[clap(long, value_name = "KEY")]
     idempotency_key: Option<String>,
 
-    /// Return as soon as the task is dispatched instead of waiting for it
-    #[clap(long)]
+    /// Stay and follow the task to its result, instead of handing it off
+    /// and returning
+    #[clap(long, short)]
+    watch: bool,
+
+    /// Accepted for compatibility: returning at once is the default
+    #[clap(long, hide = true, conflicts_with = "watch")]
     no_wait: bool,
 
     /// Let the agent ask you a question and wait for the answer, instead of
@@ -181,9 +189,9 @@ struct StatusArgs {
     /// Task ID
     task: String,
 
-    /// Wait until the task finishes or needs an answer
-    #[clap(long)]
-    wait: bool,
+    /// Stay and follow the task until it finishes or needs an answer
+    #[clap(long, short, alias = "wait")]
+    watch: bool,
 
     /// Output as JSON
     #[clap(long)]
@@ -407,16 +415,22 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
     };
     let handle = dispatched.map_err(|error| explain(error, args.reply_to.as_deref()))?;
 
-    if args.no_wait {
+    // A task is handed off by default: Railway runs it, and the caller comes
+    // back for the result. Watching is the exception, asked for by flag.
+    let _ = args.no_wait;
+    if !args.watch {
         if args.json {
             println!("{}", serde_json::to_string_pretty(&handle.raw)?);
         } else {
-            println!("Task {} dispatched.", handle.task_id.cyan());
+            println!(
+                "Task {} handed to Railway. It runs in the background.",
+                handle.task_id.cyan()
+            );
             println!(
                 "{}",
                 format!(
-                    "Check on it with `railway ca task status {}`.",
-                    handle.task_id
+                    "  Pick up the result:  railway ca task status {id}\n  Follow it live:      railway ca task status {id} --watch",
+                    id = handle.task_id
                 )
                 .dimmed()
             );
@@ -428,7 +442,7 @@ async fn run(configs: &mut Configs, client: &reqwest::Client, args: RunArgs) -> 
         eprintln!(
             "{}",
             format!(
-                "Task {} is running. Ctrl-C stops waiting, not the task.",
+                "Watching task {}. Ctrl-C stops watching, not the task.",
                 handle.task_id
             )
             .dimmed()
@@ -498,7 +512,7 @@ fn or_exit_on_interrupt(result: Result<Value>) -> Result<Value> {
         Err(error) => match error.downcast_ref::<Interrupted>() {
             Some(interrupted) => {
                 eprintln!(
-                    "Stopped waiting. The task is still running: railway ca task status {} --wait",
+                    "Stopped watching. The task is still running: railway ca task status {} --watch",
                     interrupted.task_id
                 );
                 std::process::exit(130);
@@ -642,7 +656,7 @@ async fn status(configs: &mut Configs, client: &reqwest::Client, args: StatusArg
     }
     let (agent_id, session_id) = placement(&record)?;
 
-    let result = if args.wait {
+    let result = if args.watch {
         or_exit_on_interrupt(
             wait(
                 client,
@@ -827,7 +841,7 @@ async fn respond(configs: &mut Configs, client: &reqwest::Client, args: RespondA
         println!(
             "{}",
             format!(
-                "Follow the task with `railway ca task status {} --wait`.",
+                "Follow the task with `railway ca task status {} --watch`.",
                 args.task
             )
             .dimmed()
@@ -1234,6 +1248,10 @@ fn finish(task: &Value, as_json: bool) -> Result<()> {
                 if line.contains('·') {
                     println!("{}", line.dimmed());
                 }
+                println!(
+                    "{}",
+                    format!("Follow it live: railway ca task status {task_id} --watch").dimmed()
+                );
             }
         }
     }
