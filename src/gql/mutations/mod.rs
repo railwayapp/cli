@@ -738,3 +738,23 @@ pub struct VolumeInstanceBackupRestore;
     skip_serializing_none
 )]
 pub struct VolumeInstanceBackupScheduleUpdate;
+
+/// Used by `railway verifier create`. Optional input fields are omitted when
+/// unset so the API keeps its defaults (hold 0, deadline 1h, empty config).
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/verifier-schema.json",
+    query_path = "src/gql/mutations/strings/VerifierCreate.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct VerifierCreate;
+
+/// Used by `railway verifier run`.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/verifier-schema.json",
+    query_path = "src/gql/mutations/strings/VerifierRunNow.graphql",
+    response_derives = "Debug, Serialize, Clone"
+)]
+pub struct VerifierRunNow;

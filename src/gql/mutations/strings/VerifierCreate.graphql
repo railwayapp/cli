@@ -1,0 +1,21 @@
+mutation VerifierCreate($input: VerifierCreateInput!) {
+  verifierCreate(input: $input) {
+    id
+    name
+    intent
+    kind
+    status
+    projectId
+    environmentId
+    workloadKind
+    workloadId
+    revisionId
+    clonedFromId
+    config
+    holdSeconds
+    heldSeconds
+    deadline
+    createdAt
+    resolvedAt
+  }
+}
