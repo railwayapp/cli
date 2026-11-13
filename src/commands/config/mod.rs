@@ -1272,6 +1272,7 @@ fn shared_github_sources(
         .collect()
 }
 
+#[cfg(test)]
 fn render_service_body(
     resource: &runner::DesiredResource,
     source_aliases: &std::collections::BTreeMap<String, serde_json::Value>,
@@ -1521,6 +1522,7 @@ fn python_function_runtime(image: &str) -> Option<String> {
     (!runtime.is_empty() && !runtime.starts_with(':')).then(|| runtime.to_string())
 }
 
+#[cfg(test)]
 fn render_source(source: &serde_json::Value, lang: AuthoringLang) -> String {
     render_source_following(source, lang, false)
 }
@@ -2468,6 +2470,7 @@ fn authoring_file_for_write(cwd: &Path) -> Result<PathBuf> {
     }))
 }
 
+#[cfg(test)]
 fn find_railway_file(start: &Path) -> Option<PathBuf> {
     find_railway_files(start).into_iter().next()
 }
