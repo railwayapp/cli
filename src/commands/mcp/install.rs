@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands::skills::resolve_tools;
 use serde_json::{Value as JsonValue, json};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const REMOTE_MCP_URL: &str = "https://mcp.railway.com";
@@ -541,8 +542,7 @@ fn write_codex_toml(path: &Path, transport: McpTransport) -> Result<()> {
     servers.insert("railway".to_string(), toml::Value::Table(railway));
 
     let serialized = toml::to_string_pretty(&doc).context("Failed to serialize TOML")?;
-    crate::util::write_atomic(path, &serialized)
-        .with_context(|| format!("Failed to write {}", path.display()))
+    write_config_with_backup(path, &serialized)
 }
 
 fn read_json_or_empty(path: &Path) -> Result<JsonValue> {
@@ -627,13 +627,264 @@ fn strip_jsonc(input: &str) -> String {
 
 fn write_json_pretty(path: &Path, value: &JsonValue) -> Result<()> {
     let s = serde_json::to_string_pretty(value).context("Failed to serialize JSON")?;
-    crate::util::write_atomic(path, &s)
+    write_config_with_backup(path, &s)
+}
+
+/// Keep the original document before serialization removes comments or formatting.
+fn write_config_with_backup(path: &Path, contents: &str) -> Result<()> {
+    let existing = match std::fs::read(path) {
+        Ok(existing) => Some(existing),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", path.display())),
+    };
+
+    if let Some(existing) = existing {
+        if existing == contents.as_bytes() {
+            return Ok(());
+        }
+
+        let backup_path = (|| -> Result<PathBuf> {
+            let mut prefix = path
+                .file_name()
+                .context("Config path has no filename")?
+                .to_os_string();
+            prefix.push(".railway-backup-");
+            // A unique, private file keeps earlier originals safe on later installs.
+            let mut backup = tempfile::Builder::new()
+                .prefix(&prefix)
+                .suffix(".bak")
+                .tempfile_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+            backup.write_all(&existing)?;
+            backup.as_file().sync_all()?;
+            let (_, backup_path) = backup.keep()?;
+            Ok(backup_path)
+        })()
+        .with_context(|| format!("Failed to back up {}", path.display()))?;
+        eprintln!("Backed up {} to {}", path.display(), backup_path.display());
+    }
+
+    crate::util::write_atomic(path, contents)
         .with_context(|| format!("Failed to write {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backup_paths(path: &Path) -> Vec<PathBuf> {
+        let prefix = format!(
+            "{}.railway-backup-",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&prefix)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn installs_keep_recoverable_commented_configs() {
+        for slug in [
+            "codex",
+            "claude-code",
+            "cursor",
+            "opencode",
+            "copilot",
+            "factory-droid",
+            "pi",
+            "antigravity",
+        ] {
+            for transport in ALL_TRANSPORTS {
+                let home = tempfile::tempdir().unwrap();
+                let path = config_path(slug, home.path());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let original = if slug == "codex" {
+                    "# keep my model choice\nmodel = \"test-model\" # inline note\n\n[profiles.fast]\nmodel_reasoning_effort = \"low\"\n\n[mcp_servers.other]\ncommand = \"other\"\n".to_string()
+                } else {
+                    let key = if slug == "opencode" {
+                        "mcp"
+                    } else {
+                        "mcpServers"
+                    };
+                    format!(
+                        "{{\n // keep my model choice\n \"model\": \"test-model\", /* inline note */\n \"{key}\": {{\"other\": {{\"command\": \"other\"}}}}\n}}\n"
+                    )
+                };
+                std::fs::write(&path, &original).unwrap();
+
+                install_for(slug, &path, transport).unwrap();
+
+                let backups = backup_paths(&path);
+                assert_eq!(backups.len(), 1, "{slug} {transport:?}");
+                assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), original);
+                assert!(mcp_configured_for_slug(home.path(), slug, transport));
+                let written = std::fs::read_to_string(&path).unwrap();
+                if slug == "codex" {
+                    let doc: toml::Value = written.parse().unwrap();
+                    assert_eq!(doc["model"].as_str(), Some("test-model"));
+                    assert_eq!(
+                        doc["mcp_servers"]["other"]["command"].as_str(),
+                        Some("other")
+                    );
+                    assert_eq!(
+                        doc["profiles"]["fast"]["model_reasoning_effort"].as_str(),
+                        Some("low")
+                    );
+                } else {
+                    let doc: JsonValue = serde_json::from_str(&written).unwrap();
+                    assert_eq!(doc["model"], "test-model");
+                    let key = if slug == "opencode" {
+                        "mcp"
+                    } else {
+                        "mcpServers"
+                    };
+                    assert_eq!(doc[key]["other"]["command"], "other");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_installs_retain_earlier_backups_and_skip_unchanged_configs() {
+        for slug in ["codex", "cursor", "opencode"] {
+            let home = tempfile::tempdir().unwrap();
+            let path = config_path(slug, home.path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let original = if slug == "codex" {
+                "# original comment\nmodel = \"test-model\"\n"
+            } else {
+                "{\n // original comment\n \"model\": \"test-model\"\n}\n"
+            };
+            std::fs::write(&path, original).unwrap();
+
+            install_for(slug, &path, McpTransport::RemoteProxy).unwrap();
+            let first_backup = backup_paths(&path).pop().unwrap();
+            let first_install = std::fs::read(&path).unwrap();
+            install_for(slug, &path, McpTransport::RemoteProxy).unwrap();
+            assert_eq!(backup_paths(&path), vec![first_backup.clone()]);
+            assert_eq!(std::fs::read(&path).unwrap(), first_install);
+
+            install_for(slug, &path, McpTransport::RemoteOauth).unwrap();
+            let backups = backup_paths(&path);
+            assert_eq!(backups.len(), 2);
+            assert_eq!(std::fs::read_to_string(&first_backup).unwrap(), original);
+            let second_backup = backups.iter().find(|p| **p != first_backup).unwrap();
+            assert_eq!(std::fs::read(second_backup).unwrap(), first_install);
+            assert!(mcp_configured_for_slug(
+                home.path(),
+                slug,
+                McpTransport::RemoteOauth
+            ));
+        }
+    }
+
+    #[test]
+    fn new_configs_do_not_need_backups() {
+        for slug in ["codex", "cursor", "opencode"] {
+            let home = tempfile::tempdir().unwrap();
+            let path = config_path(slug, home.path());
+            install_for(slug, &path, McpTransport::RemoteProxy).unwrap();
+            assert!(backup_paths(&path).is_empty());
+            assert!(mcp_configured_for_slug(
+                home.path(),
+                slug,
+                McpTransport::RemoteProxy
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_configs_are_unchanged_without_backups() {
+        for (slug, original) in [
+            ("codex", "model = ["),
+            ("codex", "mcp_servers = 42"),
+            ("cursor", "{ broken json"),
+            ("cursor", "{\"mcpServers\": 42}"),
+            ("opencode", "{\"mcp\": 42}"),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let path = config_path(slug, home.path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, original).unwrap();
+
+            assert!(install_for(slug, &path, McpTransport::RemoteProxy).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert!(backup_paths(&path).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_failure_leaves_original_config_unchanged() {
+        for slug in ["codex", "cursor", "opencode"] {
+            let home = tempfile::tempdir().unwrap();
+            // The config filename fits the 255-byte component limit on Linux/macOS;
+            // appending the backup suffix exceeds it, regardless of user privileges.
+            let path = home.path().join("c".repeat(240));
+            let original = if slug == "codex" {
+                "# keep\nmodel = \"test\"\n"
+            } else {
+                "{ /* keep */ }"
+            };
+            std::fs::write(&path, original).unwrap();
+
+            let result = install_for(slug, &path, McpTransport::RemoteProxy);
+
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Failed to back up")
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert!(backup_paths(&path).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_write_failure_retains_backup() {
+        let home = tempfile::tempdir().unwrap();
+        // The backup filename fits in 255 bytes, while write_atomic's longer
+        // PID/timestamp suffix exceeds that limit and makes the replacement fail.
+        let path = home.path().join("c".repeat(229));
+        let original = "{ /* keep this note */ }";
+        std::fs::write(&path, original).unwrap();
+
+        let result = install_for("cursor", &path, McpTransport::RemoteProxy);
+
+        assert!(result.unwrap_err().to_string().contains("Failed to write"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let backups = backup_paths(&path);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = config_path("cursor", home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ /* secret user notes */ }").unwrap();
+        install_for("cursor", &path, McpTransport::RemoteProxy).unwrap();
+
+        let backups = backup_paths(&path);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn detects_existing_cursor_bare_mcp_as_remote() {
