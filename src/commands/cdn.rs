@@ -6,11 +6,12 @@ use clap::ValueEnum;
 use colored::{ColoredString, Colorize};
 use serde::Serialize;
 
+use crate::controllers::edge::{
+    ResourceRef, enum_name, fetch_domains, has_public_domain, print_field,
+};
 use crate::controllers::project::{ServiceContext, resolve_service_context};
 
 use super::*;
-
-const FIELD_LABEL_WIDTH: usize = 22;
 const CLOUDFLARE_PROVIDER: &str = "DETECTED_CDN_PROVIDER_CLOUDFLARE";
 
 type ServiceEdgeConfig = queries::service_edge_config::ServiceEdgeConfigServiceInstanceEdgeConfig;
@@ -385,20 +386,6 @@ async fn load_cdn_status_with_domains(
     Ok(build_status(ctx, available, edge_config, &domains))
 }
 
-async fn fetch_domains(ctx: &ServiceContext) -> Result<queries::domains::DomainsDomains> {
-    let response = post_graphql::<queries::Domains, _>(
-        &ctx.client,
-        ctx.configs.get_backboard(),
-        queries::domains::Variables {
-            project_id: ctx.project_id.clone(),
-            environment_id: ctx.environment_id.clone(),
-            service_id: ctx.service_id.clone(),
-        },
-    )
-    .await?;
-    Ok(response.domains)
-}
-
 async fn fetch_edge_config(ctx: &ServiceContext) -> Result<Option<ServiceEdgeConfig>> {
     let response = post_graphql::<queries::ServiceEdgeConfig, _>(
         &ctx.client,
@@ -478,21 +465,6 @@ fn ensure_available(domains: &queries::domains::DomainsDomains) -> Result<()> {
     }
 }
 
-fn has_public_domain(domains: &queries::domains::DomainsDomains) -> bool {
-    domains
-        .service_domains
-        .iter()
-        .any(|domain| is_applied_domain_sync_status(&domain.sync_status))
-        || domains
-            .custom_domains
-            .iter()
-            .any(|domain| is_applied_domain_sync_status(&domain.sync_status))
-}
-
-fn is_applied_domain_sync_status<T: fmt::Debug>(sync_status: &T) -> bool {
-    matches!(enum_name(sync_status).as_str(), "ACTIVE" | "UNSPECIFIED")
-}
-
 fn has_verified_cloudflare_domain(domains: &queries::domains::DomainsDomains) -> bool {
     domains.custom_domains.iter().any(|domain| {
         is_verified_cloudflare_provider(
@@ -550,11 +522,6 @@ fn print_status(status: &CdnStatusOutput) {
     }
 }
 
-fn print_field(label: &str, value: &dyn fmt::Display) {
-    let padded = format!("{label:<FIELD_LABEL_WIDTH$}");
-    println!("{} {value}", padded.dimmed());
-}
-
 fn status_label(enabled: bool) -> ColoredString {
     if enabled {
         "enabled".green().bold()
@@ -565,10 +532,6 @@ fn status_label(enabled: bool) -> ColoredString {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
-}
-
-fn enum_name<T: fmt::Debug>(value: &T) -> String {
-    format!("{value:?}")
 }
 
 fn purge_on_deploy_from_query(
@@ -711,13 +674,6 @@ impl fmt::Display for PurgeScopeValue {
             Self::All => "all",
         })
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResourceRef {
-    id: String,
-    name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1073,24 +1029,6 @@ mod tests {
     }
 
     #[test]
-    fn public_domain_availability_requires_applied_sync_status() {
-        let empty = domains(Vec::new());
-        assert!(!has_public_domain(&empty));
-
-        let creating = domains(vec![queries::domains::ServiceDomainSyncStatus::CREATING]);
-        assert!(!has_public_domain(&creating));
-
-        let deleting = domains(vec![queries::domains::ServiceDomainSyncStatus::DELETING]);
-        assert!(!has_public_domain(&deleting));
-
-        let active = domains(vec![queries::domains::ServiceDomainSyncStatus::ACTIVE]);
-        assert!(has_public_domain(&active));
-
-        let unspecified = domains(vec![queries::domains::ServiceDomainSyncStatus::UNSPECIFIED]);
-        assert!(has_public_domain(&unspecified));
-    }
-
-    #[test]
     fn cloudflare_warning_requires_verified_cloudflare_provider() {
         assert!(is_verified_cloudflare_provider(
             true,
@@ -1123,31 +1061,6 @@ mod tests {
             }),
             purge_epoch: 0,
             purge_epoch_by_kind: serde_json::json!({}),
-        }
-    }
-
-    fn domains(
-        sync_statuses: Vec<queries::domains::ServiceDomainSyncStatus>,
-    ) -> queries::domains::DomainsDomains {
-        queries::domains::DomainsDomains {
-            service_domains: sync_statuses
-                .into_iter()
-                .enumerate()
-                .map(
-                    |(index, sync_status)| queries::domains::DomainsDomainsServiceDomains {
-                        id: format!("sd_{index}"),
-                        domain: format!("web-{index}.up.railway.app"),
-                        suffix: Some("up.railway.app".to_string()),
-                        environment_id: "env_123".to_string(),
-                        service_id: "svc_123".to_string(),
-                        target_port: None,
-                        sync_status,
-                        created_at: None,
-                        updated_at: None,
-                    },
-                )
-                .collect(),
-            custom_domains: Vec::new(),
         }
     }
 }

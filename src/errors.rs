@@ -25,6 +25,14 @@ fn ratelimit_message(retry_after_secs: Option<u64>) -> String {
     }
 }
 
+fn invalid_edge_rules_message(count: usize) -> String {
+    if count == 1 {
+        "Edge rules are invalid: 1 problem".to_string()
+    } else {
+        format!("Edge rules are invalid: {count} problems")
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RailwayError {
     #[error("Unauthorized. Please login with `railway login`")]
@@ -60,6 +68,9 @@ pub enum RailwayError {
 
     #[error("{0}")]
     GraphQLError(String),
+
+    #[error("{}", invalid_edge_rules_message(.diagnostics.len()))]
+    InvalidEdgeRules { diagnostics: Vec<serde_json::Value> },
 
     #[error("Failed to fetch: {0}")]
     FetchError(#[from] reqwest::Error),
@@ -175,6 +186,7 @@ impl RailwayError {
             RailwayError::InvalidHeader(_) => "INVALID_AUTH_STATE",
             RailwayError::MissingResponseData => "MISSING_RESPONSE_DATA",
             RailwayError::GraphQLError(_) => "GRAPHQL_ERROR",
+            RailwayError::InvalidEdgeRules { .. } => "INVALID_EDGE_RULES",
             RailwayError::FetchError(_) => "FETCH_ERROR",
             RailwayError::NoLinkedProject => "NO_LINKED_PROJECT",
             RailwayError::NoPersonalWorkspace => "NO_PERSONAL_WORKSPACE",
@@ -223,6 +235,20 @@ impl RailwayError {
                 Some("Run `railway link` to connect to a project.")
             }
             RailwayError::NoServiceLinked => Some("Run `railway service` to link a service."),
+            RailwayError::InvalidEdgeRules { .. } => Some(
+                "Fix the listed diagnostics and retry. Format reference: https://docs.railway.com/networking/edge-rules",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Structured payload for `--json` error output, surfaced as a `details`
+    /// field. Opt-in per variant: today only edge-rule diagnostics carry one.
+    pub fn details(&self) -> Option<serde_json::Value> {
+        match self {
+            RailwayError::InvalidEdgeRules { diagnostics } => {
+                Some(serde_json::Value::Array(diagnostics.clone()))
+            }
             _ => None,
         }
     }

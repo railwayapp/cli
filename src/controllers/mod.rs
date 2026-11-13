@@ -10,6 +10,7 @@ pub mod database_plugins;
 pub mod db_stats;
 pub mod deployment;
 pub mod develop;
+pub mod edge;
 pub mod environment;
 pub mod exec;
 pub mod github;
