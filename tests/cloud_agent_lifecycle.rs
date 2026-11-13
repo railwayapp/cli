@@ -240,10 +240,35 @@ fn missing_remembered_agent_stops_ssh_before_replacement_creation() {
         json!({"projects": {}, "user": {}, "codeAgents": {"env": "remembered"}}).to_string(),
     )
     .unwrap();
-    let output = server.run(home.path(), &["ssh"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("remembered"));
+    for subcommand in ["connect", "ssh"] {
+        let output = server.run(home.path(), &[subcommand]);
+        assert!(!output.status.success(), "{subcommand}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("remembered"),
+            "{subcommand}"
+        );
+    }
     assert!(server.ids_for("CloudAgentCreate").is_empty());
+}
+
+#[test]
+fn connect_is_canonical_and_ssh_is_its_alias() {
+    let server = Backboard::new(vec![], None, "RUNNING");
+    let home = tempfile::tempdir().unwrap();
+    let output = server.run(home.path(), &["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("connect"), "{help}");
+    assert!(help.contains("[aliases: ssh]"), "{help}");
+
+    for subcommand in ["connect", "ssh"] {
+        let output = server.run(home.path(), &[subcommand, "--help"]);
+        assert!(output.status.success(), "{subcommand}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("--session"),
+            "{subcommand}"
+        );
+    }
 }
 
 #[test]
