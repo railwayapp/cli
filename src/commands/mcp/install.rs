@@ -566,14 +566,14 @@ fn read_json_or_empty(path: &Path) -> Result<JsonValue> {
 /// Strip line/block comments and trailing commas, ignoring anything inside string literals.
 fn strip_jsonc(input: &str) -> String {
     let bytes = input.as_bytes();
-    let mut out = String::with_capacity(input.len());
+    let mut out = Vec::with_capacity(input.len());
     let mut i = 0;
     let mut in_string = false;
     let mut escape = false;
     while i < bytes.len() {
         let c = bytes[i];
         if in_string {
-            out.push(c as char);
+            out.push(c);
             if escape {
                 escape = false;
             } else if c == b'\\' {
@@ -586,7 +586,7 @@ fn strip_jsonc(input: &str) -> String {
         }
         if c == b'"' {
             in_string = true;
-            out.push('"');
+            out.push(b'"');
             i += 1;
             continue;
         }
@@ -619,10 +619,12 @@ fn strip_jsonc(input: &str) -> String {
                 continue;
             }
         }
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    // Only ASCII delimiters and complete comments are removed, so the remaining
+    // bytes retain the input's UTF-8 encoding.
+    String::from_utf8(out).expect("stripping JSONC preserves UTF-8")
 }
 
 fn write_json_pretty(path: &Path, value: &JsonValue) -> Result<()> {
@@ -634,6 +636,84 @@ fn write_json_pretty(path: &Path, value: &JsonValue) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonc_preserves_unicode_and_string_escapes() {
+        let strict = r#"{"café中文🚂": ["naïve é", "https://例.test/a//b/*c*/", "quoted \"é\"", "backslash \\", "\u00e9"]}"#;
+        let expected: JsonValue = serde_json::from_str(strict).unwrap();
+        let fixtures = [
+            strict.to_string(),
+            format!("// café 中文 🚂\r\n{strict}\n// fin é"),
+            format!("/* café 中文 🚂 */{strict}/* fin é */"),
+            strict.replace("]}", ",],}"),
+        ];
+
+        for fixture in fixtures {
+            let actual: JsonValue = serde_json::from_str(&strip_jsonc(&fixture)).unwrap();
+            assert_eq!(actual, expected, "fixture: {fixture}");
+        }
+    }
+
+    #[test]
+    fn installs_preserve_existing_unicode_in_json_and_jsonc() {
+        for slug in [
+            "claude-code",
+            "cursor",
+            "opencode",
+            "copilot",
+            "factory-droid",
+            "pi",
+            "antigravity",
+        ] {
+            for transport in ALL_TRANSPORTS {
+                for comment in [
+                    "",
+                    "// existing café 中文 🚂\n",
+                    "/* existing café 中文 🚂 */",
+                ] {
+                    let home = tempfile::tempdir().unwrap();
+                    let path = config_path(slug, home.path());
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    let key = if slug == "opencode" {
+                        "mcp"
+                    } else {
+                        "mcpServers"
+                    };
+                    let existing =
+                        json!({ "type": "local", "command": ["echo", "café 中文 🚂 é"] });
+                    let config = json!({ key: { "café中文🚂": existing }, "theme": "深色" });
+                    std::fs::write(&path, format!("{comment}{config}")).unwrap();
+
+                    install_for(slug, &path, transport).unwrap();
+
+                    let written = std::fs::read_to_string(&path).unwrap();
+                    let root: JsonValue = serde_json::from_str(&written).unwrap();
+                    assert_eq!(
+                        root[key]["café中文🚂"], existing,
+                        "{slug} {transport:?} with {comment:?}"
+                    );
+                    assert_eq!(root["theme"], "深色");
+                    assert!(mcp_configured_for_slug(home.path(), slug, transport));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_jsonc_is_not_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        let path = config_path("opencode", home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for config in [
+            "// existing config\n{é: 1}",
+            "// existing config\n{\"value\": é}",
+            "// existing config\n{\"value\": \"\\é\"}",
+        ] {
+            std::fs::write(&path, config).unwrap();
+            assert!(install_for("opencode", &path, McpTransport::RemoteProxy).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), config);
+        }
+    }
 
     #[test]
     fn detects_existing_cursor_bare_mcp_as_remote() {
