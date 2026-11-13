@@ -3743,6 +3743,19 @@ mod tests {
         assert_ne!(id, new_session_uuid());
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_snapshot_includes_self_and_parent() {
+        // Sanity check that the toolhelp32 snapshot at least sees our own
+        // pid and that it has a non-zero parent pid. Catches gross runtime
+        // failures (missing winapi linkage, snapshot perm errors, etc.)
+        // without coupling to specific platform versions.
+        let snapshot = super::build_windows_snapshot().expect("snapshot");
+        let me = snapshot.get(&std::process::id()).expect("self pid present");
+        assert!(me.ppid != 0, "parent pid should be non-zero");
+        assert!(!me.command.is_empty(), "command should be populated");
+    }
+
     #[test]
     fn new_session_uuid_does_not_match_cli_fallback_regex() {
         // Cross-check against the dbt-side regex
