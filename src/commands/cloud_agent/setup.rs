@@ -252,6 +252,7 @@ async fn prompt(home: &Path, existing: Option<AgentPrefs>) -> Result<AgentPrefs>
         theme: Some(theme),
         hide_tabs: previous.hide_tabs,
         sidebar_width: previous.sidebar_width,
+        automations_collapsed: previous.automations_collapsed,
     })
 }
 

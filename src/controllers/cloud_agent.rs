@@ -108,6 +108,8 @@ status_from!(
     queries::cloud_agent::CloudAgentStatus,
     queries::cloud_agents::CloudAgentStatus,
     queries::my_cloud_agents::CloudAgentStatus,
+    queries::my_cloud_agent_threads::CloudAgentStatus,
+    queries::cloud_agent_threads_in_environment::CloudAgentStatus,
     mutations::cloud_agent_create::CloudAgentStatus,
 );
 
@@ -120,6 +122,9 @@ pub struct Agent {
     pub project_id: String,
     pub environment_id: String,
     pub created_at: DateTime<Utc>,
+    /// Where the agent's work stands. `None` when the read didn't ask.
+    pub work_status: Option<crate::commands::cloud_agent::tui::work_status::WorkStatus>,
+    pub archived: bool,
 }
 
 /// Read one agent by id, scoped to its environment. `None` means it is gone —
@@ -147,6 +152,8 @@ pub async fn get(
         project_id: a.project_id,
         environment_id: a.environment_id,
         created_at: a.created_at,
+        work_status: None,
+        archived: false,
     }))
 }
 
@@ -171,6 +178,8 @@ pub async fn list_mine(client: &reqwest::Client, backboard: &str) -> Result<Vec<
             project_id: a.project_id,
             environment_id: a.environment_id,
             created_at: a.created_at,
+            work_status: None,
+            archived: false,
         })
         .collect())
 }
@@ -204,6 +213,70 @@ pub async fn list_in_environment(
             project_id: a.project_id,
             environment_id: a.environment_id,
             created_at: a.created_at,
+            work_status: None,
+            archived: false,
+        })
+        .collect())
+}
+
+/// [`list_mine`], with where each agent's work stands and whether it is
+/// archived — for `railway ca list`, which shows both.
+pub async fn list_mine_with_work(client: &reqwest::Client, backboard: &str) -> Result<Vec<Agent>> {
+    let res = post_graphql::<queries::MyCloudAgentThreads, _>(
+        client,
+        backboard,
+        queries::my_cloud_agent_threads::Variables { archived: None },
+    )
+    .await?;
+    Ok(res
+        .my_cloud_agents
+        .into_iter()
+        .map(|a| Agent {
+            id: a.id,
+            name: a.name,
+            status: a.status.into(),
+            project_id: a.project_id,
+            environment_id: a.environment_id,
+            created_at: a.created_at,
+            work_status: Some(
+                crate::commands::cloud_agent::tui::work_status::work_status_from!(a.work_status),
+            ),
+            archived: a.archived_at.is_some(),
+        })
+        .collect())
+}
+
+/// [`list_in_environment`], with work status and archive state.
+pub async fn list_in_environment_with_work(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    mine: bool,
+) -> Result<Vec<Agent>> {
+    let res = post_graphql::<queries::CloudAgentThreadsInEnvironment, _>(
+        client,
+        backboard,
+        queries::cloud_agent_threads_in_environment::Variables {
+            environment_id: environment_id.to_owned(),
+            mine: Some(mine),
+            archived: None,
+        },
+    )
+    .await?;
+    Ok(res
+        .cloud_agents
+        .into_iter()
+        .map(|a| Agent {
+            id: a.id,
+            name: a.name,
+            status: a.status.into(),
+            project_id: a.project_id,
+            environment_id: a.environment_id,
+            created_at: a.created_at,
+            work_status: Some(
+                crate::commands::cloud_agent::tui::work_status::work_status_from!(a.work_status),
+            ),
+            archived: a.archived_at.is_some(),
         })
         .collect())
 }
@@ -270,6 +343,8 @@ pub async fn create(
         project_id: res.project_id,
         environment_id: res.environment_id,
         created_at: res.created_at,
+        work_status: None,
+        archived: false,
     })
 }
 
@@ -822,6 +897,8 @@ mod tests {
             project_id: "project".into(),
             environment_id: "env".into(),
             created_at: Utc::now(),
+            work_status: None,
+            archived: false,
         }
     }
 

@@ -1,0 +1,3 @@
+mutation CloudAgentUnarchive($id: ID!) {
+  cloudAgentUnarchive(id: $id)
+}

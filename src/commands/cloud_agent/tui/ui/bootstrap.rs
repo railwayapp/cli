@@ -595,8 +595,11 @@ mod tests {
         };
         let out = draw(&mut app, 120, 40, "sidebar-default");
         let before = sidebar(&out, app.panes.tree);
+        // Narrow, the title wraps rather than being cut: all of it is there,
+        // just not on one line.
         assert!(!before.contains(title));
-        assert!(before.contains('…'));
+        assert!(!before.contains('…'), "{out}");
+        assert!(before.contains("configuration"), "{out}");
         assert!(before.contains(&"─".repeat(28)));
         let edge = app.panes.sidebar_divider;
         app.on_mouse(MouseAction::Down, edge.x, edge.y);

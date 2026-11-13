@@ -66,6 +66,10 @@ pub struct ListArgs {
     #[clap(long)]
     all: bool,
 
+    /// List archived agents instead of the rest
+    #[clap(long)]
+    archived: bool,
+
     /// Output as JSON
     #[clap(long)]
     json: bool,
@@ -258,14 +262,17 @@ pub async fn list(args: ListArgs) -> Result<()> {
     let backboard = configs.get_backboard();
     let mut agents = match &scoped {
         Some(environment_id) => {
-            ca::list_in_environment(client, &backboard, environment_id, !args.all).await?
+            ca::list_in_environment_with_work(client, &backboard, environment_id, !args.all).await?
         }
-        None => ca::list_mine(client, &backboard).await?,
+        None => ca::list_mine_with_work(client, &backboard).await?,
     };
+    agents.retain(|agent| agent.archived == args.archived);
 
     if agents.is_empty() {
         if args.json {
             println!("[]");
+        } else if args.archived {
+            println!("No archived cloud agents.");
         } else if scoped.is_some() {
             println!("No cloud agents in this environment.");
         } else {
@@ -296,6 +303,14 @@ pub async fn list(args: ListArgs) -> Result<()> {
                     "environmentId": a.environment_id,
                     "environment": names.get(&a.environment_id),
                     "createdAt": a.created_at.to_rfc3339(),
+                    "archived": a.archived,
+                    "workStatus": a.work_status.as_ref().map(|w| serde_json::json!({
+                        "state": format!("{:?}", w.state).to_uppercase(),
+                        "kind": w.kind,
+                        "message": w.message,
+                        "unseen": w.unseen,
+                        "at": w.at,
+                    })),
                 })
             })
             .collect();
@@ -304,9 +319,10 @@ pub async fn list(args: ListArgs) -> Result<()> {
     }
 
     println!(
-        "  {:<24}  {:<9}  {:<22}  {:<14}  {}",
+        "  {:<24}  {:<9}  {:<8}  {:<22}  {:<14}  {}",
         "NAME".dimmed(),
         "STATUS".dimmed(),
+        "STATE".dimmed(),
         "PROJECT".dimmed(),
         "ENVIRONMENT".dimmed(),
         "AGE".dimmed()
@@ -317,10 +333,11 @@ pub async fn list(args: ListArgs) -> Result<()> {
         marked |= current;
         let place = |id: &String| names.get(id).cloned().unwrap_or_else(|| truncate(id, 22));
         println!(
-            "{} {:<24}  {:<9}  {:<22}  {:<14}  {}",
+            "{} {:<24}  {:<9}  {:<8}  {:<22}  {:<14}  {}",
             if current { "*" } else { " " },
             truncate(&agent.name, 24),
             colorize_status(&agent.status),
+            colorize_work(agent.work_status.as_ref()),
             truncate(&place(&agent.project_id), 22),
             truncate(&place(&agent.environment_id), 14),
             ca::humanize_age(agent.created_at)
@@ -329,7 +346,41 @@ pub async fn list(args: ListArgs) -> Result<()> {
     if marked {
         println!("\n{}", "* this directory's agent".dimmed());
     }
+    if agents
+        .iter()
+        .any(|a| a.work_status.as_ref().is_some_and(|w| w.unseen))
+    {
+        println!("{}", "+ finished or failed since you last looked".dimmed());
+    }
     Ok(())
+}
+
+/// Where an agent's work stands, as the platform reports it: `+` marks an
+/// outcome nobody has looked at yet.
+fn colorize_work(work: Option<&super::tui::work_status::WorkStatus>) -> colored::ColoredString {
+    use super::tui::work_status::WorkState;
+    let Some(work) = work else {
+        return "-".dimmed();
+    };
+    let label = match work.state {
+        WorkState::Idle => "idle",
+        WorkState::Working => "working",
+        WorkState::Done => "done",
+        WorkState::Blocked => "blocked",
+        WorkState::Error => "error",
+    };
+    let label = if work.unseen {
+        format!("{label}+")
+    } else {
+        label.to_string()
+    };
+    match work.state {
+        WorkState::Blocked => label.yellow(),
+        WorkState::Error => label.red(),
+        WorkState::Working => label.green(),
+        WorkState::Done if work.unseen => label.green(),
+        _ => label.dimmed(),
+    }
 }
 
 pub async fn create(args: CreateArgs) -> Result<()> {

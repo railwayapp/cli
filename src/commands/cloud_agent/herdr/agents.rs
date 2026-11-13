@@ -525,6 +525,8 @@ mod tests {
             project_id: "project-1".into(),
             environment_id: "environment-1".into(),
             created_at: chrono::Utc::now(),
+            work_status: None,
+            archived: false,
         };
         api.stub(
             "CloudAgentWake",

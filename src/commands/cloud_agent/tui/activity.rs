@@ -92,6 +92,21 @@ pub(super) async fn fetch(
 }
 
 pub(super) fn apply(app: &mut App, agent: &str, reports: &[Report]) {
+    app.reports_seen(
+        agent,
+        &reports
+            .iter()
+            .map(|r| {
+                (
+                    r.session_id.clone(),
+                    r.title.clone(),
+                    r.prompt.clone(),
+                    r.latest_prompt.clone(),
+                    r.updated_at.clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
     let mut updates = Vec::new();
     for pane in &mut app.sessions {
         if pane.agent_id != agent

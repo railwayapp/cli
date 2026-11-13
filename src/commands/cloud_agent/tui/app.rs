@@ -18,6 +18,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::session;
 use super::theme::Theme;
+use super::work_status::{Section, WorkStatus};
 
 /// Harnesses the launcher can put a session on, in cycle order. `railway`
 /// leads the list — and so is the default pick with nothing configured —
@@ -100,7 +101,7 @@ pub const KEY_HELP: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Agent {
     pub id: String,
     pub name: String,
@@ -111,6 +112,14 @@ pub struct Agent {
     /// is expanded.
     pub sessions: LoadSessions,
     pub expanded: bool,
+    /// Its most urgent thread's work status, from the platform. `None` from a
+    /// backboard that predates it.
+    pub work_status: Option<WorkStatus>,
+    /// Every thread the platform has reported on this agent, newest first —
+    /// kept while it sleeps, so a sleeping agent's threads still list. Comes
+    /// with every agents fetch; the VM is never asked.
+    pub threads: Vec<ThreadSnapshot>,
+    pub archived: bool,
 }
 
 /// One reattachable session on an agent's VM.
@@ -131,6 +140,76 @@ pub struct ConsoleSession {
     /// the harness never reported (a plain shell, or a report that predates
     /// name attribution).
     pub snapshot: Option<ThreadSnapshot>,
+}
+
+/// A thread (or machine) someone pressed enter on, on its way into a pane:
+/// what the canvas shows meanwhile. Where it has got to is never stored —
+/// [`App::opening_stage`] reads it off the wake, the fetch, the attach and the
+/// pane themselves, so the card cannot claim a step that already failed.
+#[derive(Clone, Debug)]
+pub struct Opening {
+    pub agent_id: String,
+    pub agent_name: String,
+    /// What is being opened, as the sidebar names it.
+    pub title: String,
+    /// The session it reattaches, once known.
+    pub session_name: Option<String>,
+    pub harness: Option<String>,
+    /// The machine had to be woken first.
+    pub wake: bool,
+    /// The thread had to be looked for among the machine's sessions.
+    pub find: bool,
+    pub since: std::time::Instant,
+}
+
+/// The steps of an [`Opening`], in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OpenStage {
+    Waking,
+    Finding,
+    Connecting,
+    Starting,
+}
+
+/// A connect waiting on its machine: see [`App::take_wake_connect`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WakeConnect {
+    agent_id: String,
+    /// The thread to reopen; `None` connects to the machine itself.
+    thread: Option<ThreadKey>,
+    /// The machine's sessions were asked for again once it was up: a list
+    /// from before it slept is not what it can reopen now.
+    refetched: bool,
+}
+
+/// One conversation, by whatever names it: the console session it ran in,
+/// and the harness's own id for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThreadKey {
+    session_name: Option<String>,
+    session_id: Option<String>,
+}
+
+impl ThreadKey {
+    fn of_session(session: &ConsoleSession) -> Self {
+        Self {
+            session_name: Some(session.name.clone()),
+            session_id: session
+                .snapshot
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .filter(|id| !id.is_empty()),
+        }
+    }
+
+    fn matches(&self, session: &ConsoleSession) -> bool {
+        let id = |candidate: &str| self.session_id.as_deref() == Some(candidate);
+        self.session_name.as_deref() == Some(session.name.as_str())
+            || session.snapshot.as_ref().is_some_and(|s| id(&s.session_id))
+            || super::super::client_sessions::parse_name(&session.name)
+                .and_then(|(_, _, thread)| thread)
+                .is_some_and(id)
+    }
 }
 
 /// The reported state of one coding-agent run, from `CloudAgent.sessions` —
@@ -156,6 +235,33 @@ pub struct ThreadSnapshot {
     pub last_reply: Option<String>,
     /// The VM's clock at the last report — orders snapshots per session.
     pub updated_at: String,
+    /// The console session the run was in, when the harness reported it.
+    #[serde(default)]
+    pub session_name: Option<String>,
+    /// A generated title for the conversation.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub work_status: Option<WorkStatus>,
+    /// The harness's own transcript shows nothing was ever said in it.
+    #[serde(default)]
+    pub empty: bool,
+    /// The task that ran it, when a task did: an API, MCP or automation
+    /// dispatch rather than someone typing.
+    #[serde(default)]
+    pub task_id: Option<String>,
+}
+
+impl ThreadSnapshot {
+    /// What a thread is called: its generated title, else what it was last
+    /// asked, else what it was first asked.
+    pub fn display_title(&self) -> Option<String> {
+        [&self.title, &self.latest_prompt, &self.prompt]
+            .into_iter()
+            .flatten()
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .find(|text| !text.is_empty())
+    }
 }
 
 /// The env prologue every launch prepends. Everything before it is plumbing —
@@ -188,6 +294,11 @@ impl ConsoleSession {
                 latest_prompt: None,
                 last_reply: None,
                 updated_at: thread.updated_at.clone(),
+                session_name: None,
+                title: None,
+                work_status: None,
+                empty: false,
+                task_id: None,
             }),
         }
     }
@@ -365,8 +476,9 @@ impl LaunchRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LoadSessions {
+    #[default]
     NotLoaded,
     Loading,
     Loaded(Vec<ConsoleSession>),
@@ -709,6 +821,19 @@ pub enum RowKind {
     Agent(usize, usize, usize, usize),
     /// A reattachable session on an agent's VM.
     Session(usize, usize, usize, usize, usize),
+    /// A conversation the platform reported on an agent that has no live
+    /// session row for it: a sleeping agent's, or a finished task's. Indexes
+    /// the agent's [`Agent::threads`].
+    Thread(usize, usize, usize, usize, usize),
+    /// The threads heading: folds like the lists below it.
+    Threads,
+    /// The collapsible list of machines, below the threads.
+    Machines,
+    /// The automations heading, above one row per automation.
+    Automations,
+    /// One automation's runs, folded under a row: an index into
+    /// [`App::automation_groups`].
+    Automation(usize),
     /// A non-selectable line under an environment: loading, empty, or failed.
     Note(usize, usize, usize),
     /// The collapsible list of all projects — where `n` creates an agent.
@@ -717,6 +842,8 @@ pub enum RowKind {
     Hint,
     /// A rule between the agent groups and the projects tail.
     Separator,
+    /// A blank line: under the launcher, and between sections.
+    Spacer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -737,9 +864,239 @@ impl Row {
     pub fn selectable(&self) -> bool {
         !matches!(
             self.kind,
-            RowKind::Note(..) | RowKind::Hint | RowKind::Separator
+            RowKind::Note(..) | RowKind::Hint | RowKind::Separator | RowKind::Spacer
         )
     }
+}
+
+/// The group key for task runs that no automation dispatched.
+const OTHER_TASKS: &str = "";
+
+/// How often an environment's task list is read again for runs it hasn't
+/// placed yet.
+const TASK_RUNS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One task, as the task list reports it: which agent ran it and, when an
+/// automation dispatched it, which.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRun {
+    pub task_id: String,
+    pub agent_id: Option<String>,
+    pub automation_id: Option<String>,
+    pub prompt_preview: Option<String>,
+}
+
+/// How an automation is configured, from the platform.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomationInfo {
+    pub id: String,
+    pub name: String,
+    pub instructions: String,
+    /// False while paused.
+    pub enabled: bool,
+    pub updated_at: String,
+    /// Cron expressions, UTC.
+    pub schedules: Vec<String>,
+}
+
+/// A cron expression said plainly, for the shapes automations use; anything
+/// else as the expression itself. All in UTC.
+pub fn describe_schedule(cron: &str) -> String {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    let number = |s: &str| s.parse::<u32>().ok();
+    let day = |d: u32| {
+        [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ]
+        .get(d as usize % 7)
+        .copied()
+    };
+    match fields.as_slice() {
+        [m, "*", "*", "*", "*"] if m.starts_with("*/") => match number(&m[2..]) {
+            Some(n) => format!("every {n} minutes"),
+            None => cron.to_string(),
+        },
+        [m, "*", "*", "*", "*"] => match number(m) {
+            Some(m) => format!("hourly at :{m:02}"),
+            None => cron.to_string(),
+        },
+        [m, h, "*", "*", "*"] => match (number(m), number(h)) {
+            (Some(m), Some(h)) => format!("daily at {h:02}:{m:02} UTC"),
+            _ => cron.to_string(),
+        },
+        [m, h, "*", "*", d] => match (number(m), number(h), number(d).and_then(day)) {
+            (Some(m), Some(h), Some(d)) => format!("{d}s at {h:02}:{m:02} UTC"),
+            _ => cron.to_string(),
+        },
+        _ => cron.to_string(),
+    }
+}
+
+/// An automation's runs: agent paths with when each ran, newest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutomationGroup {
+    pub key: String,
+    pub name: String,
+    pub runs: Vec<((usize, usize, usize, usize), String)>,
+}
+
+impl AutomationGroup {
+    pub fn last_at(&self) -> &str {
+        self.runs.first().map(|(_, at)| at.as_str()).unwrap_or("")
+    }
+}
+
+/// An automation's name until the platform reports one: the first sentence
+/// of what its runs are asked.
+pub fn automation_name_from(preview: Option<&str>) -> String {
+    let text = preview
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sentence = match text.find(". ") {
+        Some(end) => &text[..end],
+        None => text.trim_end_matches('.'),
+    }
+    .trim();
+    if sentence.is_empty() {
+        "automation".into()
+    } else {
+        sentence.into()
+    }
+}
+
+/// How long ago an RFC 3339 time was: `2h ago`.
+fn age_of(at: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(at) {
+        Ok(at) => {
+            match crate::controllers::cloud_agent::humanize_age(at.with_timezone(&chrono::Utc)) {
+                age if age == "just now" => age,
+                age => format!("{age} ago"),
+            }
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// The glyph a run carries in the automations list: its outcome, seen or
+/// not — a run that succeeded and was looked at is still a success.
+fn run_glyph(thread: &ThreadSnapshot) -> Option<&'static str> {
+    use super::work_status::WorkState;
+    let work = thread.work_status.as_ref()?;
+    Some(match work.state {
+        WorkState::Blocked => "blocked",
+        WorkState::Error => "error",
+        WorkState::Working => "working",
+        WorkState::Done if work.unseen => "done",
+        WorkState::Done => "ok",
+        WorkState::Idle => return None,
+    })
+}
+
+/// How often an agent with an unnamed open thread may be re-read for a name.
+const RETITLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A row's identity across re-sorts; see [`App::hold_selection`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowId {
+    Session(String),
+    Thread(String, String),
+    Agent(String),
+    Other(RowKind),
+}
+
+/// A thread's title wraps onto at most this many sidebar lines.
+pub const WRAP_LINES: usize = 3;
+
+/// How wide a row's label may be in a sidebar `width` cells wide: the indent
+/// and the glyph come first.
+pub fn label_width(row: &Row, width: u16) -> usize {
+    usize::from(width).saturating_sub(row.depth * 2 + 2)
+}
+
+/// A row's label as the sidebar draws it: a thread's title wraps, word by
+/// word, onto up to [`WRAP_LINES`] lines, the last cut with an ellipsis;
+/// everything else stays one line.
+pub fn label_lines(row: &Row, width: u16) -> Vec<String> {
+    let width = label_width(row, width);
+    match row.kind {
+        RowKind::Session(..) | RowKind::Thread(..) => wrap_words(&row.label, width, WRAP_LINES),
+        _ => wrap_words(&row.label, width, 1),
+    }
+}
+
+/// How many sidebar lines a row takes.
+pub fn row_height(row: &Row, width: u16) -> usize {
+    label_lines(row, width).len().max(1)
+}
+
+/// Word-wrap `text` to `width` display cells, breaking a word only when it
+/// alone is wider than a line, and ending with `…` when more was left over
+/// than `max_lines` could hold.
+pub fn wrap_words(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    use console::measure_text_width as measure;
+    if width == 0 || max_lines == 0 {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut words: std::collections::VecDeque<String> =
+        text.split_whitespace().map(str::to_string).collect();
+    while let Some(word) = words.pop_front() {
+        let gap = usize::from(!line.is_empty());
+        if measure(&line) + gap + measure(&word) <= width {
+            if gap == 1 {
+                line.push(' ');
+            }
+            line.push_str(&word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+            words.push_front(word);
+            continue;
+        }
+        // One word wider than a line: as much as fits, the rest next.
+        let chars: Vec<char> = word.chars().collect();
+        let mut split = 0;
+        while split < chars.len() && measure(&chars[..=split].iter().collect::<String>()) <= width {
+            split += 1;
+        }
+        let split = split.max(1);
+        lines.push(chars[..split].iter().collect());
+        if split < chars.len() {
+            words.push_front(chars[split..].iter().collect());
+        }
+    }
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            *last = if measure(last) < width {
+                format!("{last}…")
+            } else {
+                console::truncate_str(last, width, "…").into_owned()
+            };
+        }
+    }
+    lines
+}
+
+/// One thread's way into a mark-seen request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkSeen {
+    pub agent_id: String,
+    pub environment_id: String,
+    pub session_id: String,
 }
 
 /// A lifecycle action on one agent.
@@ -925,6 +1282,14 @@ pub enum MouseAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     SaveSidebarWidth(u16),
+    /// Remember whether the automations list is folded.
+    SaveAutomationsCollapsed(bool),
+    /// Archive or unarchive an agent; the reply lands as
+    /// `Message::ArchiveSet`.
+    Archive {
+        agent_id: String,
+        archived: bool,
+    },
     CreateBootstrap(super::bootstrap_setup::Request),
     LoadBootstraps {
         environment_id: String,
@@ -1095,6 +1460,8 @@ pub struct App {
     pub known_environments: Vec<String>,
     /// The target chooser, while it is open.
     pub target_pick: Option<TargetPicker>,
+    /// What has been typed into whichever list is open.
+    pub list_filter: super::picker::ListFilter,
     pub bootstrap_form: Option<super::bootstrap_setup::Form>,
     pub bootstrap_picker: Option<super::bootstrap_setup::Picker>,
     pub bootstrap_defaults:
@@ -1105,6 +1472,20 @@ pub struct App {
     /// VM-specific discovery, never the user's default coding agent.
     pub primary_harnesses: HashMap<String, String>,
     pending_agent_connect: Option<String>,
+    /// An agent someone asked to connect to while it slept — or a thread on
+    /// it they asked to open: woken on their behalf, and connected or
+    /// reopened once it reports running.
+    connect_on_wake: Option<WakeConnect>,
+    /// What enter is opening, while the canvas shows it on its way.
+    pub opening: Option<Opening>,
+    /// A thread someone asked to reopen whose background attach was already
+    /// under way: focused when that pane lands rather than left quiet.
+    focus_on_attach: Option<String>,
+    /// The last frame drew something that moves — a spinner, a pulse — so
+    /// the loop keeps ticking to animate it. Set by the renderer.
+    pub sidebar_animated: std::cell::Cell<bool>,
+    /// What the sidebar's animations count frames from.
+    animation_epoch: std::time::Instant,
     /// ⌥n's picker cursor while [`Screen::HarnessPick`] is up.
     pub harness_pick: Option<usize>,
     pub harness_pick_target: Option<Target>,
@@ -1264,8 +1645,40 @@ pub struct App {
     pub target: Option<Target>,
     pub tree: Vec<WorkspaceNode>,
     pub cursor: usize,
-    /// Whether the projects list is open. Defaults to open, even with agents.
+    /// Whether the projects list is open. Folded until someone opens it.
     pub others_expanded: Option<bool>,
+    /// Whether the threads list is open. Open until someone folds it.
+    pub threads_expanded: bool,
+    /// Whether the automations list is open. Open unless someone folded it,
+    /// which is remembered across runs.
+    pub automations_expanded: bool,
+    /// Whether the machines list is open. Folded until someone opens it.
+    pub machines_expanded: Option<bool>,
+    /// Archived agents are fetched anyway; this decides whether they list.
+    pub show_archived: bool,
+    /// What the task list says about the tasks behind agents' threads, by
+    /// task id: which automation each ran for. Filled per environment.
+    pub task_runs: HashMap<String, TaskRun>,
+    /// When each environment's task list was last asked for.
+    task_runs_asked: HashMap<String, std::time::Instant>,
+    /// Automations whose runs are unfolded, by group key.
+    pub automations_open: std::collections::HashSet<String>,
+    /// How each automation is configured, by id, once read.
+    pub automations: HashMap<String, AutomationInfo>,
+    /// Automations already asked for, so each is read once a run.
+    automations_asked: std::collections::HashSet<String>,
+    /// Threads opened since the last loop pass whose unseen outcome the
+    /// platform should forget. Drained by the run loop.
+    pub mark_seen: Vec<MarkSeen>,
+    /// The cursor's index and the row it was on at the last loop pass: rows
+    /// re-sort as work moves, and the cursor follows the row, not the index.
+    held_row: Option<(usize, RowId)>,
+    /// When each agent's threads were last re-read to name an untitled one.
+    retitled: HashMap<String, std::time::Instant>,
+    /// Keys typed at a thread whose pane is still connecting, held for it:
+    /// the session's durable name, and the keys in order. Sent into the pane
+    /// when it opens, rather than read as sidebar commands meanwhile.
+    pub type_ahead: Option<(String, Vec<KeyEvent>)>,
     /// Transient one-line message shown in the header.
     pub status: String,
 }
@@ -1331,6 +1744,7 @@ impl App {
             configured,
             known_environments: Vec::new(),
             target_pick: None,
+            list_filter: Default::default(),
             bootstrap_form: None,
             bootstrap_picker: None,
             bootstrap_defaults: Default::default(),
@@ -1343,6 +1757,11 @@ impl App {
             harness_pick_connect: false,
             primary_harnesses: HashMap::new(),
             pending_agent_connect: None,
+            connect_on_wake: None,
+            focus_on_attach: None,
+            opening: None,
+            sidebar_animated: std::cell::Cell::new(false),
+            animation_epoch: std::time::Instant::now(),
             manage_prompt: None,
             maximized: false,
             autostart: None,
@@ -1406,6 +1825,19 @@ impl App {
             tree,
             cursor: 0,
             others_expanded: None,
+            threads_expanded: true,
+            automations_expanded: true,
+            machines_expanded: None,
+            show_archived: false,
+            task_runs: HashMap::new(),
+            task_runs_asked: HashMap::new(),
+            automations_open: std::collections::HashSet::new(),
+            automations: HashMap::new(),
+            automations_asked: std::collections::HashSet::new(),
+            mark_seen: Vec::new(),
+            held_row: None,
+            retitled: HashMap::new(),
+            type_ahead: None,
             status: String::new(),
         };
         // Make every project's create target visible on multi-workspace accounts.
@@ -1526,8 +1958,11 @@ impl App {
             self.toast_error("The VM's project is unavailable. Refresh the tree and try again.");
             return None;
         }
-        if let Some(RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _)) =
-            self.selected_row().map(|row| row.kind)
+        if let Some(
+            RowKind::Agent(w, p, e, a)
+            | RowKind::Session(w, p, e, a, _)
+            | RowKind::Thread(w, p, e, a, _),
+        ) = self.selected_row().map(|row| row.kind)
         {
             return self.save_vm_bootstrap(w, p, e, a);
         }
@@ -1673,7 +2108,22 @@ impl App {
     }
 
     /// Open the target chooser over the tree.
+    /// The target picker's labels, as it draws and filters them.
+    pub fn target_pick_labels(&self) -> Vec<String> {
+        self.target_pick
+            .as_ref()
+            .map(|picker| {
+                picker
+                    .rows(self.default_project.as_deref())
+                    .into_iter()
+                    .map(|(label, _)| label)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn start_target_pick(&mut self) {
+        self.list_filter = Default::default();
         self.target_pick = Some(TargetPicker::new(
             &self.tree,
             self.default_project.as_deref(),
@@ -1687,15 +2137,23 @@ impl App {
     }
 
     fn on_key_target_pick(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::picker::{ListId, visible};
+        let labels = self.target_pick_labels();
         let picker = self.target_pick.as_mut()?;
+        if let Some(cursor) = self
+            .list_filter
+            .on_key(ListId::Target, &labels, picker.cursor, &key)
+        {
+            picker.cursor = cursor;
+            return None;
+        }
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                picker.cursor = picker.cursor.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                picker.cursor = (picker.cursor + 1).min(picker.options.len().saturating_sub(1));
-            }
             KeyCode::Enter => {
+                // Nothing the filter kept is nothing to pick.
+                let query = self.list_filter.query(ListId::Target);
+                if !visible(query, &labels).contains(&picker.cursor) {
+                    return None;
+                }
                 let picked = picker.options.get(picker.cursor).cloned();
                 self.target_pick = None;
                 if self.harness_pick.is_some() {
@@ -1763,6 +2221,7 @@ impl App {
     /// which is right when nobody asked for setup — a first run — and wrong
     /// when they asked for it themselves and have already answered it.
     pub fn start_wizard(&mut self, ask_first: bool) {
+        self.list_filter = Default::default();
         let mut wizard = super::wizard::Wizard::new(
             &self.tree,
             Some(self.harness_name()),
@@ -1864,12 +2323,19 @@ impl App {
             expanded: None,
             dimmed: false,
         });
-        // Ruled off from the list below it: the launcher is an action, and
-        // without the line it reads as the first thread.
+        // Room to breathe, then ruled off from the list below it: the
+        // launcher is an action, and without the line it reads as the first
+        // thread.
+        rows.push(spacer_row());
         rows.push(separator_row());
         let groups = self.agent_groups();
-        for &(w, p, e) in &groups {
-            self.push_thread_rows(&mut rows, w, p, e);
+        let threads = self.push_thread_sections(&mut rows, &groups);
+        let threads = threads + self.push_automations(&mut rows, threads > 0);
+        if !groups.is_empty() {
+            if threads > 0 {
+                rows.push(separator_row());
+            }
+            self.push_machines(&mut rows, &groups);
         }
         if groups.is_empty() {
             // "None yet" is a definitive claim, so it waits until every
@@ -1905,84 +2371,719 @@ impl App {
         rows
     }
 
-    /// One environment's threads, flat: every running session is an entry of
-    /// its own — an agent thread — and an agent with no sessions keeps a row
-    /// so it stays reachable (to wake, connect to, or start a thread on).
-    /// The containers are context, not levels: the project rides along as the
-    /// row's note, and the whole story lives in the detail pane.
-    fn push_thread_rows(&self, rows: &mut Vec<Row>, w: usize, p: usize, e: usize) {
-        let proj = &self.tree[w].projects[p];
-        let env = &proj.envs[e];
-        let agents = env.agents_vec();
+    /// Threads first: every conversation on the account's agents under one
+    /// heading, ordered by where its work stands — the platform's work status,
+    /// never a state of this UI's own — and newest first within that. The machine a thread
+    /// runs on rides along as its note; machines list below, where waking,
+    /// sleeping and starting another thread happen. Returns how many thread
+    /// rows there are, folded ones included.
+    fn push_thread_sections(&self, rows: &mut Vec<Row>, groups: &[(usize, usize, usize)]) -> usize {
         let attached = self.agents_with_live_panes();
-        for a in sorted_agents(agents, &attached) {
-            let agent = &agents[a];
-            let pending = self.ops.get(agent.id.as_str()).copied();
-            let status = displayed_status(agent, &attached);
-            // The threads this agent carries: what the platform says is
-            // running in there, which outlives our connections and can be
-            // rejoined by name.
-            let live: Vec<(usize, &ConsoleSession)> = match &agent.sessions {
-                LoadSessions::Loaded(sessions) => sessions
+        let mut entries: Vec<(bool, Section, String, Row)> = Vec::new();
+        for &(w, p, e) in groups {
+            let agents = self.tree[w].projects[p].envs[e].agents_vec();
+            for (a, agent) in agents.iter().enumerate() {
+                if (agent.archived && !self.show_archived) || agent.finished_task() {
+                    continue;
+                }
+                let pending = self.ops.get(agent.id.as_str()).copied();
+                let state = pending.unwrap_or(displayed_status(agent, &attached));
+                let up = state == "running";
+                // What a thread with no work to report shows: its machine.
+                let presence = presence(state);
+                let mut shown_ids = std::collections::HashSet::new();
+                let mut shown_names = std::collections::HashSet::new();
+                if let LoadSessions::Loaded(sessions) = &agent.sessions {
+                    for (i, session) in sessions.iter().enumerate() {
+                        if !session.is_interesting() || self.ending.contains(&session.name) {
+                            continue;
+                        }
+                        shown_names.insert(session.name.clone());
+                        let report = agent.report_for(session);
+                        let open_here = self.pane_for(&session.name).is_some()
+                            || self.connecting.contains(&session.name);
+                        // A conversation nothing was ever said in has nothing
+                        // to come back to; starting another is the same.
+                        if session.snapshot.as_ref().is_some_and(|s| s.empty) && !open_here {
+                            continue;
+                        }
+                        if let Some(report) = report {
+                            shown_ids.insert(report.session_id.clone());
+                        }
+                        let work = report.and_then(|r| r.work_status.as_ref());
+                        let legacy = session.snapshot.as_ref().map(|s| s.state.as_str());
+                        // `connected` is whether THIS UI is attached; the
+                        // platform's own `attached` flag counts other clients
+                        // too. A pane held open onto a sleeping agent is not
+                        // connected in any way that matters.
+                        let connected = up && self.pane_for(&session.name).is_some();
+                        let connecting = up && self.connecting.contains(&session.name);
+                        // Enter went into its pane since the platform last
+                        // reported: a message on its way, working until the
+                        // report says otherwise.
+                        let sent = self
+                            .pane_for(&session.name)
+                            .and_then(|i| self.sessions[i].submitted_within(SUBMIT_GRACE))
+                            .filter(|sent| up && !reported_since(work, *sent));
+                        let glyph = if sent.is_some() {
+                            Some("working")
+                        } else {
+                            work_glyph(work, legacy)
+                        };
+                        // Its generated title, else what it was last asked —
+                        // both from the platform, so a prompt sent a moment
+                        // ago names the thread without a refresh.
+                        let title = report
+                            .and_then(ThreadSnapshot::display_title)
+                            .filter(|title| title != super::super::client_sessions::NEW_THREAD);
+                        // One just opened here that nothing has named yet: it
+                        // heads the list, and reads as loading until its
+                        // harness has drawn something to talk to.
+                        let new = open_here
+                            && title.is_none()
+                            && session.thread_label() == super::super::client_sessions::NEW_THREAD;
+                        let loading = new
+                            && (connecting
+                                || !connected
+                                || self.pane_for(&session.name).is_some_and(|i| {
+                                    self.sessions[i]
+                                        .with_screen(|screen| screen.contents().trim().is_empty())
+                                        .unwrap_or(true)
+                                }));
+                        let status = if connecting || loading {
+                            Some("connecting")
+                        } else if connected
+                            && !matches!(glyph, Some("blocked" | "error" | "working"))
+                        {
+                            Some("connected")
+                        } else {
+                            glyph.or(Some(presence))
+                        };
+                        let label = title.unwrap_or_else(|| {
+                            if loading {
+                                LOADING.into()
+                            } else if open_here {
+                                // The one just opened here is new, and reads so.
+                                session.thread_label()
+                            } else {
+                                untitled_label(session)
+                            }
+                        });
+                        let at = work
+                            .and_then(|w| w.at.clone())
+                            .or_else(|| report.map(|r| r.updated_at.clone()))
+                            .or_else(|| session.created_at.map(|at| at.to_rfc3339()))
+                            .unwrap_or_default();
+                        let section = if sent.is_some() {
+                            Section::Working
+                        } else {
+                            thread_section(work, legacy)
+                        };
+                        entries.push((
+                            new,
+                            section,
+                            at,
+                            Row {
+                                depth: 1,
+                                kind: RowKind::Session(w, p, e, a, i),
+                                label,
+                                note: attention_note(section, glyph),
+                                status: status.map(str::to_string),
+                                expanded: None,
+                                dimmed: false,
+                            },
+                        ));
+                    }
+                }
+                // What the platform reported that no live row stands for: a
+                // sleeping agent's conversations, a finished task's. Only the
+                // ones worth attention, plus the newest when the agent shows
+                // nothing else — the rest is history the agent row keeps.
+                let live_rows = !shown_names.is_empty();
+                let mut newest_taken = live_rows;
+                for (j, thread) in agent.threads.iter().enumerate() {
+                    if shown_ids.contains(&thread.session_id)
+                        || thread
+                            .session_name
+                            .as_ref()
+                            .is_some_and(|name| shown_names.contains(name))
+                    {
+                        continue;
+                    }
+                    let work = thread.work_status.as_ref();
+                    let section = thread_section(work, None);
+                    let attention = matches!(
+                        section,
+                        Section::NeedsYou | Section::Working | Section::Done
+                    );
+                    if !attention && newest_taken {
+                        continue;
+                    }
+                    newest_taken = true;
+                    let at = work
+                        .and_then(|w| w.at.clone())
+                        .unwrap_or_else(|| thread.updated_at.clone());
+                    entries.push((
+                        false,
+                        section,
+                        at,
+                        Row {
+                            depth: 1,
+                            kind: RowKind::Thread(w, p, e, a, j),
+                            label: thread
+                                .display_title()
+                                .unwrap_or_else(|| harness_label(&thread.harness).to_string()),
+                            note: attention_note(section, work_glyph(work, None)),
+                            status: Some(work_glyph(work, None).unwrap_or(presence).to_string()),
+                            expanded: None,
+                            dimmed: !up,
+                        },
+                    ));
+                }
+            }
+        }
+        if entries.is_empty() {
+            return 0;
+        }
+        let count = entries.len();
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::Threads,
+            label: "threads".into(),
+            note: threads_summary(entries.iter().map(|(_, section, ..)| *section)),
+            status: None,
+            expanded: Some(self.threads_expanded),
+            dimmed: false,
+        });
+        if !self.threads_expanded {
+            return count;
+        }
+        // A thread just started here first, then what wants attention —
+        // needs you, working, done — then the rest; newest first within each.
+        // RFC 3339 from one source sorts as text.
+        entries.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        rows.extend(entries.into_iter().map(|(.., row)| row));
+        count
+    }
+
+    /// The machines themselves, one row each, where an agent with no thread
+    /// is still reachable — to wake, connect to, or start a thread on.
+    fn push_machines(&self, rows: &mut Vec<Row>, groups: &[(usize, usize, usize)]) {
+        let attached = self.agents_with_live_panes();
+        let listed =
+            |agent: &&Agent| (!agent.archived || self.show_archived) && !agent.task_agent();
+        let total: usize = groups
+            .iter()
+            .map(|&(w, p, e)| {
+                self.tree[w].projects[p].envs[e]
+                    .agents_vec()
                     .iter()
-                    .enumerate()
-                    .filter(|(_, session)| {
-                        session.is_interesting() && !self.ending.contains(&session.name)
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            // The agent heads its threads: always on the list, so a sleeping
-            // or freshly created agent is reachable too — and an emptied one
-            // still says what it is once its last session closes.
-            rows.push(Row {
-                depth: 0,
-                kind: RowKind::Agent(w, p, e, a),
-                label: agent.name.clone(),
-                // No status tag: the orb's colour is the status, pending
-                // states included.
-                note: String::new(),
-                status: Some(pending.unwrap_or(status).to_string()),
-                expanded: Some(agent.expanded),
-                dimmed: false,
-            });
-            // The agent's orb is green only when its effective status says
-            // running — and its sessions never look better than it does: a
-            // pane held open onto a sleeping agent is not "connected" in any
-            // way that matters.
-            let agent_live = pending.unwrap_or(status) == "running";
-            for (i, session) in live {
-                // Each thread leads with what is happening in it — the latest
-                // prompt while the harness works, its last reply once done —
-                // falling back to `[S] name` for a session nothing has
-                // reported from. `connected` is whether THIS UI is attached;
-                // the platform's own `attached` flag counts other clients
-                // too, which is why it flickered.
-                let connected = self.pane_for(&session.name).is_some();
-                let connecting = self.connecting.contains(&session.name);
-                let reported = session.snapshot.as_ref().map(|s| s.state.as_str());
+                    .filter(listed)
+                    .count()
+            })
+            .sum();
+        let open = self.machines_expanded.unwrap_or(false);
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::Machines,
+            label: if self.show_archived {
+                "machines, archived too".into()
+            } else {
+                "machines".into()
+            },
+            note: format!("({total})"),
+            status: None,
+            expanded: Some(open),
+            dimmed: false,
+        });
+        if !open {
+            return;
+        }
+        for &(w, p, e) in groups {
+            let project = &self.tree[w].projects[p];
+            let agents = project.envs[e].agents_vec();
+            for a in sorted_agents(agents, &attached) {
+                let agent = &agents[a];
+                if !listed(&agent) {
+                    continue;
+                }
+                let pending = self.ops.get(agent.id.as_str()).copied();
+                let status = displayed_status(agent, &attached);
                 rows.push(Row {
                     depth: 1,
-                    kind: RowKind::Session(w, p, e, a, i),
-                    label: session.thread_label(),
-                    note: String::new(),
-                    status: if connected && agent_live {
-                        Some("connected".to_string())
-                    } else if connecting && agent_live {
-                        Some("connecting".to_string())
-                    } else if agent_live && let Some(state @ ("working" | "waiting")) = reported {
-                        // The harness's own state, when it is worth a glyph:
-                        // a spinner while it works, a hollow mark when it
-                        // waits on a human.
-                        Some(state.to_string())
+                    kind: RowKind::Agent(w, p, e, a),
+                    label: agent.name.clone(),
+                    note: if agent.archived {
+                        format!("{} · archived", project.name)
                     } else {
-                        None
+                        project.name.clone()
                     },
-                    expanded: None,
+                    status: Some(pending.unwrap_or(status).to_string()),
+                    expanded: Some(agent.expanded),
+                    dimmed: agent.archived,
+                });
+            }
+        }
+    }
+
+    /// Agents that ran handed-off work — an automation's run, an API or MCP
+    /// task — grouped by what they ran for, newest run first, groups by their
+    /// latest run. A run still working, blocked or failed unseen is also in
+    /// its thread section; the group is where the history lives.
+    pub fn automation_groups(&self) -> Vec<AutomationGroup> {
+        let mut groups: Vec<AutomationGroup> = Vec::new();
+        for (w, ws) in self.tree.iter().enumerate() {
+            for (p, project) in ws.projects.iter().enumerate() {
+                for (e, env) in project.envs.iter().enumerate() {
+                    for (a, agent) in env.agents_vec().iter().enumerate() {
+                        if (agent.archived && !self.show_archived) || !agent.task_agent() {
+                            continue;
+                        }
+                        let Some(latest) = agent.threads.first() else {
+                            continue;
+                        };
+                        let run = latest
+                            .task_id
+                            .as_ref()
+                            .and_then(|task| self.task_runs.get(task));
+                        let key = run
+                            .and_then(|run| run.automation_id.clone())
+                            .unwrap_or_else(|| OTHER_TASKS.to_string());
+                        let at = latest
+                            .work_status
+                            .as_ref()
+                            .and_then(|work| work.at.clone())
+                            .unwrap_or_else(|| latest.updated_at.clone());
+                        let name = match run {
+                            Some(run) if key != OTHER_TASKS => self
+                                .automations
+                                .get(&key)
+                                .map(|info| info.name.clone())
+                                .unwrap_or_else(|| {
+                                    automation_name_from(run.prompt_preview.as_deref())
+                                }),
+                            _ => "other tasks".to_string(),
+                        };
+                        match groups.iter_mut().find(|group| group.key == key) {
+                            Some(group) => group.runs.push(((w, p, e, a), at)),
+                            None => groups.push(AutomationGroup {
+                                key,
+                                name,
+                                runs: vec![((w, p, e, a), at)],
+                            }),
+                        }
+                    }
+                }
+            }
+        }
+        for group in &mut groups {
+            group.runs.sort_by(|a, b| b.1.cmp(&a.1));
+        }
+        groups.sort_by(|a, b| {
+            (a.key == OTHER_TASKS)
+                .cmp(&(b.key == OTHER_TASKS))
+                .then_with(|| b.last_at().cmp(a.last_at()))
+        });
+        groups
+    }
+
+    /// One row per automation — its latest run's outcome, how long ago, how
+    /// many runs — and its runs under it when unfolded. Returns how many runs
+    /// there are, so the sidebar knows it has threads to show.
+    fn push_automations(&self, rows: &mut Vec<Row>, after_threads: bool) -> usize {
+        let groups = self.automation_groups();
+        if groups.is_empty() {
+            return 0;
+        }
+        if after_threads {
+            rows.push(spacer_row());
+        }
+        rows.push(Row {
+            depth: 0,
+            kind: RowKind::Automations,
+            label: "automations".into(),
+            note: format!("({})", groups.len()),
+            status: None,
+            expanded: Some(self.automations_expanded),
+            dimmed: false,
+        });
+        let runs = groups.iter().map(|group| group.runs.len()).sum();
+        if !self.automations_expanded {
+            return runs;
+        }
+        let agent_at = |&(w, p, e, a): &(usize, usize, usize, usize)| {
+            self.tree
+                .get(w)?
+                .projects
+                .get(p)?
+                .envs
+                .get(e)?
+                .agents_vec()
+                .get(a)
+        };
+        let mut count = 0;
+        for (index, group) in groups.iter().enumerate() {
+            count += group.runs.len();
+            let latest = group
+                .runs
+                .first()
+                .and_then(|(path, _)| agent_at(path))
+                .and_then(|agent| agent.threads.first());
+            let open = self.automations_open.contains(&group.key);
+            rows.push(Row {
+                depth: 1,
+                kind: RowKind::Automation(index),
+                label: group.name.clone(),
+                note: age_of(group.last_at()),
+                status: latest.and_then(run_glyph).map(str::to_string),
+                expanded: Some(open),
+                dimmed: false,
+            });
+            if !open {
+                continue;
+            }
+            for (path, at) in &group.runs {
+                let Some(agent) = agent_at(path) else {
+                    continue;
+                };
+                let thread = agent.threads.first();
+                let (w, p, e, a) = *path;
+                rows.push(Row {
+                    depth: 2,
+                    kind: RowKind::Agent(w, p, e, a),
+                    label: thread
+                        .and_then(ThreadSnapshot::display_title)
+                        .unwrap_or_else(|| agent.name.clone()),
+                    note: age_of(at),
+                    status: thread.and_then(run_glyph).map(str::to_string),
+                    expanded: Some(agent.expanded),
                     dimmed: false,
                 });
             }
         }
+        count
+    }
+
+    /// Environments whose task-run agents need the task list read for runs
+    /// it hasn't placed yet, at most once a minute each.
+    pub fn task_runs_to_fetch(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for env in self
+            .tree
+            .iter()
+            .flat_map(|ws| ws.projects.iter())
+            .flat_map(|project| project.envs.iter())
+        {
+            let unplaced = env.agents_vec().iter().any(|agent| {
+                agent.task_agent()
+                    && agent
+                        .threads
+                        .iter()
+                        .filter_map(|t| t.task_id.as_ref())
+                        .any(|task| !self.task_runs.contains_key(task))
+            });
+            let due = self
+                .task_runs_asked
+                .get(&env.id)
+                .is_none_or(|at| at.elapsed() >= TASK_RUNS_EVERY);
+            if unplaced && due {
+                out.push(env.id.clone());
+            }
+        }
+        for env in &out {
+            self.task_runs_asked
+                .insert(env.clone(), std::time::Instant::now());
+        }
+        out
+    }
+
+    /// Automations with runs here whose configuration hasn't been asked for.
+    pub fn automations_to_fetch(&mut self) -> Vec<String> {
+        let ids: Vec<String> = self
+            .task_runs
+            .values()
+            .filter_map(|run| run.automation_id.clone())
+            .filter(|id| !self.automations_asked.contains(id))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.automations_asked.extend(ids.iter().cloned());
+        ids
+    }
+
+    pub fn automations_loaded(&mut self, found: Vec<AutomationInfo>) {
+        let anchor = self.selected_row().map(|row| row.kind);
+        for info in found {
+            self.automations.insert(info.id.clone(), info);
+        }
+        self.restore_cursor(anchor);
+    }
+
+    pub fn task_runs_loaded(&mut self, runs: Vec<TaskRun>) {
+        let anchor = self.selected_row().map(|row| row.kind);
+        for run in runs {
+            self.task_runs.insert(run.task_id.clone(), run);
+        }
+        self.restore_cursor(anchor);
+    }
+
+    /// Open a thread's outcome as looked at: locally now, so it leaves
+    /// `needs you` / `done` under the cursor, and on the platform once the run
+    /// loop drains [`Self::mark_seen`]. A thread with nothing unseen is left
+    /// alone.
+    fn mark_row_seen(&mut self, kind: RowKind) {
+        let (w, p, e, a, session_id) = match kind {
+            RowKind::Session(w, p, e, a, i) => {
+                let Some(agent) = self.tree[w].projects[p].envs[e].agents_vec().get(a) else {
+                    return;
+                };
+                let LoadSessions::Loaded(sessions) = &agent.sessions else {
+                    return;
+                };
+                let Some(report) = sessions.get(i).and_then(|s| agent.report_for(s)) else {
+                    return;
+                };
+                if !report.work_status.as_ref().is_some_and(|w| w.unseen) {
+                    return;
+                }
+                (w, p, e, a, report.session_id.clone())
+            }
+            RowKind::Thread(w, p, e, a, j) => {
+                let Some(thread) = self.tree[w].projects[p].envs[e]
+                    .agents_vec()
+                    .get(a)
+                    .and_then(|agent| agent.threads.get(j))
+                else {
+                    return;
+                };
+                if !thread.work_status.as_ref().is_some_and(|w| w.unseen) {
+                    return;
+                }
+                (w, p, e, a, thread.session_id.clone())
+            }
+            _ => return,
+        };
+        let environment_id = self.tree[w].projects[p].envs[e].id.clone();
+        let Load::Loaded(agents) = &mut self.tree[w].projects[p].envs[e].agents else {
+            return;
+        };
+        let Some(agent) = agents.get_mut(a) else {
+            return;
+        };
+        let seen = |snapshot: &mut ThreadSnapshot| {
+            if snapshot.session_id == session_id
+                && let Some(work) = snapshot.work_status.as_mut()
+            {
+                work.unseen = false;
+            }
+        };
+        agent.threads.iter_mut().for_each(seen);
+        if let LoadSessions::Loaded(sessions) = &mut agent.sessions {
+            sessions
+                .iter_mut()
+                .filter_map(|s| s.snapshot.as_mut())
+                .for_each(seen);
+        }
+        let any_unseen = agent
+            .threads
+            .iter()
+            .any(|t| t.work_status.as_ref().is_some_and(|w| w.unseen));
+        if let Some(work) = agent.work_status.as_mut() {
+            work.unseen = any_unseen;
+        }
+        self.mark_seen.push(MarkSeen {
+            agent_id: agent.id.clone(),
+            environment_id,
+            session_id,
+        });
+    }
+
+    /// An archive or unarchive the platform accepted: applied locally rather
+    /// than waiting for the next agents fetch.
+    pub fn archive_set(&mut self, agent_id: &str, archived: bool) {
+        let anchor = self.selected_row().map(|row| row.kind);
+        for agent in self
+            .tree
+            .iter_mut()
+            .flat_map(|ws| ws.projects.iter_mut())
+            .flat_map(|project| project.envs.iter_mut())
+            .filter_map(|env| match &mut env.agents {
+                Load::Loaded(agents) => Some(agents),
+                _ => None,
+            })
+            .flatten()
+            .filter(|agent| agent.id == agent_id)
+        {
+            agent.archived = archived;
+            self.status = format!(
+                "{} {}{}",
+                if archived { "Archived" } else { "Unarchived" },
+                agent.name,
+                if archived && !self.show_archived {
+                    " — A shows archived agents"
+                } else {
+                    ""
+                }
+            );
+        }
+        self.restore_cursor(anchor);
+    }
+
+    /// A reported thread's identity — agent and session id — which, unlike
+    /// its index, survives a refetch reordering the agent's threads.
+    fn thread_identity(&self, kind: RowKind) -> Option<(String, String)> {
+        let RowKind::Thread(w, p, e, a, j) = kind else {
+            return None;
+        };
+        let agent = self
+            .tree
+            .get(w)?
+            .projects
+            .get(p)?
+            .envs
+            .get(e)?
+            .agents_vec()
+            .get(a)?;
+        Some((agent.id.clone(), agent.threads.get(j)?.session_id.clone()))
+    }
+
+    /// [`Self::restore_cursor`], following a reported thread by identity.
+    fn restore_cursor_to(&mut self, anchor: Option<RowKind>, thread: Option<(String, String)>) {
+        if let Some(identity) = thread
+            && let Some(index) = self
+                .rows()
+                .iter()
+                .position(|row| self.thread_identity(row.kind).as_ref() == Some(&identity))
+        {
+            self.cursor = index;
+            return;
+        }
+        self.restore_cursor(anchor);
+    }
+
+    /// What a row is, independent of where it sits: a session by its
+    /// durable name, a reported thread by agent and session id, an agent by
+    /// id, anything else by its kind.
+    fn row_id(&self, row: &Row) -> RowId {
+        match row.kind {
+            RowKind::Session(w, p, e, a, i) => match self.console_session(w, p, e, a, i) {
+                Some(session) => RowId::Session(session.name.clone()),
+                None => RowId::Other(row.kind),
+            },
+            RowKind::Thread(..) => match self.thread_identity(row.kind) {
+                Some((agent, session)) => RowId::Thread(agent, session),
+                None => RowId::Other(row.kind),
+            },
+            RowKind::Agent(w, p, e, a) => match self.agent_at(w, p, e, a) {
+                Some((id, _)) => RowId::Agent(id),
+                None => RowId::Other(row.kind),
+            },
+            kind => RowId::Other(kind),
+        }
+    }
+
+    /// Keep the cursor on the row it was on. Threads re-sort as their work
+    /// moves — sending a prompt moves a thread into `working` — and an index
+    /// left where it was would land on another thread, or a heading, and
+    /// take the pane with it. A cursor someone moved since the last pass is
+    /// left where they put it.
+    pub fn hold_selection(&mut self) {
+        let rows = self.rows();
+        if let Some((at, id)) = self.held_row.clone()
+            && at == self.cursor
+            && rows.get(self.cursor).map(|row| self.row_id(row)).as_ref() != Some(&id)
+            && let Some(index) = rows.iter().position(|row| self.row_id(row) == id)
+        {
+            self.cursor = index;
+        }
+        self.held_row = rows
+            .get(self.cursor)
+            .map(|row| (self.cursor, self.row_id(row)));
+    }
+
+    /// An agent with a thread open here that nothing names yet — the platform
+    /// has no title or prompt for it — gets its threads read again, which
+    /// names it from its own transcript. At most every
+    /// [`RETITLE_EVERY`] per agent: it follows pane activity.
+    pub fn retitle(&mut self, agent_id: &str) -> Option<Effect> {
+        if self.thread_polls.contains(agent_id)
+            || self
+                .retitled
+                .get(agent_id)
+                .is_some_and(|at| at.elapsed() < RETITLE_EVERY)
+        {
+            return None;
+        }
+        let rows = self.rows();
+        let path = rows.iter().find_map(|row| {
+            let RowKind::Session(w, p, e, a, i) = row.kind else {
+                return None;
+            };
+            let (id, _) = self.agent_at(w, p, e, a)?;
+            let session = self.console_session(w, p, e, a, i)?;
+            (id == agent_id
+                && self.pane_for(&session.name).is_some()
+                && row.label == super::super::client_sessions::NEW_THREAD)
+                .then_some((w, p, e, a))
+        })?;
+        self.retitled
+            .insert(agent_id.to_string(), std::time::Instant::now());
+        self.thread_polls.insert(agent_id.to_string());
+        Some(Effect::LoadSessions {
+            agent_id: agent_id.to_string(),
+            environment_id: self.tree[path.0].projects[path.1].envs[path.2].id.clone(),
+            path,
+        })
+    }
+
+    /// Platform reports the activity check fetched for one agent, folded into
+    /// its threads, so a title or prompt shows as soon as it is reported
+    /// rather than at the next poll.
+    pub fn reports_seen(
+        &mut self,
+        agent_id: &str,
+        reports: &[(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+        )],
+    ) {
+        for agent in self
+            .tree
+            .iter_mut()
+            .flat_map(|ws| ws.projects.iter_mut())
+            .flat_map(|project| project.envs.iter_mut())
+            .filter_map(|env| match &mut env.agents {
+                Load::Loaded(agents) => Some(agents),
+                _ => None,
+            })
+            .flatten()
+            .filter(|agent| agent.id == agent_id)
+        {
+            for (session_id, title, prompt, latest_prompt, updated_at) in reports {
+                if let Some(thread) = agent
+                    .threads
+                    .iter_mut()
+                    .find(|t| &t.session_id == session_id)
+                    && *updated_at >= thread.updated_at
+                {
+                    thread.title = title.clone().or(thread.title.take());
+                    thread.prompt = prompt.clone().or(thread.prompt.take());
+                    thread.latest_prompt = latest_prompt.clone().or(thread.latest_prompt.take());
+                    thread.updated_at = updated_at.clone();
+                }
+            }
+        }
+    }
+
+    pub fn take_mark_seen(&mut self) -> Vec<MarkSeen> {
+        std::mem::take(&mut self.mark_seen)
     }
 
     /// Every project and environment stays reachable for `n`, `t`, and `r`,
@@ -2003,7 +3104,7 @@ impl App {
         if !groups.is_empty() {
             rows.push(separator_row());
         }
-        let open = self.others_expanded.unwrap_or(true);
+        let open = self.others_expanded.unwrap_or(false);
         rows.push(Row {
             depth: 0,
             kind: RowKind::OtherProjects,
@@ -2147,6 +3248,7 @@ impl App {
             RowKind::Environment(w, p, e)
             | RowKind::Agent(w, p, e, _)
             | RowKind::Session(w, p, e, _, _)
+            | RowKind::Thread(w, p, e, _, _)
             | RowKind::Note(w, p, e) => Some((w, p, e)),
             _ => None,
         }
@@ -2292,6 +3394,7 @@ impl App {
         // Before the watches settle: a sleep this TUI asked for is still
         // recorded there, which is how it is told apart from one imposed
         // from outside.
+        self.close_panes_slept_elsewhere(&before);
         self.detect_slept_under_panes(&before);
         if let Some(id) = answered {
             self.settle_watched_agents(&[id]);
@@ -2305,7 +3408,11 @@ impl App {
 
     /// Synchronous fixture loads represent a fresh request for the current tree.
     #[cfg(test)]
-    fn agents_loaded(&mut self, path: (usize, usize, usize), result: Result<Vec<Agent>, String>) {
+    pub(crate) fn agents_loaded(
+        &mut self,
+        path: (usize, usize, usize),
+        result: Result<Vec<Agent>, String>,
+    ) {
         let (w, p, e) = path;
         let Some(environment_id) = self
             .tree
@@ -2335,6 +3442,7 @@ impl App {
     /// still `Loading` await their dedicated reply.
     pub fn my_agents_loaded(&mut self, agents: Vec<(String, Agent)>, asked_at: std::time::Instant) {
         let anchor = self.selected_row().map(|row| row.kind);
+        let thread_anchor = anchor.and_then(|kind| self.thread_identity(kind));
         let before = self.status_snapshot();
         let mut by_env: HashMap<String, Vec<Agent>> = HashMap::new();
         for (environment_id, agent) in agents {
@@ -2367,9 +3475,10 @@ impl App {
         for id in &answered {
             self.agent_snapshot_floor.insert(id.clone(), asked_at);
         }
+        self.close_panes_slept_elsewhere(&before);
         self.detect_slept_under_panes(&before);
         self.settle_watched_agents(&answered);
-        self.restore_cursor(anchor);
+        self.restore_cursor_to(anchor, thread_anchor);
         self.select_pending();
         self.adopt_pane_sessions();
     }
@@ -2401,6 +3510,63 @@ impl App {
                     .map(|env| env.id.clone())
             })
         })
+    }
+
+    /// Every pane onto one agent, closed: the machine is going to sleep (or
+    /// away) under them, and a pane onto a frozen VM still takes keys that go
+    /// nowhere. Detach only, as closing a pane always is. Returns how many.
+    pub fn close_agent_panes(&mut self, agent_id: &str) -> usize {
+        let mut closed = 0;
+        while let Some(i) = self.sessions.iter().position(|s| s.agent_id == agent_id) {
+            if let Some(mut session) = self.take_session(i) {
+                session.detach();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// An agent slept by something else — an idle timer, another terminal —
+    /// under a pane that cannot ride it out: the pane is closed, and the
+    /// status line says how to get the thread back. A local Codex or OpenCode
+    /// client is left to [`Self::detect_slept_under_panes`], which offers to
+    /// wake the agent under it; its own reconnect does the rest.
+    fn close_panes_slept_elsewhere(&mut self, before: &HashMap<String, String>) {
+        let rides_out = |session: &super::session::Session| {
+            session.client_id.is_some()
+                && matches!(session.harness.as_str(), "codex" | "opencode" | "opencode2")
+        };
+        let mut slept: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .filter(|session| !rides_out(session))
+            .filter_map(|session| {
+                let agent = self.agent_by_id(&session.agent_id)?;
+                let slept_now = matches!(agent.status.as_str(), "sleeping" | "stopped")
+                    && before.get(&agent.id).is_some_and(|previous| {
+                        !matches!(previous.as_str(), "sleeping" | "stopped")
+                    });
+                (slept_now
+                    && !self.ops.contains_key(&agent.id)
+                    && !self.watching.contains_key(&agent.id))
+                .then(|| (agent.id.clone(), agent.name.clone()))
+            })
+            .collect();
+        slept.sort();
+        slept.dedup();
+        for (agent_id, agent_name) in slept {
+            while let Some(i) = self
+                .sessions
+                .iter()
+                .position(|s| s.agent_id == agent_id && !rides_out(s))
+            {
+                if let Some(mut session) = self.take_session(i) {
+                    session.detach();
+                }
+            }
+            self.status =
+                format!("{agent_name} went to sleep — enter on a thread wakes it and reopens it");
+        }
     }
 
     /// An agent that just went from awake to `sleeping` while this TUI holds a
@@ -2677,6 +3843,10 @@ impl App {
             let session = self.console_session(w, p, e, a, i)?;
             Some(session.name.clone())
         });
+        // Anything else is put back by identity: threads list above the
+        // machines, so a thread coming or going moves every row below it.
+        let anchor = self.selected_row().map(|row| row.kind);
+        let thread_anchor = anchor.and_then(|kind| self.thread_identity(kind));
         let open: std::collections::HashSet<_> = self
             .sessions
             .iter()
@@ -2786,7 +3956,10 @@ impl App {
             self.ending.retain(|name| live.contains(name.as_str()));
         }
         if self.pending_select_session.is_none() {
-            self.pending_select_session = selected;
+            self.pending_select_session = selected.clone();
+        }
+        if selected.is_none() {
+            self.restore_cursor_to(anchor, thread_anchor);
         }
         self.clamp_cursor();
         // The platform's list may still be missing sessions we are attached
@@ -3096,24 +4269,35 @@ impl App {
     }
 
     fn on_key_wizard(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::picker::{ListId, visible};
         use super::wizard::Action;
         let wizard = self.wizard.as_mut()?;
         // A step doing work owns the keyboard until it is done.
         if wizard.busy.is_some() {
             return None;
         }
-        let action = match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                wizard.up();
-                Action::Redraw
+        let list = ListId::Wizard(wizard.step);
+        let labels: Vec<String> = wizard
+            .options()
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        let action = if let Some(cursor) =
+            self.list_filter.on_key(list, &labels, wizard.cursor, &key)
+        {
+            wizard.set_cursor(cursor);
+            Action::Redraw
+        } else {
+            match key.code {
+                KeyCode::Enter
+                    if !visible(self.list_filter.query(list), &labels).contains(&wizard.cursor) =>
+                {
+                    Action::None
+                }
+                KeyCode::Enter => wizard.select(),
+                KeyCode::Esc => wizard.back(),
+                _ => Action::None,
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                wizard.down();
-                Action::Redraw
-            }
-            KeyCode::Enter => wizard.select(),
-            KeyCode::Esc => wizard.back(),
-            _ => Action::None,
         };
         // The theme previews as the cursor moves, so the whole screen follows.
         self.theme = self
@@ -3139,12 +4323,37 @@ impl App {
     }
 
     fn on_key_settings(&mut self, key: KeyEvent) -> Option<Effect> {
+        use super::picker::{ListId, visible};
         use super::settings::Action;
         let settings = self.settings.as_mut()?;
         // The picker creating a project owns the keyboard until it is done.
         if settings.busy.is_some() {
             return None;
         }
+        // The project sub-picker is a list like any other; the card itself
+        // is a form, where letters still move and change values.
+        if let Some(pick) = settings.pick {
+            let labels: Vec<String> = settings
+                .picker_options()
+                .into_iter()
+                .map(|(label, ..)| label)
+                .collect();
+            if let Some(cursor) =
+                self.list_filter
+                    .on_key(ListId::SettingsProject, &labels, pick, &key)
+            {
+                settings.error = None;
+                settings.pick = Some(cursor);
+                return None;
+            }
+            if key.code == KeyCode::Enter
+                && !visible(self.list_filter.query(ListId::SettingsProject), &labels)
+                    .contains(&pick)
+            {
+                return None;
+            }
+        }
+        let picking = settings.pick.is_some();
         let action = match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 settings.up();
@@ -3160,6 +4369,10 @@ impl App {
             KeyCode::Esc => settings.back(),
             _ => Action::None,
         };
+        // A sub-picker just opened starts unfiltered.
+        if !picking && self.settings.as_ref().is_some_and(|s| s.pick.is_some()) {
+            self.list_filter = Default::default();
+        }
         // The theme applies as it cycles, so the whole screen follows.
         self.theme = self
             .settings
@@ -3618,6 +4831,17 @@ impl App {
         if let Some(expanded) = clicked.expanded {
             return self.set_expanded(clicked.kind, !expanded);
         }
+        // A thread with no pane of its own: a double click connects to its
+        // agent — waking it first if it sleeps — the same as enter.
+        if let RowKind::Thread(..) = clicked.kind {
+            if !double {
+                return None;
+            }
+            self.mark_row_seen(clicked.kind);
+            let effect = self.open_thread_row(clicked.kind);
+            self.restore_cursor(Some(clicked.kind));
+            return effect;
+        }
         if let RowKind::Session(w, p, e, a, i) = clicked.kind {
             match self
                 .console_session(w, p, e, a, i)
@@ -3662,13 +4886,13 @@ impl App {
     fn connect_agent_row(&mut self, w: usize, p: usize, e: usize, a: usize) -> Option<Effect> {
         let agent = self.tree[w].projects[p].envs[e].agents_vec().get(a)?;
         let id = agent.id.clone();
-        if agent.status != "running" {
-            self.status = format!(
-                "{} is {} — press w to wake it first",
-                agent.name, agent.status
-            );
-            return None;
+        if agent.status != "running" || self.ops.contains_key(id.as_str()) {
+            return self.wake_and_connect(w, p, e, a, None);
         }
+        // Connecting somewhere now supersedes an older wait to connect, and
+        // the launch it becomes has its own loading pane.
+        self.connect_on_wake = None;
+        self.opening = None;
         let target = self.target_at((w, p, e))?;
         if matches!(
             agent.sessions,
@@ -3725,6 +4949,193 @@ impl App {
             return None;
         };
         self.connect_primary_agent(w, p, e, a, primary)
+    }
+
+    /// Enter on a machine that is not up: a sleeping one is woken, and one
+    /// already waking or starting is waited for. Either way it connects once
+    /// it reports running — see [`Self::take_wake_connect`].
+    fn wake_and_connect(
+        &mut self,
+        w: usize,
+        p: usize,
+        e: usize,
+        a: usize,
+        thread: Option<ThreadKey>,
+    ) -> Option<Effect> {
+        let env = &self.tree[w].projects[p].envs[e];
+        let environment_id = env.id.clone();
+        let agent = env.agents_vec().get(a)?;
+        let (id, name, status) = (agent.id.clone(), agent.name.clone(), agent.status.clone());
+        let op = self.ops.get(id.as_str()).copied();
+        let waking = op == Some(AgentOp::Wake.pending_label());
+        let find = thread.is_some();
+        let wait = WakeConnect {
+            agent_id: id.clone(),
+            thread,
+            refetched: false,
+        };
+        match self.opening.as_mut().filter(|o| o.agent_id == id) {
+            Some(opening) => {
+                opening.wake = true;
+                opening.find = find;
+            }
+            None => {
+                self.opening = Some(Opening {
+                    agent_id: id.clone(),
+                    agent_name: name.clone(),
+                    title: name.clone(),
+                    session_name: None,
+                    harness: None,
+                    wake: true,
+                    find,
+                    since: std::time::Instant::now(),
+                })
+            }
+        }
+        if waking || (op.is_none() && status == "starting") {
+            self.connect_on_wake = Some(wait);
+            self.status = format!("{name} is waking — connecting when it's up");
+            return None;
+        }
+        if op.is_some() || !matches!(status.as_str(), "sleeping" | "stopped") {
+            self.opening = None;
+            let state = op.unwrap_or(status.as_str());
+            self.status = format!("{name} is {state} — nothing to connect to yet");
+            return None;
+        }
+        self.ops.insert(id.clone(), AgentOp::Wake.pending_label());
+        self.connect_on_wake = Some(wait);
+        self.status = format!("Waking {name} — connecting when it's up");
+        Some(Effect::Agent {
+            op: AgentOp::Wake,
+            agent_id: id,
+            environment_id,
+        })
+    }
+
+    /// The connect a wake was waiting on, once its agent reports running.
+    /// Called after every agents refresh and every sessions fetch. A thread
+    /// asked for reopens itself: the machine's sessions are fetched again
+    /// now it is up, and the one that thread ran in is reattached. A wake
+    /// that failed or gave up leaves the agent asleep, and the wait with it.
+    pub fn take_wake_connect(&mut self) -> Option<Effect> {
+        let wait = self.connect_on_wake.clone()?;
+        if self.ops.contains_key(wait.agent_id.as_str()) {
+            return None;
+        }
+        let path = self.tree.iter().enumerate().find_map(|(w, ws)| {
+            ws.projects.iter().enumerate().find_map(|(p, project)| {
+                project.envs.iter().enumerate().find_map(|(e, env)| {
+                    let a = env
+                        .agents_vec()
+                        .iter()
+                        .position(|agent| agent.id == wait.agent_id)?;
+                    Some((w, p, e, a, env.agents_vec()[a].status.clone()))
+                })
+            })
+        });
+        let (w, p, e, a) = match path {
+            Some((w, p, e, a, status)) if status == "running" => (w, p, e, a),
+            Some((.., status)) if status == "starting" => return None,
+            _ => {
+                self.connect_on_wake = None;
+                return None;
+            }
+        };
+        let Some(thread) = wait.thread.clone() else {
+            self.connect_on_wake = None;
+            return self.connect_agent_row(w, p, e, a);
+        };
+        let id = wait.agent_id.clone();
+        if !wait.refetched {
+            self.connect_on_wake = Some(WakeConnect {
+                refetched: true,
+                ..wait
+            });
+            let in_flight = self.thread_polls.contains(&id)
+                || matches!(
+                    self.tree[w].projects[p].envs[e].agents_vec()[a].sessions,
+                    LoadSessions::Loading
+                );
+            if in_flight {
+                return None;
+            }
+            self.status = "Reopening the thread…".into();
+            self.thread_polls.insert(id.clone());
+            let environment_id = self.tree[w].projects[p].envs[e].id.clone();
+            if let Load::Loaded(agents) = &mut self.tree[w].projects[p].envs[e].agents {
+                agents[a].sessions = LoadSessions::Loading;
+            }
+            return Some(Effect::LoadSessions {
+                agent_id: id,
+                environment_id,
+                path: (w, p, e, a),
+            });
+        }
+        let found = match &self.tree[w].projects[p].envs[e].agents_vec()[a].sessions {
+            LoadSessions::NotLoaded | LoadSessions::Loading => return None,
+            LoadSessions::Loaded(rows) => rows.iter().position(|row| thread.matches(row)),
+            LoadSessions::Failed(_) => None,
+        };
+        self.connect_on_wake = None;
+        let Some(i) = found else {
+            // Gone with the sleep — a shell whose process died — or never
+            // listed: the machine itself is the next best thing.
+            self.status = "That thread didn't come back — connecting to its agent".into();
+            return self.connect_agent_row(w, p, e, a);
+        };
+        let kind = RowKind::Session(w, p, e, a, i);
+        let found_name = self.console_session(w, p, e, a, i).map(|s| s.name.clone());
+        let opening = self.opening.take();
+        let effect = self.reattach_row(kind);
+        // Still the same open: keep its title and its steps so far.
+        if let (Some(mut kept), Some(fresh)) = (opening, self.opening.as_mut()) {
+            kept.session_name = found_name;
+            kept.harness = fresh.harness.take().or(kept.harness);
+            *fresh = kept;
+        }
+        if let Some(index) = self.rows().iter().position(|row| row.kind == kind) {
+            self.cursor = index;
+        }
+        effect
+    }
+
+    /// Enter (or a double click) on a thread the platform reported but no
+    /// session row stands for: reopen that conversation, waking its machine
+    /// first if it sleeps.
+    fn open_thread_row(&mut self, kind: RowKind) -> Option<Effect> {
+        let RowKind::Thread(w, p, e, a, j) = kind else {
+            return None;
+        };
+        let agent = self.tree[w].projects[p].envs[e].agents_vec().get(a)?;
+        let thread = agent.threads.get(j)?;
+        let key = ThreadKey {
+            session_name: thread.session_name.clone(),
+            session_id: Some(thread.session_id.clone()).filter(|id| !id.is_empty()),
+        };
+        let id = agent.id.clone();
+        self.opening = Some(Opening {
+            agent_id: id.clone(),
+            agent_name: agent.name.clone(),
+            title: thread
+                .display_title()
+                .unwrap_or_else(|| harness_label(&thread.harness).to_string()),
+            session_name: thread.session_name.clone(),
+            harness: Some(thread.harness.clone()),
+            wake: false,
+            find: true,
+            since: std::time::Instant::now(),
+        });
+        self.target = self.target_at((w, p, e));
+        if agent.status != "running" || self.ops.contains_key(id.as_str()) {
+            return self.wake_and_connect(w, p, e, a, Some(key));
+        }
+        self.connect_on_wake = Some(WakeConnect {
+            agent_id: id,
+            thread: Some(key),
+            refetched: false,
+        });
+        self.take_wake_connect()
     }
 
     fn connect_primary_agent(
@@ -3811,29 +5222,45 @@ impl App {
     }
 
     fn click_tree_row_inner(&mut self, row: u16) -> bool {
-        let offset = row.saturating_sub(self.panes.tree.y) as usize;
+        let mut offset = row.saturating_sub(self.panes.tree.y) as usize;
         let rows = self.rows();
+        let heights: Vec<usize> = rows
+            .iter()
+            .map(|r| row_height(r, self.panes.tree.w))
+            .collect();
         // The list scrolls, so the clicked line is an offset from whatever is
         // at the top — which ratatui decides. Approximate with the same
-        // window the widget would have chosen.
-        let first = self.tree_scroll_offset(rows.len());
-        if let Some(index) = first.checked_add(offset)
-            && index < rows.len()
-            && rows[index].selectable()
-        {
-            self.cursor = index;
-            return true;
+        // window the widget would have chosen. Rows wrap, so walk heights.
+        let first = self.tree_scroll_offset(&heights);
+        for (index, height) in heights.iter().enumerate().skip(first) {
+            if offset < *height {
+                if rows[index].selectable() {
+                    self.cursor = index;
+                    return true;
+                }
+                return false;
+            }
+            offset -= height;
         }
         false
     }
 
-    /// The first visible tree row, mirroring ratatui's scroll behaviour.
-    fn tree_scroll_offset(&self, total: usize) -> usize {
-        let height = self.panes.tree.h as usize;
-        if height == 0 || total <= height {
+    /// The first visible tree row, mirroring ratatui's scroll behaviour for a
+    /// list drawn fresh each frame: from the top, unless the cursor's row
+    /// would fall below the window, in which case it sits at the bottom.
+    fn tree_scroll_offset(&self, heights: &[usize]) -> usize {
+        let window = self.panes.tree.h as usize;
+        let cursor = self.cursor.min(heights.len().saturating_sub(1));
+        if window == 0 || heights.is_empty() {
             return 0;
         }
-        self.cursor.saturating_sub(height - 1).min(total - height)
+        let mut first = 0;
+        let mut used: usize = heights[..=cursor].iter().sum();
+        while used > window && first < cursor {
+            used -= heights[first];
+            first += 1;
+        }
+        first
     }
 
     /// Begin showing the loading screen for a request. Takes the prompt with
@@ -3868,8 +5295,67 @@ impl App {
     }
 
     /// Advance the loading animation.
+    /// The sidebar's animation frame, from the clock: whatever redraws the
+    /// screen — a tick, pane output, a key — draws the frame it is now.
+    pub fn animation_frame(&self) -> usize {
+        (self.animation_epoch.elapsed().as_millis() / ANIMATION_FRAME.as_millis()) as usize
+    }
+
     pub fn tick(&mut self) {
         self.loading.tick = self.loading.tick.wrapping_add(1);
+        if self.opening.is_some() && self.opening_stage().is_none() {
+            self.opening = None;
+        }
+    }
+
+    /// Where the open under way has got to, read off the state each step
+    /// leaves: a pane up but still blank is its harness starting; an attach
+    /// in flight is connecting; a wait on the machine is waking it, or —
+    /// once it is up — finding the thread on it. `None` once it is open, or
+    /// when it stopped: a failure says so on the status line.
+    pub fn opening_stage(&self) -> Option<OpenStage> {
+        let opening = self.opening.as_ref()?;
+        if let Some(name) = &opening.session_name {
+            if let Some(i) = self.pane_for(name) {
+                let pane = &self.sessions[i];
+                if pane.ended() || pane.stalled() {
+                    return None;
+                }
+                let blank = pane
+                    .with_screen(|screen| screen.contents().trim().is_empty())
+                    .unwrap_or(true);
+                return blank.then_some(OpenStage::Starting);
+            }
+            if self.connecting.contains(name) {
+                return Some(OpenStage::Connecting);
+            }
+        }
+        self.connect_on_wake
+            .as_ref()
+            .filter(|wait| wait.agent_id == opening.agent_id)?;
+        let up = self
+            .agent_by_id(&opening.agent_id)
+            .is_some_and(|agent| agent.status == "running");
+        if !up || self.ops.contains_key(opening.agent_id.as_str()) {
+            Some(OpenStage::Waking)
+        } else {
+            Some(OpenStage::Finding)
+        }
+    }
+
+    /// The open under way, when the row under the cursor belongs to it:
+    /// walking off to another row shows that row, as ever.
+    pub fn opening_for_selection(&self) -> Option<(&Opening, OpenStage)> {
+        let opening = self.opening.as_ref()?;
+        let (w, p, e, a) = match self.selected_row()?.kind {
+            RowKind::Agent(w, p, e, a)
+            | RowKind::Session(w, p, e, a, _)
+            | RowKind::Thread(w, p, e, a, _) => (w, p, e, a),
+            _ => return None,
+        };
+        let (id, _) = self.agent_at(w, p, e, a)?;
+        (id == opening.agent_id).then_some(())?;
+        Some((opening, self.opening_stage()?))
     }
 
     /// Record a step from the launch pipeline.
@@ -4049,8 +5535,16 @@ impl App {
         {
             self.watching.remove(agent_id.as_str());
         }
+        let name = session.durable_name.clone();
         self.sessions.push(session);
         self.adopt_pane_sessions();
+        // Quiet, unless someone asked for it or was already typing into it.
+        if self.focus_on_attach.as_deref() == Some(name.as_str()) {
+            self.focus_on_attach = None;
+            self.active = Some(self.sessions.len() - 1);
+            self.focus = ManageFocus::Session;
+        }
+        self.release_typed_keys(&name);
     }
 
     /// A background attach didn't make it. Quietly again: the spinner comes
@@ -4061,6 +5555,73 @@ impl App {
         self.connecting.remove(session_name);
         let flat = err.split_whitespace().collect::<Vec<_>>().join(" ");
         self.status = format!("Couldn't connect {session_name}: {flat}");
+    }
+
+    /// Typing at a thread that is still connecting is typing into it: the
+    /// keys wait for its pane instead of being read as sidebar commands —
+    /// where `n` then Enter would start a new agent. Only plain typing is
+    /// held; arrows, Esc and chords still drive the sidebar.
+    fn hold_typed_key(&mut self, key: KeyEvent) -> bool {
+        let typing = matches!(
+            key.code,
+            KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace
+        ) && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !typing || self.focus != ManageFocus::Tree {
+            return false;
+        }
+        let Some(RowKind::Session(w, p, e, a, i)) = self.selected_row().map(|row| row.kind) else {
+            return false;
+        };
+        let Some(name) = self.console_session(w, p, e, a, i).map(|s| s.name.clone()) else {
+            return false;
+        };
+        if !self.connecting.contains(&name) {
+            if self
+                .type_ahead
+                .as_ref()
+                .is_some_and(|(held, _)| *held == name)
+            {
+                self.type_ahead = None;
+                self.status = "Couldn't open the thread — what you typed wasn't sent".into();
+            }
+            return false;
+        }
+        let held = match &mut self.type_ahead {
+            Some((held, keys)) if *held == name => keys,
+            _ => {
+                self.type_ahead = Some((name, Vec::new()));
+                &mut self.type_ahead.as_mut().expect("just set").1
+            }
+        };
+        held.push(key);
+        self.status = "Connecting — what you type goes to the thread when it opens".into();
+        true
+    }
+
+    /// Send what was typed while a thread connected into its pane, now open,
+    /// and put the keyboard there.
+    fn release_typed_keys(&mut self, name: &str) {
+        if !self
+            .type_ahead
+            .as_ref()
+            .is_some_and(|(held, _)| held == name)
+        {
+            return;
+        }
+        let Some((_, keys)) = self.type_ahead.take() else {
+            return;
+        };
+        let Some(index) = self.sessions.iter().position(|s| s.durable_name == name) else {
+            return;
+        };
+        self.active = Some(index);
+        self.focus = ManageFocus::Session;
+        self.status.clear();
+        for key in keys {
+            self.sessions[index].send_key(key);
+        }
     }
 
     /// Adopt a freshly opened session, make it active, and focus it.
@@ -4108,6 +5669,10 @@ impl App {
             self.pending_select = None;
         } else {
             self.select_pending();
+        }
+        let name = self.sessions.last().map(|s| s.durable_name.clone());
+        if let Some(name) = name {
+            self.release_typed_keys(&name);
         }
     }
 
@@ -4880,9 +6445,9 @@ impl App {
             return Some((session.agent_id.clone(), session.agent_name.clone()));
         }
         match self.selected_row()?.kind {
-            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => {
-                self.agent_at(w, p, e, a)
-            }
+            RowKind::Agent(w, p, e, a)
+            | RowKind::Session(w, p, e, a, _)
+            | RowKind::Thread(w, p, e, a, _) => self.agent_at(w, p, e, a),
             _ => None,
         }
     }
@@ -4951,13 +6516,33 @@ impl App {
             return None;
         };
         let name = self.console_session(w, p, e, a, i)?.name.clone();
+        let harness = self
+            .console_session(w, p, e, a, i)?
+            .harness_slug()
+            .map(str::to_string);
         let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
         self.target = self.target_at((w, p, e));
+        let title = self
+            .rows()
+            .into_iter()
+            .find(|row| row.kind == kind)
+            .map_or_else(|| name.clone(), |row| row.label);
+        self.opening = Some(Opening {
+            agent_id: agent_id.clone(),
+            agent_name: agent_name.clone(),
+            title,
+            session_name: Some(name.clone()),
+            harness,
+            wake: false,
+            find: false,
+            since: std::time::Instant::now(),
+        });
 
         // An attach already in flight — usually the startup auto-connect —
         // would race a second ssh onto the same session.
         if self.connecting.contains(&name) {
             self.status = format!("Connecting to {name}…");
+            self.focus_on_attach = Some(name);
             return None;
         }
 
@@ -4972,6 +6557,7 @@ impl App {
             } else {
                 self.active = Some(index);
                 self.focus = ManageFocus::Session;
+                self.opening = None;
                 return None;
             }
         }
@@ -4983,9 +6569,10 @@ impl App {
             .agent_status(w, p, e, a)
             .unwrap_or_else(|| "unknown".into());
         if status != "running" {
-            self.status = format!("{agent_name} is {status} — press w to wake it first");
-            return None;
+            let key = ThreadKey::of_session(self.console_session(w, p, e, a, i)?);
+            return self.wake_and_connect(w, p, e, a, Some(key));
         }
+        self.connect_on_wake = None;
         Some(Effect::Reattach {
             agent_id,
             agent_name,
@@ -4999,7 +6586,9 @@ impl App {
     pub fn selected_agent_status(&self) -> Option<String> {
         let row = self.selected_row()?;
         let (w, p, e, a) = match row.kind {
-            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+            RowKind::Agent(w, p, e, a)
+            | RowKind::Session(w, p, e, a, _)
+            | RowKind::Thread(w, p, e, a, _) => (w, p, e, a),
             _ => return None,
         };
         self.agent_status(w, p, e, a)
@@ -5671,6 +7260,9 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.ops
                         .insert(pending.agent_id.clone(), pending.op.pending_label());
+                    if matches!(pending.op, AgentOp::Sleep | AgentOp::Delete) {
+                        self.close_agent_panes(&pending.agent_id);
+                    }
                     if pending.resume.is_some()
                         && let Some(entry) = self.slept_resume.get_mut(&pending.agent_id)
                     {
@@ -5703,6 +7295,10 @@ impl App {
             return None;
         }
 
+        if self.hold_typed_key(key) {
+            return None;
+        }
+
         // On the New Session row the keyboard writes the prompt; only what
         // the prompt doesn't take (↑ ↓, tab, mouse chords) falls through to
         // the tree below.
@@ -5728,10 +7324,46 @@ impl App {
                 self.full_screen_current()
             }
             KeyCode::Char('f') => self.full_screen_current(),
+            // Archive the agent under the cursor, or bring it back. Archiving
+            // only changes which lists show it: the machine is untouched.
+            KeyCode::Char('a') => {
+                let (w, p, e, a) = match row?.kind {
+                    RowKind::Agent(w, p, e, a)
+                    | RowKind::Session(w, p, e, a, _)
+                    | RowKind::Thread(w, p, e, a, _) => (w, p, e, a),
+                    _ => {
+                        self.status = "Select an agent or thread to archive".into();
+                        return None;
+                    }
+                };
+                let agent = self.tree[w].projects[p].envs[e].agents_vec().get(a)?;
+                let archived = !agent.archived;
+                self.status = format!(
+                    "{} {}…",
+                    if archived { "Archiving" } else { "Unarchiving" },
+                    agent.name
+                );
+                Some(Effect::Archive {
+                    agent_id: agent.id.clone(),
+                    archived,
+                })
+            }
+            KeyCode::Char('A') => {
+                self.show_archived = !self.show_archived;
+                self.status = if self.show_archived {
+                    "Showing archived agents".into()
+                } else {
+                    "Hiding archived agents".into()
+                };
+                self.restore_cursor(row.map(|row| row.kind));
+                None
+            }
             // A separate shell on this exact VM, even from a session row.
             KeyCode::Char('c') => {
                 let (w, p, e, a) = match row?.kind {
-                    RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+                    RowKind::Agent(w, p, e, a)
+                    | RowKind::Session(w, p, e, a, _)
+                    | RowKind::Thread(w, p, e, a, _) => (w, p, e, a),
                     _ => {
                         self.status = "Select a VM or session to copy its SSH shell command".into();
                         return None;
@@ -5754,7 +7386,32 @@ impl App {
                         None
                     }
                     RowKind::Agent(w, p, e, a) => self.connect_agent_row(w, p, e, a),
-                    RowKind::Session(..) => self.reattach_row(kind),
+                    // Opening a thread is looking at it: its unseen outcome
+                    // stops being news, here and on every other surface.
+                    RowKind::Session(..) => {
+                        self.mark_row_seen(kind);
+                        let effect = self.reattach_row(kind);
+                        self.restore_cursor(Some(kind));
+                        effect
+                    }
+                    RowKind::Thread(..) => {
+                        self.mark_row_seen(kind);
+                        let effect = self.open_thread_row(kind);
+                        self.restore_cursor(Some(kind));
+                        effect
+                    }
+                    RowKind::Threads
+                    | RowKind::Automations
+                    | RowKind::Machines
+                    | RowKind::Automation(_) => {
+                        let open = self
+                            .rows()
+                            .iter()
+                            .find(|row| row.kind == kind)
+                            .and_then(|row| row.expanded)
+                            .unwrap_or(false);
+                        self.set_expanded(kind, !open)
+                    }
                     // A toggle: open drills straight through to the first
                     // environment's agents — what someone opening a project is
                     // looking for — and a second enter folds the whole thing
@@ -5906,7 +7563,9 @@ impl App {
     fn new_here_prompted(&mut self, prompt: Option<String>) -> Option<Effect> {
         let kind = self.selected_row().map(|row| row.kind);
         match kind {
-            Some(RowKind::Agent(w, p, e, a)) | Some(RowKind::Session(w, p, e, a, _)) => {
+            Some(RowKind::Agent(w, p, e, a))
+            | Some(RowKind::Session(w, p, e, a, _))
+            | Some(RowKind::Thread(w, p, e, a, _)) => {
                 let (agent_id, agent_name) = self.agent_at(w, p, e, a)?;
                 self.target = self.target_at((w, p, e));
                 let target = self.target.clone()?;
@@ -5974,9 +7633,11 @@ impl App {
             self.active_session().and_then(|s| s.environment_id())
         } else {
             match self.selected_row().map(|r| r.kind) {
-                Some(RowKind::Agent(w, p, e, _) | RowKind::Session(w, p, e, _, _)) => {
-                    Some(self.tree[w].projects[p].envs[e].id.clone())
-                }
+                Some(
+                    RowKind::Agent(w, p, e, _)
+                    | RowKind::Session(w, p, e, _, _)
+                    | RowKind::Thread(w, p, e, _, _),
+                ) => Some(self.tree[w].projects[p].envs[e].id.clone()),
                 _ => None,
             }
         };
@@ -6221,7 +7882,9 @@ impl App {
         // A session belongs to an agent, so acting on it from a session row is
         // unambiguous — and it is where the cursor usually is.
         let (w, p, e, a) = match row.kind {
-            RowKind::Agent(w, p, e, a) | RowKind::Session(w, p, e, a, _) => (w, p, e, a),
+            RowKind::Agent(w, p, e, a)
+            | RowKind::Session(w, p, e, a, _)
+            | RowKind::Thread(w, p, e, a, _) => (w, p, e, a),
             _ => {
                 self.status = "Select an agent first".into();
                 return None;
@@ -6245,6 +7908,14 @@ impl App {
         }
         self.ops
             .insert(pending.agent_id.clone(), op.pending_label());
+        // Sleeping freezes the VM under any pane onto it; close them now
+        // rather than leave a screen that takes keys and answers nothing.
+        if op == AgentOp::Sleep && self.close_agent_panes(&pending.agent_id) > 0 {
+            self.status = format!(
+                "Sleeping {} — enter on a thread wakes it and reopens it",
+                pending.agent_name
+            );
+        }
         Some(Effect::Agent {
             op,
             agent_id: pending.agent_id,
@@ -6604,6 +8275,24 @@ impl App {
             RowKind::OtherProjects => {
                 self.others_expanded = Some(open);
             }
+            RowKind::Automations => {
+                self.automations_expanded = open;
+                return Some(Effect::SaveAutomationsCollapsed(!open));
+            }
+            RowKind::Machines => {
+                self.machines_expanded = Some(open);
+            }
+            RowKind::Threads => {
+                self.threads_expanded = open;
+            }
+            RowKind::Automation(index) => {
+                let key = self.automation_groups().get(index)?.key.clone();
+                if open {
+                    self.automations_open.insert(key);
+                } else {
+                    self.automations_open.remove(&key);
+                }
+            }
             RowKind::Workspace(w) => {
                 self.tree.get_mut(w)?.expanded = open;
             }
@@ -6679,6 +8368,14 @@ fn separator_row() -> Row {
         status: None,
         expanded: None,
         dimmed: true,
+    }
+}
+
+/// A blank, unselectable line.
+fn spacer_row() -> Row {
+    Row {
+        kind: RowKind::Spacer,
+        ..separator_row()
     }
 }
 
@@ -6875,6 +8572,172 @@ fn alt_chord(key: &KeyEvent) -> Option<char> {
 ///
 /// Matched by id, so a rename or a status change lands and an agent that has
 /// gone from the fresh list is gone from the tree.
+impl Agent {
+    /// Handed-off work, done: asleep, every thread run by a task, and none of
+    /// them blocked, failing unseen, working or finished unseen.
+    pub fn finished_task(&self) -> bool {
+        self.task_agent()
+            && self.status != "running"
+            && self
+                .threads
+                .iter()
+                .all(|t| matches!(Section::of(t.work_status.as_ref()), Section::Threads))
+    }
+
+    /// Every thread on it was run by a task: an agent made for handed-off
+    /// work, not one someone works in.
+    pub fn task_agent(&self) -> bool {
+        !self.threads.is_empty() && self.threads.iter().all(|t| t.task_id.is_some())
+    }
+
+    /// The platform's latest report for one of this agent's listed sessions.
+    /// The agents fetch's copy wins: it is polled, while the copy the session
+    /// fetch joined is only as fresh as the last time the VM was asked.
+    pub fn report_for<'a>(&'a self, session: &'a ConsoleSession) -> Option<&'a ThreadSnapshot> {
+        let joined = session.snapshot.as_ref();
+        self.threads
+            .iter()
+            .find(|thread| {
+                joined.is_some_and(|j| j.session_id == thread.session_id)
+                    || thread.session_name.as_deref() == Some(session.name.as_str())
+            })
+            .or(joined)
+    }
+}
+
+/// A harness as a person would name it: `railway-agent` is Railway.
+pub fn harness_name(slug: &str) -> &str {
+    match slug {
+        "railway" | "railway-agent" => "Railway",
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "grok" => "Grok",
+        other => harness_label(other),
+    }
+}
+
+/// A thread's label when nothing names it: its own label, unless that is the
+/// placeholder, in which case which harness it is and how old.
+fn untitled_label(session: &ConsoleSession) -> String {
+    let label = session.thread_label();
+    if label != super::super::client_sessions::NEW_THREAD {
+        return label;
+    }
+    let harness = session
+        .snapshot
+        .as_ref()
+        .map(|s| s.harness.as_str())
+        .or(session.harness_slug())
+        .map(harness_name)
+        .unwrap_or("Agent");
+    match session.created_at {
+        Some(at) => match crate::controllers::cloud_agent::humanize_age(at) {
+            age if age == "just now" => format!("{harness} thread · just now"),
+            age => format!("{harness} thread · {age} ago"),
+        },
+        None => format!("{harness} thread"),
+    }
+}
+
+/// The glyph key a thread's work status draws as (see `ui::tree_line`):
+/// only what asks for attention or is in motion gets one. `legacy` is the
+/// harness's raw state, for a report from before work status.
+fn work_glyph(work: Option<&WorkStatus>, legacy: Option<&str>) -> Option<&'static str> {
+    use super::work_status::WorkState;
+    match work {
+        Some(work) => match work.state {
+            WorkState::Blocked => Some("blocked"),
+            WorkState::Error if work.unseen => Some("error"),
+            WorkState::Working => Some("working"),
+            WorkState::Done if work.unseen => Some("done"),
+            _ => None,
+        },
+        None => match legacy {
+            Some("working") => Some("working"),
+            Some("waiting") => Some("waiting"),
+            _ => None,
+        },
+    }
+}
+
+/// One frame of the TUI's animations.
+pub const ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_millis(110);
+
+/// How long a thread reads as working on the strength of an Enter alone. The
+/// platform's report lands within one work poll; past this, it is trusted
+/// again even if it never moved.
+const SUBMIT_GRACE: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The platform reported on this thread at or after `sent`.
+fn reported_since(work: Option<&WorkStatus>, sent: chrono::DateTime<chrono::Utc>) -> bool {
+    work.and_then(|w| w.at.as_deref())
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| at >= sent)
+}
+
+/// A thread's marker when its work has nothing to say: where its machine
+/// stands. `awake` and `sleeping` are the steady states; on the way between
+/// them it is `waking` (starting, too) or `dozing`; `deleting` on the way
+/// out; a machine that died is `down`.
+fn presence(state: &str) -> &'static str {
+    match state {
+        "running" => "awake",
+        "sleeping" | "stopped" => "sleeping",
+        "crashed" | "failed" | "missing" | "error" => "down",
+        "sleeping…" => "dozing",
+        "deleting" | "deleting…" => "deleting",
+        _ => "waking",
+    }
+}
+
+/// What a thread just started here reads while its harness comes up.
+const LOADING: &str = "Loading…";
+
+/// The dim word beside a thread that wants attention; nothing beside one
+/// that doesn't, whose glyph already says where its machine stands.
+fn attention_note(section: Section, glyph: Option<&str>) -> String {
+    match (section, glyph) {
+        (Section::NeedsYou, Some("error")) => "failed".into(),
+        (Section::Threads, _) => String::new(),
+        (section, _) => section.label().into(),
+    }
+}
+
+/// The threads heading's note: how many, and what wants attention among
+/// them, so a folded list still says whether anything is waiting.
+fn threads_summary(sections: impl Iterator<Item = Section>) -> String {
+    let mut total = 0;
+    let mut counts = [0usize; 3];
+    for section in sections {
+        total += 1;
+        match section {
+            Section::NeedsYou => counts[0] += 1,
+            Section::Working => counts[1] += 1,
+            Section::Done => counts[2] += 1,
+            Section::Threads => {}
+        }
+    }
+    let attention: Vec<String> = [Section::NeedsYou, Section::Working, Section::Done]
+        .into_iter()
+        .zip(counts)
+        .filter(|(_, n)| *n > 0)
+        .map(|(section, n)| format!("{n} {}", section.label()))
+        .collect();
+    if attention.is_empty() {
+        format!("({total})")
+    } else {
+        format!("({total}) · {}", attention.join(" · "))
+    }
+}
+
+fn thread_section(work: Option<&WorkStatus>, legacy: Option<&str>) -> Section {
+    match (work, legacy) {
+        (None, Some("working")) => Section::Working,
+        (None, Some("waiting")) => Section::NeedsYou,
+        _ => Section::of(work),
+    }
+}
+
 fn merge_agents(previous: Vec<Agent>, fresh: Vec<Agent>) -> Vec<Agent> {
     let mut kept: HashMap<String, (bool, LoadSessions)> = previous
         .into_iter()
@@ -6914,10 +8777,10 @@ impl EnvNode {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn key(code: KeyCode) -> KeyEvent {
+    pub(crate) fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
     fn ctrl(c: char) -> KeyEvent {
@@ -6952,7 +8815,15 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(tree(), None, Some("claude"), None, None, true)
+        lists_open(App::new(tree(), None, Some("claude"), None, None, true))
+    }
+
+    /// The machines and projects lists open, as if someone had unfolded them:
+    /// they start folded, and most tests are about what is inside them.
+    pub(crate) fn lists_open(mut a: App) -> App {
+        a.machines_expanded = Some(true);
+        a.others_expanded = Some(true);
+        a
     }
 
     #[test]
@@ -7055,7 +8926,7 @@ mod tests {
                 project("p4", "beta"),
             ],
         }];
-        App::new(tree, None, Some("claude"), None, None, true)
+        lists_open(App::new(tree, None, Some("claude"), None, None, true))
     }
 
     fn project_order(a: &App) -> Vec<String> {
@@ -7067,20 +8938,23 @@ mod tests {
     }
 
     /// A target-less app with nothing loaded yet: the pinned launcher first,
-    /// ruled off from the rest, then — with no agents to lead with — the
-    /// projects tail as the whole tree, open, behind the search hint.
+    /// a blank line and a rule under it, then — with no agents to lead with —
+    /// the projects tail behind the search hint, folded until someone opens
+    /// it.
     #[test]
-    fn opens_with_the_projects_tail_open() {
-        let a = app();
+    fn opens_with_the_projects_tail_folded() {
+        let a = App::new(tree(), None, Some("claude"), None, None, true);
         let rows = a.rows();
         assert_eq!(rows.len(), 5, "{rows:#?}");
         assert_eq!(rows[0].label, "New Agent");
         assert!(rows[0].selectable());
-        assert!(matches!(rows[1].kind, RowKind::Separator));
-        assert_eq!(rows[2].label, "looking for cloud agents…");
-        assert!(!rows[2].selectable());
-        assert_eq!(rows[3].label, "projects");
-        assert_eq!(rows[4].label, "devtools");
+        assert!(matches!(rows[1].kind, RowKind::Spacer));
+        assert!(!rows[1].selectable());
+        assert!(matches!(rows[2].kind, RowKind::Separator));
+        assert_eq!(rows[3].label, "looking for cloud agents…");
+        assert!(!rows[3].selectable());
+        assert_eq!(rows[4].label, "projects");
+        assert_eq!(rows[4].expanded, Some(false));
         // The cursor starts on the launcher: the prompt is the first thing.
         assert_eq!(a.cursor, 0);
     }
@@ -7089,9 +8963,9 @@ mod tests {
     fn expanding_an_environment_requests_its_agents_once() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 4; // devtools
+        a.cursor = 5; // devtools
         assert_eq!(a.on_key(key(KeyCode::Right)), None);
-        a.cursor = 5; // production
+        a.cursor = 6; // production
         let effect = a.on_key(key(KeyCode::Right)).unwrap();
         assert_eq!(
             effect,
@@ -7109,9 +8983,9 @@ mod tests {
     fn a_loading_environment_shows_a_note_that_cannot_be_selected() {
         let mut a = app();
         a.screen = Screen::Manage;
-        a.cursor = 4; // devtools
+        a.cursor = 5; // devtools
         a.on_key(key(KeyCode::Right));
-        a.cursor = 5; // production
+        a.cursor = 6; // production
         a.on_key(key(KeyCode::Right));
         let rows = a.rows();
         let note = rows.iter().find(|r| r.label == "loading…").unwrap();
@@ -7122,7 +8996,7 @@ mod tests {
         assert_eq!(a.selected_row().unwrap().label, "staging");
     }
 
-    fn loaded_app() -> App {
+    pub(crate) fn loaded_app() -> App {
         let mut a = app();
         a.screen = Screen::Manage;
         a.tree[0].projects[0].expanded = true;
@@ -7132,6 +9006,688 @@ mod tests {
             Ok(vec![agent("ca_1", "nimble-otter", "running")]),
         );
         a
+    }
+
+    pub(crate) fn reported(
+        session_id: &str,
+        state: super::super::work_status::WorkState,
+        unseen: bool,
+        at: &str,
+    ) -> ThreadSnapshot {
+        ThreadSnapshot {
+            harness: "railway-agent".into(),
+            session_id: session_id.into(),
+            state: "idle".into(),
+            prompt: Some(format!("{session_id} prompt")),
+            latest_prompt: None,
+            last_reply: None,
+            updated_at: at.into(),
+            session_name: None,
+            title: Some(format!("{session_id} title")),
+            work_status: Some(WorkStatus {
+                state,
+                kind: None,
+                message: Some(format!("{session_id} message")),
+                unseen,
+                at: Some(at.into()),
+            }),
+            empty: false,
+            task_id: None,
+        }
+    }
+
+    /// A sleeping agent's reported threads list from the platform's copy under
+    /// one heading, ordered by work status, the ones that want attention
+    /// saying why.
+    #[test]
+    fn reported_threads_list_by_where_their_work_stands() {
+        use super::super::work_status::WorkState;
+        let mut a = app();
+        a.screen = Screen::Manage;
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![
+            reported("asked", WorkState::Blocked, false, "2026-10-17T10:00:00Z"),
+            reported("failed", WorkState::Error, true, "2026-10-17T09:00:00Z"),
+            reported("finished", WorkState::Done, true, "2026-10-17T08:00:00Z"),
+            reported("old", WorkState::Done, false, "2026-10-16T08:00:00Z"),
+            reported("older", WorkState::Done, false, "2026-10-15T08:00:00Z"),
+        ];
+        a.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        let rows = a.rows();
+        let labels: Vec<(&str, Option<&str>, &str)> = rows
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Thread(..) | RowKind::Threads))
+            .map(|r| (r.label.as_str(), r.status.as_deref(), r.note.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("threads", None, "(3) · 2 needs you · 1 done"),
+                ("asked title", Some("blocked"), "needs you"),
+                ("failed title", Some("error"), "failed"),
+                ("finished title", Some("done"), "done"),
+            ],
+            "{rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.label.starts_with("old")),
+            "history the agent row keeps: an agent with outcomes to show needs no filler"
+        );
+        assert!(rows.iter().all(|r| r.note != "nimble-otter" || r.dimmed));
+    }
+
+    /// A thread with nothing to report shows where its machine stands.
+    #[test]
+    fn idle_threads_carry_their_machines_presence() {
+        assert_eq!(presence("running"), "awake");
+        assert_eq!(presence("sleeping"), "sleeping");
+        assert_eq!(presence("stopped"), "sleeping");
+        assert_eq!(presence("starting"), "waking");
+        assert_eq!(presence(AgentOp::Wake.pending_label()), "waking");
+        assert_eq!(presence(AgentOp::Sleep.pending_label()), "dozing");
+        assert_eq!(presence(AgentOp::Delete.pending_label()), "deleting");
+        assert_eq!(presence("crashed"), "down");
+        assert_eq!(presence("failed"), "down");
+    }
+
+    /// The threads heading folds like the lists below it: open to start, shut
+    /// with enter, open again with →, and still saying what waits while folded.
+    #[test]
+    fn the_threads_heading_folds_and_unfolds() {
+        use super::super::work_status::WorkState;
+        let mut a = app();
+        a.screen = Screen::Manage;
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![
+            reported("asked", WorkState::Blocked, false, "2026-10-17T10:00:00Z"),
+            reported("finished", WorkState::Done, true, "2026-10-17T08:00:00Z"),
+        ];
+        a.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        let heading = |a: &App| {
+            a.rows()
+                .into_iter()
+                .position(|r| r.kind == RowKind::Threads)
+                .unwrap()
+        };
+        let shows = |a: &App, label: &str| a.rows().iter().any(|r| r.label == label);
+        assert_eq!(
+            a.rows()
+                .iter()
+                .filter(|r| r.kind == RowKind::Threads)
+                .count(),
+            1,
+            "one heading over every thread"
+        );
+        assert_eq!(a.rows()[heading(&a)].expanded, Some(true));
+        assert!(shows(&a, "asked title"));
+
+        a.cursor = heading(&a);
+        assert!(a.selected_row().unwrap().selectable());
+        a.on_key(key(KeyCode::Enter));
+        let row = &a.rows()[heading(&a)];
+        assert_eq!(row.expanded, Some(false));
+        assert_eq!(
+            row.note, "(2) · 1 needs you · 1 done",
+            "what waits stays in sight while folded"
+        );
+        assert!(!shows(&a, "asked title"));
+        assert!(!shows(&a, "finished title"));
+
+        a.on_key(key(KeyCode::Right));
+        assert!(shows(&a, "asked title"));
+    }
+
+    /// A thread just started here heads the list, above even what needs you,
+    /// and reads as loading until its harness draws.
+    #[test]
+    fn a_new_thread_starts_at_the_top_loading() {
+        use super::super::super::client_sessions;
+        use super::super::work_status::WorkState;
+        let mut a = loaded_app();
+        let mut running = agent("ca_1", "nimble-otter", "running");
+        running.threads = vec![
+            reported("asked", WorkState::Blocked, false, "2026-10-17T10:00:00Z"),
+            reported("finished", WorkState::Done, true, "2026-10-17T08:00:00Z"),
+        ];
+        a.agents_loaded((0, 0, 0), Ok(vec![running]));
+        let mut pane = session("ca_1", "box");
+        pane.harness = "claude".into();
+        pane.durable_name = client_sessions::draft_name("claude", "ca_1", "our-pane");
+        pane.client_id = Some("our-pane".into());
+        a.attach_session(pane, "ca_1".into());
+        let rows = a.rows();
+        let heading = rows
+            .iter()
+            .position(|r| r.kind == RowKind::Threads)
+            .unwrap();
+        assert_eq!(rows[heading + 1].label, LOADING, "{rows:#?}");
+        assert_eq!(rows[heading + 1].status.as_deref(), Some("connecting"));
+        assert_eq!(rows[heading + 2].label, "asked title");
+
+        a.sessions[0].draw_for_test("> ");
+        let rows = a.rows();
+        assert_eq!(rows[heading + 1].label, "New Thread", "up, and still first");
+    }
+
+    /// Sleeping a machine from here closes every pane onto it, at once: a
+    /// frozen VM under a live-looking screen takes keys that go nowhere.
+    /// Other machines' panes stay.
+    #[test]
+    fn sleeping_a_machine_closes_its_panes() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        a.attach_session(session("ca_2", "quiet-harbor"), "ca_2".into());
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert!(matches!(
+            a.on_key(key(KeyCode::Char('s'))),
+            Some(Effect::Agent {
+                op: AgentOp::Sleep,
+                ..
+            })
+        ));
+        let left: Vec<_> = a.sessions.iter().map(|s| s.agent_id.as_str()).collect();
+        assert_eq!(left, ["ca_2"]);
+        assert!(a.status.contains("wakes it and reopens it"), "{}", a.status);
+    }
+
+    /// Slept by something else — an idle timer, another terminal — the same:
+    /// its panes close and the status line says how to get back. A local
+    /// Codex client rides it out, and is offered the wake instead.
+    #[test]
+    fn a_machine_slept_elsewhere_closes_its_panes() {
+        let mut a = loaded_app();
+        a.attach_session(session("ca_1", "nimble-otter"), "ca_1".into());
+        let mut client = session("ca_1", "nimble-otter");
+        client.harness = "codex".into();
+        client.client_id = Some("pane-1".into());
+        a.attach_session(client, "ca_1".into());
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "sleeping")]),
+        );
+        let left: Vec<_> = a.sessions.iter().map(|s| s.harness.as_str()).collect();
+        assert_eq!(left, ["codex"], "only the client that reconnects stays");
+        assert!(a.confirm.is_some(), "and it is offered the wake, as before");
+    }
+
+    /// Enter on a sleeping machine's session: the canvas walks every step —
+    /// waking, finding the thread, connecting, the harness starting — and
+    /// lets go once the pane has something on it.
+    #[test]
+    fn opening_a_sleeping_thread_reports_each_step() {
+        let listed = || ConsoleSession {
+            name: "claude-one".into(),
+            kind: "SHELL".into(),
+            command: None,
+            running: true,
+            attached: false,
+            created_at: None,
+            snapshot: None,
+        };
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].status = "sleeping".into();
+            agents[0].sessions = LoadSessions::Loaded(vec![listed()]);
+        }
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "[S] claude-one")
+            .unwrap();
+        a.on_key(key(KeyCode::Enter));
+        let stage = |a: &App| a.opening_for_selection().map(|(_, stage)| stage);
+        assert_eq!(stage(&a), Some(OpenStage::Waking));
+        let opening = a.opening.as_ref().unwrap();
+        assert!(opening.wake && opening.find);
+        assert_eq!(opening.title, "[S] claude-one");
+
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
+        assert_eq!(stage(&a), Some(OpenStage::Finding));
+        a.take_wake_connect();
+        assert_eq!(stage(&a), Some(OpenStage::Finding), "while it fetches");
+        a.sessions_loaded((0, 0, 0, 0), "ca_1", Ok(vec![listed()]));
+        assert!(matches!(
+            a.take_wake_connect(),
+            Some(Effect::Reattach { .. })
+        ));
+        // The event loop puts the attach in flight.
+        a.connecting.insert("claude-one".into());
+        assert_eq!(stage(&a), Some(OpenStage::Connecting));
+        assert_eq!(
+            a.opening.as_ref().unwrap().title,
+            "[S] claude-one",
+            "the same open throughout"
+        );
+
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "claude-one".into();
+        a.attach_session(pane, "ca_1".into());
+        assert_eq!(stage(&a), Some(OpenStage::Starting), "up, nothing drawn");
+        a.sessions[0].draw_for_test("ready");
+        assert_eq!(stage(&a), None);
+        a.tick();
+        assert!(a.opening.is_none(), "done with once the pane speaks");
+    }
+
+    /// An open that stops — the wake failed — stops showing as one.
+    #[test]
+    fn a_failed_open_lets_the_canvas_go() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].status = "sleeping".into();
+        }
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        a.on_key(key(KeyCode::Enter));
+        assert!(a.opening_for_selection().is_some());
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, Some("nope".into()));
+        a.take_wake_connect();
+        a.tick();
+        assert!(a.opening_for_selection().is_none());
+    }
+
+    #[test]
+    fn the_heading_counts_only_what_wants_attention() {
+        use super::super::work_status::Section::*;
+        assert_eq!(threads_summary([Threads, Threads].into_iter()), "(2)");
+        assert_eq!(
+            threads_summary([Working, Threads, NeedsYou, Working].into_iter()),
+            "(4) · 1 needs you · 2 working"
+        );
+    }
+
+    /// Opening a thread is looking at it: the outcome stops being unseen here
+    /// at once, and the platform is told on the next loop pass.
+    #[test]
+    fn opening_an_unseen_thread_marks_it_seen() {
+        use super::super::work_status::WorkState;
+        let mut a = app();
+        a.screen = Screen::Manage;
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![reported(
+            "finished",
+            WorkState::Done,
+            true,
+            "2026-10-17T08:00:00Z",
+        )];
+        a.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "finished title")
+            .unwrap();
+        a.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            a.take_mark_seen(),
+            vec![MarkSeen {
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
+                session_id: "finished".into(),
+            }]
+        );
+        let row = a.selected_row().unwrap();
+        assert_eq!(row.label, "finished title", "the cursor follows the thread");
+        assert_eq!(
+            row.status.as_deref(),
+            Some("waking"),
+            "no longer news: back to its machine's marker, which enter woke"
+        );
+        assert!(a.status.contains("Waking nimble-otter"), "{}", a.status);
+        // Looking again asks nothing more of the platform.
+        a.on_key(key(KeyCode::Enter));
+        assert!(a.take_mark_seen().is_empty());
+    }
+
+    /// A conversation nothing was said in stays out of the list unless it is
+    /// open here; one nothing names says which harness it is and how old.
+    #[test]
+    fn empty_threads_hide_and_untitled_ones_say_what_they_are() {
+        let mut a = loaded_app();
+        let row = |id: &str, prompt: Option<&str>, empty: bool| ConsoleSession {
+            name: format!("client-thread:railway:ca_1:{id}"),
+            kind: "THREAD".into(),
+            command: Some("railway".into()),
+            running: true,
+            attached: false,
+            created_at: Some(chrono::Utc::now() - chrono::Duration::hours(3)),
+            snapshot: Some(ThreadSnapshot {
+                harness: "railway".into(),
+                session_id: id.into(),
+                state: "idle".into(),
+                prompt: prompt.map(str::to_string),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: "2026-10-17T08:00:00Z".into(),
+                session_name: None,
+                title: None,
+                work_status: None,
+                empty,
+                task_id: None,
+            }),
+        };
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![
+                row("asked", Some("Fix the flaky deploy test"), false),
+                row("nothing", Some("New Thread"), true),
+                row("unread", Some("New Thread"), false),
+            ]),
+        );
+        let labels: Vec<String> = a
+            .rows()
+            .into_iter()
+            .filter(|r| matches!(r.kind, RowKind::Session(..)))
+            .map(|r| r.label)
+            .collect();
+        assert!(
+            labels.contains(&"Fix the flaky deploy test".to_string()),
+            "{labels:?}"
+        );
+        assert!(
+            labels.contains(&"Railway thread · 3h ago".to_string()),
+            "{labels:?}"
+        );
+        assert_eq!(labels.len(), 2, "the empty one is left out: {labels:?}");
+    }
+
+    #[test]
+    fn titles_wrap_by_word_and_end_in_an_ellipsis_when_cut() {
+        assert_eq!(
+            wrap_words("Fix the flaky deploy test", 12, 3),
+            vec!["Fix the", "flaky deploy", "test"]
+        );
+        assert_eq!(
+            wrap_words("one two three four five six", 8, 2),
+            vec!["one two", "three…"]
+        );
+        assert_eq!(wrap_words("abcdefghij", 4, 3), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(wrap_words("", 10, 3), vec![""]);
+    }
+
+    /// Task-run agents group by the automation that ran them, named from its
+    /// runs' prompt until the platform names it; a failed run also asks for
+    /// attention, and none of them crowd the machines.
+    #[test]
+    fn task_runs_group_by_automation() {
+        use super::super::work_status::WorkState;
+        let mut a = app();
+        a.screen = Screen::Manage;
+        let task = |name: &str, state, unseen, at: &str| {
+            let mut agent = agent(name, name, "sleeping");
+            let mut thread = reported(name, state, unseen, at);
+            thread.task_id = Some(format!("task-{name}"));
+            agent.threads = vec![thread];
+            agent
+        };
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![
+                task("report-1", WorkState::Done, false, "2026-10-16T15:00:00Z"),
+                task("report-2", WorkState::Done, false, "2026-10-17T15:00:00Z"),
+                task("broke", WorkState::Error, true, "2026-10-17T16:00:00Z"),
+                task("adhoc", WorkState::Done, false, "2026-10-10T10:00:00Z"),
+            ]),
+        );
+        let run = |task: &str, automation: Option<&str>, preview: &str| TaskRun {
+            task_id: format!("task-{task}"),
+            agent_id: Some(task.into()),
+            automation_id: automation.map(str::to_string),
+            prompt_preview: Some(preview.into()),
+        };
+        assert_eq!(a.task_runs_to_fetch(), vec!["env_prod".to_string()]);
+        assert!(a.task_runs_to_fetch().is_empty(), "asked once a minute");
+        a.task_runs_loaded(vec![
+            run(
+                "report-1",
+                Some("daily"),
+                "Produce a daily report. Be brief.",
+            ),
+            run(
+                "report-2",
+                Some("daily"),
+                "Produce a daily report. Be brief.",
+            ),
+            run(
+                "broke",
+                Some("hourly"),
+                "Check the logs for errors. Then email.",
+            ),
+            run("adhoc", None, "Do a thing"),
+        ]);
+        let rows = a.rows();
+        let groups: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .filter(|r| matches!(r.kind, RowKind::Automation(_)))
+            .map(|r| (r.label.as_str(), r.note.as_str(), r.status.as_deref()))
+            .collect();
+        assert_eq!(groups.len(), 3, "{rows:#?}");
+        assert_eq!(groups[0].0, "Check the logs for errors");
+        assert_eq!(groups[0].2, Some("error"));
+        assert_eq!(groups[1].0, "Produce a daily report");
+        assert!(
+            groups[1].1.ends_with(" ago"),
+            "how long ago, no run count: {}",
+            groups[1].1
+        );
+        assert_eq!(groups[1].2, Some("ok"), "a seen success is still a success");
+        assert_eq!(groups[2].0, "other tasks");
+        assert!(
+            rows.iter()
+                .any(|r| r.label == "broke title" && matches!(r.kind, RowKind::Thread(..))),
+            "the failure also asks for attention: {rows:#?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Agent(..)) && r.depth == 1),
+            "task agents are not machines someone works on: {rows:#?}"
+        );
+        // The list folds, and the fold is remembered.
+        a.focus = ManageFocus::Tree;
+        a.cursor = rows
+            .iter()
+            .position(|r| r.kind == RowKind::Automations)
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::SaveAutomationsCollapsed(true))
+        );
+        assert!(
+            !a.rows()
+                .iter()
+                .any(|r| matches!(r.kind, RowKind::Automation(_)))
+        );
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::SaveAutomationsCollapsed(false))
+        );
+        // Unfolding an automation lists its runs, newest first.
+        a.cursor = rows
+            .iter()
+            .position(|r| r.label == "Produce a daily report")
+            .unwrap();
+        a.on_key(key(KeyCode::Enter));
+        let rows = a.rows();
+        let runs: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.depth == 2)
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(runs, vec!["report-2 title", "report-1 title"]);
+    }
+
+    #[test]
+    fn schedules_read_plainly() {
+        assert_eq!(describe_schedule("0 15 * * *"), "daily at 15:00 UTC");
+        assert_eq!(describe_schedule("20 * * * *"), "hourly at :20");
+        assert_eq!(describe_schedule("*/15 * * * *"), "every 15 minutes");
+        assert_eq!(describe_schedule("30 9 * * 1"), "Mondays at 09:30 UTC");
+        assert_eq!(describe_schedule("0 9 1 * *"), "0 9 1 * *");
+    }
+
+    #[test]
+    fn an_automation_is_named_by_the_first_sentence_it_is_given() {
+        assert_eq!(
+            automation_name_from(Some("Check the yba-sports project for errors. Then email.")),
+            "Check the yba-sports project for errors"
+        );
+        assert_eq!(automation_name_from(Some("Do a thing.")), "Do a thing");
+        assert_eq!(automation_name_from(None), "automation");
+    }
+
+    /// Sending a prompt moves a thread into `working`, above where it was;
+    /// the cursor goes with it rather than staying on the index and landing
+    /// on another thread.
+    #[test]
+    fn the_cursor_follows_its_thread_when_work_re_sorts_the_list() {
+        let mut a = loaded_app();
+        let thread = |id: &str, state: &str| ConsoleSession {
+            name: format!("client-thread:railway:ca_1:{id}"),
+            kind: "THREAD".into(),
+            command: Some("railway".into()),
+            running: true,
+            attached: false,
+            created_at: None,
+            snapshot: Some(ThreadSnapshot {
+                harness: "railway".into(),
+                session_id: id.into(),
+                state: state.into(),
+                prompt: Some(format!("{id} prompt")),
+                latest_prompt: None,
+                last_reply: None,
+                updated_at: "2026-10-17T08:00:00Z".into(),
+                session_name: None,
+                title: None,
+                work_status: None,
+                empty: false,
+                task_id: None,
+            }),
+        };
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![thread("first", "idle"), thread("second", "idle")]),
+        );
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "second prompt")
+            .unwrap();
+        a.hold_selection();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents
+            && let LoadSessions::Loaded(sessions) = &mut agents[0].sessions
+        {
+            sessions[1].snapshot.as_mut().unwrap().state = "working".into();
+        }
+        let moved = a.rows();
+        assert_ne!(
+            moved[a.cursor].label, "second prompt",
+            "the list re-sorted: {moved:#?}"
+        );
+        a.hold_selection();
+        assert_eq!(a.selected_row().unwrap().label, "second prompt");
+        // A cursor someone moves is theirs.
+        a.on_key(key(KeyCode::Down));
+        let mine = a.cursor;
+        a.hold_selection();
+        assert_eq!(a.cursor, mine);
+    }
+
+    /// Typing at a thread that is still connecting goes to that thread once
+    /// it opens — not to the sidebar, where `n` then Enter starts an agent.
+    #[test]
+    fn typing_while_a_thread_connects_waits_for_its_pane() {
+        let mut a = loaded_app();
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: None,
+                snapshot: None,
+            }]),
+        );
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "[S] claude-one")
+            .unwrap();
+        a.connecting.insert("claude-one".into());
+        for c in "hey now".chars() {
+            assert_eq!(
+                a.on_key(key(KeyCode::Char(c))),
+                None,
+                "{c} is typing, not a command"
+            );
+        }
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
+        assert_eq!(a.type_ahead.as_ref().map(|(_, keys)| keys.len()), Some(8));
+        assert_ne!(a.screen, Screen::HarnessPick, "n did not start a new agent");
+        // A connect that fails drops what was held, and says so.
+        a.connecting.clear();
+        a.on_key(key(KeyCode::Char('x')));
+        assert!(a.type_ahead.is_none());
+        assert!(a.status.contains("wasn't sent"), "{}", a.status);
+    }
+
+    /// Archiving asks the platform; an archived agent and its threads drop
+    /// out of the lists until `A` shows them.
+    #[test]
+    fn archived_agents_hide_until_asked_for() {
+        use super::super::work_status::WorkState;
+        let mut a = app();
+        a.screen = Screen::Manage;
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![reported(
+            "finished",
+            WorkState::Done,
+            true,
+            "2026-10-17T08:00:00Z",
+        )];
+        a.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        a.focus = ManageFocus::Tree;
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "finished title")
+            .unwrap();
+        assert_eq!(
+            a.on_key(key(KeyCode::Char('a'))),
+            Some(Effect::Archive {
+                agent_id: "ca_1".into(),
+                archived: true,
+            })
+        );
+        a.archive_set("ca_1", true);
+        assert!(!a.rows().iter().any(|r| r.note.contains("nimble-otter")));
+        a.on_key(key(KeyCode::Char('A')));
+        let rows = a.rows();
+        assert!(rows.iter().any(|r| r.label == "finished title"));
+        assert!(
+            rows.iter()
+                .any(|r| r.label == "nimble-otter" && r.note == "devtools · archived")
+        );
     }
 
     #[test]
@@ -7740,6 +10296,12 @@ mod tests {
             pane.client_id = Some("our-pane".into());
             app.attach_session(pane, "ca_1".into());
             let draft_index = app.cursor;
+            assert_eq!(
+                app.selected_row().unwrap().label,
+                LOADING,
+                "{harness}: nothing drawn yet"
+            );
+            app.sessions[0].draw_for_test("> ");
             assert_eq!(app.selected_row().unwrap().label, "New Thread");
             let mut saved = thread(harness, "real-id").thread;
             saved.title = "New Thread".into();
@@ -8018,7 +10580,10 @@ mod tests {
             threads[0].label, "[S] merry-daisy-ld9",
             "the shell name leads"
         );
-        assert!(threads[0].note.is_empty(), "the orb and name are the row");
+        assert!(
+            threads[0].note.is_empty(),
+            "the thread is the row; its machine is in the card"
+        );
         assert_eq!(
             threads[0].status.as_deref(),
             Some("connected"),
@@ -8119,7 +10684,11 @@ mod tests {
             .iter()
             .find(|r| matches!(r.kind, RowKind::Session(..)))
             .unwrap();
-        assert_eq!(row.status, None, "not green while the agent sleeps");
+        assert_eq!(
+            row.status.as_deref(),
+            Some("sleeping"),
+            "not green while the agent sleeps"
+        );
 
         // A pending op holds auto-connect off too, even while the platform
         // still says running.
@@ -10544,13 +13113,14 @@ mod tests {
         assert!(a.status.contains("Couldn't wake"));
     }
 
-    fn agent(id: &str, name: &str, status: &str) -> Agent {
+    pub(crate) fn agent(id: &str, name: &str, status: &str) -> Agent {
         Agent {
             id: id.into(),
             name: name.into(),
             status: status.into(),
             sessions: LoadSessions::NotLoaded,
             expanded: false,
+            ..Default::default()
         }
     }
 
@@ -11448,8 +14018,12 @@ mod tests {
                 .find(|r| r.label == "[S] claude-one")
                 .unwrap()
         };
-        assert_eq!(row(&a).status, None, "not open here, so no marker");
-        assert!(row(&a).note.is_empty(), "the project lives in the card");
+        assert_eq!(
+            row(&a).status.as_deref(),
+            Some("awake"),
+            "not open here: its machine's marker, not connected's"
+        );
+        assert!(row(&a).note.is_empty(), "its machine is in the card");
 
         let mut pane = session("ca_1", "nimble-otter");
         pane.durable_name = "claude-one".into();
@@ -11656,6 +14230,7 @@ mod tests {
             status: "running".into(),
             sessions: LoadSessions::Loaded(vec![session]),
             expanded: true,
+            ..Default::default()
         }];
         let mut asleep = previous.clone();
         asleep[0].status = "sleeping".into();
@@ -12136,10 +14711,11 @@ mod tests {
         );
     }
 
-    /// A sleeping agent cannot be reattached to; say so instead of failing in
-    /// ssh a second later.
+    /// Enter on a sleeping agent's session wakes it — once — and reopens that
+    /// same session when it comes up, rather than failing in ssh a second
+    /// later or connecting to the machine's default agent instead.
     #[test]
-    fn reattaching_to_a_sleeping_agent_asks_for_a_wake() {
+    fn reattaching_to_a_sleeping_agent_wakes_it_and_connects() {
         let mut a = loaded_app();
         if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
             agents[0].status = "sleeping".into();
@@ -12159,14 +14735,174 @@ mod tests {
             .iter()
             .position(|r| r.label == "[S] claude-one")
             .unwrap();
-        assert_eq!(a.on_key(key(KeyCode::Enter)), None);
-        assert!(a.status.contains("press w to wake"), "{}", a.status);
+        assert_eq!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::Agent {
+                op: AgentOp::Wake,
+                agent_id: "ca_1".into(),
+                environment_id: "env_prod".into(),
+            })
+        );
+        assert!(a.status.contains("connecting when it's up"), "{}", a.status);
+        assert_eq!(a.on_key(key(KeyCode::Enter)), None, "one wake, not two");
+        assert_eq!(a.take_wake_connect(), None, "still waking");
+
+        // It comes up: the wait turns into a connect, exactly once.
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
+        assert!(!a.ops.contains_key("ca_1"));
+        // Up: what it can reopen is asked again, not read off a list from
+        // before it slept.
+        assert!(matches!(
+            a.take_wake_connect(),
+            Some(Effect::LoadSessions { ref agent_id, .. }) if agent_id == "ca_1"
+        ));
+        assert_eq!(a.take_wake_connect(), None, "one fetch, not two");
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![ConsoleSession {
+                name: "claude-one".into(),
+                kind: "SHELL".into(),
+                command: None,
+                running: true,
+                attached: false,
+                created_at: None,
+                snapshot: None,
+            }]),
+        );
+        assert!(matches!(
+            a.take_wake_connect(),
+            Some(Effect::Reattach { ref session_name, .. }) if session_name == "claude-one"
+        ));
+        assert_eq!(a.screen, Screen::Manage, "the thread, not a harness pick");
+        assert_eq!(a.take_wake_connect(), None, "only once");
+    }
+
+    /// Enter on a thread the platform reported for a sleeping machine wakes
+    /// it and reopens that conversation — found by its id among the sessions
+    /// the woken machine lists.
+    #[test]
+    fn enter_on_a_sleeping_machines_thread_reopens_that_thread() {
+        use super::super::super::client_sessions;
+        use super::super::work_status::WorkState;
+        let mut a = loaded_app();
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![reported(
+            "conv-7",
+            WorkState::Done,
+            true,
+            "2026-10-17T08:00:00Z",
+        )];
+        a.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "conv-7 title")
+            .unwrap();
+        assert!(matches!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::Agent {
+                op: AgentOp::Wake,
+                ..
+            })
+        ));
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
+        assert!(matches!(
+            a.take_wake_connect(),
+            Some(Effect::LoadSessions { .. })
+        ));
+        let name = client_sessions::name("railway", "ca_1", Some("conv-7"));
+        a.sessions_loaded(
+            (0, 0, 0, 0),
+            "ca_1",
+            Ok(vec![
+                ConsoleSession::client_thread("ca_1", "codex", None),
+                ConsoleSession {
+                    name: name.clone(),
+                    kind: "SHELL".into(),
+                    command: None,
+                    running: false,
+                    attached: false,
+                    created_at: None,
+                    snapshot: None,
+                },
+            ]),
+        );
+        assert!(matches!(
+            a.take_wake_connect(),
+            Some(Effect::Reattach { ref session_name, .. }) if *session_name == name
+        ));
+    }
+
+    /// A wake that fails takes the wait to connect with it: nothing connects
+    /// later, out of the blue, when someone else wakes the agent.
+    #[test]
+    fn a_failed_wake_drops_the_connect() {
+        let mut a = loaded_app();
+        if let Load::Loaded(agents) = &mut a.tree[0].projects[0].envs[0].agents {
+            agents[0].status = "sleeping".into();
+        }
+        a.cursor = a
+            .rows()
+            .iter()
+            .position(|r| r.label == "nimble-otter")
+            .unwrap();
+        assert!(matches!(
+            a.on_key(key(KeyCode::Enter)),
+            Some(Effect::Agent {
+                op: AgentOp::Wake,
+                ..
+            })
+        ));
+        a.agent_op_finished("ca_1", "env_prod", AgentOp::Wake, Some("nope".into()));
+        assert_eq!(a.take_wake_connect(), None);
+        a.agents_loaded(
+            (0, 0, 0),
+            Ok(vec![agent("ca_1", "nimble-otter", "running")]),
+        );
+        assert_eq!(a.take_wake_connect(), None, "the wait went with the wake");
+    }
+
+    /// Enter in a thread's pane reads as working at once, ahead of the
+    /// platform's report; a report from after the Enter takes over again.
+    #[test]
+    fn enter_in_a_pane_shows_the_thread_working() {
+        let mut a = app_with_listed_session();
+        let mut pane = session("ca_1", "nimble-otter");
+        pane.durable_name = "merry-daisy-ld9".into();
+        a.sessions = vec![pane];
+        let status = |a: &App| {
+            a.rows()
+                .into_iter()
+                .find(|r| matches!(r.kind, RowKind::Session(..)))
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(&a).as_deref(), Some("connected"));
+
+        a.sessions[0].submit_for_test(std::time::Duration::from_secs(1));
+        assert_eq!(status(&a).as_deref(), Some("working"));
+
+        a.sessions[0].submit_for_test(SUBMIT_GRACE + std::time::Duration::from_secs(1));
+        assert_eq!(
+            status(&a).as_deref(),
+            Some("connected"),
+            "the grace ran out"
+        );
     }
 
     /// The count of sessions rides beside the agent's status, like a project's
     /// agent count.
     #[test]
-    fn sessions_nest_under_their_agent() {
+    fn threads_list_above_their_machines() {
         let mut a = loaded_app();
         let rows = a.rows();
         let agent = rows.iter().find(|r| r.label == "nimble-otter").unwrap();
@@ -12203,13 +14939,23 @@ mod tests {
         let agent = rows
             .iter()
             .position(|r| r.label == "nimble-otter")
-            .expect("the agent heads its threads");
+            .expect("the machine still lists");
         let thread = rows
             .iter()
             .position(|r| r.label == "[S] claude-one")
-            .expect("the running session is a child thread");
-        assert_eq!(thread, agent + 1, "nested right under it: {rows:#?}");
-        assert_eq!(rows[thread].depth, 1);
+            .expect("the running session is a thread");
+        assert!(thread < agent, "threads come first: {rows:#?}");
+        assert_eq!(rows[thread].depth, 1, "indented under its section");
+        assert!(rows[thread].note.is_empty(), "its machine is in the card");
+        assert_eq!(
+            rows[thread - 1].kind,
+            RowKind::Threads,
+            "under the one threads heading"
+        );
+        assert!(
+            rows[..agent].iter().any(|r| r.kind == RowKind::Machines),
+            "the machines list heads its agents"
+        );
         assert!(
             !rows.iter().any(|r| r.label.contains("setup")),
             "a finished provisioning exec is not a thread"
@@ -12217,9 +14963,9 @@ mod tests {
         assert_eq!(
             rows[agent].status.as_deref(),
             Some("running"),
-            "the orb carries the status; no tag rides beside it"
+            "the orb carries the status"
         );
-        assert!(rows[agent].note.is_empty());
+        assert_eq!(rows[agent].note, "devtools", "a machine names its project");
     }
 
     /// Loading, failure, and an empty result all keep a single agent row.
@@ -12360,7 +15106,7 @@ mod tests {
             .filter(|(_, r)| matches!(r.kind, RowKind::Separator))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(seps, vec![1], "only the launcher's rule");
+        assert_eq!(seps, vec![2], "only the launcher's rule");
     }
 
     /// Alphabetical, case-insensitively — a capitalised project should not
@@ -12488,7 +15234,7 @@ mod tests {
         let rows = a.rows();
         let session_row = rows.iter().find(|r| r.label == "[S] sess-7").unwrap();
         assert!(matches!(session_row.kind, RowKind::Session(0, 0, 0, 0, 0)));
-        assert_eq!(session_row.depth, 1, "a child of its agent");
+        assert!(session_row.note.is_empty(), "its machine is in the card");
         assert!(
             rows.iter().any(|r| r.label == "nimble-otter"),
             "the agent still heads its threads"
@@ -13131,11 +15877,11 @@ mod tests {
         let mut a = loaded_app();
         a.focus = ManageFocus::Session;
         a.panes = panes_fixture();
-        // Row 1 is the launcher's rule, so the first row a click can land on
-        // below the launcher is the group at 2.
-        a.on_mouse(MouseAction::Down, 5, 5);
+        // Rows 1 and 2 are the launcher's blank line and rule, so the first
+        // row a click can land on below the launcher is the group at 3.
+        a.on_mouse(MouseAction::Down, 5, 6);
         assert_eq!(a.focus, ManageFocus::Tree);
-        assert_eq!(a.cursor, 2, "third visible row");
+        assert_eq!(a.cursor, 3, "fourth visible row");
 
         // A click that lands on nothing changes neither.
         a.on_mouse(MouseAction::Down, 200, 200);
@@ -13352,6 +16098,7 @@ mod tests {
                 status: "running".into(),
                 sessions: LoadSessions::NotLoaded,
                 expanded: false,
+                ..Default::default()
             }]),
         );
 
@@ -13640,7 +16387,7 @@ mod tests {
         second.projects[0].id = "proj_other".into();
         second.projects[0].envs[0].id = "env_other".into();
         workspaces.push(second);
-        let mut a = App::new(workspaces, None, Some("grok"), None, None, true);
+        let mut a = lists_open(App::new(workspaces, None, Some("grok"), None, None, true));
         a.screen = Screen::Manage;
         for w in 0..2 {
             for e in 0..2 {
@@ -13676,8 +16423,9 @@ mod tests {
     #[test]
     fn the_hint_waits_for_answers_before_claiming_empty() {
         let mut a = app();
-        // The hint sits under the pinned New Session row and its rule.
-        let hint = |a: &App| a.rows()[2].label.clone();
+        // The hint sits under the pinned New Session row, its blank line and
+        // its rule.
+        let hint = |a: &App| a.rows()[3].label.clone();
         assert_eq!(hint(&a), "looking for cloud agents…", "not loaded");
 
         a.tree[0].projects[0].envs[0].agents = Load::Loading;
