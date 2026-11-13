@@ -451,6 +451,10 @@ pub struct Session {
     /// ctrl-d, `/exit` — arrives as keystrokes moments before ssh ends, and
     /// this is what lets the reap tell "the user ended it" from "it died".
     last_input: Option<std::time::Instant>,
+    /// When Enter last went into the pane: a message sent, or an answer to
+    /// the harness. The sidebar shows the thread working from here until the
+    /// platform's own report catches up.
+    submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Last size pushed to the pty, so a redraw at the same size is free.
     size: (u16, u16),
     /// Rows scrolled back from the live view. Typing snaps back to 0 — nobody
@@ -767,6 +771,7 @@ impl Session {
             exit_status: None,
             reattach,
             spawned_at: std::time::Instant::now(),
+            submitted_at: None,
             got_output,
             kitty_keys,
             last_input: None,
@@ -1102,7 +1107,26 @@ impl Session {
         // Typing is a statement of intent to be at the bottom.
         self.scroll_to_live();
         self.last_input = Some(std::time::Instant::now());
+        if bytes.contains(&b'\r') {
+            self.submitted_at = Some(chrono::Utc::now());
+        }
         self.write_raw(bytes);
+    }
+
+    /// When Enter last went in, if within `window`.
+    pub fn submitted_within(
+        &self,
+        window: std::time::Duration,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        let at = self.submitted_at?;
+        let age = chrono::Utc::now().signed_duration_since(at).to_std().ok()?;
+        (age < window).then_some(at)
+    }
+
+    /// Pretend Enter went in `ago`.
+    #[cfg(test)]
+    pub fn submit_for_test(&mut self, ago: std::time::Duration) {
+        self.submitted_at = Some(chrono::Utc::now() - ago);
     }
 
     /// Local input reached the pane within `window`. Every deliberate way out
@@ -1204,6 +1228,13 @@ impl Session {
         self.ended.store(true, Ordering::Relaxed);
     }
 
+    /// Pretend the harness drew `text` into the pane.
+    pub fn draw_for_test(&self, text: &str) {
+        if let Ok(mut parser) = self.parser.lock() {
+            parser.process(text.as_bytes());
+        }
+    }
+
     /// Pretend the user just typed into the pane.
     pub fn touch_input_for_test(&mut self) {
         self.last_input = Some(std::time::Instant::now());
@@ -1270,6 +1301,7 @@ impl Session {
             exit_status: None,
             reattach: false,
             spawned_at: std::time::Instant::now(),
+            submitted_at: None,
             got_output: Arc::new(AtomicBool::new(true)),
             kitty_keys: Arc::new(AtomicBool::new(false)),
             last_input: None,

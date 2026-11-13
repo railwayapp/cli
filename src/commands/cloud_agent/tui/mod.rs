@@ -19,6 +19,7 @@ mod activity;
 pub mod app;
 pub(crate) mod bootstrap_setup;
 mod cache;
+pub mod picker;
 pub mod session;
 pub mod settings;
 mod terminal_palette;
@@ -28,6 +29,7 @@ mod terminal_palette;
 pub use crate::tui_theme as theme;
 mod ui;
 pub mod wizard;
+pub mod work_status;
 
 use std::io::{Write, stdout};
 use std::panic;
@@ -128,6 +130,7 @@ fn save_setup(
         theme: None,
         hide_tabs: outcome.hide_tabs,
         sidebar_width: app.sidebar_width,
+        automations_collapsed: !app.automations_expanded,
     };
     prefs.save_in(&home)?;
     Ok(prefs)
@@ -233,7 +236,13 @@ fn ssh_command_for(environment_id: &str, agent_id: &str) -> String {
 
 /// How often the loading spinner advances. Fast enough to read as motion,
 /// slow enough that a launch does not redraw the screen hundreds of times.
-const SPINNER_TICK: std::time::Duration = std::time::Duration::from_millis(110);
+const SPINNER_TICK: std::time::Duration = app::ANIMATION_FRAME;
+
+/// How often the sidebar asks the account's agents again while it is up, so a
+/// thread that becomes blocked, fails or finishes shows without a keypress.
+/// One request, answered from what the platform stores: no VM is woken or
+/// asked.
+const WORK_POLL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The frame budget while messages are still queued. Session output wakes the
 /// loop once per read — a reattach replaying a long session's recording is
@@ -295,11 +304,25 @@ enum Message {
     /// why that wasn't possible, in which case startup degrades to the
     /// per-environment path.
     MyAgentsLoaded {
+        /// From the background poll rather than a refresh someone asked for:
+        /// applied the same way, without the session refetches and the
+        /// "refreshed" notice a refresh brings.
+        poll: bool,
         result: Result<Vec<(String, Agent)>, String>,
         /// When the request went out, which decides what this snapshot is
         /// allowed to overwrite: anything the tree has heard since is fresher
         /// news. See [`App::my_agents_loaded`].
         asked_at: std::time::Instant,
+    },
+    /// An environment's task list: which automation ran each task.
+    TaskRunsLoaded(Vec<app::TaskRun>),
+    /// How automations are configured.
+    AutomationsLoaded(Vec<app::AutomationInfo>),
+    /// An archive or unarchive came back.
+    ArchiveSet {
+        agent_id: String,
+        archived: bool,
+        result: Result<(), String>,
     },
     /// A background fetch was refused for rate limiting. The rest of its batch
     /// is abandoned; see [`spawn_sweep`].
@@ -861,6 +884,30 @@ pub async fn load_tree(client: &reqwest::Client, configs: &Configs) -> Result<Ve
         .collect())
 }
 
+/// The platform's per-thread reports on an agent, from any agents query.
+macro_rules! agent_threads {
+    ($sessions:expr) => {
+        $sessions
+            .into_iter()
+            .map(|s| app::ThreadSnapshot {
+                harness: s.harness,
+                session_id: s.session_id,
+                state: s.state,
+                prompt: s.prompt,
+                latest_prompt: s.latest_prompt,
+                last_reply: None,
+                updated_at: s.updated_at,
+                session_name: s.session_name,
+                title: s.title,
+                work_status: Some(work_status::work_status_from!(s.work_status)),
+                empty: false,
+                task_id: s.task_id,
+            })
+            .collect::<Vec<_>>()
+    };
+}
+use agent_threads;
+
 /// The caller's own agents in one environment.
 ///
 /// `mine` matches what the launcher does: agents hold the credentials of the
@@ -871,12 +918,15 @@ async fn fetch_agents(
     backboard: &str,
     environment_id: &str,
 ) -> Result<Vec<Agent>> {
-    let res = post_graphql::<queries::CloudAgents, _>(
+    let res = post_graphql::<queries::CloudAgentThreadsInEnvironment, _>(
         client,
         backboard,
-        queries::cloud_agents::Variables {
+        queries::cloud_agent_threads_in_environment::Variables {
             environment_id: environment_id.to_owned(),
             mine: Some(true),
+            // Both: the sidebar hides archived agents itself, so showing
+            // them is a keypress rather than a refetch.
+            archived: None,
         },
     )
     .await?;
@@ -889,6 +939,9 @@ async fn fetch_agents(
             status: crate::controllers::cloud_agent::Status::from(a.status).label(),
             sessions: LoadSessions::NotLoaded,
             expanded: false,
+            work_status: Some(work_status::work_status_from!(a.work_status)),
+            threads: agent_threads!(a.sessions),
+            archived: a.archived_at.is_some(),
         })
         .collect())
 }
@@ -903,10 +956,10 @@ async fn fetch_my_agents(
     client: &reqwest::Client,
     backboard: &str,
 ) -> Result<Vec<(String, Agent)>> {
-    let res = post_graphql::<queries::MyCloudAgents, _>(
+    let res = post_graphql::<queries::MyCloudAgentThreads, _>(
         client,
         backboard,
-        queries::my_cloud_agents::Variables {},
+        queries::my_cloud_agent_threads::Variables { archived: None },
     )
     .await?;
     Ok(res
@@ -921,6 +974,9 @@ async fn fetch_my_agents(
                     status: crate::controllers::cloud_agent::Status::from(a.status).label(),
                     sessions: LoadSessions::NotLoaded,
                     expanded: false,
+                    work_status: Some(work_status::work_status_from!(a.work_status)),
+                    threads: agent_threads!(a.sessions),
+                    archived: a.archived_at.is_some(),
                 },
             )
         })
@@ -932,6 +988,7 @@ fn spawn_my_agents_fetch(
     tx: &mpsc::UnboundedSender<Message>,
     client: &reqwest::Client,
     backboard: &str,
+    poll: bool,
 ) {
     let tx = tx.clone();
     let client = client.clone();
@@ -944,6 +1001,7 @@ fn spawn_my_agents_fetch(
         match fetch_my_agents(&client, &backboard).await {
             Ok(agents) => {
                 let _ = tx.send(Message::MyAgentsLoaded {
+                    poll,
                     result: Ok(agents),
                     asked_at,
                 });
@@ -957,6 +1015,7 @@ fn spawn_my_agents_fetch(
                 }
                 None => {
                     let _ = tx.send(Message::MyAgentsLoaded {
+                        poll,
                         result: Err(err.to_string()),
                         asked_at,
                     });
@@ -1000,7 +1059,7 @@ fn start_refresh(
         }
         return;
     }
-    spawn_my_agents_fetch(tx, client, backboard);
+    spawn_my_agents_fetch(tx, client, backboard, false);
 }
 
 /// Real conversations on the VM, plus directly reattachable VM shells.
@@ -1073,6 +1132,11 @@ async fn fetch_sessions(
             latest_prompt: snapshot.latest_prompt,
             last_reply: None,
             updated_at: snapshot.updated_at,
+            session_name: Some(name.clone()),
+            title: snapshot.title,
+            work_status: Some(work_status::work_status_from!(snapshot.work_status)),
+            empty: false,
+            task_id: snapshot.task_id,
         };
         match snapshots.entry(name) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
@@ -1090,7 +1154,7 @@ async fn fetch_sessions(
         backboard,
         cloud_agent_id,
         environment_id,
-        ws_url,
+        ws_url.clone(),
         &mut snapshots,
     )
     .await;
@@ -1130,6 +1194,15 @@ async fn fetch_sessions(
             inventory.primary_harness = Some(harness.into());
         }
     }
+    fill_daemon_titles(
+        client,
+        backboard,
+        cloud_agent_id,
+        environment_id,
+        ws_url,
+        &mut inventory.rows,
+    )
+    .await;
     inventory.rows.sort_by(|a, b| {
         b.snapshot
             .as_ref()
@@ -1138,6 +1211,265 @@ async fn fetch_sessions(
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(inventory)
+}
+
+/// The tasks run in one environment, newest first, as far back as a few
+/// pages go: which agent each ran on and, from its metadata, which
+/// automation dispatched it.
+async fn fetch_task_runs(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+) -> Result<Vec<app::TaskRun>> {
+    const PAGES: usize = 3;
+    const QUERY: &str = "query CloudAgentTaskRuns($environmentId: String!, $cursor: String) { cloudAgentTasks(environmentId: $environmentId, cursor: $cursor, limit: 100) { nextCursor tasks { id cloudAgentId metadata promptPreview } } }";
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Task {
+        id: String,
+        cloud_agent_id: Option<String>,
+        metadata: Option<serde_json::Value>,
+        prompt_preview: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        next_cursor: Option<String>,
+        tasks: Vec<Task>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Response {
+        cloud_agent_tasks: Page,
+    }
+    let mut cursor: Option<String> = None;
+    let mut runs = Vec::new();
+    for _ in 0..PAGES {
+        let variables = serde_json::json!({ "environmentId": environment_id, "cursor": cursor });
+        let page: Response =
+            crate::client::post_graphql_raw(client, backboard, QUERY, variables).await?;
+        for task in page.cloud_agent_tasks.tasks {
+            let automation_id = task
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("automationId")?.as_str())
+                .map(str::to_string);
+            runs.push(app::TaskRun {
+                task_id: task.id,
+                agent_id: task.cloud_agent_id,
+                automation_id,
+                prompt_preview: task.prompt_preview,
+            });
+        }
+        cursor = page.cloud_agent_tasks.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(runs)
+}
+
+/// How automations are configured — name, instructions, schedules — read
+/// from Backboard's internal schema, where automations live. One request per
+/// automation, all at once. One the caller can't read (the Automations
+/// feature is off for them, or it was deleted) is left out.
+async fn fetch_automations(
+    client: &reqwest::Client,
+    backboard: &str,
+    ids: Vec<String>,
+) -> Vec<app::AutomationInfo> {
+    const QUERY: &str = "query CliAutomation($id: String!) { automation(id: $id) { id name instructions enabled updatedAt triggers(first: 20) { edges { node { type cronExpression } } } } }";
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Trigger {
+        r#type: String,
+        cron_expression: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Edge {
+        node: Trigger,
+    }
+    #[derive(serde::Deserialize)]
+    struct Triggers {
+        edges: Vec<Edge>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Automation {
+        id: String,
+        name: String,
+        instructions: String,
+        enabled: bool,
+        updated_at: String,
+        triggers: Triggers,
+    }
+    #[derive(serde::Deserialize)]
+    struct Response {
+        automation: Automation,
+    }
+    let internal = crate::controllers::agent_bootstrap::internal_url(backboard);
+    let reads = ids.into_iter().map(|id| {
+        let internal = internal.clone();
+        async move {
+            crate::client::post_graphql_raw::<Response, _>(
+                client,
+                internal,
+                QUERY,
+                serde_json::json!({ "id": id }),
+            )
+            .await
+            .ok()
+        }
+    });
+    futures_util::future::join_all(reads)
+        .await
+        .into_iter()
+        .flatten()
+        .map(|res| {
+            let a = res.automation;
+            app::AutomationInfo {
+                id: a.id,
+                name: a.name,
+                instructions: a.instructions,
+                enabled: a.enabled,
+                updated_at: a.updated_at,
+                schedules: a
+                    .triggers
+                    .edges
+                    .into_iter()
+                    .filter(|edge| edge.node.r#type == "SCHEDULE")
+                    .map(|edge| edge.node.cron_expression)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn spawn_automations(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    let ids = app.automations_to_fetch();
+    if ids.is_empty() {
+        return;
+    }
+    let tx = tx.clone();
+    let client = client.clone();
+    let backboard = backboard.to_string();
+    tokio::spawn(async move {
+        let found = fetch_automations(&client, &backboard, ids).await;
+        let _ = tx.send(Message::AutomationsLoaded(found));
+    });
+}
+
+fn spawn_task_runs(
+    app: &mut App,
+    tx: &mpsc::UnboundedSender<Message>,
+    client: &reqwest::Client,
+    backboard: &str,
+) {
+    for environment_id in app.task_runs_to_fetch() {
+        let tx = tx.clone();
+        let client = client.clone();
+        let backboard = backboard.to_string();
+        tokio::spawn(async move {
+            if let Ok(runs) = fetch_task_runs(&client, &backboard, &environment_id).await {
+                let _ = tx.send(Message::TaskRunsLoaded(runs));
+            }
+        });
+    }
+}
+
+/// Railway conversations the daemon lists without a title — ones nothing
+/// reported a prompt for — are named from their own transcript: the first
+/// thing asked in them. One with no messages at all is marked empty, which
+/// the sidebar leaves out unless it is open.
+async fn fill_daemon_titles(
+    client: &reqwest::Client,
+    backboard: &str,
+    cloud_agent_id: &str,
+    environment_id: &str,
+    ws_url: Option<String>,
+    rows: &mut [ConsoleSession],
+) {
+    /// Each is read once per change (see [`transcript_cache`]), so this only
+    /// bounds the first look at an agent with a long history.
+    const MAX_DIALS: usize = 12;
+    let Some(ws_url) = ws_url else { return };
+    let untitled = |row: &ConsoleSession| {
+        client_sessions::is_client(&row.name)
+            && row.snapshot.as_ref().is_some_and(|s| {
+                matches!(s.harness.as_str(), "railway" | "railway-agent")
+                    && !s.session_id.is_empty()
+                    && s.prompt
+                        .as_deref()
+                        .map(str::trim)
+                        .is_none_or(|p| p.is_empty() || p == client_sessions::NEW_THREAD)
+            })
+    };
+    let mut targets: Vec<(String, String)> = rows
+        .iter()
+        .filter(|row| untitled(row))
+        .filter_map(|row| row.snapshot.as_ref())
+        .map(|s| (s.updated_at.clone(), s.session_id.clone()))
+        .collect();
+    targets.sort_by(|a, b| b.0.cmp(&a.0));
+    targets.dedup_by(|a, b| a.1 == b.1);
+    targets.truncate(MAX_DIALS);
+    let mut read: std::collections::HashMap<String, Transcript> = Default::default();
+    let mut to_dial = Vec::new();
+    {
+        let cache = transcript_cache().lock().unwrap_or_else(|e| e.into_inner());
+        for (updated_at, session_id) in targets {
+            match cache.get(&session_id) {
+                Some((at, transcript)) if *at == updated_at => {
+                    read.insert(session_id, transcript.clone());
+                }
+                _ => to_dial.push((updated_at, session_id)),
+            }
+        }
+    }
+    if !to_dial.is_empty()
+        && let Ok(res) = post_graphql::<mutations::CloudAgentHarnessToken, _>(
+            client,
+            backboard,
+            mutations::cloud_agent_harness_token::Variables {
+                id: cloud_agent_id.to_owned(),
+                environment_id: environment_id.to_owned(),
+            },
+        )
+        .await
+    {
+        let token = res.cloud_agent_harness_token;
+        for (updated_at, session_id) in to_dial {
+            let Some(transcript) = gate_transcript(&ws_url, &token, &session_id).await else {
+                continue;
+            };
+            let mut cache = transcript_cache().lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() > 256 {
+                cache.clear();
+            }
+            cache.insert(session_id.clone(), (updated_at, transcript.clone()));
+            read.insert(session_id, transcript);
+        }
+    }
+    for row in rows.iter_mut().filter(|row| untitled(row)) {
+        let Some(snapshot) = row.snapshot.as_mut() else {
+            continue;
+        };
+        let Some(transcript) = read.get(&snapshot.session_id) else {
+            continue;
+        };
+        if let Some(prompt) = &transcript.first_prompt {
+            snapshot.prompt = Some(prompt.clone());
+        }
+        if snapshot.last_reply.is_none() {
+            snapshot.last_reply = transcript.last_reply.clone();
+        }
+        snapshot.empty = transcript.empty;
+    }
 }
 
 fn merge_native_threads(
@@ -1317,11 +1649,14 @@ pub async fn run(
 ) -> Result<Outcome> {
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        restore_terminal();
+        // No drain: the event stream may still hold the input reader here.
+        restore_terminal(false);
         original_hook(info);
     }));
     let mut terminal = setup_terminal()?;
-    let _cleanup = scopeguard::guard((), |_| restore_terminal());
+    // Runs after `events` below is dropped, so the input reader is free to
+    // drain.
+    let _cleanup = scopeguard::guard((), |_| restore_terminal(true));
 
     let mut events = EventStream::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
@@ -1358,9 +1693,19 @@ pub async fn run(
 
     // When the previous frame was painted, for the flood cap below.
     let mut last_frame = std::time::Instant::now() - FLOOD_FRAME;
+    // A deadline, not a fresh sleep per pass: a pane streaming output wins
+    // the select every few milliseconds, and a sleep restarted each time
+    // would never get to fire — the spinners froze exactly while work ran.
+    let mut next_tick = tokio::time::Instant::now() + SPINNER_TICK;
+
+    // The first tick is now, and the refresh above already covers it.
+    let mut work_poll = tokio::time::interval(WORK_POLL);
+    work_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    work_poll.tick().await;
 
     loop {
         load_bootstrap_default(app, &tx, &client, &backboard);
+        app.hold_selection();
         // Coalesce frames under load: with more messages already waiting,
         // painting now just repeats a screen that is about to change again.
         // See [`FLOOD_FRAME`]. Everything the skipped frame would have shown
@@ -1453,16 +1798,30 @@ pub async fn run(
             // Background work first: draining it keeps the tree and the session
             // honest even while keys arrive faster than frames.
             Some(message) = rx.recv() => handle_message(app, message, &tx, &client, &backboard, &stop_fetching),
+            // Work status moves on its own — a thread blocks, fails, finishes
+            // — so the sidebar asks again rather than waiting for a keypress.
+            // Skipped while a refresh is already out, which answers the same
+            // question.
+            _ = work_poll.tick(), if app.screen == Screen::Manage && !app.account_query_unavailable => {
+                if !app.refreshing {
+                    spawn_my_agents_fetch(&tx, &client, &backboard, true);
+                }
+                None
+            }
             // Animate the loading screen. Only armed while it is showing, so an
             // idle TUI still blocks rather than spinning on a timer.
             // The wizard and settings borrow the same tick for their
-            // "creating…" spinners, and the tree's connecting rows too.
-            _ = tokio::time::sleep(SPINNER_TICK), if app.loading.active
+            // "creating…" spinners, and the tree's connecting rows too — and
+            // whatever else the sidebar last drew moving: a working spinner,
+            // a waking machine's pulse.
+            _ = tokio::time::sleep_until(next_tick), if app.loading.active
                 || !app.connecting.is_empty()
+                || app.sidebar_animated.get()
                 || app.bootstrap_form.as_ref().is_some_and(|f| f.running)
                 || app.bootstrap_picker.as_ref().is_some_and(|p| p.loading || p.saving)
                 || app.wizard.as_ref().is_some_and(|w| w.busy.is_some())
                 || app.settings.as_ref().is_some_and(|s| s.busy.is_some()) => {
+                next_tick = tokio::time::Instant::now() + SPINNER_TICK;
                 app.tick();
                 None
             }
@@ -1525,9 +1884,59 @@ pub async fn run(
         for connect in app.take_auto_connects() {
             spawn_auto_connect(connect, &tx);
         }
+        // Best effort: a mark that doesn't land leaves the thread unseen on
+        // other surfaces, which the next look fixes.
+        for seen in app.take_mark_seen() {
+            let client = client.clone();
+            let backboard = backboard.clone();
+            tokio::spawn(async move {
+                let _ = post_graphql::<mutations::CloudAgentMarkSeen, _>(
+                    &client,
+                    &backboard,
+                    mutations::cloud_agent_mark_seen::Variables {
+                        cloud_agent_id: seen.agent_id,
+                        session_id: Some(seen.session_id),
+                    },
+                )
+                .await;
+            });
+        }
 
         match effect {
             None => {}
+            Some(Effect::Archive { agent_id, archived }) => {
+                let tx = tx.clone();
+                let client = client.clone();
+                let backboard = backboard.clone();
+                tokio::spawn(async move {
+                    let result = if archived {
+                        post_graphql::<mutations::CloudAgentArchive, _>(
+                            &client,
+                            &backboard,
+                            mutations::cloud_agent_archive::Variables {
+                                id: agent_id.clone(),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                    } else {
+                        post_graphql::<mutations::CloudAgentUnarchive, _>(
+                            &client,
+                            &backboard,
+                            mutations::cloud_agent_unarchive::Variables {
+                                id: agent_id.clone(),
+                            },
+                        )
+                        .await
+                        .map(|_| ())
+                    };
+                    let _ = tx.send(Message::ArchiveSet {
+                        agent_id,
+                        archived,
+                        result: result.map_err(|err| err.to_string()),
+                    });
+                });
+            }
             Some(Effect::Quit) => {
                 // Panes detach; agents stay running. Sleeping is a deliberate
                 // act (`s` on the tree, `railway ca sleep`) — an automatic
@@ -1762,6 +2171,13 @@ pub async fn run(
                     });
                 }
             }
+            Some(Effect::SaveAutomationsCollapsed(collapsed)) => {
+                let _ = dirs::home_dir()
+                    .context("No home directory")
+                    .and_then(|home| {
+                        super::prefs::AgentPrefs::save_automations_collapsed_in(&home, collapsed)
+                    });
+            }
             Some(Effect::SaveSidebarWidth(width)) => {
                 let result = dirs::home_dir()
                     .context("No home directory")
@@ -1911,12 +2327,10 @@ pub async fn run(
                 agent_id,
                 environment_id,
             }) => {
-                // Deleting the agent a session is attached to leaves the pane
-                // pointing at something that no longer exists.
-                if op == AgentOp::Delete
-                    && let Some(index) = app.sessions.iter().position(|s| s.agent_id == agent_id)
-                {
-                    close_session(app, index, &client, &backboard).await;
+                // Deleting or sleeping the agent a pane is attached to leaves
+                // it pointing at something that no longer answers.
+                if matches!(op, AgentOp::Delete | AgentOp::Sleep) {
+                    app.close_agent_panes(&agent_id);
                 }
                 let tx = tx.clone();
                 let client = client.clone();
@@ -2135,6 +2549,95 @@ fn apply_reply(
             snapshot.last_reply = Some(reply.clone());
         }
     }
+}
+
+/// What one daemon conversation holds, from the gate's `catchup` frame.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Transcript {
+    /// The first thing asked in it, one line.
+    first_prompt: Option<String>,
+    last_reply: Option<String>,
+    /// Nothing was ever said in it.
+    empty: bool,
+}
+
+/// Transcript cache across fetches: session id → (updated_at it was read
+/// at, what it held). Process-wide for the same reason as [`reply_cache`].
+fn transcript_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, (String, Transcript)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, Transcript)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// One daemon conversation's transcript, from the `catchup` frame the gate
+/// pushes first on attach. `None` when the gate won't dial or doesn't answer.
+async fn gate_transcript(ws_url: &str, token: &str, session_id: &str) -> Option<Transcript> {
+    use futures_util::StreamExt;
+    use reqwest_websocket::{Message as WsMessage, RequestBuilderExt};
+    let url = format!("{ws_url}?session_id={session_id}&token={token}");
+    let response = reqwest::Client::default()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(8))
+        .upgrade()
+        .send()
+        .await
+        .ok()?;
+    let mut ws = response.into_websocket().await.ok()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let frame = tokio::time::timeout_at(deadline, ws.next()).await.ok()??;
+        let Ok(WsMessage::Text(text)) = frame else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("catchup") => {
+                let first_prompt = first_user_text(&value);
+                let last_reply = last_assistant_text(&value);
+                let empty = first_prompt.is_none() && last_reply.is_none();
+                return Some(Transcript {
+                    first_prompt,
+                    last_reply,
+                    empty,
+                });
+            }
+            // Catchup is the FIRST frame when there is history; the session
+            // lifecycle starting without one means an empty session.
+            Some("ready" | "session_start") => {
+                return Some(Transcript {
+                    empty: true,
+                    ..Default::default()
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The first user message's text blocks from a catchup payload, one line.
+fn first_user_text(catchup: &serde_json::Value) -> Option<String> {
+    let messages = catchup.get("data")?.get("messages")?.as_array()?;
+    messages
+        .iter()
+        .filter(|message| message.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .find_map(|message| {
+            let text = match message.get("content")? {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(blocks) => blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => return None,
+            };
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!text.is_empty()).then(|| text.chars().take(200).collect())
+        })
 }
 
 /// The newest assistant text of one daemon conversation, from the `catchup`
@@ -2388,14 +2891,63 @@ fn handle_message(
                 spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
             }
             // A launch that just created an agent asked for it to be opened;
-            // its row only exists now.
-            app.expand_pending()
+            // its row only exists now. Otherwise, a woken agent someone asked
+            // to connect to may just have come up.
+            app.expand_pending().or_else(|| app.take_wake_connect())
         }
-        Message::MyAgentsLoaded { result, asked_at } => match result {
+        Message::MyAgentsLoaded {
+            poll: true,
+            result,
+            asked_at,
+        } => {
+            // A poll that failed says nothing worth a toast: the next one is
+            // twenty seconds away, and an explicit refresh reports its own.
+            if let Ok(agents) = result {
+                app.my_agents_loaded(agents, asked_at);
+                spawn_task_runs(app, tx, client, backboard);
+                spawn_server_respawns(app.take_pending_respawns(), tx);
+                app.restore_cached_threads();
+                // Only agents that came up since: a poll never re-asks a VM
+                // it has already listed.
+                let prefetch = app.sessions_to_prefetch();
+                if !prefetch.is_empty() {
+                    spawn_session_prefetch(prefetch, tx, client, backboard, stop_fetching.clone());
+                }
+                return app.take_wake_connect();
+            }
+            None
+        }
+        Message::TaskRunsLoaded(runs) => {
+            app.task_runs_loaded(runs);
+            spawn_automations(app, tx, client, backboard);
+            None
+        }
+        Message::AutomationsLoaded(found) => {
+            app.automations_loaded(found);
+            None
+        }
+        Message::ArchiveSet {
+            agent_id,
+            archived,
+            result,
+        } => {
+            match result {
+                Ok(()) => app.archive_set(&agent_id, archived),
+                Err(err) => app.toast_error(format!(
+                    "Couldn't {} it: {err}",
+                    if archived { "archive" } else { "unarchive" }
+                )),
+            }
+            None
+        }
+        Message::MyAgentsLoaded {
+            result, asked_at, ..
+        } => match result {
             Ok(agents) => {
                 let count = agents.len();
                 app.refresh_finished();
                 app.my_agents_loaded(agents, asked_at);
+                spawn_task_runs(app, tx, client, backboard);
                 spawn_server_respawns(app.take_pending_respawns(), tx);
                 app.restore_cached_threads();
                 let prefetch = app.sessions_to_prefetch();
@@ -2413,7 +2965,7 @@ fn handle_message(
                 // Normally redundant — a launch's own refetch answers this —
                 // but it is the safety net when that refetch failed before
                 // this settle arrived.
-                app.expand_pending()
+                app.expand_pending().or_else(|| app.take_wake_connect())
             }
             // Whether the field doesn't exist yet or the request died, the
             // per-environment path still works, so startup degrades to what
@@ -2481,6 +3033,7 @@ fn handle_message(
                 Err(error) => app.sessions_loaded(path, &agent_id, Err(error)),
             }
             app.finish_agent_connect(&agent_id)
+                .or_else(|| app.take_wake_connect())
         }
         Message::BootstrapDefaultLoaded(env, state) => {
             app.bootstrap_defaults.insert(env, state);
@@ -2781,6 +3334,11 @@ fn handle_message(
             app.activity.finished(&agent_id);
             if let Ok(reports) = result {
                 activity::apply(app, &agent_id, &reports);
+            }
+            // Something happened in an open thread nothing names yet: read its
+            // transcript again for the question that was just asked.
+            if let Some(effect) = app.retitle(&agent_id) {
+                spawn_session_prefetch(vec![effect], tx, client, backboard, stop_fetching.clone());
             }
             None
         }
@@ -3351,7 +3909,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     Ok(terminal)
 }
 
-fn restore_terminal() {
+fn restore_terminal(drain: bool) {
     // Popping a protocol that was never pushed is harmless; leaving one pushed
     // would follow the user out of the TUI and into their shell.
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
@@ -3368,9 +3926,32 @@ fn restore_terminal() {
     // whether the modes belong to the screen buffer that set them, so turn
     // them off on both.
     let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = stdout().flush();
+    if drain {
+        drain_input();
+    }
     let _ = disable_raw_mode();
     crate::util::prompt::set_terminal_owned(false);
     let _ = stdout().flush();
+}
+
+/// Swallow input that was already on its way when the TUI let go: mouse
+/// reports the terminal sent before it read the request to stop, and any the
+/// loop never got to. Left in the queue they are the shell's, and moving the
+/// pointer on the way out prints `51;22;37M` at the prompt. Once tracking is
+/// off nothing new arrives, so a short quiet spell ends it; the cap keeps a
+/// terminal that ignored the request from holding the exit hostage.
+fn drain_input() {
+    let quiet = std::time::Duration::from_millis(30);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    while std::time::Instant::now() < deadline {
+        match crossterm::event::poll(quiet) {
+            Ok(true) => {
+                let _ = crossterm::event::read();
+            }
+            _ => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3558,6 +4139,24 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_is_named_by_its_first_question() {
+        let catchup = serde_json::json!({
+            "type": "catchup",
+            "data": {"messages": [
+                {"role": "user", "content": [{"type": "text", "text": "  Why is the\n deploy failing? "}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "It isn't."}]},
+                {"role": "user", "content": "Check again"},
+            ]},
+        });
+        assert_eq!(
+            first_user_text(&catchup).as_deref(),
+            Some("Why is the deploy failing?")
+        );
+        let empty = serde_json::json!({"type": "catchup", "data": {"messages": []}});
+        assert_eq!(first_user_text(&empty), None);
+    }
+
+    #[test]
     fn history_survives_console_exit_and_native_switches_replace_the_console_row() {
         let old = remote_threads::tests::thread("claude", "old");
         let mut current = remote_threads::tests::thread("claude", "current");
@@ -3578,6 +4177,11 @@ mod tests {
                 latest_prompt: None,
                 last_reply: None,
                 updated_at: "2026-09-10T09:00:00Z".into(),
+                session_name: None,
+                title: None,
+                work_status: None,
+                empty: false,
+                task_id: None,
             }),
         };
         let stale = merge_remote_threads(

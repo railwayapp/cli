@@ -1,0 +1,3 @@
+mutation CloudAgentMarkSeen($cloudAgentId: ID!, $sessionId: String) {
+  cloudAgentMarkSeen(cloudAgentId: $cloudAgentId, sessionId: $sessionId)
+}

@@ -478,6 +478,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     app.skills_enabled = saved.skills.enabled;
     app.hide_tabs = saved.hide_tabs;
     app.sidebar_width = saved.sidebar_width;
+    app.automations_expanded = !saved.automations_collapsed;
     // What the key check learned. Connects gate on this in-frame: an
     // unregistered key raises a register question instead of a hung prompt.
     app.ssh_key = ssh_key;

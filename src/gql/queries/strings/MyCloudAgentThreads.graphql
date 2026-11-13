@@ -1,0 +1,36 @@
+query MyCloudAgentThreads($archived: Boolean) {
+  myCloudAgents(archived: $archived) {
+    id
+    name
+    status
+    projectId
+    environmentId
+    createdAt
+    archivedAt
+    workStatus {
+      state
+      kind
+      message
+      unseen
+      at
+    }
+    sessions {
+      sessionId
+      sessionName
+      harness
+      state
+      title
+      prompt
+      latestPrompt
+      updatedAt
+      taskId
+      workStatus {
+        state
+        kind
+        message
+        unseen
+        at
+      }
+    }
+  }
+}

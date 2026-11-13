@@ -84,7 +84,7 @@ impl ClientConnection {
 
     async fn request(&self, command: &str) -> Result<Value> {
         tokio::time::timeout(Duration::from_secs(20), async {
-            let mut socket = self.target()?.open(None).await?;
+            let mut socket = self.target()?.open(&Default::default()).await?;
             socket
                 .send(Message::Text(
                     json!({"type": command, "id": "railway-cli-history"}).to_string(),
