@@ -26,6 +26,15 @@ query CloudAgentSessionThreads($cloudAgentId: ID!, $environmentId: ID!) {
       updatedAt
       prompt
       latestPrompt
+      title
+      taskId
+      workStatus {
+        state
+        kind
+        message
+        unseen
+        at
+      }
     }
   }
 }

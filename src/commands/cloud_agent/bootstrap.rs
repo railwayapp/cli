@@ -250,6 +250,8 @@ mod tests {
             project_id: "project".into(),
             environment_id: "env".into(),
             created_at: chrono::Utc::now(),
+            work_status: None,
+            archived: false,
         }
     }
 

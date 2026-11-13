@@ -58,6 +58,9 @@ pub struct AgentPrefs {
     /// Sidebar width in terminal columns, including its border.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<u16>,
+    /// The sidebar's automations list was folded, and stays folded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automations_collapsed: bool,
 }
 
 impl Default for AgentPrefs {
@@ -71,6 +74,7 @@ impl Default for AgentPrefs {
             theme: None,
             hide_tabs: false,
             sidebar_width: None,
+            automations_collapsed: false,
         }
     }
 }
@@ -164,6 +168,12 @@ impl AgentPrefs {
         prefs.save_in(home)
     }
 
+    pub fn save_automations_collapsed_in(home: &Path, collapsed: bool) -> Result<()> {
+        let mut prefs = Self::load_in(home).unwrap_or_default();
+        prefs.automations_collapsed = collapsed;
+        prefs.save_in(home)
+    }
+
     pub fn save_in(&self, home: &Path) -> Result<()> {
         let path = Self::path_in(home);
         let contents = serde_json::to_string_pretty(self)?;
@@ -211,6 +221,7 @@ mod tests {
             theme: Some("ember".into()),
             hide_tabs: true,
             sidebar_width: Some(46),
+            automations_collapsed: true,
         };
         prefs.save_in(home.path()).unwrap();
         assert_eq!(AgentPrefs::load_in(home.path()).unwrap(), prefs);

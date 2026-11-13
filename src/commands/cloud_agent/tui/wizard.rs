@@ -371,11 +371,19 @@ impl Wizard {
         Some((index, 4))
     }
 
+    #[cfg(test)]
     pub fn up(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
         self.preview_theme();
     }
 
+    /// Put the cursor on an option directly — the list filter's moves.
+    pub fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.options().len().saturating_sub(1));
+        self.preview_theme();
+    }
+
+    #[cfg(test)]
     pub fn down(&mut self) {
         self.cursor = (self.cursor + 1).min(self.options().len().saturating_sub(1));
         self.preview_theme();

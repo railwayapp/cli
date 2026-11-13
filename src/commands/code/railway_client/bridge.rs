@@ -8,7 +8,22 @@ use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use reqwest_websocket::{Message, WebSocket};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-type Open = Arc<dyn Fn(Option<String>) -> BoxFuture<'static, Result<WebSocket>> + Send + Sync>;
+type Open = Arc<dyn Fn(Dial) -> BoxFuture<'static, Result<WebSocket>> + Send + Sync>;
+
+/// What the local client asked for on one dial that the gate should hear:
+/// the session to attach, and the client's own requests that ride the same
+/// query — its first prompt above all, which `railway-agent-tui` sends as
+/// `initial_prompt=` for the gate to submit once the session is ready.
+/// Everything that says where the gate points (`cwd`, the token) is ours,
+/// never the dialler's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Dial {
+    pub session_id: Option<String>,
+    pub forwarded: Vec<(String, String)>,
+}
+
+/// The client's query parameters the relay passes through to the gate.
+const FORWARDED: [&str; 3] = ["initial_prompt", "resume", "client_name"];
 
 pub(crate) struct Bridge {
     pub url: String,
@@ -27,9 +42,9 @@ impl Bridge {
         selected: impl Fn(crate::commands::cloud_agent::client_sessions::Thread) + Send + Sync + 'static,
     ) -> Result<Self> {
         Self::bind(
-            Arc::new(move |session| {
+            Arc::new(move |dial| {
                 let target = target.clone();
-                Box::pin(async move { target.open(session.as_deref()).await })
+                Box::pin(async move { target.open(&dial).await })
             }),
             Arc::new(selected),
         )
@@ -71,7 +86,7 @@ impl Bridge {
     }
 }
 
-fn local_session(request: &Request, token: &str) -> Option<Option<String>> {
+fn local_session(request: &Request, token: &str) -> Option<Dial> {
     if request.uri().path() != "/_railway/agent" || request.headers().contains_key("origin") {
         return None;
     }
@@ -92,7 +107,21 @@ fn local_session(request: &Request, token: &str) -> Option<Option<String>> {
     {
         return None;
     }
-    Some(sessions.first().map(|(_, id)| id.to_string()))
+    // Each forwarded key at most once; a repeat is not a request we can read.
+    let mut forwarded = Vec::new();
+    for key in FORWARDED {
+        let mut values = pairs.iter().filter(|(k, _)| k == key);
+        if let Some((_, value)) = values.next() {
+            if values.next().is_some() {
+                return None;
+            }
+            forwarded.push((key.to_string(), value.to_string()));
+        }
+    }
+    Some(Dial {
+        session_id: sessions.first().map(|(_, id)| id.to_string()),
+        forwarded,
+    })
 }
 
 #[allow(clippy::result_large_err)]
@@ -102,14 +131,14 @@ async fn relay(
     open: Open,
     selected: Arc<dyn Fn(crate::commands::cloud_agent::client_sessions::Thread) + Send + Sync>,
 ) -> Result<()> {
-    let mut session = None;
+    let mut dial = Dial::default();
     let mut local = tokio::time::timeout(
         Duration::from_secs(10),
         async_tungstenite::accept_hdr_async(
             stream.compat(),
             |request: &Request, response: Response| match local_session(request, token) {
-                Some(selected) => {
-                    session = selected;
+                Some(asked) => {
+                    dial = asked;
                     Ok(response)
                 }
                 None => {
@@ -127,7 +156,7 @@ async fn relay(
     .context("Local Railway TUI handshake timed out")??;
     // The opener mints a new 5-minute gate token each time. An already-open
     // connection stays valid; we never disconnect an active turn to rotate it.
-    let mut remote = tokio::time::timeout(Duration::from_secs(30), open(session))
+    let mut remote = tokio::time::timeout(Duration::from_secs(30), open(dial))
         .await
         .context("Railway gate connection timed out")??;
     loop {
@@ -165,13 +194,20 @@ mod tests {
             .uri("/_railway/agent?session_id=a%20b&token=secret")
             .body(())
             .unwrap();
-        assert_eq!(local_session(&request, "secret"), Some(Some("a b".into())));
+        assert_eq!(
+            local_session(&request, "secret"),
+            Some(Dial {
+                session_id: Some("a b".into()),
+                forwarded: Vec::new(),
+            })
+        );
         for uri in [
             "/_railway/agent",
             "/agent?token=secret",
             "/_railway/agent?token=wrong",
             "/_railway/agent?token=secret&token=secret",
             "/_railway/agent?token=secret&session_id=",
+            "/_railway/agent?token=secret&initial_prompt=a&initial_prompt=b",
         ] {
             let request = Request::builder().uri(uri).body(()).unwrap();
             assert!(local_session(&request, "secret").is_none());
@@ -182,6 +218,27 @@ mod tests {
             .body(())
             .unwrap();
         assert!(local_session(&request, "secret").is_none());
+    }
+
+    /// The client's first prompt reaches the gate — exactly the handshake
+    /// `railway-agent-tui -- <prompt>` makes — while anything that would
+    /// repoint the gate stays ours.
+    #[test]
+    fn the_clients_prompt_rides_through_and_nothing_else_does() {
+        let request = Request::builder()
+            .uri("/_railway/agent?token=secret&initial_prompt=hello%20from%20probe&cwd=/etc&resume=1")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            local_session(&request, "secret"),
+            Some(Dial {
+                session_id: None,
+                forwarded: vec![
+                    ("initial_prompt".into(), "hello from probe".into()),
+                    ("resume".into(), "1".into()),
+                ],
+            })
+        );
     }
 
     #[tokio::test]
@@ -218,13 +275,13 @@ mod tests {
         let selected = Arc::new(Mutex::new(Vec::new()));
         let selections = selected.clone();
         let bridge = Bridge::bind(
-            Arc::new(move |session| {
+            Arc::new(move |dial: Dial| {
                 let n = minted.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
                     let mut url = url::Url::parse(&format!("ws://{address}/agent")).unwrap();
                     url.query_pairs_mut()
                         .append_pair("token", &format!("fresh-{n}"));
-                    if let Some(session) = session {
+                    if let Some(session) = dial.session_id {
                         url.query_pairs_mut().append_pair("session_id", &session);
                     }
                     super::super::open_gate(url).await

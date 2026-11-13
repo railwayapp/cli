@@ -126,7 +126,7 @@ pub(super) async fn command(mut args: LaunchArgs, action: ClientAction) -> Resul
             &connection,
             &saved,
             &persisted,
-            None,
+            args.initial_prompt.clone(),
             installed.binary,
             "Railway",
         )
@@ -272,7 +272,7 @@ fn validate_url(value: &str) -> Result<url::Url> {
 }
 
 impl Target {
-    async fn open(&self, session_id: Option<&str>) -> Result<reqwest_websocket::WebSocket> {
+    async fn open(&self, dial: &bridge::Dial) -> Result<reqwest_websocket::WebSocket> {
         let token = post_graphql::<mutations::CloudAgentHarnessToken, _>(
             &self.client,
             &self.backboard,
@@ -287,8 +287,11 @@ impl Target {
         url.query_pairs_mut()
             .append_pair("token", &token)
             .append_pair("cwd", &self.connection.directory);
-        if let Some(id) = session_id {
+        if let Some(id) = dial.session_id.as_deref() {
             url.query_pairs_mut().append_pair("session_id", id);
+        }
+        for (key, value) in &dial.forwarded {
+            url.query_pairs_mut().append_pair(key, value);
         }
         open_gate(url).await
     }
@@ -325,7 +328,7 @@ async fn open_gate(url: url::Url) -> Result<reqwest_websocket::WebSocket> {
 async fn verify_connection(target: &Target) -> Result<String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut socket = loop {
-        match target.open(None).await {
+        match target.open(&Default::default()).await {
             Ok(socket) => break socket,
             Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
             Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,

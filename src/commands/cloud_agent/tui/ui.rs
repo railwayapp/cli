@@ -166,6 +166,9 @@ fn banner_lines(theme: &Theme) -> Vec<Line<'static>> {
 /// into a buffer, and what the user dragged over is that composition.
 pub fn render_with_layout(app: &App, f: &mut Frame) -> (PaneRects, Option<String>) {
     let mut rects = PaneRects::default();
+    // Whatever draws something moving this frame says so; a frame that
+    // draws nothing moving lets the loop go back to blocking.
+    app.sidebar_animated.set(false);
     render_inner(app, f, &mut rects);
     let text = app.pending_copy.and_then(|selection| {
         let bounds = match selection.pane {
@@ -625,6 +628,196 @@ fn render_loading(app: &App, f: &mut Frame, area: Rect) {
     );
 }
 
+/// Enter on a thread, on its way into the pane: every step it takes —
+/// waking the machine, finding the thread on it, connecting, the harness
+/// starting — ticked off as it lands, the current one spinning, so a wait
+/// of half a minute reads as progress rather than a dead key.
+fn render_opening(
+    app: &App,
+    f: &mut Frame,
+    area: Rect,
+    opening: &super::app::Opening,
+    stage: super::app::OpenStage,
+) {
+    use super::app::OpenStage;
+    let theme = app.theme;
+    app.sidebar_animated.set(true);
+    // The pane it is about to become, as the launch's loading pane does.
+    let block = terminal_block(app, f.area().width)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {} · opening ", opening.agent_name),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let harness = opening
+        .harness
+        .as_deref()
+        .map(super::app::harness_name)
+        .unwrap_or("the agent");
+    let mut steps: Vec<(OpenStage, String, String)> = Vec::new();
+    if opening.wake {
+        steps.push((
+            OpenStage::Waking,
+            format!("Waking {}", opening.agent_name),
+            format!("Woke {}", opening.agent_name),
+        ));
+    }
+    if opening.find {
+        steps.push((
+            OpenStage::Finding,
+            "Finding the thread".into(),
+            "Found the thread".into(),
+        ));
+    }
+    steps.push((
+        OpenStage::Connecting,
+        "Connecting".into(),
+        "Connected".into(),
+    ));
+    steps.push((
+        OpenStage::Starting,
+        format!("Starting {harness}"),
+        format!("Started {harness}"),
+    ));
+
+    let width = 52.min(inner.width.saturating_sub(2));
+    // Title, machine, a gap, the steps, a gap, the clock; borders and the
+    // top padding around them.
+    let height = steps.len() as u16 + 8;
+    let card = centered(width, height, inner);
+    let block = dialog_block(theme)
+        .title(" Opening thread ")
+        .padding(Padding::new(2, 2, 1, 0));
+    let body = block.inner(card);
+    f.render_widget(block, card);
+
+    let room = body.width as usize;
+    let title = if console::measure_text_width(&opening.title) > room {
+        console::truncate_str(&opening.title, room, "…").into_owned()
+    } else {
+        opening.title.clone()
+    };
+    let mut lines = vec![
+        Line::styled(
+            title,
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!("{} · {harness}", opening.agent_name),
+            Style::default().fg(theme.dim),
+        ),
+        Line::raw(""),
+    ];
+    let tick = app.animation_frame();
+    for (step, doing, done) in steps {
+        lines.push(if step < stage {
+            Line::from(vec![
+                Span::styled("✓ ", Style::default().fg(theme.running)),
+                Span::styled(done, Style::default().fg(theme.dim)),
+            ])
+        } else if step == stage {
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", spinner_frame(tick)),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(
+                    format!("{doing}…"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("○ ", Style::default().fg(theme.sleeping)),
+                Span::styled(doing, Style::default().fg(theme.dim)),
+            ])
+        });
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!("{}s", opening.since.elapsed().as_secs()),
+        Style::default().fg(theme.dim),
+    ));
+    f.render_widget(Paragraph::new(lines), body);
+}
+
+// The sidebar's moving markers. Each tells its own story in shape and colour
+// at once, so a glance tells waking from working from connecting without
+// reading a word. One tick is `SPINNER_TICK` (110ms).
+
+/// `t` of the way from `a` to `b`. Truecolour blends; a named colour cannot,
+/// so it switches over halfway — the motion still reads, just in two steps.
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+            let mix =
+                |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+            Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
+        }
+        _ if t < 0.5 => a,
+        _ => b,
+    }
+}
+
+/// 0 → 1 → 0 over `period` ticks, eased: a breath rather than a sawtooth.
+fn wave(tick: usize, period: usize) -> f32 {
+    let phase = (tick % period) as f32 / period as f32;
+    (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0
+}
+
+/// Working: a moon spinning on its axis, its green catching the light once
+/// a turn and a half.
+fn orbit(theme: &Theme, tick: usize) -> (String, Color) {
+    const FRAMES: [char; 4] = ['◐', '◓', '◑', '◒'];
+    let color = blend(theme.running, theme.fg, 0.55 * wave(tick, 6));
+    (format!("{} ", FRAMES[tick % FRAMES.len()]), color)
+}
+
+/// Waking: the orb fills from empty while it warms from sleep's grey to
+/// amber, holds full for a beat, and rises again.
+fn sunrise(theme: &Theme, tick: usize) -> (String, Color) {
+    const FRAMES: [char; 14] = [
+        '○', '○', '◔', '◔', '◑', '◑', '◕', '◕', '●', '●', '●', '●', '●', '●',
+    ];
+    let step = tick % FRAMES.len();
+    let color = blend(theme.sleeping, theme.pending, step as f32 / 8.0);
+    (format!("{} ", FRAMES[step]), color)
+}
+
+/// Going to sleep, or away: the sunrise run backwards, draining from `from`
+/// to sleep's grey.
+fn sunset(theme: &Theme, tick: usize, from: Color) -> (String, Color) {
+    const FRAMES: [char; 14] = [
+        '●', '●', '●', '●', '◕', '◕', '◑', '◑', '◔', '◔', '○', '○', '○', '○',
+    ];
+    let step = tick % FRAMES.len();
+    let color = blend(from, theme.sleeping, step.saturating_sub(2) as f32 / 8.0);
+    (format!("{} ", FRAMES[step]), color)
+}
+
+/// Connecting: an arc sweeping round like radar, amber glinting white as it
+/// passes the top.
+fn sweep(theme: &Theme, tick: usize) -> (String, Color) {
+    const FRAMES: [char; 4] = ['◜', '◝', '◞', '◟'];
+    let step = tick % FRAMES.len();
+    let color = blend(theme.pending, theme.fg, if step == 1 { 0.5 } else { 0.0 });
+    (format!("{} ", FRAMES[step]), color)
+}
+
+/// Needs you: purple breathing slowly between dim and bright — insistent
+/// without flicker.
+fn glow(theme: &Theme, tick: usize) -> Color {
+    blend(theme.accent_dim, theme.accent, 0.35 + 0.65 * wave(tick, 18))
+}
+
 /// Braille spinner, one frame per tick.
 fn spinner_frame(tick: usize) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -880,6 +1073,8 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         // until it produces the session that replaces it.
         if app.loading.active {
             render_loading(app, f, pane);
+        } else if let Some((opening, stage)) = app.opening_for_selection() {
+            render_opening(app, f, pane, opening, stage);
         } else if let Some(session) = app.active_session() {
             render_session(app, session, f, pane);
         }
@@ -900,8 +1095,19 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
 
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|r| ListItem::new(tree_line(theme, r, app, panes[0].width.saturating_sub(2))))
+        .map(|r| ListItem::new(tree_lines(theme, r, app, panes[0].width.saturating_sub(2))))
         .collect();
+    if rows.iter().any(|r| match (&r.kind, r.status.as_deref()) {
+        (RowKind::Agent(..), Some(status)) if r.depth < 2 => machine_in_transition(status),
+        (_, status) => matches!(
+            status,
+            Some(
+                "working" | "waking" | "dozing" | "deleting" | "connecting" | "blocked" | "waiting"
+            )
+        ),
+    }) {
+        app.sidebar_animated.set(true);
+    }
     let mut state = ListState::default();
     state.select(if rows.is_empty() {
         None
@@ -920,7 +1126,9 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                     } else {
                         theme.accent_dim
                     }))
-                    .title(Span::styled(" threads ", Style::default().fg(theme.dim))),
+                    .title(Span::styled(" threads ", Style::default().fg(theme.dim)))
+                    // A line of room above the launcher.
+                    .padding(Padding::top(1)),
             )
             .highlight_style(
                 Style::default()
@@ -930,7 +1138,11 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         panes[0],
         &mut state,
     );
-    rects.tree = interior(panes[0]);
+    // The list starts under the padding line, so clicks map from there.
+    let mut tree = interior(panes[0]);
+    tree.y += 1;
+    tree.h = tree.h.saturating_sub(1);
+    rects.tree = tree;
     rects.tree_outer = whole(panes[0]);
 
     if two_pane {
@@ -952,6 +1164,8 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
         let selected_kind = app.selected_row().map(|row| row.kind);
         if app.loading.active {
             render_loading(app, f, panes[1]);
+        } else if let Some((opening, stage)) = app.opening_for_selection() {
+            render_opening(app, f, panes[1], opening, stage);
         } else {
             match app
                 .displayed_session_index()
@@ -973,15 +1187,17 @@ fn render_manage(app: &App, f: &mut Frame, rects: &mut PaneRects) {
                         " detail "
                     };
                     f.render_widget(
-                        Paragraph::new(detail_lines(app)).block(
-                            terminal_block(app, f.area().width)
-                                .border_style(Style::default().fg(if tree_focused {
-                                    theme.accent_dim
-                                } else {
-                                    theme.accent
-                                }))
-                                .title(Span::styled(title, Style::default().fg(theme.dim))),
-                        ),
+                        Paragraph::new(detail_lines(app))
+                            .wrap(Wrap { trim: false })
+                            .block(
+                                terminal_block(app, f.area().width)
+                                    .border_style(Style::default().fg(if tree_focused {
+                                        theme.accent_dim
+                                    } else {
+                                        theme.accent
+                                    }))
+                                    .title(Span::styled(title, Style::default().fg(theme.dim))),
+                            ),
                         panes[1],
                     )
                 }
@@ -1244,9 +1460,14 @@ struct PanelRow {
     detail: String,
 }
 
-/// The centred card list both the setup flow and the target chooser are made
-/// of. One shape, so choosing a target looks like answering the same question
-/// setup asks — because it is.
+/// The centred card every list in this TUI is picked from — the setup flow,
+/// the target chooser, the settings project picker. One shape, so choosing a
+/// target looks like answering the same question setup asks — because it is.
+///
+/// It stays a card however long the list: at most [`PANEL_BODY_MAX`] lines of
+/// rows, scrolled under the cursor with what is above and below counted, and a
+/// filter line once the list is long enough to search (see
+/// [`super::picker`]).
 struct Panel<'a> {
     title: &'a str,
     heading: &'a str,
@@ -1254,19 +1475,41 @@ struct Panel<'a> {
     position: Option<(usize, usize)>,
     rows: &'a [PanelRow],
     cursor: usize,
+    /// What has been typed into this list, for a list that can be filtered;
+    /// `None` for a form, where letters are keys.
+    query: Option<&'a str>,
     footer: Line<'static>,
 }
 
+/// The most lines of rows a card shows before it scrolls.
+const PANEL_BODY_MAX: usize = 12;
+
 fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
-    let body_h = panel
-        .rows
-        .iter()
-        .map(|row| if row.detail.is_empty() { 1 } else { 2 })
-        .sum::<usize>() as u16;
+    use super::picker::{SEARCHABLE_AFTER, visible};
+    let row_height = |row: &PanelRow| if row.detail.is_empty() { 1 } else { 2 };
+    let searchable = panel
+        .query
+        .is_some_and(|query| panel.rows.len() > SEARCHABLE_AFTER || !query.is_empty());
+    let query = panel.query.unwrap_or_default();
+    let shown: Vec<usize> = if searchable {
+        let labels: Vec<String> = panel.rows.iter().map(|row| row.label.clone()).collect();
+        visible(query, &labels)
+    } else {
+        (0..panel.rows.len()).collect()
+    };
+    let cursor = shown.iter().position(|&i| i == panel.cursor).unwrap_or(0);
+
+    let total_h: usize = shown.iter().map(|&i| row_height(&panel.rows[i])).sum();
+    let overflows = total_h > PANEL_BODY_MAX;
+    // "No matches" still takes its line.
+    let body_h = total_h.clamp(1, PANEL_BODY_MAX) as u16;
     // No progress dots means no row held open for them.
     let dots_h = u16::from(panel.position.is_some());
+    let search_h = u16::from(searchable);
+    let more_h = u16::from(overflows);
     let width = (62 + DIALOG_CHROME_X).min(area.width.saturating_sub(4));
-    let height = (body_h + dots_h + 5 + DIALOG_CHROME_Y).min(area.height.saturating_sub(2));
+    let height = (body_h + dots_h + search_h + more_h + 5 + DIALOG_CHROME_Y)
+        .min(area.height.saturating_sub(2));
     let outer = centered(width, height, area);
     f.render_widget(Clear, outer);
 
@@ -1282,8 +1525,10 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
     let rows = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(dots_h),
+        Constraint::Length(search_h),
         Constraint::Length(1), // gap
         Constraint::Length(body_h),
+        Constraint::Length(more_h),
         Constraint::Min(0),
         Constraint::Length(1), // footer
     ])
@@ -1316,26 +1561,56 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
         );
     }
 
-    // The card clamps to the terminal, so a long list (a real account's
-    // projects) can hold more rows than the body has lines. Window the rows
-    // to keep the cursor visible: walk the start of the window forward until
-    // everything from there through the cursor fits.
-    let avail = rows[3].height as usize;
-    let row_height = |row: &PanelRow| if row.detail.is_empty() { 1 } else { 2 };
+    // The filter line: what has been typed, or how to start; and how much of
+    // the list it kept.
+    if searchable {
+        let line = if query.is_empty() {
+            Line::from(vec![
+                Span::styled("  ⌕ ", Style::default().fg(theme.accent)),
+                Span::styled("type to filter", Style::default().fg(theme.dim)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("  ⌕ ", Style::default().fg(theme.accent)),
+                Span::styled(format!("{query}▏"), Style::default().fg(theme.fg)),
+            ])
+        };
+        f.render_widget(Paragraph::new(line), rows[2]);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("{} of {}  ", shown.len(), panel.rows.len()),
+                Style::default().fg(theme.dim),
+            ))
+            .alignment(Alignment::Right),
+            rows[2],
+        );
+    }
+
+    // Window the rows to keep the cursor visible: walk the start of the window
+    // forward until everything from there through the cursor fits.
+    let avail = rows[4].height as usize;
     let mut first = 0usize;
-    while first < panel.cursor
-        && panel.rows[first..=panel.cursor.min(panel.rows.len() - 1)]
+    while first < cursor
+        && shown[first..=cursor.min(shown.len().saturating_sub(1))]
             .iter()
-            .map(row_height)
+            .map(|&i| row_height(&panel.rows[i]))
             .sum::<usize>()
             > avail
     {
         first += 1;
     }
 
-    let mut lines: Vec<Line> = Vec::with_capacity(panel.rows.len() * 2);
-    for (i, row) in panel.rows.iter().enumerate().skip(first) {
-        let on = i == panel.cursor;
+    let mut lines: Vec<Line> = Vec::with_capacity(PANEL_BODY_MAX);
+    let mut used = 0usize;
+    let mut last = first;
+    for (n, &i) in shown.iter().enumerate().skip(first) {
+        let row = &panel.rows[i];
+        if used + row_height(row) > avail {
+            break;
+        }
+        used += row_height(row);
+        last = n;
+        let on = n == cursor;
         let mut spans = vec![
             Span::styled(
                 if on { "▌ " } else { "  " },
@@ -1370,10 +1645,42 @@ fn render_panel(f: &mut Frame, theme: &Theme, area: Rect, panel: Panel) {
             )));
         }
     }
-    f.render_widget(Paragraph::new(lines), rows[3]);
+    if shown.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  nothing matches “{query}” — backspace or esc"),
+            Style::default().fg(theme.dim),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), rows[4]);
+
+    // What the window leaves out, counted, so a long list reads as one.
+    if overflows {
+        let above = first;
+        let below = shown.len().saturating_sub(last + 1);
+        let mut spans = Vec::new();
+        if above > 0 {
+            spans.push(Span::styled(
+                format!("↑ {above} more"),
+                Style::default().fg(theme.dim),
+            ));
+        }
+        if above > 0 && below > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(theme.accent_dim)));
+        }
+        if below > 0 {
+            spans.push(Span::styled(
+                format!("↓ {below} more"),
+                Style::default().fg(theme.dim),
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+            rows[5],
+        );
+    }
     f.render_widget(
         Paragraph::new(panel.footer).alignment(Alignment::Center),
-        rows[5],
+        rows[7],
     );
 }
 
@@ -1422,6 +1729,10 @@ fn render_wizard(app: &App, f: &mut Frame) {
             position: wizard.position(),
             rows: &rows,
             cursor: wizard.cursor,
+            query: Some(
+                app.list_filter
+                    .query(super::picker::ListId::Wizard(wizard.step)),
+            ),
             footer,
         },
     );
@@ -1475,6 +1786,10 @@ fn render_settings(app: &App, f: &mut Frame) {
                 position: None,
                 rows: &rows,
                 cursor: pick,
+                query: Some(
+                    app.list_filter
+                        .query(super::picker::ListId::SettingsProject),
+                ),
                 footer,
             },
         );
@@ -1518,6 +1833,7 @@ fn render_settings(app: &App, f: &mut Frame) {
             position: None,
             rows: &rows,
             cursor: settings.cursor,
+            query: None,
             footer,
         },
     );
@@ -1811,6 +2127,7 @@ fn render_target_pick(app: &App, f: &mut Frame) {
             position: None,
             rows: &rows,
             cursor: picker.cursor,
+            query: Some(app.list_filter.query(super::picker::ListId::Target)),
             footer,
         },
     );
@@ -2126,6 +2443,16 @@ fn status_color(theme: &Theme, status: &str) -> Color {
     }
 }
 
+/// Waking, starting, going to sleep, deleting: neither steady state, nor one
+/// that has stopped for good.
+fn machine_in_transition(status: &str) -> bool {
+    !status.is_empty()
+        && !matches!(
+            status,
+            "running" | "sleeping" | "stopped" | "crashed" | "failed" | "missing" | "error"
+        )
+}
+
 fn status_glyph(status: &str) -> &'static str {
     match status {
         "running" => "●",
@@ -2134,10 +2461,57 @@ fn status_glyph(status: &str) -> &'static str {
     }
 }
 
+/// A row as the sidebar draws it: one line, or for a thread whose title is
+/// longer than the sidebar is wide, the title wrapped onto the lines below,
+/// lined up under its first word.
+fn tree_lines(theme: &Theme, row: &Row, app: &App, width: u16) -> Vec<Line<'static>> {
+    if !matches!(row.kind, RowKind::Session(..) | RowKind::Thread(..)) {
+        return vec![tree_line(theme, row, app, width)];
+    }
+    let wrapped = super::app::label_lines(row, width);
+    let mut first = row.clone();
+    first.label = wrapped.first().cloned().unwrap_or_default();
+    let mut lines = vec![tree_line(theme, &first, app, width)];
+    let fg = if row.dimmed { theme.dim } else { theme.fg };
+    let hang = "  ".repeat(row.depth) + "  ";
+    for text in wrapped.into_iter().skip(1) {
+        lines.push(Line::from(vec![
+            Span::raw(hang.clone()),
+            Span::styled(text, Style::default().fg(fg)),
+        ]));
+    }
+    lines
+}
+
+/// The glyph for a work outcome: `!` blocked, `✕` failed, a spinner while
+/// working, `✓` finished (bright while unseen).
+fn work_glyph(theme: &Theme, status: Option<&str>, tick: usize) -> Option<(String, Color)> {
+    Some(match status? {
+        "blocked" => ("! ".to_string(), theme.accent),
+        "error" => ("✕ ".to_string(), theme.danger),
+        "working" => (format!("{} ", spinner_frame(tick)), theme.running),
+        "done" => ("✓ ".to_string(), theme.running),
+        "ok" => ("✓ ".to_string(), theme.dim),
+        _ => return None,
+    })
+}
+
 fn tree_line(theme: &Theme, row: &Row, app: &App, width: u16) -> Line<'static> {
-    let tick = app.loading.tick;
+    let tick = app.animation_frame();
     let indent = "  ".repeat(row.depth);
-    let label_width = usize::from(width).saturating_sub(indent.len() + 2);
+    // A thread's machine rides along as its note; the title gives way to it,
+    // not the other way round, up to half the row.
+    let note_width = if row.note.is_empty() {
+        0
+    } else {
+        (console::measure_text_width(&row.note) + 2).min(usize::from(width) / 2)
+    };
+    // An automation draws its fold arrow and its outcome both.
+    let marks = match row.kind {
+        RowKind::Automation(_) if row.status.is_some() => 4,
+        _ => 2,
+    };
+    let label_width = usize::from(width).saturating_sub(indent.len() + marks + note_width);
     let label = if label_width == 0 {
         String::new()
     } else if console::measure_text_width(&row.label) > label_width {
@@ -2157,32 +2531,82 @@ fn tree_line(theme: &Theme, row: &Row, app: &App, width: u16) -> Line<'static> {
                 Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ));
         }
+        // An automation: folds like a list, and carries its latest run's
+        // outcome.
+        (RowKind::Automation(_), expanded) => {
+            spans.push(Span::styled(
+                if expanded == Some(true) {
+                    "▾ "
+                } else {
+                    "▸ "
+                },
+                Style::default().fg(theme.accent),
+            ));
+            if let Some((glyph, color)) = work_glyph(theme, row.status.as_deref(), tick) {
+                spans.push(Span::styled(glyph, Style::default().fg(color)));
+            }
+            spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
+        }
+        // A run under an automation: its outcome, not its machine.
+        (RowKind::Agent(..), _) if row.depth == 2 => {
+            let (glyph, color) = work_glyph(theme, row.status.as_deref(), tick)
+                .unwrap_or_else(|| ("↳ ".to_string(), theme.dim));
+            spans.push(Span::styled(glyph, Style::default().fg(color)));
+            spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
+        }
         (RowKind::Agent(..), _) => {
             let status = row.status.as_deref().unwrap_or_default();
-            // Metadata discovery does not change machine health.
-            let (glyph, color) = (status_glyph(status), status_color(theme, status));
+            // Metadata discovery does not change machine health. A machine on
+            // its way between states pulses rather than sitting still.
+            let (glyph, color) = if machine_in_transition(status) {
+                let (glyph, color) = match status {
+                    "sleeping…" => sunset(theme, tick, theme.pending),
+                    "deleting" | "deleting…" => sunset(theme, tick, theme.danger),
+                    _ => sunrise(theme, tick),
+                };
+                (glyph.trim_end().to_string(), color)
+            } else {
+                (
+                    status_glyph(status).to_string(),
+                    status_color(theme, status),
+                )
+            };
             spans.push(Span::styled(
                 format!("{glyph} "),
                 Style::default().fg(color),
             ));
             spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
         }
-        (RowKind::Session(..), _) => {
-            // The marker is the state: a spinner while the attach is in
-            // flight or the harness is working, a filled dot when this UI has
-            // it open (and the agent is green — a sleeping agent's sessions
-            // never are), a hollow mark when the harness waits on a human, a
-            // quiet branch otherwise.
+        (RowKind::Session(..) | RowKind::Thread(..), _) => {
+            // The marker is where the work stands, as the platform reports
+            // it, and where nothing is happening, where its machine stands:
+            // purple `!` blocked on a person (an older harness's waiting
+            // too) breathing, `✕` failed and unseen, a spinning moon while it
+            // works, a sweeping arc while it attaches, a sunrise while its
+            // machine wakes and a sunset while it sleeps, `✓` finished and
+            // unseen, `◉` open
+            // in this UI, a green dot awake, a grey ring asleep, a red dot on
+            // a machine that died.
             let (glyph, color) = match row.status.as_deref() {
-                Some("connecting") => (format!("{} ", spinner_frame(tick)), theme.pending),
-                Some("working") => (format!("{} ", spinner_frame(tick)), theme.running),
-                Some("waiting") => ("◌ ".to_string(), theme.pending),
-                Some(_) => ("● ".to_string(), theme.running),
-                None => ("↳ ".to_string(), theme.dim),
+                Some("blocked" | "waiting") => ("! ".to_string(), glow(theme, tick)),
+                Some("error") => ("✕ ".to_string(), theme.danger),
+                Some("connecting") => sweep(theme, tick),
+                Some("waking") => sunrise(theme, tick),
+                Some("dozing") => sunset(theme, tick, theme.pending),
+                Some("deleting") => sunset(theme, tick, theme.danger),
+                Some("working") => orbit(theme, tick),
+                Some("done") => ("✓ ".to_string(), theme.running),
+                Some("connected") => ("◉ ".to_string(), theme.running),
+                Some("awake") => ("● ".to_string(), theme.running),
+                Some("sleeping") => ("○ ".to_string(), theme.sleeping),
+                Some("down") => ("● ".to_string(), theme.danger),
+                _ => ("↳ ".to_string(), theme.dim),
             };
             spans.push(Span::styled(glyph, Style::default().fg(color)));
-            spans.push(Span::styled(label.clone(), Style::default().fg(theme.fg)));
+            let fg = if row.dimmed { theme.dim } else { theme.fg };
+            spans.push(Span::styled(label.clone(), Style::default().fg(fg)));
         }
+        (RowKind::Spacer, _) => {}
         (RowKind::Separator, _) => spans.push(Span::styled(
             "─".repeat(width.saturating_sub(2) as usize),
             Style::default().fg(theme.accent_dim),
@@ -2193,6 +2617,17 @@ fn tree_line(theme: &Theme, row: &Row, app: &App, width: u16) -> Line<'static> {
                 .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )),
+        // Every heading in the sidebar folds, and reads the same.
+        (
+            RowKind::Threads | RowKind::Automations | RowKind::Machines | RowKind::OtherProjects,
+            Some(expanded),
+        ) => {
+            let heading = Style::default()
+                .fg(theme.accent_dim)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled(if expanded { "▾ " } else { "▸ " }, heading));
+            spans.push(Span::styled(label.clone(), heading));
+        }
         (_, Some(expanded)) => {
             spans.push(Span::styled(
                 if expanded { "▾ " } else { "▸ " },
@@ -2219,8 +2654,13 @@ fn tree_line(theme: &Theme, row: &Row, app: &App, width: u16) -> Line<'static> {
     // Every thread row carries its context as a dim note: the project for a
     // session, the status for an agent still without one.
     if !row.note.is_empty() {
+        let note = if note_width > 2 && console::measure_text_width(&row.note) + 2 > note_width {
+            console::truncate_str(&row.note, note_width - 2, "…").into_owned()
+        } else {
+            row.note.clone()
+        };
         spans.push(Span::styled(
-            format!("  {}", row.note),
+            format!("  {note}"),
             Style::default().fg(theme.dim),
         ));
     }
@@ -2433,6 +2873,16 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                     session_state(app, &session.name, session.running).to_string(),
                 ));
                 lines.push(kv("kind", session.kind.to_lowercase()));
+                let agent = match &env.agents {
+                    Load::Loaded(list) => list.get(a),
+                    _ => None,
+                };
+                if let Some(work) = agent
+                    .and_then(|agent| agent.report_for(session))
+                    .and_then(|report| report.work_status.as_ref())
+                {
+                    lines.extend(work_lines(theme, work));
+                }
                 // What the harness inside says it is doing — the full text the
                 // row's label truncates, and the state the row's glyph encodes.
                 if let Some(snapshot) = &session.snapshot {
@@ -2509,8 +2959,229 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
                 Style::default().fg(theme.dim),
             )),
         ],
-        RowKind::Separator | RowKind::Note(..) | RowKind::Hint => vec![Line::from("")],
+        // A conversation the platform reported with no live session row: a
+        // sleeping agent's, or a finished task's.
+        RowKind::Thread(w, p, e, a, j) => {
+            let proj = &app.tree[w].projects[p];
+            let env = &proj.envs[e];
+            let agent = match &env.agents {
+                Load::Loaded(list) => list.get(a),
+                _ => None,
+            };
+            let mut lines = vec![Line::from(Span::styled(
+                format!(" {}", row.label),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            let Some((agent, thread)) =
+                agent.and_then(|agent| Some((agent, agent.threads.get(j)?)))
+            else {
+                return lines;
+            };
+            lines.push(Line::from(""));
+            lines.push(kv("project", proj.name.clone()));
+            lines.push(kv("env", env.name.clone()));
+            lines.push(kv("agent", format!("{} ({})", agent.name, agent.status)));
+            lines.push(kv(
+                "harness",
+                super::app::harness_label(&thread.harness).to_string(),
+            ));
+            lines.push(kv("updated", thread.updated_at.clone()));
+            if let Some(work) = &thread.work_status {
+                lines.extend(work_lines(theme, work));
+            }
+            if let Some(text) = thread.latest_prompt.as_deref().or(thread.prompt.as_deref()) {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(" › ", Style::default().fg(theme.dim)),
+                    Span::styled(truncate(text, 200), Style::default().fg(theme.fg)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                if agent.status == "running" {
+                    " enter connects to its agent · a archives the agent"
+                } else {
+                    " w wakes its agent · a archives the agent"
+                },
+                Style::default().fg(theme.dim),
+            )));
+            lines
+        }
+        RowKind::Threads => vec![
+            Line::from(Span::styled(
+                " threads",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " every conversation on your agents, what wants you first:",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(Span::styled(
+                " needs you, then working, then done, then the rest, newest first",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(Span::styled(
+                " a finished thread keeps its ✓ until you open it",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " enter or ←/→ folds and unfolds",
+                Style::default().fg(theme.dim),
+            )),
+        ],
+        RowKind::Machines => vec![
+            Line::from(Span::styled(
+                " machines",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " every agent, whether or not a thread is open on it",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(Span::styled(
+                " a archives one · A shows archived ones too",
+                Style::default().fg(theme.dim),
+            )),
+        ],
+        RowKind::Automations => vec![
+            Line::from(Span::styled(
+                " automations",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " runs of your automations, and other handed-off tasks, by what ran them",
+                Style::default().fg(theme.dim),
+            )),
+            Line::from(Span::styled(
+                " a run that failed or is waiting on you also shows under needs you",
+                Style::default().fg(theme.dim),
+            )),
+        ],
+        RowKind::Automation(index) => {
+            let Some(group) = app.automation_groups().into_iter().nth(index) else {
+                return vec![Line::from("")];
+            };
+            let info = app.automations.get(&group.key);
+            let mut lines = vec![Line::from(Span::styled(
+                format!(" {}", group.name),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            lines.push(Line::from(""));
+            match info {
+                Some(info) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {:<9}", "state"), Style::default().fg(theme.dim)),
+                        if info.enabled {
+                            Span::styled("on", Style::default().fg(theme.running))
+                        } else {
+                            Span::styled("paused", Style::default().fg(theme.pending))
+                        },
+                    ]));
+                    if info.schedules.is_empty() {
+                        lines.push(kv("runs", "only when started by hand".into()));
+                    }
+                    for (i, cron) in info.schedules.iter().enumerate() {
+                        lines.push(kv(
+                            if i == 0 { "schedule" } else { "" },
+                            format!("{} ({cron})", super::app::describe_schedule(cron)),
+                        ));
+                    }
+                    lines.push(kv("changed", info.updated_at.clone()));
+                }
+                None if group.key.is_empty() => lines.push(Line::from(Span::styled(
+                    " tasks handed off over the API or MCP, not by an automation",
+                    Style::default().fg(theme.dim),
+                ))),
+                None => lines.push(Line::from(Span::styled(
+                    " its settings aren't readable here",
+                    Style::default().fg(theme.dim),
+                ))),
+            }
+            lines.push(kv("last run", group.last_at().to_string()));
+            let latest = group.runs.first().and_then(|((w, p, e, a), _)| {
+                match &app.tree[*w].projects[*p].envs[*e].agents {
+                    Load::Loaded(agents) => agents.get(*a),
+                    _ => None,
+                }
+            });
+            if let Some(work) = latest
+                .and_then(|agent| agent.threads.first())
+                .and_then(|thread| thread.work_status.as_ref())
+            {
+                lines.extend(work_lines(theme, work));
+            }
+            if let Some(info) = info {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " instructions",
+                    Style::default().fg(theme.dim),
+                )));
+                // The instructions as written, line for line; the pane wraps
+                // what is wider than it.
+                for line in info.instructions.lines().take(40) {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {line}"),
+                        Style::default().fg(theme.fg),
+                    )));
+                }
+                if info.instructions.lines().count() > 40 {
+                    lines.push(Line::from(Span::styled(
+                        " …",
+                        Style::default().fg(theme.dim),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " enter shows or hides its runs",
+                Style::default().fg(theme.dim),
+            )));
+            lines
+        }
+        RowKind::Separator | RowKind::Spacer | RowKind::Note(..) | RowKind::Hint => {
+            vec![Line::from("")]
+        }
     }
+}
+
+/// Where a thread's work stands, for the detail pane: the headline, and the
+/// platform's one line about it — the question, the failure, or the closing
+/// prose. The line is agent text, already flattened to one line by the
+/// platform, and drawn as plain text.
+fn work_lines(theme: &Theme, work: &super::work_status::WorkStatus) -> Vec<Line<'static>> {
+    use super::work_status::WorkState;
+    let color = match work.state {
+        WorkState::Blocked => theme.pending,
+        WorkState::Error => theme.danger,
+        WorkState::Working | WorkState::Done => theme.running,
+        WorkState::Idle => theme.dim,
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {:<9}", "work"), Style::default().fg(theme.dim)),
+        Span::styled(work.headline(), Style::default().fg(color)),
+    ])];
+    if let Some(message) = work.message.as_deref().filter(|m| !m.trim().is_empty()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", truncate(message, 300)),
+            Style::default().fg(theme.fg),
+        )));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -2521,6 +3192,43 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// Every frame of every marker is one cell and a space, so a row never
+    /// shifts under its title as the marker moves, and each one does move.
+    #[test]
+    fn the_moving_markers_move_without_shifting_the_row() {
+        let theme = &Theme::default_theme();
+        let markers: [(&str, fn(&Theme, usize) -> (String, Color)); 5] = [
+            ("orbit", orbit),
+            ("sunrise", sunrise),
+            ("sunset", |t, tick| sunset(t, tick, t.pending)),
+            ("sweep", sweep),
+            ("glow", |t, tick| ("! ".into(), glow(t, tick))),
+        ];
+        for (name, marker) in markers {
+            let frames: Vec<(String, Color)> = (0..36).map(|tick| marker(theme, tick)).collect();
+            for (glyph, _) in &frames {
+                assert_eq!(console::measure_text_width(glyph), 2, "{name}: {glyph:?}");
+            }
+            let distinct: std::collections::HashSet<String> = frames
+                .iter()
+                .map(|(glyph, color)| format!("{glyph}{color:?}"))
+                .collect();
+            assert!(distinct.len() > 1, "{name} never changes");
+        }
+    }
+
+    #[test]
+    fn colours_blend_where_they_can_and_switch_where_they_cannot() {
+        let (a, b) = (Color::Rgb(0, 100, 200), Color::Rgb(100, 200, 0));
+        assert_eq!(blend(a, b, 0.0), a);
+        assert_eq!(blend(a, b, 1.0), b);
+        assert_eq!(blend(a, b, 0.5), Color::Rgb(50, 150, 100));
+        assert_eq!(blend(Color::Green, Color::White, 0.4), Color::Green);
+        assert_eq!(blend(Color::Green, Color::White, 0.6), Color::White);
+        assert!((wave(0, 10) - 0.0).abs() < 1e-6);
+        assert!((wave(5, 10) - 1.0).abs() < 1e-6);
+    }
 
     pub(super) fn app_with_tree() -> App {
         let tree = vec![WorkspaceNode {
@@ -2541,11 +3249,12 @@ mod tests {
                         status: "running".into(),
                         sessions: LoadSessions::NotLoaded,
                         expanded: false,
+                        ..Default::default()
                     }]),
                 }],
             }],
         }];
-        App::new(
+        crate::commands::cloud_agent::tui::app::tests::lists_open(App::new(
             tree,
             Some(Target {
                 project_id: "proj_1".into(),
@@ -2557,7 +3266,7 @@ mod tests {
             None,
             None,
             true,
-        )
+        ))
     }
 
     #[test]
@@ -2780,6 +3489,7 @@ mod tests {
                 status: "running".into(),
                 sessions: LoadSessions::Loaded(vec![remote_thread("other-vm-thread")]),
                 expanded: true,
+                ..Default::default()
             });
         }
         let mut open = Session::for_test("ca_1", "nimble-otter").unwrap();
@@ -4527,6 +5237,84 @@ mod tests {
         assert!(out.contains("Where should agents live?"), "{out}");
         assert!(out.contains("devtools (production)"), "{out}");
         assert!(out.contains("Decide later"), "{out}");
+    }
+
+    /// A real account's forty projects stay a card in the middle of the
+    /// screen — a dozen rows, the rest counted — and typing narrows it.
+    /// Enter on a sleeping machine's thread: the canvas becomes the steps
+    /// of getting there, the current one named.
+    #[test]
+    fn opening_a_thread_shows_its_steps_on_the_canvas() {
+        use super::super::app::tests::{agent, key, loaded_app, reported};
+        use super::super::work_status::WorkState;
+        use crossterm::event::KeyCode;
+        let mut app = loaded_app();
+        let mut sleeping = agent("ca_1", "nimble-otter", "sleeping");
+        sleeping.threads = vec![reported(
+            "conv-7",
+            WorkState::Idle,
+            false,
+            "2026-10-17T08:00:00Z",
+        )];
+        app.agents_loaded((0, 0, 0), Ok(vec![sleeping]));
+        app.cursor = app
+            .rows()
+            .iter()
+            .position(|r| r.label == "conv-7 title")
+            .unwrap();
+        app.on_key(key(KeyCode::Enter));
+        let out = draw(&app, 120, 40);
+        assert!(out.contains("Opening thread"), "{out}");
+        assert!(out.contains("conv-7 title"), "{out}");
+        assert!(out.contains("Waking nimble-otter…"), "{out}");
+        assert!(out.contains("○ Finding the thread"), "{out}");
+        assert!(out.contains("○ Connecting"), "{out}");
+        assert!(out.contains("○ Starting Railway"), "{out}");
+        assert!(out.contains("0s"), "the clock shows:\n{out}");
+        assert!(
+            app.sidebar_animated.get(),
+            "the spinner keeps the loop ticking"
+        );
+    }
+
+    #[test]
+    fn a_long_project_list_is_a_small_searchable_card() {
+        use crate::commands::cloud_agent::tui::app::{EnvNode, ProjectNode};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app_with_tree();
+        app.tree[0].projects = (0..40)
+            .map(|i| ProjectNode {
+                id: format!("proj_{i}"),
+                name: format!("service-{i:02}"),
+                expanded: false,
+                envs: vec![EnvNode {
+                    id: format!("env_{i}"),
+                    name: "production".into(),
+                    expanded: false,
+                    agents: Load::NotLoaded,
+                }],
+            })
+            .collect();
+        app.start_target_pick();
+
+        let out = draw(&app, 100, 60);
+        let listed = out.lines().filter(|l| l.contains("(production)")).count();
+        assert_eq!(listed, 12, "a dozen rows, not the whole screen:\n{out}");
+        assert!(out.contains("type to filter"), "{out}");
+        assert!(out.contains("40 of 40"), "{out}");
+        assert!(out.contains("more"), "the rest is counted:\n{out}");
+
+        for c in "-3".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let out = draw(&app, 100, 60);
+        assert!(out.contains("10 of 40"), "-3 matches 30–39:\n{out}");
+        assert!(out.contains("service-30 (production)"), "{out}");
+        assert!(!out.contains("service-03 (production)"), "{out}");
+        assert!(
+            !out.contains("more"),
+            "ten rows fit; nothing to count:\n{out}"
+        );
     }
 
     /// A tree with nothing in it must not panic the renderer.
