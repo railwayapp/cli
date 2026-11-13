@@ -1,0 +1,6 @@
+mutation RailwayDomainNameserversSet($input: RailwayDomainNameserversSetInput!) {
+  railwayDomainNameserversSet(input: $input) {
+    nameservers
+    isDefault
+  }
+}

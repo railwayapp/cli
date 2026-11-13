@@ -1,0 +1,16 @@
+query RailwayDomainDnsRecords($domain: String!, $workspaceId: String!) {
+  railwayDomainDnsRecords(domain: $domain, workspaceId: $workspaceId) {
+    ...RailwayDomainDnsRecordFields
+  }
+}
+
+fragment RailwayDomainDnsRecordFields on RailwayDomainDnsRecord {
+  id
+  domainName
+  host
+  fqdn
+  type
+  answer
+  ttl
+  priority
+}

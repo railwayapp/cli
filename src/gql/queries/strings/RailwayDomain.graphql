@@ -1,0 +1,29 @@
+query RailwayDomain($id: String!) {
+  railwayDomain(id: $id) {
+    ...RailwayDomainFields
+  }
+}
+
+fragment RailwayDomainFields on RailwayDomain {
+  id
+  domain
+  status
+  autoRenewEnabled
+  purchasePrice
+  renewalPrice
+  registrationYears
+  nextBillingDate
+  workspaceId
+  workspaceName
+  createdAt
+  nameservers {
+    nameservers
+    isDefault
+  }
+  connectedServiceInstances {
+    projectId
+    serviceId
+    environmentId
+    serviceName
+  }
+}

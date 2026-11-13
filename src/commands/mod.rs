@@ -26,6 +26,7 @@ pub mod deployment;
 pub mod dev;
 pub mod docs;
 pub mod domain;
+pub mod domains;
 pub mod down;
 pub mod environment;
 pub mod flag;

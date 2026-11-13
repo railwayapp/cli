@@ -1,0 +1,16 @@
+mutation RailwayDomainDnsRecordUpdate($input: RailwayDomainDnsRecordUpdateInput!) {
+  railwayDomainDnsRecordUpdate(input: $input) {
+    ...RailwayDomainDnsRecordFields
+  }
+}
+
+fragment RailwayDomainDnsRecordFields on RailwayDomainDnsRecord {
+  id
+  domainName
+  host
+  fqdn
+  type
+  answer
+  ttl
+  priority
+}
