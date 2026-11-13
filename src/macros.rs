@@ -60,6 +60,7 @@ macro_rules! commands {
                     .mut_subcommand("bucket", |cmd| cmd.visible_alias("buckets"))
                     .mut_subcommand("volume", |cmd| cmd.visible_alias("volumes"))
                     .mut_subcommand("deployment", |cmd| cmd.visible_alias("deployments"))
+                    .mut_subcommand("changes", |cmd| cmd.visible_alias("staged-changes"))
                     .mut_subcommand("templates", |cmd| cmd.visible_alias("template"))
                     .mut_subcommand("check_updates", |cmd| cmd.visible_alias("check-updates"));
                 cmd

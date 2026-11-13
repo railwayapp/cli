@@ -26,6 +26,7 @@ pub mod scale_tui;
 pub mod service;
 pub mod signals;
 pub mod ssh;
+pub mod staged_changes;
 pub mod tcp_proxy;
 pub mod template_apply;
 pub mod upload;

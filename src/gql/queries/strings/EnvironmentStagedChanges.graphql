@@ -1,7 +1,10 @@
-query EnvironmentStagedChanges($environmentId: String!) {
+query EnvironmentStagedChanges($environmentId: String!, $decryptVariables: Boolean) {
   environmentStagedChanges(environmentId: $environmentId) {
     id
+    createdAt
+    updatedAt
     status
-    patch
+    lastAppliedError
+    patch(decryptVariables: $decryptVariables)
   }
 }
