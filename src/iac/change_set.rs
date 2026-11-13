@@ -277,6 +277,7 @@ pub fn diff_graphs_following(
         if resource_type(resource) == "service" {
             diff_top_level_field(previous, resource, "tracing", &mut changes);
             diff_top_level_field(previous, resource, "cdn", &mut changes);
+            diff_top_level_field(previous, resource, "edgeRules", &mut changes);
         }
         diff_networking(previous, resource, &mut changes, &mut diagnostics);
         if resource_type(previous) == "bucket" && resource_type(resource) == "bucket" {
@@ -1265,13 +1266,17 @@ fn diff_top_level_field(
     if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
         return;
     }
-    let details = changed_leaf_paths(&normalized_before, &normalized_after, field_name);
+    let details = if field_name == "edgeRules" {
+        edge_rule_details(&normalized_before, &normalized_after)
+    } else {
+        changed_leaf_paths(&normalized_before, &normalized_after, field_name)
+    };
     changes.push(update(
         &resource_addr(resource),
         field_name,
         before,
         after,
-        summary_for_field(resource, field_name, &normalized_before, &normalized_after),
+        summary_from_details(resource, field_name, &details),
         Some(details),
         "safe",
     ));
@@ -1745,7 +1750,14 @@ fn normalize_database_deploy(value: &Value) -> Value {
 }
 
 fn summary_for_field(resource: &Value, field_name: &str, before: &Value, after: &Value) -> String {
-    let details = changed_leaf_paths(before, after, field_name);
+    summary_from_details(
+        resource,
+        field_name,
+        &changed_leaf_paths(before, after, field_name),
+    )
+}
+
+fn summary_from_details(resource: &Value, field_name: &str, details: &[String]) -> String {
     if !details.is_empty() {
         let shown = details
             .iter()
@@ -1886,10 +1898,10 @@ fn update(
 
 /// Auto-instrumentation reaches running containers live; only
 /// `tracing.enabled` needs a deploy, for the OpenTelemetry variables. CDN
-/// settings live on the edge and never reach the container. Mirrors
-/// backboard's `changesThatSkipRedeploy`.
+/// settings and edge rules live on the edge and never reach the container.
+/// Mirrors backboard's `changesThatSkipRedeploy`.
 fn deploy_effect_for_update(field_name: &str, details: Option<&[String]>) -> &'static str {
-    if field_name == "config" || field_name == "groupId" || field_name == "cdn" {
+    if matches!(field_name, "config" | "groupId" | "cdn" | "edgeRules") {
         return "none";
     }
     if field_name == "tracing" {
@@ -2086,7 +2098,113 @@ fn normalize_cdn_object(object: &Map<String, Value>) -> Map<String, Value> {
         .collect()
 }
 
+/// Railway serialises a service's edge rules in one canonical form and
+/// compares a patch the same way: sorted by `priority`, without `id` or null
+/// fields, `enabled` left out when true, `mode` left out when `enforce`, and
+/// empty `params` left out. An empty list means the same as no list. Mirrors
+/// `canonicalizeEdgeRules` in `@railway/models`; nested keys sort on their own
+/// since `serde_json` maps are ordered.
+pub fn normalize_edge_rules(value: &Value) -> Value {
+    let Some(rules) = value.as_array() else {
+        return Value::Null;
+    };
+    let mut normalized: Vec<Value> = rules.iter().map(normalize_edge_rule).collect();
+    normalized.sort_by_key(|rule| rule.get("priority").and_then(Value::as_i64));
+    if normalized.is_empty() {
+        Value::Null
+    } else {
+        Value::Array(normalized)
+    }
+}
+
+fn normalize_edge_rule(rule: &Value) -> Value {
+    let Some(object) = rule.as_object() else {
+        return rule.clone();
+    };
+    let mut out = Map::new();
+    for (key, child) in object {
+        let is_default = match key.as_str() {
+            "id" => true,
+            "enabled" => child.as_bool() == Some(true),
+            "mode" => child.as_str() == Some("enforce"),
+            "description" => child.as_str() == Some(""),
+            _ => false,
+        };
+        if child.is_null() || is_default {
+            continue;
+        }
+        let mut child = without_nulls(child);
+        if key == "then" {
+            if let Some(action) = child.as_object_mut() {
+                if action
+                    .get("params")
+                    .is_some_and(|params| params.as_object().is_some_and(Map::is_empty))
+                {
+                    action.remove("params");
+                }
+            }
+        }
+        out.insert(key.clone(), child);
+    }
+    Value::Object(out)
+}
+
+/// Objects with their null entries dropped, all the way down.
+fn without_nulls(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(_, child)| !child.is_null())
+                .map(|(key, child)| (key.clone(), without_nulls(child)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_nulls).collect()),
+        other => other.clone(),
+    }
+}
+
+/// One line per rule, keyed by priority: the edge replaces the list as a
+/// whole and a rule has no name of its own, so a leaf-by-leaf diff of two
+/// lists would pair rules up by position and read as churn.
+fn edge_rule_details(before: &Value, after: &Value) -> Vec<String> {
+    let by_priority = |value: &Value| -> BTreeMap<i64, Value> {
+        value
+            .as_array()
+            .map(|rules| {
+                rules
+                    .iter()
+                    .map(|rule| {
+                        (
+                            rule.get("priority").and_then(Value::as_i64).unwrap_or(-1),
+                            rule.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let before = by_priority(before);
+    let after = by_priority(after);
+    let mut priorities: Vec<_> = before.keys().chain(after.keys()).copied().collect();
+    priorities.sort_unstable();
+    priorities.dedup();
+    priorities
+        .into_iter()
+        .filter(|priority| before.get(priority) != after.get(priority))
+        .map(|priority| {
+            format!(
+                "edgeRules[{priority}] ({} → {})",
+                format_diff_value(before.get(&priority).unwrap_or(&Value::Null)),
+                format_diff_value(after.get(&priority).unwrap_or(&Value::Null))
+            )
+        })
+        .collect()
+}
+
 fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
+    if field_name == "edgeRules" {
+        return normalize_edge_rules(value);
+    }
     if !value.is_object() {
         return value.clone();
     }

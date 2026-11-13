@@ -17,7 +17,8 @@ pub mod saved_plan;
 
 #[allow(dead_code)]
 pub use change_set::{
-    ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, normalize_cdn, render_change_set,
+    ChangeSet, RAILWAY_CHANGE_SET_VERSION, diff_graphs, normalize_cdn, normalize_edge_rules,
+    render_change_set,
 };
 #[allow(dead_code)]
 pub use compiler::{

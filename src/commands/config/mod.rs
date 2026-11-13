@@ -1329,6 +1329,7 @@ fn render_service_body_following(
     render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_tracing(resource.tracing.as_ref(), lang, &mut lines);
     render_cdn(resource.cdn.as_ref(), lang, &mut lines);
+    render_edge_rules(resource.edge_rules.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -1494,6 +1495,7 @@ fn render_function_body(
     render_networking(resource.networking.as_ref(), lang, &mut lines);
     render_tracing(resource.tracing.as_ref(), lang, &mut lines);
     render_cdn(resource.cdn.as_ref(), lang, &mut lines);
+    render_edge_rules(resource.edge_rules.as_ref(), lang, &mut lines);
     render_volume_attachments(
         resource.volume_attachments.as_ref(),
         resource_names,
@@ -1924,6 +1926,24 @@ fn render_cdn(cdn: Option<&serde_json::Value>, lang: AuthoringLang, lines: &mut 
         return;
     }
     lines.push(lang.config_field("cdn", &code_value(&cdn, lang)));
+}
+
+/// The rules in their canonical form: sorted by priority, without ids or
+/// null fields, and without `enabled: true` or `mode: "enforce"`. A service
+/// without rules has no list, and a plan reads an empty list as none.
+fn render_edge_rules(
+    rules: Option<&serde_json::Value>,
+    lang: AuthoringLang,
+    lines: &mut Vec<String>,
+) {
+    let Some(rules) = rules else {
+        return;
+    };
+    let rules = crate::iac::normalize_edge_rules(rules);
+    if rules.is_null() {
+        return;
+    }
+    lines.push(lang.config_field("edgeRules", &code_value(&rules, lang)));
 }
 
 fn is_image_source(source: Option<&serde_json::Value>) -> bool {
@@ -2621,6 +2641,7 @@ mod tests {
             group_id: None,
             tracing: None,
             cdn: None,
+            edge_rules: None,
             kind: None,
         }
     }
@@ -2645,6 +2666,7 @@ mod tests {
             group_id: None,
             tracing: None,
             cdn: None,
+            edge_rules: None,
             kind: None,
         }
     }
@@ -2967,6 +2989,70 @@ mod tests {
             AuthoringLang::TypeScript,
         );
         assert!(!rendered.contains("cdn"), "{rendered}");
+    }
+
+    #[test]
+    fn pull_renderer_authors_edge_rules_in_their_canonical_form() {
+        let mut resource = service_resource(json!({ "image": "nginx:latest" }), json!({}));
+        resource.edge_rules = Some(json!([
+            {
+                "id": "rul_2l3imrrd1hdzp",
+                "priority": 20,
+                "enabled": true,
+                "mode": "enforce",
+                "if": { "attr": "http.path", "op": "matches", "value": "/api*", "key": null },
+                "then": { "action": "cache_override", "params": { "bypass": true } }
+            },
+            {
+                "priority": 10,
+                "description": "Keep the admin private",
+                "enabled": false,
+                "if": { "attr": "http.path", "op": "matches", "value": "/admin*" },
+                "then": { "action": "block", "params": {} }
+            }
+        ]));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert_eq!(
+            rendered.lines().find(|line| line.contains("edgeRules")),
+            Some(
+                "    edgeRules: [{ description: \"Keep the admin private\", enabled: false, \
+                 if: { attr: \"http.path\", op: \"matches\", value: \"/admin*\" }, \
+                 priority: 10, then: { action: \"block\" } }, \
+                 { if: { attr: \"http.path\", op: \"matches\", value: \"/api*\" }, \
+                 priority: 20, then: { action: \"cache_override\", params: { bypass: true } } }],"
+            ),
+            "{rendered}"
+        );
+
+        resource.edge_rules = Some(json!([]));
+        let rendered = render_service_body(
+            &resource,
+            &std::collections::BTreeMap::new(),
+            &std::collections::HashMap::new(),
+            true,
+            AuthoringLang::TypeScript,
+        );
+        assert!(!rendered.contains("edgeRules"), "{rendered}");
+    }
+
+    #[test]
+    fn pull_renderer_authors_edge_rules_on_functions() {
+        let mut resource = function_resource("hello", "export default {}\n");
+        resource.edge_rules = Some(json!([{
+            "priority": 10,
+            "if": { "attr": "ipv4.src", "op": "in", "value": ["10.0.0.0/8"] },
+            "then": { "action": "allow" }
+        }]));
+        let graph = graph_of(vec![resource]);
+        let rendered = render_graph_as_railway(&graph, true, AuthoringLang::TypeScript, true);
+        assert!(rendered.contains("edgeRules: [{"), "{rendered}");
+        assert!(rendered.contains("value: [\"10.0.0.0/8\"]"), "{rendered}");
     }
 
     #[test]
