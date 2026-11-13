@@ -33,11 +33,11 @@ jobs:
           echo "version is: ${{ env.CLI_VERSION }}"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
 
       - name: Build Changelog
         id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v5
+        uses: mikepenz/release-changelog-builder-action@v5.4.1
         with:
           configuration: ".github/changelog-configuration.json"
         env:
@@ -45,7 +45,7 @@ jobs:
 
       - name: Create Draft GitHub release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -107,7 +107,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
         with:
           fetch-depth: 1
       - name: Install Rust
@@ -116,7 +116,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/cargo@v1.0.3
         with:
           command: build
           args: --release --locked --target ${{ matrix.target }}
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload docker artifact
         if: ${{ matrix.docker-artifact }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: docker-binary-artifact-${{ matrix.target }}
           path: target/${{ matrix.target }}/release
@@ -135,7 +135,7 @@ jobs:
 
       - name: Upload docker artifact version
         if: ${{ matrix.docker-artifact }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: docker-tag-artifact
           path: cli-version.txt
@@ -200,7 +200,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -234,10 +234,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.4.0
 
       - name: Use Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v6.5.0
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
@@ -252,7 +252,7 @@ jobs:
 
     steps:
       - name: Discord Deployment Status Notification
-        uses: sarisia/actions-status-discord@v1
+        uses: sarisia/actions-status-discord@v1.16.0
         with:
           webhook: ${{ secrets.DEPLOY_WEBHOOK }}
           status: ${{ job.status }}
