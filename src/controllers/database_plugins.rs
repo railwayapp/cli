@@ -290,7 +290,7 @@ pub fn resolve_root_service_id(config: &EnvironmentConfig, service_id: &str) -> 
 mod tests {
     use super::*;
     use crate::controllers::config::{DeployConfig, ServiceSource, Variable};
-    use crate::controllers::database_engines::{MYSQL, POSTGRES, REDIS};
+    use crate::controllers::database_engines::{MONGO, MYSQL, POSTGRES, REDIS};
 
     fn service_with_image(image: &str) -> ServiceInstance {
         ServiceInstance {
@@ -406,6 +406,7 @@ mod tests {
             (&POSTGRES, "PATRONI_ENABLED"),
             (&REDIS, "SENTINEL_ENABLED"),
             (&MYSQL, "GR_ENABLED"),
+            (&MONGO, "RS_ENABLED"),
         ] {
             let config = config_with(vec![
                 ("root", declared_root(variable, true)),
@@ -438,6 +439,7 @@ mod tests {
         // none, so they must not go guessing another engine's variable.
         assert!(!compute_ha_state(&config, "root", &BTreeMap::new(), &REDIS).is_cluster);
         assert!(!compute_ha_state(&config, "root", &BTreeMap::new(), &MYSQL).is_cluster);
+        assert!(!compute_ha_state(&config, "root", &BTreeMap::new(), &MONGO).is_cluster);
     }
 
     #[test]
