@@ -8,6 +8,7 @@ use tokio::time::sleep;
 use crate::{
     client::{GQLClient, post_graphql_raw},
     config::{Configs, LinkedProject},
+    errors::RailwayError,
 };
 
 use super::change_set::{
@@ -534,33 +535,84 @@ async fn fetch_current_environment(
     environment_id: &str,
     decrypt_variables: bool,
 ) -> Result<EnvNode> {
-    let query_with_partials = r#"
-      query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
-        environment(id: $environmentId) {
-          id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
-        }
-      }
-    "#;
     let vars = json!({ "environmentId": environment_id, "decryptVariables": decrypt_variables });
-    match post_graphql_raw::<EnvQuery, _>(client, endpoint, query_with_partials, vars.clone()).await
+    Ok(
+        with_source_environment_fallback(|select_source_environment| {
+            fetch_environment_node(client, endpoint, vars.clone(), select_source_environment)
+        })
+        .await?,
+    )
+}
+
+/// A token scoped to a forked environment may not read `sourceEnvironment`,
+/// so on an authorization error retry without it.
+async fn with_source_environment_fallback<F, Fut>(fetch: F) -> Result<EnvNode, RailwayError>
+where
+    F: Fn(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<EnvNode, RailwayError>>,
+{
+    match fetch(true).await {
+        Err(err) if is_authorization_error(&err) => match fetch(false).await {
+            Err(retry_err) if is_authorization_error(&retry_err) => Err(err),
+            other => other,
+        },
+        other => other,
+    }
+}
+
+fn is_authorization_error(err: &RailwayError) -> bool {
+    matches!(
+        err,
+        RailwayError::Unauthorized
+            | RailwayError::UnauthorizedToken(_)
+            | RailwayError::UnauthorizedLogin
+            | RailwayError::OAuthInsufficientGrant
+    )
+}
+
+async fn fetch_environment_node(
+    client: &reqwest::Client,
+    endpoint: &str,
+    vars: Value,
+    select_source_environment: bool,
+) -> Result<EnvNode, RailwayError> {
+    let query_with_partials = iac_environment_query(select_source_environment, true);
+    match post_graphql_raw::<EnvQuery, _>(client, endpoint, &query_with_partials, vars.clone())
+        .await
     {
         Ok(data) => Ok(data.environment),
         Err(err) if err.to_string().contains("iacPartials") => {
-            let query = r#"
-              query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
-                environment(id: $environmentId) {
-                  id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
-                }
-              }
-            "#;
+            let query = iac_environment_query(select_source_environment, false);
             Ok(
-                post_graphql_raw::<EnvQuery, _>(client, endpoint, query, vars)
+                post_graphql_raw::<EnvQuery, _>(client, endpoint, &query, vars)
                     .await?
                     .environment,
             )
         }
-        Err(err) => Err(err.into()),
+        Err(err) => Err(err),
     }
+}
+
+fn iac_environment_query(select_source_environment: bool, select_iac_partials: bool) -> String {
+    let source_environment = if select_source_environment {
+        " sourceEnvironment { name }"
+    } else {
+        ""
+    };
+    let iac_partials = if select_iac_partials {
+        " iacPartials"
+    } else {
+        ""
+    };
+    format!(
+        r#"
+      query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {{
+        environment(id: $environmentId) {{
+          id name projectId isEphemeral meta {{ branch prNumber prRepo }}{source_environment} config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs{iac_partials}
+        }}
+      }}
+    "#
+    )
 }
 
 async fn fill_name_maps(
@@ -869,6 +921,127 @@ mod tests {
             "config": {}
         }));
         assert!(production.pr_context().is_none());
+    }
+
+    #[test]
+    fn environment_query_selects_source_environment_and_partials_by_default() {
+        let query = iac_environment_query(true, true);
+        assert!(query.contains(
+            "id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials"
+        ));
+
+        let without_source = iac_environment_query(false, true);
+        assert!(!without_source.contains("sourceEnvironment"));
+        assert!(without_source.contains("iacPartials"));
+        assert!(without_source.contains("config(decryptVariables: $decryptVariables)"));
+        assert!(without_source.contains("meta { branch prNumber prRepo }"));
+
+        let bare = iac_environment_query(false, false);
+        assert!(!bare.contains("sourceEnvironment"));
+        assert!(!bare.contains("iacPartials"));
+    }
+
+    async fn run_source_environment_fallback(
+        responses: Vec<Result<EnvNode, RailwayError>>,
+    ) -> (Result<EnvNode, RailwayError>, Vec<bool>) {
+        let responses = std::sync::Mutex::new(std::collections::VecDeque::from(responses));
+        let attempts = std::sync::Mutex::new(Vec::new());
+        let result = with_source_environment_fallback(|select_source_environment| {
+            attempts.lock().unwrap().push(select_source_environment);
+            let response = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected extra environment fetch");
+            async move { response }
+        })
+        .await;
+        (result, attempts.into_inner().unwrap())
+    }
+
+    fn forked_environment(with_source: bool) -> EnvNode {
+        let mut value = json!({
+            "id": "env",
+            "name": "sandbox",
+            "isEphemeral": false,
+            "config": {}
+        });
+        if with_source {
+            value["sourceEnvironment"] = json!({ "name": "production" });
+        }
+        env_node(value)
+    }
+
+    #[tokio::test]
+    async fn source_environment_is_kept_when_readable() {
+        let (result, attempts) =
+            run_source_environment_fallback(vec![Ok(forked_environment(true))]).await;
+        let node = result.unwrap();
+        assert_eq!(attempts, vec![true]);
+        assert_eq!(
+            node.source_environment.and_then(|source| source.name),
+            Some("production".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_source_environment_is_dropped_instead_of_failing() {
+        for refusal in [
+            RailwayError::UnauthorizedToken("RAILWAY_TOKEN".to_string()),
+            RailwayError::Unauthorized,
+            RailwayError::UnauthorizedLogin,
+            RailwayError::OAuthInsufficientGrant,
+        ] {
+            let (result, attempts) =
+                run_source_environment_fallback(vec![Err(refusal), Ok(forked_environment(false))])
+                    .await;
+            let node = result.unwrap();
+            assert_eq!(attempts, vec![true, false]);
+            assert_eq!(node.name.as_deref(), Some("sandbox"));
+            assert!(node.source_environment.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn real_authorization_failure_still_errors_with_the_original_error() {
+        let (result, attempts) = run_source_environment_fallback(vec![
+            Err(RailwayError::UnauthorizedToken("RAILWAY_TOKEN".to_string())),
+            Err(RailwayError::Unauthorized),
+        ])
+        .await;
+        assert_eq!(attempts, vec![true, false]);
+        assert!(matches!(
+            result,
+            Err(RailwayError::UnauthorizedToken(ref name)) if name == "RAILWAY_TOKEN"
+        ));
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_not_retried() {
+        let (result, attempts) = run_source_environment_fallback(vec![Err(
+            RailwayError::InvalidRailwayToken("RAILWAY_TOKEN".to_string()),
+        )])
+        .await;
+        assert_eq!(attempts, vec![true]);
+        assert!(matches!(result, Err(RailwayError::InvalidRailwayToken(_))));
+
+        let (result, attempts) = run_source_environment_fallback(vec![Err(
+            RailwayError::GraphQLError("boom".to_string()),
+        )])
+        .await;
+        assert_eq!(attempts, vec![true]);
+        assert!(matches!(result, Err(RailwayError::GraphQLError(ref m)) if m == "boom"));
+    }
+
+    #[tokio::test]
+    async fn non_authorization_error_on_retry_is_reported() {
+        let (result, attempts) = run_source_environment_fallback(vec![
+            Err(RailwayError::UnauthorizedToken("RAILWAY_TOKEN".to_string())),
+            Err(RailwayError::GraphQLError("boom".to_string())),
+        ])
+        .await;
+        assert_eq!(attempts, vec![true, false]);
+        assert!(matches!(result, Err(RailwayError::GraphQLError(ref m)) if m == "boom"));
     }
 
     fn wire_after_apply(ok_before: bool, apply_result: Value) -> Value {
