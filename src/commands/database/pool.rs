@@ -36,13 +36,12 @@ use crate::controllers::{
         build_multi_region_patch, merge_config, region_data_from_deployment_meta,
         validate_total_replicas,
     },
-    template_apply::{
-        self, ApplyKind, ApplyTemplateParams, RevertTemplateParams, stage_and_commit_patch,
-    },
+    template_apply::{self, ApplyTemplateParams, RevertTemplateParams, stage_and_commit_patch},
 };
 
 use super::{
-    ResourceRef, confirm_or_bail, print_field, resolve_root, service_name_map, status_label,
+    ResourceRef, confirm_deploy_or_bail, deploy_outcome, on_off, print_field, resolve_root,
+    service_name_map,
 };
 
 /// Live-probe timeout -- PgBouncer's admin console usually answers instantly;
@@ -71,7 +70,7 @@ const MAX_PREPARED_STATEMENTS_FALLBACK: i64 = 100;
 /// Manage PgBouncer connection pooling
 #[derive(Parser)]
 #[clap(
-    after_help = "Examples:\n\n  railway postgres pgbouncer status --service postgres\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n  railway postgres pgbouncer remove --service postgres --yes\n  railway postgres pgbouncer configure --service postgres --max-client-conn 200\n  railway postgres pgbouncer scale --service postgres --replicas 2\n\nAutomation notes:\n  Works against a standalone database or an HA cluster root -- if --service points at a pooler/proxy edge node, the actual database root is resolved automatically."
+    after_help = "Examples:\n\n  railway postgres pgbouncer status --service postgres\n  railway postgres pgbouncer add --service postgres --pool-mode transaction\n  railway postgres pgbouncer remove --service postgres --yes\n  railway postgres pgbouncer configure --service postgres --max-client-conn 200\n  railway postgres pgbouncer scale --service postgres --replicas 2\n\nAutomation notes:\n  Works against a standalone database or an HA cluster. If --service points at the PgBouncer or reverse proxy service, the CLI resolves the database behind it."
 )]
 pub struct Args {
     #[clap(subcommand)]
@@ -92,7 +91,7 @@ enum Commands {
     /// Configure pool mode and connection knobs
     Configure(ConfigureArgs),
 
-    /// Scale PgBouncer replicas
+    /// Scale PgBouncer instances
     Scale(ScaleArgs),
 }
 
@@ -124,7 +123,7 @@ struct AddArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -135,7 +134,7 @@ struct RemoveArgs {
     #[clap(long, short = 'y')]
     yes: bool,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -164,18 +163,18 @@ struct ConfigureArgs {
     #[clap(long = "max-prepared-statements", value_parser = clap::value_parser!(i64).range(0..))]
     max_prepared_statements: Option<i64>,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
 
 #[derive(Parser)]
 struct ScaleArgs {
-    /// Target replica count
+    /// Target number of PgBouncer instances
     #[clap(long, value_parser = clap::value_parser!(i64).range(0..))]
     replicas: i64,
 
-    /// Commit the config change without triggering deploys (applies on the next deploy)
+    /// Stage the change without deploying (it applies on the next deploy)
     #[clap(long)]
     no_deploy: bool,
 }
@@ -327,15 +326,15 @@ fn print_pgbouncer_status(output: &PgBouncerStatusOutput) {
     print_field("Service:", &output.service.name.green().bold());
     print_field("Environment:", &output.environment.name.blue().bold());
     if output.root.id != output.service.id {
-        print_field("Database root:", &output.root.name);
+        print_field("Database:", &output.root.name);
     }
-    print_field("Status:", &status_label(output.attached));
+    print_field("Connection pooling:", &on_off(output.attached));
 
     if !output.attached {
         return;
     }
     if let Some(edge) = &output.edge {
-        print_field("Edge service:", &edge.name);
+        print_field("PgBouncer service:", &edge.name);
     }
     print_field(
         "Pool mode:",
@@ -429,7 +428,7 @@ fn print_util_line(label: &str, used: i64, capacity: i64, warn_threshold: f64) {
     let util = used as f64 / capacity as f64;
     let free = (capacity - used).max(0);
     let line = format!(
-        "{used} of {capacity} in use ({:.0}%) -- {free} free",
+        "{used} of {capacity} in use ({:.0}%), {free} free",
         util * 100.0
     );
     let colored = if util >= UTIL_CRIT {
@@ -474,14 +473,17 @@ async fn add(
         "Postgres database"
     };
 
-    if !confirm_or_bail(
+    if !confirm_deploy_or_bail(
+        &ctx,
         &format!(
-            "Add PgBouncer in front of {} ({})? Connection strings will point to PgBouncer.",
+            "Add PgBouncer in front of {} ({})? Connection strings will point to PgBouncer (Pooled), and a Direct endpoint stays available.",
             root.root_name.yellow(),
             upstream
         ),
         args.yes,
-    )? {
+    )
+    .await?
+    {
         println!("Cancelled.");
         return Ok(());
     }
@@ -497,12 +499,10 @@ async fn add(
         ApplyTemplateParams {
             template_code: pooling.template_code.to_string(),
             service_id: root.root_id.clone(),
-            volume_instance_id: None,
             replica_count: None,
             internal_count: None,
             edge_count: None,
             edge_variables: Some(edge_variables),
-            kind: ApplyKind::Stacking,
             auto_deploy: !args.no_deploy,
         },
     )
@@ -513,11 +513,7 @@ async fn add(
         .await?
         .config;
     if !json {
-        let verb = if result.deployed {
-            "Added and deployed"
-        } else {
-            "Added (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(result.deployed, "Added");
         println!(
             "{verb} PgBouncer in front of {} in environment {} (project {}).",
             root.root_name.bold(),
@@ -548,13 +544,17 @@ async fn remove(
         bail!("PgBouncer is not attached to {}.", root.root_name);
     }
 
-    if !confirm_or_bail(
+    if !confirm_deploy_or_bail(
+        &ctx,
         &format!(
-            "Remove PgBouncer from {}? Active PgBouncer connections will be dropped.",
-            root.root_name.red()
+            "Remove connection pooling from {}? Connection strings point back to {}, and active PgBouncer connections drop.",
+            root.root_name.red(),
+            root.root_name
         ),
         args.yes,
-    )? {
+    )
+    .await?
+    {
         println!("Cancelled.");
         return Ok(());
     }
@@ -574,11 +574,7 @@ async fn remove(
         .await?
         .config;
     if !json {
-        let verb = if result.deployed {
-            "Removed and deployed"
-        } else {
-            "Removed (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(result.deployed, "Removed");
         println!(
             "{verb} PgBouncer from {} in environment {} (project {}).",
             root.root_name.bold(),
@@ -699,6 +695,7 @@ async fn configure(
         ..EnvironmentConfig::default()
     };
 
+    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
     let deployed = stage_and_commit_patch(&ctx, patch, !args.no_deploy)
         .await
         .context("Failed to configure PgBouncer")?;
@@ -707,11 +704,7 @@ async fn configure(
         .await?
         .config;
     if !json {
-        let verb = if deployed {
-            "Configured and deployed"
-        } else {
-            "Configured (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(deployed, "Configured");
         println!(
             "{verb} PgBouncer on {} in environment {} (project {}).",
             root.root_name.bold(),
@@ -747,7 +740,7 @@ fn configure_advisory_warnings(inputs: AdvisoryInputs) -> Vec<String> {
 
     if inputs.max_client_conn < pool_capacity {
         warnings.push(format!(
-            "MAX_CLIENT_CONN ({}) is below pool capacity ({} x {replicas} replica{} = {pool_capacity}) -- some pooled connections can't be reached.",
+            "MAX_CLIENT_CONN ({}) is below pool capacity ({} x {replicas} instance{} = {pool_capacity}), so some pooled connections can't be reached.",
             inputs.max_client_conn,
             inputs.default_pool_size,
             if replicas == 1 { "" } else { "s" },
@@ -756,7 +749,7 @@ fn configure_advisory_warnings(inputs: AdvisoryInputs) -> Vec<String> {
 
     if inputs.pool_mode == "transaction" && inputs.max_prepared_statements <= 0 {
         warnings.push(
-            "MAX_PREPARED_STATEMENTS is 0 in transaction mode -- this breaks Prisma and most ORMs."
+            "MAX_PREPARED_STATEMENTS is 0 in transaction mode, which breaks Prisma and most ORMs."
                 .to_string(),
         );
     }
@@ -802,7 +795,7 @@ async fn scale(
     )
     .await?;
     let instance = find_service_instance(&environment_instances, &edge_id).with_context(|| {
-        format!("PgBouncer edge service \"{edge_name}\" has no instance in this environment")
+        format!("PgBouncer service \"{edge_name}\" isn't deployed in this environment")
     })?;
 
     let existing = instance
@@ -829,6 +822,7 @@ async fn scale(
     validate_total_replicas(&region_data)?;
 
     let patch = build_multi_region_patch(&edge_id, &region_data)?;
+    template_apply::warn_if_preexisting_staged_changes(&ctx).await;
     let deployed = stage_and_commit_patch(&ctx, patch, !args.no_deploy)
         .await
         .context("Failed to scale PgBouncer")?;
@@ -837,13 +831,9 @@ async fn scale(
         .await?
         .config;
     if !json {
-        let verb = if deployed {
-            "Scaled and deployed"
-        } else {
-            "Scaled (deploys skipped -- applies on the next deploy)"
-        };
+        let verb = deploy_outcome(deployed, "Scaled");
         println!(
-            "{verb} {} to {} replica(s) in environment {} (project {}).",
+            "{verb} {} to {} instance(s) in environment {} (project {}).",
             edge_name.bold(),
             args.replicas,
             ctx.environment_name.bold(),
@@ -870,10 +860,10 @@ fn single_scalable_region(existing: &Value, edge_name: &str) -> Result<String> {
     match regions.as_slice() {
         [region] => Ok(region.clone()),
         [] => bail!(
-            "\"{edge_name}\" has no active deployment yet in this environment -- deploy it first, then retry `railway postgres pgbouncer scale`."
+            "\"{edge_name}\" isn't deployed in this environment yet. Deploy it first, then retry `railway postgres pgbouncer scale`."
         ),
         _ => bail!(
-            "\"{edge_name}\" is deployed across multiple regions ({}) -- use `railway scale --service {edge_name} <REGION>=<REPLICAS>` to control replicas per region.",
+            "\"{edge_name}\" is deployed across multiple regions ({}). Use `railway scale --service {edge_name} <REGION>=<REPLICAS>` to set the instances per region.",
             regions.join(", ")
         ),
     }
@@ -1014,7 +1004,7 @@ async fn probe_pgbouncer_live_inner(
     )
     .await?;
     let instance = find_service_instance(&environment_instances, edge_service_id)
-        .context("PgBouncer edge service has no instance in this environment")?;
+        .context("The PgBouncer service isn't deployed in this environment")?;
     let instance_id = instance.id.clone();
 
     let command = build_pgbouncer_probe_command();
