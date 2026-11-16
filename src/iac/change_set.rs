@@ -2071,10 +2071,31 @@ fn generated_secret_is_unchanged(current: Option<&Value>, desired: &Value) -> bo
         return false;
     };
     let desired_gen = effective_generator(desired_gen, desired);
+    let rotate_requested = value_rotate_token(desired).is_some();
     match generator_text(current) {
-        Some(current_gen) => current_gen == desired_gen,
-        None => desired.get("rotate").and_then(Value::as_str).is_none(),
+        Some(current_gen) if current_gen == desired_gen => true,
+        // Deleting the rotate line must not mint a new secret. The stored
+        // generator keeps its `rotate=` suffix until the file sets a new one.
+        Some(current_gen) if !rotate_requested => {
+            generator_without_rotate(current_gen) == generator_without_rotate(&desired_gen)
+        }
+        None => !rotate_requested,
+        Some(_) => false,
     }
+}
+
+fn value_rotate_token(value: &Value) -> Option<&str> {
+    value
+        .get("rotate")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+}
+
+fn generator_without_rotate(generator: &str) -> &str {
+    generator
+        .split_once(" rotate=")
+        .map(|(base, _)| base)
+        .unwrap_or(generator)
 }
 
 fn effective_generator(generator: &str, value: &Value) -> String {
