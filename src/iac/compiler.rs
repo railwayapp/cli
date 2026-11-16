@@ -703,7 +703,29 @@ fn variable_to_config(value: &Value, resource_names_by_id: &Map<String, Value>) 
             let output = field_str(value, "output").unwrap_or("");
             json!({ "value": format!("${{{{{name}.{output}}}}}") })
         }
-        _ => value.clone(),
+        _ => {
+            let mut copy = value.clone();
+            if let Some(obj) = copy.as_object_mut() {
+                if let Some(generator) = obj
+                    .get("generator")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    if let Some(token) = obj
+                        .get("rotate")
+                        .and_then(Value::as_str)
+                        .filter(|token| !token.is_empty() && !generator.contains("rotate="))
+                    {
+                        obj.insert(
+                            "generator".to_string(),
+                            json!(format!("{generator} rotate={token}")),
+                        );
+                    }
+                    obj.remove("rotate");
+                }
+            }
+            copy
+        }
     }
 }
 
@@ -1067,14 +1089,21 @@ fn variables_from_environment_config(variables: &Value) -> Value {
         let sealed = value.get("isSealed").and_then(Value::as_bool) == Some(true);
         let literal = value.get("value").and_then(Value::as_str);
         let masked = literal.is_none() || literal == Some("") || literal == Some("*****") || sealed;
-        out.insert(
-            key.clone(),
-            if masked {
-                json!({ "type": "preserve" })
-            } else {
-                json!({ "type": "literal", "value": literal })
-            },
-        );
+        let mut entry = if masked {
+            json!({ "type": "preserve" })
+        } else {
+            json!({ "type": "literal", "value": literal })
+        };
+        if let Some(generator) = value
+            .get("generator")
+            .and_then(Value::as_str)
+            .filter(|generator| !generator.is_empty())
+        {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("generator".to_string(), json!(generator));
+            }
+        }
+        out.insert(key.clone(), entry);
     }
     Value::Object(out)
 }

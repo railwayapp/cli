@@ -147,6 +147,77 @@ fn diff(
     })
 }
 
+#[test]
+fn generated_secret_does_not_plan_a_change_when_the_variable_exists() {
+    let current = graph_from(vec![service(
+        "api",
+        json!({
+            "variables": {
+                "SESSION_SECRET": { "type": "preserve", "generator": "secret(32)" }
+            }
+        }),
+    )]);
+    let desired = graph_from(vec![service(
+        "api",
+        json!({
+            "variables": {
+                "SESSION_SECRET": { "generator": "secret(32)", "isSealed": true }
+            }
+        }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(result.changes.is_empty(), "{:?}", result.changes);
+
+    // Older imports dropped the generator. Existence is still a no-op.
+    let current = graph_from(vec![service(
+        "api",
+        json!({ "variables": { "SESSION_SECRET": { "type": "preserve" } } }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(result.changes.is_empty(), "{:?}", result.changes);
+}
+
+#[test]
+fn generated_secret_still_plans_a_set_when_missing_or_rotated() {
+    let current = graph_from(vec![service("api", json!({}))]);
+    let desired = graph_from(vec![service(
+        "api",
+        json!({ "variables": { "SESSION_SECRET": { "generator": "secret(32)" } } }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(kinds(&result), vec!["variable.set".to_string()]);
+
+    let current = graph_from(vec![service(
+        "api",
+        json!({ "variables": { "SESSION_SECRET": { "type": "preserve", "generator": "secret(32)" } } }),
+    )]);
+    let desired = graph_from(vec![service(
+        "api",
+        json!({ "variables": { "SESSION_SECRET": { "generator": "secret(32)", "rotate": "2026-12" } } }),
+    )]);
+    let result = diff(&current, &desired);
+    assert_eq!(kinds(&result), vec!["variable.set".to_string()]);
+
+    // Removing rotate leaves the stored secret alone.
+    let current = graph_from(vec![service(
+        "api",
+        json!({
+            "variables": {
+                "SESSION_SECRET": {
+                    "type": "preserve",
+                    "generator": "secret(32) rotate=2026-12"
+                }
+            }
+        }),
+    )]);
+    let desired = graph_from(vec![service(
+        "api",
+        json!({ "variables": { "SESSION_SECRET": { "generator": "secret(32)" } } }),
+    )]);
+    let result = diff(&current, &desired);
+    assert!(result.changes.is_empty(), "{:?}", result.changes);
+}
+
 fn kinds(change_set: &super::change_set::ChangeSet) -> Vec<String> {
     change_set
         .changes

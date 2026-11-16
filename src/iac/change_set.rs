@@ -794,6 +794,12 @@ fn diff_variables(
             continue;
         }
         let current = before.get(key);
+        // A generated secret is a new value on every evaluation. Re-applying
+        // the same generator must not plan a change or redeploy. A different
+        // generator, including an explicit rotate token, still plans a set.
+        if generated_secret_is_unchanged(current, value) {
+            continue;
+        }
         if !is_unknown_current_variable(current)
             && stable_stringify(&normalize_variable_for_diff(current, resources_by_address))
                 == stable_stringify(&normalize_variable_for_diff(
@@ -2037,6 +2043,68 @@ fn is_equivalent_database_source(previous: &Value, after: &Value) -> bool {
 
 fn is_preserved_variable(value: &Value) -> bool {
     field_str(value, "type") == Some("preserve")
+}
+
+fn generator_text(value: &Value) -> Option<&str> {
+    value
+        .get("generator")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            let text = value.get("value").and_then(Value::as_str)?;
+            text.contains("secret(").then_some(text)
+        })
+}
+
+fn is_secret_generator(text: &str) -> bool {
+    text.contains("secret(")
+}
+
+/// Same generator against an existing variable is a no-op. A missing stored
+/// generator is also a no-op unless the file asks to rotate: older imports
+/// did not keep the generator, and treating that as a change redeploys.
+fn generated_secret_is_unchanged(current: Option<&Value>, desired: &Value) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    let Some(desired_gen) = generator_text(desired).filter(|text| is_secret_generator(text)) else {
+        return false;
+    };
+    let desired_gen = effective_generator(desired_gen, desired);
+    let rotate_requested = value_rotate_token(desired).is_some();
+    match generator_text(current) {
+        Some(current_gen) if current_gen == desired_gen => true,
+        // Deleting the rotate line must not mint a new secret. The stored
+        // generator keeps its `rotate=` suffix until the file sets a new one.
+        Some(current_gen) if !rotate_requested => {
+            generator_without_rotate(current_gen) == generator_without_rotate(&desired_gen)
+        }
+        None => !rotate_requested,
+        Some(_) => false,
+    }
+}
+
+fn value_rotate_token(value: &Value) -> Option<&str> {
+    value
+        .get("rotate")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+}
+
+fn generator_without_rotate(generator: &str) -> &str {
+    generator
+        .split_once(" rotate=")
+        .map(|(base, _)| base)
+        .unwrap_or(generator)
+}
+
+fn effective_generator(generator: &str, value: &Value) -> String {
+    match value.get("rotate").and_then(Value::as_str) {
+        Some(token) if !token.is_empty() && !generator.contains("rotate=") => {
+            format!("{generator} rotate={token}")
+        }
+        _ => generator.to_string(),
+    }
 }
 
 fn is_unknown_current_variable(value: Option<&Value>) -> bool {
