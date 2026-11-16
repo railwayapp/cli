@@ -175,6 +175,27 @@ fn database_limits_and_pitr_round_trip_and_do_not_clear_when_omitted() {
         "{:?}",
         result.changes
     );
+
+    let mut clear_limits = postgres("db", None);
+    clear_limits["deploy"] = json!({ "limitOverride": null });
+    let result = diff(&current, &graph_from(vec![clear_limits]));
+    assert!(
+        result
+            .changes
+            .iter()
+            .any(|change| change["field"].as_str() == Some("deploy")),
+        "{:?}",
+        result.changes
+    );
+
+    let mut clear_pitr = postgres("db", None);
+    clear_pitr["variables"] = json!({ "WAL_ARCHIVE_BUCKET": null });
+    let result = diff(&current, &graph_from(vec![clear_pitr]));
+    assert!(
+        kinds(&result).iter().any(|kind| kind == "variable.delete"),
+        "{:?}",
+        result.changes
+    );
 }
 
 fn diff(

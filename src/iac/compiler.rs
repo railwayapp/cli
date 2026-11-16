@@ -504,10 +504,14 @@ fn database_deploy(database: &Value, required_mount_path: &str) -> Value {
     let Some(source) = field(database, "deploy").and_then(Value::as_object) else {
         return deploy;
     };
-    for key in ["multiRegionConfig", "limitOverride", "startCommand"] {
+    for key in ["multiRegionConfig", "startCommand"] {
         if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
             deploy[key] = value.clone();
         }
+    }
+    // Null is an explicit clear. Absence means the file is not managing limits.
+    if source.contains_key("limitOverride") {
+        deploy["limitOverride"] = source.get("limitOverride").cloned().unwrap_or(Value::Null);
     }
     deploy
 }
@@ -1108,7 +1112,33 @@ fn pitr_variables_from_environment_config(variables: &Value) -> Value {
             kept.insert(key.clone(), value.clone());
         }
     }
-    variables_from_environment_config(&Value::Object(kept))
+    let mut imported = variables_from_environment_config(&Value::Object(kept));
+    // Archive keys and secrets can come back decrypted. Never write those
+    // into the pulled file as literals.
+    if let Some(vars) = imported.as_object_mut() {
+        for (key, value) in vars.iter_mut() {
+            if pitr_value_is_credential(key) {
+                let generator = value.get("generator").cloned();
+                *value = json!({ "type": "preserve" });
+                if let Some(generator) = generator.filter(|generator| !generator.is_null()) {
+                    value
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("generator".to_string(), generator);
+                }
+            }
+        }
+    }
+    imported
+}
+
+fn pitr_value_is_credential(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name.contains("SECRET")
+        || name.contains("PASSWORD")
+        || name.contains("TOKEN")
+        || name.contains("CREDENTIAL")
+        || name.ends_with("_KEY")
 }
 
 fn variables_from_environment_config(variables: &Value) -> Value {

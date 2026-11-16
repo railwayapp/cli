@@ -1677,7 +1677,7 @@ fn render_database_variable_overrides(
                 value
                     .get("value")
                     .and_then(|value| value.as_str())
-                    .map(|literal| format!("{literal:?}"))?
+                    .map(|literal| ts_string(literal))?
             };
             Some((key, rendered))
         })
