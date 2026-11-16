@@ -978,6 +978,13 @@ fn render_graph_as_railway_following(
                         lang,
                         &mut out,
                     );
+                    render_database_variable_overrides(
+                        resource,
+                        &var_name,
+                        lang,
+                        preserve_variables,
+                        &mut out,
+                    );
                     render_database_networking_overrides(
                         resource.networking.as_ref(),
                         &var_name,
@@ -1614,7 +1621,7 @@ fn render_database_deploy_overrides(
     let Some(deploy) = deploy.and_then(|value| value.as_object()) else {
         return;
     };
-    let overrides = ["startCommand", "limitOverride"]
+    let overrides = ["startCommand", "limitOverride", "multiRegionConfig"]
         .into_iter()
         .filter_map(|key| {
             deploy
@@ -1626,19 +1633,85 @@ fn render_database_deploy_overrides(
     if overrides.is_empty() {
         return;
     }
+    let value = serde_json::Value::Object(overrides);
     match lang {
-        AuthoringLang::TypeScript => out.push_str(&format!(
-            "  {var_name}.deploy = {};\n",
-            ts_value(&serde_json::Value::Object(overrides))
-        )),
+        AuthoringLang::TypeScript => {
+            out.push_str(&format!("  {var_name}.deploy = {};\n", ts_value(&value)))
+        }
+        // Assignment, not a comment: a comment is dropped on the next plan
+        // and the limits disappear. with_fields is the Python helper that
+        // keeps the node.
         AuthoringLang::Python => out.push_str(&format!(
-            "    # deploy overrides: {}\n",
-            code_value(&serde_json::Value::Object(overrides), lang)
+            "    {var_name} = {var_name}.with_fields(deploy={})\n",
+            code_value(&value, lang)
         )),
         AuthoringLang::Go => out.push_str(&format!(
             "  // deploy overrides: {}\n",
-            code_value(&serde_json::Value::Object(overrides), lang)
+            code_value(&value, lang)
         )),
+    }
+}
+
+fn render_database_variable_overrides(
+    resource: &runner::DesiredResource,
+    var_name: &str,
+    lang: AuthoringLang,
+    preserve_variables: bool,
+    out: &mut String,
+) {
+    let Some(variables) = resource.variables.as_ref() else {
+        return;
+    };
+    if variables.is_empty() {
+        return;
+    }
+    let mut entries = variables.iter().collect::<Vec<_>>();
+    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let pairs = entries
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let rendered = if value.get("type").and_then(|value| value.as_str()) == Some("preserve")
+            {
+                preserve_variables.then(|| format!("{}()", lang.helper("preserve")))?
+            } else {
+                value
+                    .get("value")
+                    .and_then(|value| value.as_str())
+                    .map(|literal| ts_string(literal))?
+            };
+            Some((key, rendered))
+        })
+        .collect::<Vec<_>>();
+    if pairs.is_empty() {
+        return;
+    }
+    match lang {
+        AuthoringLang::TypeScript => {
+            let inner = pairs
+                .iter()
+                .map(|(key, value)| format!("    {key}: {value},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push_str(&format!("  {var_name}.env = {{\n{inner}\n  }};\n"));
+        }
+        AuthoringLang::Python => {
+            let inner = pairs
+                .iter()
+                .map(|(key, value)| format!("        {key:?}: {value},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push_str(&format!(
+                "    {var_name} = {var_name}.with_fields(variables={{\n{inner}\n    }})\n"
+            ));
+        }
+        AuthoringLang::Go => {
+            let inner = pairs
+                .iter()
+                .map(|(key, value)| format!("{key:?}: {value}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("  // pitr variables: map[string]any{{{inner}}}\n"));
+        }
     }
 }
 
@@ -3076,6 +3149,18 @@ mod tests {
         assert!(rendered.contains("startCommand"));
         assert!(rendered.contains("limitOverride"));
         assert!(!rendered.contains("requiredMountPath"));
+
+        let mut python = String::new();
+        render_database_deploy_overrides(
+            Some(&json!({
+                "limitOverride": { "containers": { "memoryBytes": 2147483648_i64 } }
+            })),
+            "db",
+            AuthoringLang::Python,
+            &mut python,
+        );
+        assert!(python.contains("with_fields(deploy="));
+        assert!(python.contains("memoryBytes"));
     }
 
     #[test]

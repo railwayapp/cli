@@ -794,6 +794,23 @@ fn diff_variables(
             continue;
         }
         let current = before.get(key);
+        // Explicit null is how a database file clears a variable it names.
+        // Omitting the key still leaves it alone.
+        if resource_type(resource) == "database" && value.is_null() {
+            if let Some(current) = current {
+                changes.push(json!({
+                    "kind": "variable.delete",
+                    "address": resource_addr(resource),
+                    "variable": key,
+                    "previous": current,
+                    "path": format!("resources.{}.variables.{key}", resource_addr(resource)),
+                    "summary": format!("Delete variable {}.{}", resource_name(resource), key),
+                    "severity": "destructive",
+                    "deployEffect": "deploy",
+                }));
+            }
+            continue;
+        }
         // A generated secret is a new value on every evaluation. Re-applying
         // the same generator must not plan a change or redeploy. A different
         // generator, including an explicit rotate token, still plans a set.
@@ -833,6 +850,11 @@ fn diff_variables(
     }
     for (key, value) in &before {
         if after.contains_key(key) {
+            continue;
+        }
+        // A database file authors only the variables it names. Template
+        // credentials and anything the file does not mention stay put.
+        if resource_type(resource) == "database" {
             continue;
         }
         changes.push(json!({
@@ -1610,7 +1632,16 @@ fn drop_unauthored_platform_fields(
 }
 
 fn drop_platform_start_command(previous_deploy: &Value, resource_deploy: &Value) -> Value {
-    drop_unauthored_platform_fields(previous_deploy, resource_deploy, &["startCommand"])
+    let previous =
+        drop_unauthored_platform_fields(previous_deploy, resource_deploy, &["startCommand"]);
+    // Absent means the file does not manage limits. Null means clear them.
+    if resource_deploy
+        .as_object()
+        .is_some_and(|deploy| deploy.contains_key("limitOverride"))
+    {
+        return previous;
+    }
+    drop_unauthored_platform_fields(&previous, &json!({}), &["limitOverride"])
 }
 
 fn is_masked_registry_credentials(value: Option<&Value>) -> bool {
