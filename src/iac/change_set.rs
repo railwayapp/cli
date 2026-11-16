@@ -835,6 +835,11 @@ fn diff_variables(
         if after.contains_key(key) {
             continue;
         }
+        // A database file authors only the variables it names. Template
+        // credentials and anything the file does not mention stay put.
+        if resource_type(resource) == "database" {
+            continue;
+        }
         changes.push(json!({
             "kind": "variable.delete",
             "address": resource_addr(resource),
@@ -1610,7 +1615,13 @@ fn drop_unauthored_platform_fields(
 }
 
 fn drop_platform_start_command(previous_deploy: &Value, resource_deploy: &Value) -> Value {
-    drop_unauthored_platform_fields(previous_deploy, resource_deploy, &["startCommand"])
+    // limitOverride is authored only when the file sets it. A file that never
+    // mentions CPU or memory must not clear the live override.
+    drop_unauthored_platform_fields(
+        previous_deploy,
+        resource_deploy,
+        &["startCommand", "limitOverride"],
+    )
 }
 
 fn is_masked_registry_credentials(value: Option<&Value>) -> bool {

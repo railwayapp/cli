@@ -501,10 +501,13 @@ fn database_region(database: &Value) -> Option<String> {
 
 fn database_deploy(database: &Value, required_mount_path: &str) -> Value {
     let mut deploy = json!({ "requiredMountPath": required_mount_path });
-    if let Some(multi) =
-        field(database, "deploy").and_then(|deploy| deploy.get("multiRegionConfig"))
-    {
-        deploy["multiRegionConfig"] = multi.clone();
+    let Some(source) = field(database, "deploy").and_then(Value::as_object) else {
+        return deploy;
+    };
+    for key in ["multiRegionConfig", "limitOverride", "startCommand"] {
+        if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
+            deploy[key] = value.clone();
+        }
     }
     deploy
 }
@@ -882,6 +885,12 @@ pub fn environment_config_to_graph(
                 {
                     node["networking"] = networking;
                 }
+                if let Some(variables) = service.get("variables") {
+                    let pitr = pitr_variables_from_environment_config(variables);
+                    if pitr.as_object().is_some_and(|vars| !vars.is_empty()) {
+                        node["variables"] = pitr;
+                    }
+                }
                 if let Some(group_id) = field_str(service, "groupId") {
                     node["groupId"] = json!(
                         group_names_by_id
@@ -1075,6 +1084,31 @@ fn networking_from_environment_config(
     } else {
         None
     }
+}
+
+fn is_pitr_variable(name: &str) -> bool {
+    name.starts_with("WAL_ARCHIVE_")
+        || name.starts_with("WAL_RECOVER_FROM_")
+        || name.starts_with("BINLOG_ARCHIVE_")
+        || name.starts_with("BINLOG_RECOVER_FROM_")
+        || name == "POSTGRES_RECOVERY_TARGET_TIME"
+        || name == "MYSQL_RECOVERY_TARGET_TIME"
+}
+
+/// PITR is variables on the database service. The rest of a template database's
+/// variables stay off the graph, so a file that does not mention them cannot
+/// delete them.
+fn pitr_variables_from_environment_config(variables: &Value) -> Value {
+    let Some(map) = variables.as_object() else {
+        return json!({});
+    };
+    let mut kept = Map::new();
+    for (key, value) in map {
+        if is_pitr_variable(key) {
+            kept.insert(key.clone(), value.clone());
+        }
+    }
+    variables_from_environment_config(&Value::Object(kept))
 }
 
 fn variables_from_environment_config(variables: &Value) -> Value {

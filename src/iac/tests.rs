@@ -134,6 +134,49 @@ fn managed_db_config(config: Value) -> super::graph::RailwayGraph {
     )
 }
 
+#[test]
+fn database_limits_and_pitr_round_trip_and_do_not_clear_when_omitted() {
+    let current = managed_db_config(json!({
+        "services": {
+            "db": {
+                "source": { "image": "ghcr.io/railwayapp-templates/postgres-ssl:18" },
+                "deploy": {
+                    "limitOverride": { "containers": { "cpu": 2, "memoryBytes": 2147483648_i64 } }
+                },
+                "variables": {
+                    "POSTGRES_PASSWORD": { "value": "secret" },
+                    "WAL_ARCHIVE_BUCKET": { "value": "archives" }
+                }
+            }
+        }
+    }));
+    let db = &current.resources[0];
+    assert_eq!(db["deploy"]["limitOverride"]["containers"]["cpu"], 2);
+    assert!(db["variables"]["WAL_ARCHIVE_BUCKET"].is_object());
+    assert!(db["variables"].get("POSTGRES_PASSWORD").is_none());
+
+    let mut authored = postgres("db", None);
+    authored["deploy"] = db["deploy"].clone();
+    authored["variables"] = db["variables"].clone();
+    let result = diff(&current, &graph_from(vec![authored]));
+    assert!(result.changes.is_empty(), "{:?}", result.changes);
+
+    let result = diff(&current, &graph_from(vec![postgres("db", None)]));
+    assert!(
+        !kinds(&result).iter().any(|kind| kind == "variable.delete"),
+        "{:?}",
+        result.changes
+    );
+    assert!(
+        !result.changes.iter().any(|change| {
+            change["field"].as_str() == Some("deploy")
+                && change.to_string().contains("limitOverride")
+        }),
+        "{:?}",
+        result.changes
+    );
+}
+
 fn diff(
     current: &super::graph::RailwayGraph,
     desired: &super::graph::RailwayGraph,
