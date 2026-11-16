@@ -2165,6 +2165,7 @@ fn eval_context_pr() -> EvalContext {
             number: 123,
             branch: Some("feat/x".into()),
             base: Some("dev".into()),
+            base_unavailable: false,
         }),
         ..eval_context_production()
     }

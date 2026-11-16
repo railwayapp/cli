@@ -48,6 +48,10 @@ pub struct PrContext {
     pub number: i64,
     pub branch: Option<String>,
     pub base: Option<String>,
+    /// The environment is a PR environment, but this token could not read the
+    /// source environment's name. `base` stays unset. Evaluation throws if the
+    /// config reads it, instead of planning against a silent null.
+    pub base_unavailable: bool,
 }
 
 impl EvalContext {
@@ -72,11 +76,17 @@ impl EvalContext {
             "environmentId": self.environment_id,
             "environment": self.environment,
             "environmentName": self.environment_name,
-            "pr": self.pr.as_ref().map(|pr| json!({
-                "number": pr.number,
-                "branch": pr.branch,
-                "base": pr.base,
-            })),
+            "pr": self.pr.as_ref().map(|pr| {
+                let mut value = json!({
+                    "number": pr.number,
+                    "branch": pr.branch,
+                    "base": pr.base,
+                });
+                if pr.base_unavailable {
+                    value["baseUnavailable"] = json!(true);
+                }
+                value
+            }),
             "features": IAC_FEATURES,
         })
     }
@@ -401,6 +411,16 @@ try {
     ctx = iac.createRailwayContext(input);
   }
 } catch {}
+if (input.pr && input.pr.baseUnavailable) {
+  const pr = { ...(ctx.pr ?? {}), ...input.pr };
+  Object.defineProperty(pr, "base", {
+    enumerable: true,
+    get() {
+      throw new Error("ctx.pr.base is unset because this token cannot read the source environment name. The plan can still run. Use an account token, or a CLI that can read sourceEnvironmentName, to branch on the base environment.");
+    },
+  });
+  ctx = { ...ctx, pr };
+}
 const mod = await import(`${pathToFileURL(file).href}?t=${Date.now()}`);
 const partial = mod.partial ?? mod.PARTIAL ?? mod.Partial ?? undefined;
 let exported = mod.default ?? mod.main ?? mod.Railway ?? mod;
