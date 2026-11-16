@@ -41,6 +41,14 @@ struct EnvNode {
     meta: Option<EnvMeta>,
     #[serde(default)]
     source_environment: Option<SourceEnvironment>,
+    /// Set when the API exposes the source name without requiring access to
+    /// the source environment. Preferred over `source_environment`.
+    #[serde(default)]
+    source_environment_name: Option<String>,
+    /// The token could not read the source environment. Not part of the API
+    /// payload. Evaluation throws if a PR config reads `ctx.pr.base`.
+    #[serde(skip)]
+    source_name_unavailable: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -63,13 +71,20 @@ impl EnvNode {
             return None;
         }
         let number = self.meta.as_ref().and_then(|meta| meta.pr_number)?;
+        let base = self
+            .source_environment_name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                self.source_environment
+                    .as_ref()
+                    .and_then(|source| source.name.clone())
+            });
         Some(PrContext {
             number,
             branch: self.meta.as_ref().and_then(|meta| meta.branch.clone()),
-            base: self
-                .source_environment
-                .as_ref()
-                .and_then(|source| source.name.clone()),
+            base_unavailable: base.is_none() && self.source_name_unavailable,
+            base,
         })
     }
 }
@@ -528,38 +543,61 @@ async fn github_default_branches(
         .collect())
 }
 
+fn iac_environment_query(source: &str, partials: bool) -> String {
+    let partials = if partials { " iacPartials" } else { "" };
+    format!(
+        r#"
+      query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {{
+        environment(id: $environmentId) {{
+          id name projectId isEphemeral meta {{ branch prNumber prRepo }} {source} config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs{partials}
+        }}
+      }}
+    "#
+    )
+}
+
 async fn fetch_current_environment(
     client: &reqwest::Client,
     endpoint: &str,
     environment_id: &str,
     decrypt_variables: bool,
 ) -> Result<EnvNode> {
-    let query_with_partials = r#"
-      query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
-        environment(id: $environmentId) {
-          id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs iacPartials
-        }
-      }
-    "#;
+    // `sourceEnvironment { name }` resolves the source Environment node. A
+    // project token is pinned to its own environment, so that field fails the
+    // whole query for a copied environment. `sourceEnvironmentName` is a
+    // string on this environment and does not grant source access. Older
+    // servers don't have it; fall back, then drop the relation on Unauthorized
+    // so plan/apply still run. Reading ctx.pr.base then fails loudly.
     let vars = json!({ "environmentId": environment_id, "decryptVariables": decrypt_variables });
-    match post_graphql_raw::<EnvQuery, _>(client, endpoint, query_with_partials, vars.clone()).await
-    {
-        Ok(data) => Ok(data.environment),
-        Err(err) if err.to_string().contains("iacPartials") => {
-            let query = r#"
-              query IacEnvironmentConfig($environmentId: String!, $decryptVariables: Boolean) {
-                environment(id: $environmentId) {
-                  id name projectId isEphemeral meta { branch prNumber prRepo } sourceEnvironment { name } config(decryptVariables: $decryptVariables) configEtag canvasGroupRefs
+    let mut source = "sourceEnvironmentName";
+    let mut partials = true;
+    let mut source_name_unavailable = false;
+    loop {
+        let query = iac_environment_query(source, partials);
+        match post_graphql_raw::<EnvQuery, _>(client, endpoint, &query, vars.clone()).await {
+            Ok(data) => {
+                let mut environment = data.environment;
+                environment.source_name_unavailable = source_name_unavailable;
+                return Ok(environment);
+            }
+            Err(err) => {
+                let message = err.to_string();
+                if source == "sourceEnvironmentName" && message.contains("sourceEnvironmentName") {
+                    source = "sourceEnvironment { name }";
+                    continue;
                 }
-              }
-            "#;
-            Ok(
-                post_graphql_raw::<EnvQuery, _>(client, endpoint, query, vars)
-                    .await?
-                    .environment,
-            )
+                if partials && message.contains("iacPartials") {
+                    partials = false;
+                    continue;
+                }
+                if source.contains("sourceEnvironment {") && message.contains("Unauthorized") {
+                    source = "";
+                    source_name_unavailable = true;
+                    continue;
+                }
+                return Err(err.into());
+            }
         }
-        Err(err) => Err(err.into()),
     }
 }
 
@@ -825,6 +863,35 @@ mod tests {
         assert_eq!(pr.number, 123);
         assert_eq!(pr.branch.as_deref(), Some("feat/x"));
         assert_eq!(pr.base.as_deref(), Some("dev"));
+        assert!(!pr.base_unavailable);
+    }
+
+    #[test]
+    fn pr_context_prefers_source_environment_name() {
+        let node = env_node(json!({
+            "id": "env",
+            "isEphemeral": true,
+            "meta": { "prNumber": 4 },
+            "sourceEnvironmentName": "staging",
+            "config": {}
+        }));
+        let pr = node.pr_context().unwrap();
+        assert_eq!(pr.base.as_deref(), Some("staging"));
+        assert!(!pr.base_unavailable);
+    }
+
+    #[test]
+    fn pr_context_marks_base_unavailable_when_source_name_could_not_be_read() {
+        let mut node = env_node(json!({
+            "id": "env",
+            "isEphemeral": true,
+            "meta": { "prNumber": 4 },
+            "config": {}
+        }));
+        node.source_name_unavailable = true;
+        let pr = node.pr_context().unwrap();
+        assert!(pr.base.is_none());
+        assert!(pr.base_unavailable);
     }
 
     #[test]
