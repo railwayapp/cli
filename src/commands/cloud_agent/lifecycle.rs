@@ -531,10 +531,12 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
             }
             None => ca::list_mine(client, &backboard).await?,
         };
-        // A sleeping observation may predate a wake elsewhere. Send the intent
-        // for every agent; the server handles already-asleep agents as no-ops.
+        // Only running agents: the pre-sleep flush connects over SSH, and any
+        // SSH connection wakes a sleeping agent, which the sleep request then
+        // fails to put back down.
+        let agents = running_only(agents);
         if agents.is_empty() {
-            println!("No cloud agents to sleep.");
+            println!("No running cloud agents to sleep.");
             return Ok(());
         }
         telemetry::track_lifecycle("sleep_all", Duration::ZERO, None).await;
@@ -570,7 +572,10 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
     let spinner = create_spinner(format!("Sleeping agent {}", agent.name));
     let result = ca::sleep(client, &backboard, &agent.environment_id, &agent.id).await;
     spinner.finish_and_clear();
-    result?;
+    if result? == ca::SleepOutcome::AlreadyAsleep {
+        println!("✓ Agent {} is already asleep.", agent.name.cyan());
+        return Ok(());
+    }
     // Present tense, not "is asleep": the mutation returns before the agent has
     // finished transitioning, so a `railway ca list` run straight afterwards
     // still reports it running. Claiming a state the next command contradicts is
@@ -580,6 +585,14 @@ pub async fn sleep(args: SleepArgs) -> Result<()> {
         agent.name.cyan()
     );
     Ok(())
+}
+
+/// The agents `railway ca sleep --all` acts on.
+fn running_only(agents: Vec<ca::Agent>) -> Vec<ca::Agent> {
+    agents
+        .into_iter()
+        .filter(|agent| agent.status == ca::Status::Running)
+        .collect()
 }
 
 pub async fn delete(args: DeleteArgs) -> Result<()> {
@@ -1305,5 +1318,31 @@ mod tests {
         // multi-byte char in half.
         assert_eq!(truncate("ünïcödé", 10), "ünïcödé");
         assert_eq!(truncate("ünïcödé-project", 8).chars().count(), 8);
+    }
+
+    #[test]
+    fn sleep_all_skips_agents_that_are_not_running() {
+        let agent = |id: &str, status: ca::Status| ca::Agent {
+            id: id.into(),
+            name: id.into(),
+            status,
+            project_id: "project".into(),
+            environment_id: "env".into(),
+            created_at: chrono::Utc::now(),
+            work_status: None,
+            archived: false,
+        };
+        let agents = vec![
+            agent("running", ca::Status::Running),
+            agent("sleeping", ca::Status::Sleeping),
+            agent("starting", ca::Status::Starting),
+            agent("crashed", ca::Status::Crashed),
+            agent("failed", ca::Status::Failed),
+            agent("deleting", ca::Status::Deleting),
+            agent("unknown", ca::Status::Unknown("NEW_STATE".into())),
+            agent("also-running", ca::Status::Running),
+        ];
+        let ids: Vec<_> = running_only(agents).into_iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["running", "also-running"]);
     }
 }

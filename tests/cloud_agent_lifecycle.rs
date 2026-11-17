@@ -136,7 +136,7 @@ fn agent(id: &str, status: &str) -> Value {
 }
 
 #[test]
-fn sleep_sends_every_observed_state_and_reports_acceptance() {
+fn sleep_skips_an_asleep_agent_and_sends_every_other_state() {
     for status in [
         "RUNNING",
         "STARTING",
@@ -146,7 +146,8 @@ fn sleep_sends_every_observed_state_and_reports_acceptance() {
         "DELETING",
         "FUTURE_STATE",
     ] {
-        let server = Backboard::new(vec![agent("existing", status)], None, "RUNNING");
+        // The status sleep reads before acting is the `CloudAgent` response.
+        let server = Backboard::new(vec![agent("existing", status)], None, status);
         let home = tempfile::tempdir().unwrap();
         let output = server.run(home.path(), &["sleep", "existing"]);
         assert!(
@@ -154,21 +155,30 @@ fn sleep_sends_every_observed_state_and_reports_acceptance() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(server.ids_for("CloudAgentSleep"), ["existing"], "{status}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Sleep requested"));
-        assert!(
-            server.ids_for("CloudAgent").is_empty(),
-            "acceptance does not poll for completion"
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if status == "SLEEPING" {
+            // Connecting to flush would wake it; nothing is sent.
+            assert!(server.ids_for("CloudAgentSleep").is_empty(), "{status}");
+            assert!(stdout.contains("already asleep"), "{stdout}");
+        } else {
+            assert_eq!(server.ids_for("CloudAgentSleep"), ["existing"], "{status}");
+            assert!(stdout.contains("Sleep requested"), "{stdout}");
+        }
+        assert_eq!(
+            server.ids_for("CloudAgent"),
+            ["existing"],
+            "one status read; acceptance does not poll for completion"
         );
     }
 }
 
 #[test]
-fn bulk_sleep_attempts_every_agent_and_reports_partial_failure() {
-    for refused in [None, Some("sleeping")] {
+fn bulk_sleep_attempts_every_running_agent_and_reports_partial_failure() {
+    for refused in [None, Some("also-running")] {
         let server = Backboard::new(
             vec![
                 agent("running", "RUNNING"),
+                agent("also-running", "RUNNING"),
                 agent("sleeping", "SLEEPING"),
                 agent("unknown", "FUTURE_STATE"),
             ],
@@ -180,18 +190,36 @@ fn bulk_sleep_attempts_every_agent_and_reports_partial_failure() {
         assert_eq!(output.status.success(), refused.is_none());
         assert_eq!(
             server.ids_for("CloudAgentSleep"),
-            ["running", "sleeping", "unknown"]
+            ["also-running", "running"]
         );
-        let count = if refused.is_some() { 2 } else { 3 };
+        let count = if refused.is_some() { 1 } else { 2 };
         assert!(
             String::from_utf8_lossy(&output.stdout)
                 .contains(&format!("Sleep requested for {count} agents"))
         );
         if refused.is_some() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(stderr.contains("sleeping — mutation refused"), "{stderr}");
+            assert!(
+                stderr.contains("also-running — mutation refused"),
+                "{stderr}"
+            );
         }
     }
+}
+
+#[test]
+fn bulk_sleep_with_nothing_running_sends_nothing() {
+    let server = Backboard::new(
+        vec![agent("sleeping", "SLEEPING"), agent("crashed", "CRASHED")],
+        None,
+        "SLEEPING",
+    );
+    let home = tempfile::tempdir().unwrap();
+    let output = server.run(home.path(), &["sleep", "--all"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("No running cloud agents"));
+    assert!(server.ids_for("CloudAgentSleep").is_empty());
+    assert!(server.ids_for("CloudAgent").is_empty());
 }
 
 #[test]
