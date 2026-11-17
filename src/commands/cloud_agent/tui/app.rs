@@ -120,6 +120,9 @@ pub struct Agent {
     /// with every agents fetch; the VM is never asked.
     pub threads: Vec<ThreadSnapshot>,
     pub archived: bool,
+    /// When the agent was created, which decides whether it sleeps when idle
+    /// (see `ca::sleeps_when_idle`). `None` when the read didn't say.
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One reattachable session on an agent's VM.
@@ -6220,17 +6223,19 @@ impl App {
                     {
                         respawn = Some((session.agent_id.clone(), session.harness.clone()));
                     }
-                    closed = Some(session.agent_name.clone());
+                    closed = Some((session.agent_name.clone(), session.agent_id.clone()));
                 }
             } else {
                 i += 1;
             }
         }
         self.notice_dropped_panes();
-        let agent_name = closed?;
+        let (agent_name, closed_id) = closed?;
         if self.quit_when_done && self.sessions.is_empty() {
+            let created_at = self.agent_by_id(&closed_id).and_then(|a| a.created_at);
             self.exit_note = Some(format!(
-                "Session ended — agent {agent_name} is still running. `railway ca sleep {agent_name}` stops the compute bill."
+                "Session ended — {}",
+                crate::controllers::cloud_agent::leave_note(&agent_name, &agent_name, created_at)
             ));
             return Some(Effect::Quit);
         }
@@ -11283,7 +11288,10 @@ pub(crate) mod tests {
         a.sessions[0].end_for_test();
         assert_eq!(a.reap_ended_sessions(), Some(Effect::Quit));
         assert!(a.sessions.is_empty());
-        let note = a.exit_note.as_deref().expect("says the agent still runs");
+        let note = a
+            .exit_note
+            .as_deref()
+            .expect("says what happens to the agent");
         assert!(note.contains("nimble-otter"), "{note}");
     }
 

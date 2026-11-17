@@ -78,6 +78,9 @@ pub struct StoredSandboxTemplate {
     pub name: Option<String>,
     pub environment_id: String,
     pub instructions: Vec<String>,
+    /// Legacy: the base image a template was built on, from before the API
+    /// stopped accepting one. Kept so old records round-trip and so
+    /// `sandbox create --template` can refuse them clearly; never sent.
     pub base_image_digest: Option<String>,
     pub created_at: Option<String>,
 }
@@ -1088,6 +1091,41 @@ mod tests {
         );
 
         assert!(has_credentials);
+    }
+
+    /// Templates built with `--base-image-digest` before the API dropped it
+    /// still carry one on disk. The whole config has to keep parsing: a parse
+    /// failure regenerates it, which signs the user out. The digest round-trips
+    /// so `sandbox create --template` can refuse that template by name.
+    #[test]
+    fn config_with_legacy_template_base_image_digest_parses_and_round_trips() {
+        let raw = serde_json::json!({
+            "projects": {},
+            "user": { "token": "tok_123" },
+            "sandboxTemplates": [{
+                "id": "abc123",
+                "name": "dev",
+                "environmentId": "env-1",
+                "instructions": ["npm i -g pnpm"],
+                "baseImageDigest": "sha256:deadbeef",
+                "createdAt": "2026-01-01T00:00:00Z",
+            }],
+        });
+        let config: RailwayConfig = serde_json::from_slice(raw.to_string().as_bytes())
+            .expect("a config with a legacy template must parse");
+        assert_eq!(config.user.token.as_deref(), Some("tok_123"));
+        let templates = config.sandbox_templates.as_ref().unwrap();
+        assert_eq!(templates[0].instructions, vec!["npm i -g pnpm"]);
+        assert_eq!(
+            templates[0].base_image_digest.as_deref(),
+            Some("sha256:deadbeef")
+        );
+
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            written["sandboxTemplates"][0]["baseImageDigest"],
+            "sha256:deadbeef"
+        );
     }
 }
 

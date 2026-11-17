@@ -1,17 +1,13 @@
 //! The `CLOUD_AGENTS` preflight.
 //!
-//! Cloud agents are behind a Priority Boarding flag. Without it the API refuses
-//! the create — but only once the launch has already resolved a credential, a
-//! target and an agent, so what someone without the flag saw was a one-line
-//! rejection at the end of a pipeline that looked like it was working. This
-//! asks first, and answers with the two things that line didn't have: that the
-//! flag is what is missing, and where to turn it on.
+//! Cloud agents are behind a Priority Boarding flag. The CLI and the dashboard
+//! enforce it; the API does not check it on create. This asks before a launch
+//! resolves a credential, a target and an agent, and answers with what is
+//! missing (the flag) and where to turn it on.
 //!
-//! Advisory, not a gate. Only a query that succeeds and comes back without the
-//! flag stops a launch; anything else (a project token, which cannot read `me`,
-//! or a transient failure) proceeds and lets the real call decide. A preflight
-//! that blocks work the API would have allowed is worse than the error it
-//! replaces.
+//! Best-effort. Only a query that succeeds and comes back without the flag
+//! stops a launch; anything else (a project token, which cannot read `me`, or a
+//! transient failure) proceeds and lets the API's own access checks decide.
 
 use anyhow::{Result, bail};
 use colored::Colorize;
@@ -46,7 +42,7 @@ fn has_cloud_agents(flags: &[queries::cloud_agent_access::ActiveFeatureFlag]) ->
         .any(|flag| matches!(flag, ActiveFeatureFlag::CLOUD_AGENTS))
 }
 
-/// What to say instead of the API's rejection. Names the flag, says where it
+/// What to say when the flag is off. Names the flag, says where it
 /// lives, and gives the URL — a flag nobody can find is the same as no flag.
 fn not_enabled_message(host: &str) -> String {
     format!(

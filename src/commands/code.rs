@@ -73,8 +73,12 @@ use crate::util::shell::shell_join;
 // survives sleep. `--refresh-auth` forces a re-mint; `railway logout` drops the
 // cache.
 //
-// Lifecycle: agents are durable and have no idle timeout, so unlike a sandbox
-// nothing eventually reaps one. Disconnecting leaves the agent RUNNING —
+// Lifecycle: agents are durable; unlike a sandbox, nothing eventually deletes
+// one. An idle agent (no SSH client attached, almost no network traffic, and no
+// coding agent working or waiting) sleeps after 5 minutes, which ends its
+// processes, and wakes on SSH, HTTP or API; agents created before the
+// 2026-10-08 deploy never do (see `ca::sleeps_when_idle`). Disconnecting leaves
+// the agent RUNNING — the CLI never sleeps it as a side effect, because
 // sleeping kills every process on the VM (including durable sessions the
 // platform keeps listing as reattachable), so it is a deliberate act:
 // `railway ca sleep`, or `s` on the TUI tree.
@@ -136,7 +140,7 @@ arguments to the agent. Available local credentials are copied to the VM;
 Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
 detected Desktop installs.
 
-Disconnecting leaves the VM running. Use railway ca sleep <agent> to stop compute.
+An idle VM sleeps after 5 minutes; railway ca sleep <agent> sleeps it now.
 Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
@@ -288,8 +292,7 @@ pub struct LaunchArgs {
     #[clap(long, conflicts_with_all = ["remote_agent", "rm"], help_heading = "VM creation")]
     no_bootstrap: bool,
 
-    /// Accepted for compatibility; agents now always stay running on
-    /// disconnect. `railway ca sleep` stops the compute bill
+    /// Accepted for compatibility and ignored; it has no effect on sleep
     #[clap(long, hide = true)]
     keep_awake: bool,
 
@@ -544,7 +547,9 @@ impl LaunchArgs {
     }
 
     /// No flags, no arguments — the invocation that means "just open the
-    /// front door" rather than "launch this exact thing".
+    /// front door" rather than "launch this exact thing". `--keep-awake` is
+    /// ignored here as everywhere: a flag that does nothing must not change
+    /// what runs.
     pub fn is_bare(&self) -> bool {
         !self.codex
             && !self.opencode
@@ -555,7 +560,6 @@ impl LaunchArgs {
             && !self.new
             && self.bootstrap.is_none()
             && !self.no_bootstrap
-            && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
             && self.name.is_none()
@@ -2984,6 +2988,9 @@ pub struct Prepared {
     pub relay_opts: Vec<String>,
     pub agent_id: String,
     pub agent_name: String,
+    /// When the agent was created, which decides whether it sleeps when idle
+    /// (see [`ca::sleeps_when_idle`]).
+    pub agent_created_at: chrono::DateTime<chrono::Utc>,
     pub environment_id: String,
     pub harness: &'static str,
     /// True when this run created the agent, which only affects messaging.
@@ -3103,9 +3110,12 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
     println!(
-        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
-        prepared.agent_name.cyan(),
-        prepared.agent_name
+        "\nDisconnected — {}",
+        ca::leave_note(
+            &prepared.agent_name.cyan().to_string(),
+            &prepared.agent_name,
+            Some(prepared.agent_created_at)
+        )
     );
 
     if prepared.created {
@@ -3673,6 +3683,7 @@ async fn prepare_inner(
         },
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
+        agent_created_at: cloud_agent.created_at,
         environment_id,
         harness: agent.slug(),
         created,
@@ -3722,8 +3733,9 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// session was writing without reaching into it.
 ///
 /// Best-effort by design. Failing to reach the agent must not stop us sleeping
-/// it — agents have no idle timeout, so the alternative to an imperfect sleep is
-/// a machine that bills until someone remembers it.
+/// it — the alternative to an imperfect sleep is a machine that bills until it
+/// idles out, or, for an agent created before idle sleep, until someone
+/// remembers it.
 pub async fn flush_disk(environment_id: &str, agent_id: &str) {
     // Deliberately not `ssh_plumbing`: its ~20s retry budget exists to cross the
     // gap while a woken agent becomes attachable. Spending it here would make
@@ -5653,6 +5665,15 @@ cat
     #[test]
     fn launch_args_bareness_and_targeting() {
         assert!(LaunchArgs::default().is_bare());
+
+        let keep_awake = LaunchArgs {
+            keep_awake: true,
+            ..Default::default()
+        };
+        assert!(
+            keep_awake.is_bare(),
+            "--keep-awake is ignored, so it must not turn the TUI into a launch"
+        );
 
         let mut flagged = LaunchArgs::default();
         flagged.set_harness("codex");

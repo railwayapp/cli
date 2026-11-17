@@ -1,11 +1,11 @@
 //! Cloud agent lifecycle, shared by `railway ca` and `railway code`.
 //!
 //! The launcher grew these operations as flags on a command whose job is
-//! something else (`--new` creates, `--rm` destroys, `--keep-awake` declines to
-//! sleep). Pulling them here gives the flat `railway ca` verbs one
-//! implementation to call, and — more importantly — one place where the local
-//! agent pointer is kept honest. A delete that forgets to clear the pointer
-//! leaves `railway code` waking a corpse.
+//! something else (`--new` creates, `--rm` destroys). Pulling them here gives
+//! the flat `railway ca` verbs one implementation to call, and — more
+//! importantly — one place where the local agent pointer is kept honest. A
+//! delete that forgets to clear the pointer leaves `railway code` waking a
+//! corpse.
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
@@ -717,11 +717,62 @@ pub fn humanize_age(created_at: DateTime<Utc>) -> String {
     }
 }
 
+/// When cloud agents began sleeping themselves when idle: the deploy of idle
+/// sleep (monorepo #41923). An agent keeps the spec it was created with, so one
+/// created before this never sleeps unless someone runs `railway ca sleep`.
+///
+/// A heuristic. The CLI can't read an agent's idle-sleep spec, only its age,
+/// so an agent created within minutes of the deploy may land on either side.
+const IDLE_SLEEP_DEPLOYED_AT: &str = "2026-10-08T00:37:00Z";
+
+/// Whether an agent created at `created_at` sleeps on its own when idle. See
+/// [`IDLE_SLEEP_DEPLOYED_AT`].
+pub fn sleeps_when_idle(created_at: DateTime<Utc>) -> bool {
+    let deployed: DateTime<Utc> = IDLE_SLEEP_DEPLOYED_AT
+        .parse()
+        .expect("IDLE_SLEEP_DEPLOYED_AT is RFC 3339");
+    created_at >= deployed
+}
+
+/// What to say once someone leaves an agent, after "Disconnected — " or
+/// "Session ended — ". `shown` is the name as displayed (possibly colored),
+/// `name` the plain one for the command. An unknown `created_at` reads as a new
+/// agent, which is what nearly every agent is by now.
+///
+/// The new-agent note says sleeping ends processes on purpose: a command left
+/// running in a detached session does not keep the agent awake.
+pub fn leave_note(shown: &str, name: &str, created_at: Option<DateTime<Utc>>) -> String {
+    if created_at.is_none_or(sleeps_when_idle) {
+        format!(
+            "agent {shown} sleeps after 5 minutes with no SSH client, network traffic or agent turn, which ends its processes."
+        )
+    } else {
+        format!("agent {shown} is still running. `railway ca sleep {name}` stops the compute bill.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testkit::MockBackboard;
     use serde_json::json;
+
+    #[test]
+    fn idle_sleep_follows_the_deploy_cutoff() {
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        assert!(!sleeps_when_idle(at("2026-10-07T12:00:00Z")));
+        assert!(!sleeps_when_idle(at("2026-10-08T00:36:59Z")));
+        assert!(sleeps_when_idle(at("2026-10-08T00:37:00Z")));
+        assert!(sleeps_when_idle(at("2026-11-01T00:00:00Z")));
+
+        let old = leave_note("box", "box", Some(at("2026-09-01T00:00:00Z")));
+        assert!(old.contains("still running"), "{old}");
+        assert!(old.contains("`railway ca sleep box`"), "{old}");
+        let new = leave_note("box", "box", Some(at("2026-11-01T00:00:00Z")));
+        assert!(new.contains("sleeps after 5 minutes"), "{new}");
+        assert!(new.contains("ends its processes"), "{new}");
+        assert_eq!(leave_note("box", "box", None), new);
+    }
 
     #[tokio::test]
     async fn create_serializes_endpoint_and_checkpoint_only_when_requested() {

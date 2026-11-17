@@ -32,7 +32,7 @@ fn launcher_help_matches_each_execution_path() {
             assert!(!text.contains("desktop-only"));
             assert!(!text.contains("--agent <NAME_OR_ID>"));
             assert!(text.contains("Arguments to pass to the agent after --"));
-            assert!(text.contains("VM running"));
+            assert!(text.contains("idle VM sleeps after 5 minutes"));
         }
     }
 }
@@ -45,7 +45,8 @@ fn focused_help_retains_side_effects_and_workflow_examples() {
             vec![
                 "--remove",
                 "stops the managed OpenCode server",
-                "VM stays running",
+                "idle VM sleeps after 5 minutes",
+                "restart the OpenCode server on wake",
             ],
         ),
         (
@@ -65,7 +66,7 @@ fn focused_help_retains_side_effects_and_workflow_examples() {
         ),
         (
             vec!["ca", "ssh"],
-            vec!["--session", "--resume", "Sleep ends its processes"],
+            vec!["--session", "--resume", "Sleeping ends its processes"],
         ),
         (
             vec!["code", "get-config"],

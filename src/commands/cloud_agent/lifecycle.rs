@@ -172,7 +172,8 @@ pub struct SleepArgs {
   railway ca ssh my-box --resume           # resume the latest Claude conversation
   railway ca ssh my-box -- ls -la /app     # run a command
 
-Disconnecting leaves the VM running. Sleep ends its processes and keeps its disk."#)]
+An idle VM sleeps after 5 minutes and wakes when you connect.
+Sleeping ends its processes and keeps its disk."#)]
 pub struct SshArgs {
     /// Agent name or ID (defaults to this directory's, or your only one)
     #[clap(value_name = "AGENT")]
@@ -186,8 +187,7 @@ pub struct SshArgs {
     #[clap(long, conflicts_with_all = ["session", "command"])]
     resume: bool,
 
-    /// Accepted for compatibility; agents now always stay running on
-    /// disconnect. `railway ca sleep` stops the compute bill
+    /// Accepted for compatibility and ignored; it has no effect on sleep
     #[clap(long, hide = true)]
     keep_awake: bool,
 
@@ -475,7 +475,7 @@ pub async fn create(args: CreateArgs) -> Result<()> {
     println!(
         "{}",
         format!(
-            "Agents have no idle timeout: `railway ca sleep {}` stops the compute bill, `railway ca delete {}` takes the disk with it.",
+            "An idle agent sleeps after 5 minutes, which ends its processes, and wakes when you connect. `railway ca sleep {}` sleeps it now, `railway ca delete {}` takes the disk with it.",
             agent.name, agent.name
         )
         .dimmed()
@@ -799,8 +799,9 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // process exits (bounded — see drain_detached).
     crate::commands::ssh::tel::drain_detached(Duration::from_secs(2)).await;
 
-    // A connection that never happened still woke a machine with no idle
-    // timeout, so put back what this run changed — but only that. An agent
+    // A connection that never happened still woke the machine, which then bills
+    // until it idles out (or indefinitely, for an agent created before idle
+    // sleep), so put back what this run changed — but only that. An agent
     // found already running was someone's deliberate state (possibly a session
     // open in another terminal), and a failed connect here is no reason to
     // suspend it.
@@ -819,9 +820,12 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
     println!(
-        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
-        agent.name.cyan(),
-        agent.name
+        "\nDisconnected — {}",
+        ca::leave_note(
+            &agent.name.cyan().to_string(),
+            &agent.name,
+            Some(agent.created_at)
+        )
     );
 
     Ok(exit_code)

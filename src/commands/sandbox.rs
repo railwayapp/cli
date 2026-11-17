@@ -183,8 +183,9 @@ struct TemplateBuildArgs {
     #[clap(long)]
     name: Option<String>,
 
-    /// Base image digest to build on (defaults to the standard sandbox image)
-    #[clap(long, value_name = "DIGEST")]
+    /// Retired: the API stopped accepting a base image in August, and templates
+    /// build on the default sandbox image. Kept so passing it explains that.
+    #[clap(long, value_name = "DIGEST", hide = true)]
     base_image_digest: Option<String>,
 
     /// Wait for the build to finish (polls until READY or FAILED)
@@ -1018,7 +1019,6 @@ async fn create(
     let template = if let Some(name) = &args.checkpoint {
         Some(mutations::sandbox_create::SandboxTemplateInput {
             instructions: None,
-            base_image_digest: None,
             name: Some(name.clone()),
             variables: None,
         })
@@ -1030,9 +1030,13 @@ async fn create(
                     "Unknown template `{handle}` for this environment. Build it first:\n  railway sandbox template build --name {handle} -c '<command>' --wait"
                 )
             })?;
+        // Sending only the instructions would look up a checkpoint that was
+        // never built and fail with "Sandbox checkpoint not found".
+        if stored.base_image_digest.is_some() {
+            bail!(legacy_base_image_message(handle));
+        }
         Some(mutations::sandbox_create::SandboxTemplateInput {
             instructions: Some(stored.instructions),
-            base_image_digest: stored.base_image_digest,
             name: None,
             variables: None,
         })
@@ -1091,6 +1095,18 @@ async fn template(
     }
 }
 
+const RETIRED_BASE_IMAGE_DIGEST: &str =
+    "Base images are no longer configurable; templates build on the default sandbox image.";
+
+/// Why a template recorded with a custom base image can't boot: the API no
+/// longer takes one, and without it the recipe names a checkpoint that was
+/// never built.
+fn legacy_base_image_message(template: &str) -> String {
+    format!(
+        "Template `{template}` was built on a custom base image, which Railway no longer supports. Rebuild it with `railway sandbox template build`."
+    )
+}
+
 async fn template_build(
     configs: &mut Configs,
     client: &reqwest::Client,
@@ -1098,6 +1114,9 @@ async fn template_build(
     environment: Option<String>,
     args: TemplateBuildArgs,
 ) -> Result<()> {
+    if args.base_image_digest.is_some() {
+        bail!(RETIRED_BASE_IMAGE_DIGEST);
+    }
     let (_, environment_id) =
         resolve_project_and_env(configs, client, project, environment).await?;
 
@@ -1108,7 +1127,6 @@ async fn template_build(
             environment_id: environment_id.clone(),
             input: mutations::sandbox_template_build::SandboxTemplateInput {
                 instructions: Some(args.commands.clone()),
-                base_image_digest: args.base_image_digest.clone(),
                 name: None,
                 variables: None,
             },
@@ -1124,7 +1142,7 @@ async fn template_build(
         name: args.name.clone(),
         environment_id: environment_id.clone(),
         instructions: args.commands,
-        base_image_digest: args.base_image_digest,
+        base_image_digest: None,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
     });
     configs.write()?;
@@ -2462,6 +2480,34 @@ mod tests {
         <Args as clap::Parser>::try_parse_from(full)
     }
 
+    /// The retired flag still parses, so passing it reaches the explanation
+    /// rather than clap's "unexpected argument", and stays out of help.
+    #[test]
+    fn retired_base_image_digest_parses_but_is_hidden() {
+        let args = parse_exec(&[
+            "template",
+            "build",
+            "-c",
+            "true",
+            "--base-image-digest",
+            "sha256:deadbeef",
+        ])
+        .unwrap();
+        let Commands::Template(TemplateArgs {
+            command: TemplateCommands::Build(build),
+        }) = args.command
+        else {
+            panic!("expected template build");
+        };
+        assert_eq!(build.base_image_digest.as_deref(), Some("sha256:deadbeef"));
+
+        let help = <TemplateBuildArgs as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("base-image-digest"), "{help}");
+        assert!(legacy_base_image_message("dev").contains("`dev`"));
+    }
+
     #[test]
     fn exec_session_without_command_parses() {
         let args = parse_exec(&["exec", "--session", "sess-1"]).unwrap();
@@ -2578,7 +2624,6 @@ mod tests {
     fn checkpoint_boot_serializes_name_only() {
         let input = mutations::sandbox_create::SandboxTemplateInput {
             instructions: None,
-            base_image_digest: None,
             name: Some("my-setup".to_string()),
             variables: None,
         };
@@ -2590,7 +2635,6 @@ mod tests {
     fn template_boot_serializes_instructions_only() {
         let input = mutations::sandbox_create::SandboxTemplateInput {
             instructions: Some(vec!["npm i -g pnpm".to_string()]),
-            base_image_digest: None,
             name: None,
             variables: None,
         };

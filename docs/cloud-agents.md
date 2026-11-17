@@ -78,9 +78,12 @@ Preferences live in `~/.railway/agent-prefs.json`.
 Agent selectors accept names or IDs. Lifecycle commands without a selector use
 this directory's agent or your only agent, otherwise show candidates.
 
-Disconnecting leaves the VM running and compute billing continues.
-`railway ca sleep <agent>` stops compute and ends running processes while keeping
-the disk. `railway ca delete <agent>` deletes the VM and its disk.
+An agent sleeps after 5 idle minutes: no SSH client attached, almost no
+network traffic, and no coding agent working or waiting. Sleeping ends its
+processes, including commands left running in a detached session, and keeps the
+disk; connecting wakes it. Agents created before October 8, 2026 don't sleep on
+their own. `railway ca sleep <agent>` sleeps one now.
+`railway ca delete <agent>` deletes the VM and its disk.
 The older `railway code --rm` deletes this environment's agent and disk.
 
 Use `railway ca ssh <agent>` for a shell, `--session [name]` to attach to or start
@@ -146,7 +149,10 @@ Desktop setup uses an existing VM when available, creating one if needed.
 `--new` requests a fresh VM; `--agent` selects an existing one.
 `railway ca desktop --codex` alone is an alias for Codex `desktop-only` setup.
 Setup writes configuration without opening the desktop app. Restart the app to
-load the connection. The VM remains awake; rerun setup after sleep or restart.
+load the connection. An idle VM sleeps after 5 minutes and connecting wakes it;
+Claude and Codex just reconnect. Agents created since October 8, 2026 restart
+the OpenCode server on wake, so reconnecting usually works; if it can't connect,
+rerun `railway ca desktop --opencode`.
 
 Normal `railway code` Codex setup and connect also configure Desktop in the
 background. OpenCode setup and connect configure the matching Desktop edition
