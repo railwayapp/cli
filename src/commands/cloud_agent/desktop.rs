@@ -50,8 +50,9 @@ pub(crate) use opencode_config::configure_installed as configure_installed_openc
 
 Sets up the selected app's connection and credentials without opening the app.
 Uses an existing VM when available; --new creates one, --agent selects one.
-Restart the app after setup to load its connection. The VM stays running;
-railway ca sleep <agent> stops compute. Rerun setup after sleep or restart.
+Restart the app after setup to load its connection. An idle VM powers off
+after 5 minutes; railway ca sleep <agent> stops it now. Rerun setup after
+sleep or restart.
 
 --dry-run previews changes without modifying the VM or local configuration.
 --remove removes local configuration and stops the managed OpenCode server.
@@ -1071,7 +1072,7 @@ fn summarize(
     }
     if !apps.iter().any(|app| app.is_opencode()) {
         println!(
-            "\n{} The agent must be awake when the app connects — the relay refuses a\nsleeping one, and a desktop app can't wake it. {} does.",
+            "\n{} Connecting over SSH wakes a sleeping agent, so the app wakes it when it\nconnects. If the app times out before the agent is ready, run {} and retry.",
             "!".yellow().bold(),
             format!("railway ca wake {}", prepared.agent_name).cyan()
         );

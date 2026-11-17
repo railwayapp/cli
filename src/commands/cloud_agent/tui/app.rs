@@ -6230,7 +6230,7 @@ impl App {
         let agent_name = closed?;
         if self.quit_when_done && self.sessions.is_empty() {
             self.exit_note = Some(format!(
-                "Session ended — agent {agent_name} is still running. `railway ca sleep {agent_name}` stops the compute bill."
+                "Session ended — agent {agent_name} is still running and powers off after 5 idle minutes. `railway ca sleep {agent_name}` stops it now."
             ));
             return Some(Effect::Quit);
         }

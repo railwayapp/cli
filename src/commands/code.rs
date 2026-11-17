@@ -73,11 +73,13 @@ use crate::util::shell::shell_join;
 // survives sleep. `--refresh-auth` forces a re-mint; `railway logout` drops the
 // cache.
 //
-// Lifecycle: agents are durable and have no idle timeout, so unlike a sandbox
-// nothing eventually reaps one. Disconnecting leaves the agent RUNNING —
-// sleeping kills every process on the VM (including durable sessions the
-// platform keeps listing as reattachable), so it is a deliberate act:
-// `railway ca sleep`, or `s` on the TUI tree.
+// Lifecycle: agents are durable; unlike a sandbox, nothing eventually deletes
+// one. An idle agent (no SSH session, outbound traffic or agent turn) powers
+// itself off after 5 minutes and wakes on SSH, HTTP or API; agents created
+// before 2026-10-07 never do. Disconnecting leaves the agent RUNNING — the CLI
+// never sleeps it as a side effect, because sleeping kills every process on the
+// VM (including durable sessions the platform keeps listing as reattachable),
+// so it is a deliberate act: `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
 pub(crate) mod bootstrap_setup;
@@ -136,7 +138,7 @@ arguments to the agent. Available local credentials are copied to the VM;
 Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
 detected Desktop installs.
 
-Disconnecting leaves the VM running. Use railway ca sleep <agent> to stop compute.
+An idle VM powers off after 5 minutes; railway ca sleep <agent> stops it now.
 Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
@@ -288,8 +290,8 @@ pub struct LaunchArgs {
     #[clap(long, conflicts_with_all = ["remote_agent", "rm"], help_heading = "VM creation")]
     no_bootstrap: bool,
 
-    /// Accepted for compatibility; agents now always stay running on
-    /// disconnect. `railway ca sleep` stops the compute bill
+    /// Accepted for compatibility and ignored: disconnecting never sleeps the
+    /// agent, and this does not stop an idle one powering off after 5 minutes
     #[clap(long, hide = true)]
     keep_awake: bool,
 
@@ -3103,7 +3105,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
     println!(
-        "\nDisconnected — agent {} is still running. `railway ca sleep {}` stops the compute bill.",
+        "\nDisconnected — agent {} is still running and powers off after 5 idle minutes. `railway ca sleep {}` stops it now.",
         prepared.agent_name.cyan(),
         prepared.agent_name
     );
@@ -3722,8 +3724,9 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// session was writing without reaching into it.
 ///
 /// Best-effort by design. Failing to reach the agent must not stop us sleeping
-/// it — agents have no idle timeout, so the alternative to an imperfect sleep is
-/// a machine that bills until someone remembers it.
+/// it — the alternative to an imperfect sleep is a machine that bills until it
+/// idles out, or, for an agent created before idle sleep, until someone
+/// remembers it.
 pub async fn flush_disk(environment_id: &str, agent_id: &str) {
     // Deliberately not `ssh_plumbing`: its ~20s retry budget exists to cross the
     // gap while a woken agent becomes attachable. Spending it here would make
