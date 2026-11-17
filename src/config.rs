@@ -68,9 +68,6 @@ pub struct StoredSandbox {
 /// `sandboxCreate` needs the full recipe — not just the id — so the CLI keeps
 /// the instructions locally to make `railway sandbox create --template <name>`
 /// possible.
-///
-/// Records written before the API dropped `baseImageDigest` may still carry
-/// one; serde ignores it, and the next config write drops it.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +78,10 @@ pub struct StoredSandboxTemplate {
     pub name: Option<String>,
     pub environment_id: String,
     pub instructions: Vec<String>,
+    /// Legacy: the base image a template was built on, from before the API
+    /// stopped accepting one. Kept so old records round-trip and so
+    /// `sandbox create --template` can refuse them clearly; never sent.
+    pub base_image_digest: Option<String>,
     pub created_at: Option<String>,
 }
 
@@ -1092,22 +1093,39 @@ mod tests {
         assert!(has_credentials);
     }
 
-    /// The API no longer takes a base image digest, but templates built with
-    /// `--base-image-digest` before it was removed still have one on disk.
+    /// Templates built with `--base-image-digest` before the API dropped it
+    /// still carry one on disk. The whole config has to keep parsing: a parse
+    /// failure regenerates it, which signs the user out. The digest round-trips
+    /// so `sandbox create --template` can refuse that template by name.
     #[test]
-    fn stored_template_with_legacy_base_image_digest_still_parses() {
-        let template: StoredSandboxTemplate = serde_json::from_value(serde_json::json!({
-            "id": "abc123",
-            "name": "dev",
-            "environmentId": "env-1",
-            "instructions": ["npm i -g pnpm"],
-            "baseImageDigest": "sha256:deadbeef",
-            "createdAt": "2026-01-01T00:00:00Z",
-        }))
-        .unwrap();
-        assert_eq!(template.instructions, vec!["npm i -g pnpm"]);
-        let json = serde_json::to_value(&template).unwrap();
-        assert!(json.get("baseImageDigest").is_none());
+    fn config_with_legacy_template_base_image_digest_parses_and_round_trips() {
+        let raw = serde_json::json!({
+            "projects": {},
+            "user": { "token": "tok_123" },
+            "sandboxTemplates": [{
+                "id": "abc123",
+                "name": "dev",
+                "environmentId": "env-1",
+                "instructions": ["npm i -g pnpm"],
+                "baseImageDigest": "sha256:deadbeef",
+                "createdAt": "2026-01-01T00:00:00Z",
+            }],
+        });
+        let config: RailwayConfig = serde_json::from_slice(raw.to_string().as_bytes())
+            .expect("a config with a legacy template must parse");
+        assert_eq!(config.user.token.as_deref(), Some("tok_123"));
+        let templates = config.sandbox_templates.as_ref().unwrap();
+        assert_eq!(templates[0].instructions, vec!["npm i -g pnpm"]);
+        assert_eq!(
+            templates[0].base_image_digest.as_deref(),
+            Some("sha256:deadbeef")
+        );
+
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            written["sandboxTemplates"][0]["baseImageDigest"],
+            "sha256:deadbeef"
+        );
     }
 }
 
