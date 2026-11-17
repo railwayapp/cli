@@ -847,7 +847,21 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     };
 
     let was_running = matches!(agent.status, ca::Status::Running);
-    let spinner = (!was_running).then(|| create_spinner(format!("Waking agent {}", agent.name)));
+    // An interactive session gets the same before and after as `railway
+    // sandbox ssh`: a short "Connecting" spinner and a disconnect line. A
+    // one-off command (`-- <cmd>`) prints nothing of its own, except the wake
+    // spinner when there is a wait to explain.
+    let interactive = args.command.is_empty();
+    let connecting = format!("Connecting to cloud agent {}", agent.name);
+    let spinner = match agent.status {
+        ca::Status::Sleeping => Some(create_spinner(format!("Waking cloud agent {}", agent.name))),
+        ca::Status::Starting => Some(create_spinner(format!(
+            "Starting cloud agent {}",
+            agent.name
+        ))),
+        _ if interactive => Some(create_spinner(connecting.clone())),
+        _ => None,
+    };
     // Probe the route instead of polling status to RUNNING: the platform
     // routes a shell as soon as the container exists, several seconds before
     // the status flips. STARTING means something else is already booting the
@@ -894,15 +908,26 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
             agent.status.label()
         )),
     };
-    if let Some(spinner) = spinner {
-        spinner.finish_and_clear();
-    }
+    // A plain shell keeps the spinner up until ssh takes the terminal. A
+    // session attach prints its own progress, so it starts with a clear line.
+    let plain_shell = interactive && args.session.is_none() && !args.resume;
+    let spinner = match spinner {
+        Some(spinner) if ready.is_ok() && plain_shell => {
+            spinner.set_message(connecting);
+            Some(spinner)
+        }
+        Some(spinner) => {
+            spinner.finish_and_clear();
+            None
+        }
+        None => None,
+    };
     ready?;
     ca::remember(configs, &agent)?;
 
     let connected = if let Some(command) = args.remote_command() {
         telemetry::track_lifecycle_detached("ssh_command");
-        run_command(&agent, &command).await
+        run_command(&agent, &command, spinner).await
     } else {
         attach(
             client,
@@ -939,14 +964,17 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // the VM — including the durable session just detached from — while the
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
-    println!(
-        "\nDisconnected — {}",
-        ca::leave_note(
-            &agent.name.cyan().to_string(),
-            &agent.name,
-            Some(agent.created_at)
-        )
-    );
+    if interactive {
+        println!(
+            "\n{}",
+            disconnected(
+                Kind::CloudAgent,
+                &agent.name.cyan().to_string(),
+                &agent.name,
+                Some(Idle::cloud_agent(agent.created_at)),
+            )
+        );
+    }
 
     Ok(exit_code)
 }
@@ -954,8 +982,19 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
 /// Run one command on the agent instead of attaching. This is ssh's ordinary
 /// trailing-command behaviour. Bare `railway ca ssh` supplies the login-shell
 /// command with the harness autostart disabled.
-async fn run_command(agent: &ca::Agent, command: &[String]) -> Result<i32> {
-    let info = code::connect_info(&agent.environment_id, &agent.id).await?;
+///
+/// `spinner`, when given, is cleared once the connection details are in hand,
+/// before ssh takes the terminal.
+async fn run_command(
+    agent: &ca::Agent,
+    command: &[String],
+    spinner: Option<indicatif::ProgressBar>,
+) -> Result<i32> {
+    let info = code::connect_info(&agent.environment_id, &agent.id).await;
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+    let info = info?;
     let command = command.to_vec();
     let code = tokio::task::spawn_blocking(move || {
         native::run_native_ssh_with_opts(

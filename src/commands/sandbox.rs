@@ -2079,6 +2079,25 @@ async fn ssh(
     configs.set_active_sandbox(&sandbox_id);
     configs.write()?;
 
+    // An interactive session gets the same before and after as `railway ca
+    // ssh`: a short spinner, then a disconnect line that says what happens to
+    // the sandbox now. A one-off command prints nothing of its own. The idle
+    // timeout read is best-effort and only feeds that line.
+    let interactive = args.command.is_empty();
+    let idle_timeout = if interactive {
+        let spinner = create_spinner(format!("Connecting to sandbox {sandbox_id}"));
+        let idle = fetch_sandbox(client, configs, &environment_id, &sandbox_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|sandbox| sandbox.idle_timeout_minutes);
+        spinner.finish_and_clear();
+        idle
+    } else {
+        None
+    };
+    let label = sandbox_id.clone();
+
     // Relay target format (per backboard): sbx:<environmentId>:<sandboxId>.
     // `run_native_ssh` appends the environment's relay host internally.
     let target = format!("sbx:{environment_id}:{sandbox_id}");
@@ -2115,6 +2134,19 @@ async fn ssh(
     let exit_code = tel::track_for("sandbox", "ssh_session", session).await?;
 
     heartbeat.abort();
+
+    if interactive {
+        use colored::Colorize;
+        println!(
+            "\n{}",
+            disconnected(
+                Kind::Sandbox,
+                &label.cyan().to_string(),
+                &label,
+                Idle::sandbox(idle_timeout),
+            )
+        );
+    }
 
     if exit_code != 0 {
         tel::report_failure_for(
@@ -2387,6 +2419,18 @@ async fn fetch_sandbox_status(
     environment_id: &str,
     sandbox_id: &str,
 ) -> Result<Option<queries::sandbox::SandboxStatus>> {
+    Ok(fetch_sandbox(client, configs, environment_id, sandbox_id)
+        .await?
+        .map(|s| s.status))
+}
+
+/// Read one sandbox. `Ok(None)` means the API answered but it is gone.
+async fn fetch_sandbox(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: &str,
+    sandbox_id: &str,
+) -> Result<Option<queries::sandbox::SandboxSandbox>> {
     let res = post_graphql::<queries::Sandbox, _>(
         client,
         configs.get_backboard(),
@@ -2396,7 +2440,7 @@ async fn fetch_sandbox_status(
         },
     )
     .await?;
-    Ok(res.sandbox.map(|s| s.status))
+    Ok(res.sandbox)
 }
 
 pub(crate) fn spawn_heartbeat(
