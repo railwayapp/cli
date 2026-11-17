@@ -82,6 +82,11 @@ railway mcp install --agent cursor
 railway skills --agent claude-code
 ```
 
+Before updating an existing MCP configuration, the installer keeps a copy beside
+it as `<filename>.railway-backup-<random>.bak` and prints its path. TOML and JSONC
+comments remain recoverable in that copy. Reinstalling an unchanged configuration
+does not create another backup.
+
 With automatic updates enabled, CLI-managed skills update silently in the background,
 including on the first normal command after a CLI version change (whether upgraded
 with `railway upgrade` or a package manager). Locally modified or deleted skills are
