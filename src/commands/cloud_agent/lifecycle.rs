@@ -18,11 +18,12 @@ use crate::client::GQLClient;
 use crate::commands::cloud_agent::telemetry;
 use crate::commands::cloud_agent::tui::session;
 use crate::commands::code::{self, LaunchArgs, Progress};
+use crate::commands::output::machine::{Created, Domain, Idle, Kind, disconnected, render_created};
 use crate::commands::sandbox::{resolve_project_and_env, variables_to_input};
 use crate::commands::ssh::native;
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
-use crate::util::progress::create_spinner;
+use crate::util::progress::{create_shimmer_spinner, create_spinner};
 use crate::util::prompt::prompt_confirm_with_default;
 
 /// Where to look. Flattened into each subcommand rather than made global on
@@ -402,7 +403,7 @@ pub async fn create(args: CreateArgs) -> Result<()> {
         args.no_bootstrap || args.from_checkpoint.is_some(),
     )
     .await?;
-    let spinner = (!args.json).then(|| create_spinner("Creating a cloud agent".to_string()));
+    let spinner = (!args.json).then(|| create_shimmer_spinner("Creating cloud agent"));
     let agent = match ca::create(
         client,
         &backboard,
@@ -444,6 +445,14 @@ pub async fn create(args: CreateArgs) -> Result<()> {
             }
         }
     };
+    // Region and domains are read once the agent is up (or right away with
+    // --no-wait, when they are usually not there yet). Best-effort: the agent
+    // exists either way, and the report simply leaves out what it can't read.
+    let placement = ca::placement(client, &backboard, &environment_id, &agent.id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     if let Some(spinner) = spinner {
         spinner.finish_and_clear();
     }
@@ -451,36 +460,134 @@ pub async fn create(args: CreateArgs) -> Result<()> {
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "id": agent.id,
-                "name": agent.name,
-                "status": agent.status.label(),
-                "projectId": agent.project_id,
-                "environmentId": agent.environment_id,
-                "createdAt": agent.created_at.to_rfc3339(),
-            }))?
+            serde_json::to_string_pretty(&created_json(&agent, &placement))?
         );
         return Ok(());
     }
 
-    println!(
-        "✓ Created agent {} ({})",
-        agent.name.cyan(),
-        agent.status.label()
-    );
-    println!(
-        "\nIt has no coding agent on it yet — {} installs one and drops you in.",
-        format!("railway ca ssh {}", agent.name).cyan()
-    );
-    println!(
-        "{}",
-        format!(
-            "An idle agent sleeps after 5 minutes, which ends its processes, and wakes when you connect. `railway ca sleep {}` sleeps it now, `railway ca delete {}` takes the disk with it.",
-            agent.name, agent.name
-        )
-        .dimmed()
-    );
+    print!("{}", render_created(&created_report(&agent, &placement)));
     Ok(())
+}
+
+/// `railway ca create --json`. `region` and `domains` were added alongside the
+/// original keys, which scripts read and stay as they were.
+fn created_json(agent: &ca::Agent, placement: &ca::Placement) -> serde_json::Value {
+    serde_json::json!({
+        "id": agent.id,
+        "name": agent.name,
+        "status": agent.status.label(),
+        "region": placement.region,
+        "projectId": agent.project_id,
+        "environmentId": agent.environment_id,
+        "createdAt": agent.created_at.to_rfc3339(),
+        "domains": placement.domains,
+    })
+}
+
+/// The harness gate's port: the dashboard chat's front door, not something a
+/// person opens, so the create block leaves it out (`--json` keeps it).
+const GATE_PORT: i64 = 8790;
+
+/// The shared create block, plus the agent's one extra line.
+fn created_report(agent: &ca::Agent, placement: &ca::Placement) -> Created {
+    Created {
+        kind: Kind::CloudAgent,
+        verb: "Created",
+        label: agent.name.clone(),
+        status: agent.status.label(),
+        region: placement.region.clone(),
+        // A new agent always gets idle sleep.
+        idle: Some(Idle::cloud_agent(agent.created_at)),
+        domains: placement
+            .domains
+            .iter()
+            .filter(|d| d.port != GATE_PORT)
+            .map(|d| Domain {
+                domain: d.domain.clone(),
+                port: d.port,
+            })
+            .collect(),
+        domains_publishing: false,
+        connect: format!("railway ca ssh {}", agent.name),
+        hint: Some(format!(
+            "No coding agent is installed yet. `railway ca ssh {} --session` sets one up.",
+            agent.name
+        )),
+    }
+}
+
+#[cfg(test)]
+mod create_output_tests {
+    use super::*;
+
+    fn agent(status: ca::Status) -> ca::Agent {
+        ca::Agent {
+            id: "agent-id".into(),
+            name: "my-box".into(),
+            status,
+            project_id: "project".into(),
+            environment_id: "env".into(),
+            created_at: "2026-11-17T00:00:00Z".parse().unwrap(),
+            work_status: None,
+            archived: false,
+        }
+    }
+
+    fn placement() -> ca::Placement {
+        let domain = |prefix: &str, port: i64| ca::Domain {
+            prefix: prefix.into(),
+            port,
+            domain: format!("{prefix}-3c9e1f.up.railway.app"),
+        };
+        ca::Placement {
+            region: Some("us-east4".into()),
+            domains: vec![domain("app", 8080), domain("agent", GATE_PORT)],
+        }
+    }
+
+    #[test]
+    fn json_keeps_the_original_keys_and_adds_region_and_domains() {
+        let json = created_json(&agent(ca::Status::Running), &placement());
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "createdAt",
+                "domains",
+                "environmentId",
+                "id",
+                "name",
+                "projectId",
+                "region",
+                "status"
+            ]
+        );
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["region"], "us-east4");
+        // Scripts get every domain, the gate included.
+        assert_eq!(json["domains"].as_array().unwrap().len(), 2);
+        assert_eq!(json["domains"][0]["prefix"], "app");
+
+        let unplaced = created_json(&agent(ca::Status::Starting), &ca::Placement::default());
+        assert_eq!(unplaced["region"], serde_json::Value::Null);
+        assert_eq!(unplaced["domains"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn the_block_leaves_out_the_harness_gate() {
+        let report = created_report(&agent(ca::Status::Running), &placement());
+        assert_eq!(report.label, "my-box");
+        assert_eq!(report.idle, Some(Idle::SleepsAfter(5)));
+        assert_eq!(
+            report.domains,
+            [Domain {
+                domain: "app-3c9e1f.up.railway.app".into(),
+                port: 8080
+            }]
+        );
+        assert_eq!(report.connect, "railway ca ssh my-box");
+    }
 }
 
 pub async fn wake(args: WakeArgs) -> Result<()> {

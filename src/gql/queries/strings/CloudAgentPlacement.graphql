@@ -1,0 +1,11 @@
+query CloudAgentPlacement($id: ID!, $environmentId: ID!) {
+  cloudAgent(id: $id, environmentId: $environmentId) {
+    id
+    region
+    domains {
+      prefix
+      port
+      domain
+    }
+  }
+}
