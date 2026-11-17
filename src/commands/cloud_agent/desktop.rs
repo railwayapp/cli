@@ -50,9 +50,11 @@ pub(crate) use opencode_config::configure_installed as configure_installed_openc
 
 Sets up the selected app's connection and credentials without opening the app.
 Uses an existing VM when available; --new creates one, --agent selects one.
-Restart the app after setup to load its connection. An idle VM powers off
-after 5 minutes; railway ca sleep <agent> stops it now. Rerun setup after
-sleep or restart.
+Restart the app after setup to load its connection. An idle VM sleeps
+after 5 minutes and connecting wakes it; Claude and Codex just reconnect.
+Agents created since Oct 8, 2026 restart the OpenCode server on wake, so
+reconnecting usually works. If it can't connect, rerun
+railway ca desktop --opencode.
 
 --dry-run previews changes without modifying the VM or local configuration.
 --remove removes local configuration and stops the managed OpenCode server.
@@ -352,7 +354,12 @@ pub async fn command(args: Args) -> Result<()> {
         opencode::show_connection(&connection, &prepared.agent_name, desktop.is_ok())?;
         desktop.context("OpenCode is running, but Desktop configuration failed. Rerun this command to finish setup.")?;
         println!(
-            "You can close this terminal. Rerun this command after sleeping or restarting the agent."
+            "{}",
+            if ca::sleeps_when_idle(prepared.agent_created_at) {
+                "You can close this terminal. The agent sleeps after 5 idle minutes and restarts OpenCode when it wakes. If Desktop can't connect, rerun this command."
+            } else {
+                "You can close this terminal. Rerun this command after sleeping or restarting the agent."
+            }
         );
     } else {
         code::save_desktop_configuration(&prepared, None, &Ok(true));
@@ -1072,15 +1079,18 @@ fn summarize(
     }
     if !apps.iter().any(|app| app.is_opencode()) {
         println!(
-            "\n{} Connecting over SSH wakes a sleeping agent, so the app wakes it when it\nconnects. If the app times out before the agent is ready, run {} and retry.",
-            "!".yellow().bold(),
+            "\nConnecting over SSH wakes a sleeping agent, so the app wakes it when it\nconnects. If the app times out before the agent is ready, run {} and retry.",
             format!("railway ca wake {}", prepared.agent_name).cyan()
         );
     }
-    println!(
-        "{} stops the compute bill when you're done.",
-        format!("railway ca sleep {}", prepared.agent_name).cyan()
-    );
+    let sleep = format!("railway ca sleep {}", prepared.agent_name).cyan();
+    if ca::sleeps_when_idle(prepared.agent_created_at) {
+        println!(
+            "The agent sleeps after 5 idle minutes, which ends its processes; {sleep} sleeps it now."
+        );
+    } else {
+        println!("{sleep} stops the compute bill when you're done.");
+    }
 }
 
 #[cfg(test)]

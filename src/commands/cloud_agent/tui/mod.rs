@@ -942,6 +942,7 @@ async fn fetch_agents(
             work_status: Some(work_status::work_status_from!(a.work_status)),
             threads: agent_threads!(a.sessions),
             archived: a.archived_at.is_some(),
+            created_at: Some(a.created_at),
         })
         .collect())
 }
@@ -977,6 +978,7 @@ async fn fetch_my_agents(
                     work_status: Some(work_status::work_status_from!(a.work_status)),
                     threads: agent_threads!(a.sessions),
                     archived: a.archived_at.is_some(),
+                    created_at: Some(a.created_at),
                 },
             )
         })

@@ -63,8 +63,8 @@ pub(crate) fn harness_label(slug: &str) -> &str {
 Use railway code for a local Codex/OpenCode client connected to a VM.
 Agent flags here launch on the VM. Use --new to create a fresh VM.
 Flags override preferences; the linked project overrides the saved project.
-An idle VM powers off after 5 minutes and wakes when you connect.
-Sleep stops processes and keeps the disk.
+An idle VM sleeps after 5 minutes and wakes when you connect.
+Sleeping ends its processes and keeps the disk.
 Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
@@ -100,7 +100,7 @@ enum Command {
 Launches on the VM directly, without the management interface.
 Uses your configured agent and project defaults; --new creates a fresh VM.
 Available local credentials are copied to the VM; Claude can mint a setup token.
-An idle VM powers off after 5 minutes; railway ca sleep <agent> stops it now.
+An idle VM sleeps after 5 minutes; railway ca sleep <agent> sleeps it now.
 Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
     Start(LaunchArgs),

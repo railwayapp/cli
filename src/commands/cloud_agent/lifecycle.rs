@@ -172,8 +172,8 @@ pub struct SleepArgs {
   railway ca ssh my-box --resume           # resume the latest Claude conversation
   railway ca ssh my-box -- ls -la /app     # run a command
 
-An idle VM powers off after 5 minutes and wakes when you connect.
-Sleep ends its processes and keeps its disk."#)]
+An idle VM sleeps after 5 minutes and wakes when you connect.
+Sleeping ends its processes and keeps its disk."#)]
 pub struct SshArgs {
     /// Agent name or ID (defaults to this directory's, or your only one)
     #[clap(value_name = "AGENT")]
@@ -475,7 +475,7 @@ pub async fn create(args: CreateArgs) -> Result<()> {
     println!(
         "{}",
         format!(
-            "An idle agent powers off after 5 minutes and wakes when you connect. `railway ca sleep {}` stops it now, `railway ca delete {}` takes the disk with it.",
+            "An idle agent sleeps after 5 minutes, which ends its processes, and wakes when you connect. `railway ca sleep {}` sleeps it now, `railway ca delete {}` takes the disk with it.",
             agent.name, agent.name
         )
         .dimmed()
@@ -820,9 +820,12 @@ async fn ssh_connect(args: SshArgs) -> Result<i32> {
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
     println!(
-        "\nDisconnected — agent {} is still running and powers off after 5 idle minutes. `railway ca sleep {}` stops it now.",
-        agent.name.cyan(),
-        agent.name
+        "\nDisconnected — {}",
+        ca::leave_note(
+            &agent.name.cyan().to_string(),
+            &agent.name,
+            Some(agent.created_at)
+        )
     );
 
     Ok(exit_code)

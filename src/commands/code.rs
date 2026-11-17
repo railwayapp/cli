@@ -74,12 +74,14 @@ use crate::util::shell::shell_join;
 // cache.
 //
 // Lifecycle: agents are durable; unlike a sandbox, nothing eventually deletes
-// one. An idle agent (no SSH session, outbound traffic or agent turn) powers
-// itself off after 5 minutes and wakes on SSH, HTTP or API; agents created
-// before 2026-10-07 never do. Disconnecting leaves the agent RUNNING — the CLI
-// never sleeps it as a side effect, because sleeping kills every process on the
-// VM (including durable sessions the platform keeps listing as reattachable),
-// so it is a deliberate act: `railway ca sleep`, or `s` on the TUI tree.
+// one. An idle agent (no SSH client attached, almost no network traffic, and no
+// coding agent working or waiting) sleeps after 5 minutes, which ends its
+// processes, and wakes on SSH, HTTP or API; agents created before the
+// 2026-10-08 deploy never do (see `ca::sleeps_when_idle`). Disconnecting leaves
+// the agent RUNNING — the CLI never sleeps it as a side effect, because
+// sleeping kills every process on the VM (including durable sessions the
+// platform keeps listing as reattachable), so it is a deliberate act:
+// `railway ca sleep`, or `s` on the TUI tree.
 // ---------------------------------------------------------------------------
 
 pub(crate) mod bootstrap_setup;
@@ -138,7 +140,7 @@ arguments to the agent. Available local credentials are copied to the VM;
 Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
 detected Desktop installs.
 
-An idle VM powers off after 5 minutes; railway ca sleep <agent> stops it now.
+An idle VM sleeps after 5 minutes; railway ca sleep <agent> sleeps it now.
 Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
@@ -2986,6 +2988,9 @@ pub struct Prepared {
     pub relay_opts: Vec<String>,
     pub agent_id: String,
     pub agent_name: String,
+    /// When the agent was created, which decides whether it sleeps when idle
+    /// (see [`ca::sleeps_when_idle`]).
+    pub agent_created_at: chrono::DateTime<chrono::Utc>,
     pub environment_id: String,
     pub harness: &'static str,
     /// True when this run created the agent, which only affects messaging.
@@ -3105,9 +3110,12 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     // platform keeps listing those sessions as running, so the next reattach
     // landed on a dead name and a blank screen. Sleeping is deliberate now.
     println!(
-        "\nDisconnected — agent {} is still running and powers off after 5 idle minutes. `railway ca sleep {}` stops it now.",
-        prepared.agent_name.cyan(),
-        prepared.agent_name
+        "\nDisconnected — {}",
+        ca::leave_note(
+            &prepared.agent_name.cyan().to_string(),
+            &prepared.agent_name,
+            Some(prepared.agent_created_at)
+        )
     );
 
     if prepared.created {
@@ -3675,6 +3683,7 @@ async fn prepare_inner(
         },
         agent_id: cloud_agent.id,
         agent_name: cloud_agent.name,
+        agent_created_at: cloud_agent.created_at,
         environment_id,
         harness: agent.slug(),
         created,
