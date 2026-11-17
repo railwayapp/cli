@@ -65,6 +65,56 @@ def owned_process(state):
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
 
 
+def listener_pid(port):
+    """The PID of the process listening on TCP `port`, read from /proc."""
+    sockets = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            # local_address is HEXIP:HEXPORT; state 0A is LISTEN.
+            if len(fields) > 9 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                sockets.add(f"socket:[{fields[9]}]")
+    if not sockets:
+        return None
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            for descriptor in (process / "fd").iterdir():
+                if os.readlink(descriptor) in sockets:
+                    return int(process.name)
+        except OSError:
+            continue
+    return None
+
+
+def adopt_listener(state, port, authenticated):
+    """Record a server that express-agent restarted after the VM powered off.
+
+    express-agent relaunches recorded listeners on the first boot after a
+    power-off, so the server this script started comes back with a new PID and
+    the saved PID check fails. A listener that accepts the saved credentials is
+    that server: record its process group leader (what stop signals) and start
+    time in `state`. Returns whether it was adopted.
+    """
+    if restored_state(state) or not authenticated:
+        return False
+    pid = listener_pid(port)
+    try:
+        leader = os.getpgid(pid) if pid else None
+    except OSError:
+        return False
+    start = process_start(leader) if leader and leader > 1 else None
+    if start is None:
+        return False
+    state.update(pid=leader, start=start)
+    return True
+
+
 def probe(port, credentials, path):
     request = urllib.request.Request(f"http://127.0.0.1:{port}/{path}")
     if credentials:
@@ -99,6 +149,11 @@ def health(port, credentials=None):
         body.get("healthy") is True or (type(body.get("pid")) is int and isinstance(body.get("urls"), list))
     )
     return status, ready
+
+
+def authenticates(port, credentials):
+    """The server on `port` accepts `credentials` and refuses requests without them."""
+    return health(port, credentials) == (200, True) and health(port)[0] == 401
 
 
 def stop_owned(state):
@@ -224,9 +279,11 @@ def setup(request, home):
         if not saved_v2(state):
             return None
         port = server_port(state)
-        if (owned_process(state)
-                and health(port, state) == (200, True)
-                and health(port)[0] == 401):
+        if not owned_process(state) and state.get("password") and not port_available(port):
+            # Read-only: adopt into a copy that is never saved.
+            state = dict(state)
+            adopt_listener(state, port, authenticates(port, state))
+        if owned_process(state) and authenticates(port, state):
             return {"directory": state.get("directory") or str(Path(f"/proc/{state['pid']}/cwd").resolve())}
         return None
     if request.get("action") == "connect" and not state_path.exists():
@@ -241,6 +298,13 @@ def setup(request, home):
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         if request.get("action") == "stop":
             # A V1 server is still ours to stop; nothing else touches it.
+            if not owned_process(state) and state.get("password"):
+                try:
+                    port = server_port(state)
+                except SetupError:
+                    port = None
+                if port and not port_available(port):
+                    adopt_listener(state, port, authenticates(port, state))
             stop_owned(state)
             state.pop("pid", None)
             state.pop("start", None)
@@ -280,6 +344,9 @@ def setup(request, home):
             raise SetupError("OpenCode requires a nonempty username and password.")
 
         runtime = None
+        if (not port_available(port) and not owned_process(state) and state.get("password")
+                and adopt_listener(state, port, authenticates(port, credentials))):
+            save(state_path, state)
         if not port_available(port) and not owned_process(state):
             raise SetupError(f"Port {port} is occupied by another process. Stop it or use --new for a fresh agent.")
         current = server_status(port, credentials)[1].get("version") if owned_process(state) else None

@@ -373,21 +373,63 @@ pub async fn wake(client: &reqwest::Client, backboard: &str, id: &str) -> Result
     Ok(())
 }
 
-/// Sleep an agent, flushing its filesystem first.
+/// What [`sleep`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SleepOutcome {
+    /// The sleep mutation was sent.
+    Requested,
+    /// The agent was already asleep, or on its way there; nothing was sent.
+    AlreadyAsleep,
+}
+
+/// How [`sleep`] treats an agent in a given state.
+#[derive(Debug, PartialEq, Eq)]
+enum SleepPlan {
+    FlushThenSleep,
+    AlreadyAsleep,
+    SleepWithoutFlush,
+}
+
+/// Only a RUNNING agent is flushed: any SSH connection wakes a sleeping agent,
+/// and a sleep request that lands while it is starting is refused, so flushing
+/// anything else either wakes it and leaves it running or reaches nothing.
+/// Backboard reports the orchestrator's STOPPING as SLEEPING, so both count as
+/// already asleep. Every other state (including an agent the read did not
+/// find) still sends the mutation, so the API reports what it makes of it.
+fn sleep_plan(status: Option<&Status>) -> SleepPlan {
+    match status {
+        Some(Status::Running) => SleepPlan::FlushThenSleep,
+        Some(Status::Sleeping) => SleepPlan::AlreadyAsleep,
+        _ => SleepPlan::SleepWithoutFlush,
+    }
+}
+
+/// Sleep an agent, flushing its filesystem first when it is running.
 ///
 /// The flush is paired with the mutation here, rather than left to each caller,
 /// because forgetting it loses the user's most recent work silently — see
 /// [`crate::commands::code::flush_disk`]. Every path that suspends an agent goes
 /// through this function for that reason; there is deliberately no way to reach
 /// the bare mutation from outside this module.
+///
+/// The agent's status is read first so the flush never wakes an agent that is
+/// already asleep — see [`sleep_plan`].
 pub async fn sleep(
     client: &reqwest::Client,
     backboard: &str,
     environment_id: &str,
     id: &str,
-) -> Result<()> {
-    crate::commands::code::flush_disk(environment_id, id).await;
-    sleep_without_flush(client, backboard, id).await
+) -> Result<SleepOutcome> {
+    let status = get(client, backboard, environment_id, id)
+        .await?
+        .map(|agent| agent.status);
+    match sleep_plan(status.as_ref()) {
+        SleepPlan::AlreadyAsleep => return Ok(SleepOutcome::AlreadyAsleep),
+        SleepPlan::FlushThenSleep => crate::commands::code::flush_disk(environment_id, id).await,
+        SleepPlan::SleepWithoutFlush => {}
+    }
+    sleep_without_flush(client, backboard, id).await?;
+    Ok(SleepOutcome::Requested)
 }
 
 async fn sleep_without_flush(client: &reqwest::Client, backboard: &str, id: &str) -> Result<()> {
@@ -1032,5 +1074,69 @@ mod tests {
         );
         assert_eq!(humanize_age(Utc::now() - chrono::Duration::hours(3)), "3h");
         assert_eq!(humanize_age(Utc::now() - chrono::Duration::days(9)), "9d");
+    }
+
+    #[test]
+    fn only_a_running_agent_is_flushed_before_sleeping() {
+        assert_eq!(
+            sleep_plan(Some(&Status::Running)),
+            SleepPlan::FlushThenSleep
+        );
+        assert_eq!(
+            sleep_plan(Some(&Status::Sleeping)),
+            SleepPlan::AlreadyAsleep
+        );
+        for status in [
+            Status::Starting,
+            Status::Crashed,
+            Status::Failed,
+            Status::Deleting,
+            Status::Unknown("NEW_STATE".into()),
+        ] {
+            assert_eq!(
+                sleep_plan(Some(&status)),
+                SleepPlan::SleepWithoutFlush,
+                "{status:?}"
+            );
+        }
+        assert_eq!(sleep_plan(None), SleepPlan::SleepWithoutFlush);
+    }
+
+    fn agent_node(status: &str) -> serde_json::Value {
+        json!({"cloudAgent": {
+            "id": "agent", "name": "agent", "status": status,
+            "projectId": "project", "environmentId": "env",
+            "createdAt": "2026-09-10T00:00:00Z"
+        }})
+    }
+
+    #[tokio::test]
+    async fn sleeping_an_asleep_agent_sends_nothing() {
+        let server = MockBackboard::spawn();
+        server.stub("CloudAgent", agent_node("SLEEPING"));
+        let outcome = sleep(&reqwest::Client::new(), &server.url(), "env", "agent")
+            .await
+            .unwrap();
+        assert_eq!(outcome, SleepOutcome::AlreadyAsleep);
+        assert!(server.variables_for("CloudAgentSleep").is_empty());
+    }
+
+    #[tokio::test]
+    async fn sleeping_a_starting_agent_still_requests_sleep() {
+        // Not RUNNING, so no flush: the request goes straight to the API.
+        let server = MockBackboard::spawn();
+        server.stub("CloudAgent", agent_node("STARTING"));
+        server.stub(
+            "CloudAgentSleep",
+            json!({"cloudAgentSleep": {"id": "agent", "status": "STARTING"}}),
+        );
+        let outcome = sleep(&reqwest::Client::new(), &server.url(), "env", "agent")
+            .await
+            .unwrap();
+        assert_eq!(outcome, SleepOutcome::Requested);
+        assert_eq!(
+            server.variables_for("CloudAgentSleep"),
+            vec![json!({"id": "agent"})]
+        );
     }
 }

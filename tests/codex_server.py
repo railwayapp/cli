@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -136,6 +137,12 @@ else:
                 str(pid) if any(c.pid == pid and c.poll() is None for c in self.children) else None)
             mock.start()
             self.addCleanup(mock.stop)
+            # /proc's socket tables stand in for lsof on Linux.
+            mock = patch.object(bootstrap, "listener_pid", side_effect=lambda port: next(iter(map(int, subprocess.run(
+                ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True, text=True).stdout.split())), None))
+            mock.start()
+            self.addCleanup(mock.stop)
         self.addCleanup(self.stop_children)
 
     def stop_children(self):
@@ -143,6 +150,24 @@ else:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGTERM)
             child.wait(timeout=5)
+
+    def relaunch(self):
+        """What express-agent does on the first boot after a power-off: the
+        recorded server's command again, in its own session, under a new PID."""
+        self.stop_children()
+        child = subprocess.Popen(
+            [str(self.home / ".local/bin/codex"), "app-server", "--listen", f"ws://0.0.0.0:{self.port}",
+             "--ws-auth", "capability-token", "--ws-token-file", str(self.root / "server-token"),
+             "-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"'],
+            cwd=self.directory, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        self.children.append(child)
+        deadline = time.monotonic() + 10
+        while bootstrap.probe(self.port) != 200:
+            self.assertLess(time.monotonic(), deadline, "relaunched server never listened")
+            time.sleep(0.05)
+        return child
 
     def start(self, **extra):
         return bootstrap.setup(dict(directory=str(self.directory), token=self.token, **extra), self.home)
@@ -368,14 +393,37 @@ else:
                 self.start()
         self.assertEqual(self.children, [])
 
-    def test_stale_pid_cannot_claim_an_existing_listener(self):
+    def test_server_relaunched_after_power_off_is_adopted(self):
+        first = self.start()
+        state_path = self.root / "server.json"
+        relaunched = self.relaunch()
+        before = state_path.read_bytes()
+        info = bootstrap.setup({"action": "inspect"}, self.home)
+        self.assertEqual(info, {"directory": str(self.directory), "version": first["version"]})
+        self.assertEqual(state_path.read_bytes(), before)
+        connected = bootstrap.setup({"action": "connect"}, self.home)
+        self.assertTrue(connected["reused"])
+        self.assertEqual(connected["token"], first["token"])
+        self.assertEqual(json.loads(state_path.read_text())["pid"], relaunched.pid)
+        self.assertTrue(self.start()["reused"])
+        self.assertIsNone(relaunched.poll())
+        # Adopted means owned: an update stops the relaunched server.
+        with patch.dict(os.environ, {"FAKE_LATEST": "0.154.0"}):
+            self.assertFalse(self.start()["reused"])
+        relaunched.wait(timeout=5)
+
+    def test_listener_that_rejects_the_saved_token_is_not_adopted(self):
         self.start()
         state_path = self.root / "server.json"
         state = json.loads(state_path.read_text())
-        state["start"] = "not-the-process-start-time"
+        state.update(start="not-the-process-start-time", token="b" * 43)
         bootstrap.save(state_path, state)
+        self.assertIsNone(bootstrap.setup({"action": "inspect"}, self.home))
         with self.assertRaisesRegex(bootstrap.SetupError, "occupied by another process"):
             self.start()
+        with self.assertRaisesRegex(bootstrap.SetupError, "occupied by another process"):
+            bootstrap.setup({"action": "connect"}, self.home)
+        self.assertEqual(json.loads(state_path.read_text())["start"], "not-the-process-start-time")
         self.assertIsNone(self.children[0].poll())
 
     def test_concurrent_setup_is_rejected(self):

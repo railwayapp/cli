@@ -3721,12 +3721,13 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Flush the agent's filesystem so sleeping it cannot discard recent work.
 ///
-/// `cloudAgentSleep` snapshots the disk without quiescing the guest, so pages
-/// still dirty in its page cache are absent from the image the next wake
-/// restores. Measured on a scratch agent: a file written a second before a
-/// sleep was gone after waking, while the same write followed by `sync`
-/// survived — including when the sleep was issued immediately on disconnect.
-/// So the variable is the flush, not the timing.
+/// Belt-and-braces: since monorepo #37022 a host-initiated stop syncs the
+/// guest itself. Before that, `cloudAgentSleep` snapshotted the disk without
+/// quiescing the guest, and a file written a second before a sleep was gone
+/// after waking unless a `sync` ran first. The flush stays for RUNNING agents
+/// only: connecting to a sleeping agent wakes it, so
+/// [`crate::controllers::cloud_agent::sleep`] checks the status before calling
+/// this.
 ///
 /// A side connection is enough because `sync(2)` flushes the whole filesystem
 /// regardless of which process dirtied it: this covers whatever the durable
