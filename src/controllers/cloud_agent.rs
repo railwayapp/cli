@@ -157,6 +157,52 @@ pub async fn get(
     }))
 }
 
+/// One public domain on an agent's machine.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Domain {
+    pub prefix: String,
+    pub port: i64,
+    pub domain: String,
+}
+
+/// Where an agent runs and what it publishes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Placement {
+    /// `None` until the machine is placed, briefly after create.
+    pub region: Option<String>,
+    pub domains: Vec<Domain>,
+}
+
+/// Read an agent's region and public domains. `None` means it is gone.
+pub async fn placement(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Option<Placement>> {
+    let res = post_graphql::<queries::CloudAgentPlacement, _>(
+        client,
+        backboard,
+        queries::cloud_agent_placement::Variables {
+            id: id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    Ok(res.cloud_agent.map(|a| Placement {
+        region: a.region,
+        domains: a
+            .domains
+            .into_iter()
+            .map(|d| Domain {
+                prefix: d.prefix,
+                port: d.port,
+                domain: d.domain,
+            })
+            .collect(),
+    }))
+}
+
 /// Every agent the caller owns, across the whole account, in one request.
 ///
 /// This is what makes the flat verbs work without a linked directory: agents
@@ -776,6 +822,15 @@ pub fn sleeps_when_idle(created_at: DateTime<Utc>) -> bool {
     created_at >= deployed
 }
 
+/// Minutes of inactivity before an agent created since
+/// [`IDLE_SLEEP_DEPLOYED_AT`] sleeps (`CLOUD_AGENT_IDLE_SLEEP_SECONDS` in
+/// monorepo `controllers/cloudAgent/create.ts`).
+pub const IDLE_SLEEP_MINUTES: i64 = 5;
+
+/// What counts as idle, and what sleeping does, completing "It …" or
+/// "agent X …".
+pub const IDLE_SLEEP_CONDITIONS: &str = "sleeps after 5 minutes with no SSH client, network traffic or agent turn, which ends its processes";
+
 /// What to say once someone leaves an agent, after "Disconnected — " or
 /// "Session ended — ". `shown` is the name as displayed (possibly colored),
 /// `name` the plain one for the command. An unknown `created_at` reads as a new
@@ -785,9 +840,7 @@ pub fn sleeps_when_idle(created_at: DateTime<Utc>) -> bool {
 /// running in a detached session does not keep the agent awake.
 pub fn leave_note(shown: &str, name: &str, created_at: Option<DateTime<Utc>>) -> String {
     if created_at.is_none_or(sleeps_when_idle) {
-        format!(
-            "agent {shown} sleeps after 5 minutes with no SSH client, network traffic or agent turn, which ends its processes."
-        )
+        format!("agent {shown} {IDLE_SLEEP_CONDITIONS}.")
     } else {
         format!("agent {shown} is still running. `railway ca sleep {name}` stops the compute bill.")
     }

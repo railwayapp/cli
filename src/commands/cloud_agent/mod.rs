@@ -8,7 +8,6 @@
 //! preferences file, so the choice between them is only whether you want to
 //! browse first. `railway ca start` is the one that skips the TUI entirely.
 
-pub mod access;
 pub mod bootstrap;
 pub(crate) mod client_sessions;
 pub(crate) mod codex;
@@ -65,7 +64,6 @@ Agent flags here launch on the VM. Use --new to create a fresh VM.
 Flags override preferences; the linked project overrides the saved project.
 An idle VM sleeps after 5 minutes and wakes when you connect.
 Sleeping ends its processes and keeps the disk.
-Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
 pub struct Args {
@@ -101,7 +99,6 @@ Launches on the VM directly, without the management interface.
 Uses your configured agent and project defaults; --new creates a fresh VM.
 Available local credentials are copied to the VM; Claude can mint a setup token.
 An idle VM sleeps after 5 minutes; railway ca sleep <agent> sleeps it now.
-Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#)]
     Start(LaunchArgs),
 
@@ -278,37 +275,8 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
 pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    eprintln!(
-        "{}",
-        "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
-            .yellow()
-    );
 
-    // The flag check races target resolution instead of preceding it: an
-    // un-flagged user is still stopped the moment the check answers — before
-    // any prompt is worth their time — while everyone else no longer pays a
-    // serialized round-trip. `browse_with` checks again beside its tree load,
-    // which is what actually gates the create. Its own `Configs` because
-    // resolve_launch holds the mutable borrow.
-    let resolved = {
-        let ensure_fut = async {
-            let flag_configs = Configs::new()?;
-            access::ensure_enabled(&client, &flag_configs).await
-        };
-        let resolve_fut = crate::commands::code::resolve_launch(&args, &mut configs, &client);
-        tokio::pin!(ensure_fut);
-        tokio::pin!(resolve_fut);
-        tokio::select! {
-            enabled = &mut ensure_fut => {
-                enabled?;
-                resolve_fut.await?
-            }
-            resolved = &mut resolve_fut => {
-                ensure_fut.await?;
-                resolved?
-            }
-        }
-    };
+    let resolved = crate::commands::code::resolve_launch(&args, &mut configs, &client).await?;
     let mut args = args;
     args.local_name_project = resolved.local_name_project;
     let launch = tui::LaunchRequest {
@@ -365,9 +333,9 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     let client = GQLClient::new_authorized(&configs)?;
     let backboard = configs.get_backboard();
 
-    // All under one spinner: the flag check and the key check are small
-    // queries against the same client, and running them beside the tree load
-    // rather than before it keeps them off the clock.
+    // All under one spinner: the key check is a small query against the same
+    // client, and running it beside the tree load rather than before it keeps
+    // it off the clock.
     //
     // An arriving launch starts its pipeline in here too, the moment the key
     // check answers Ready — the tree is for drawing the manage screen, not
@@ -382,12 +350,7 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
     let (key_ready_tx, key_ready_rx) = tokio::sync::oneshot::channel::<bool>();
     let spinner = create_spinner("Loading your projects".to_string());
     let (loaded, ssh_key, inflight) = tokio::join!(
-        async {
-            tokio::try_join!(
-                access::ensure_enabled(&client, &configs),
-                tui::load_tree(&client, &configs),
-            )
-        },
+        async { tui::load_tree(&client, &configs).await },
         async {
             let state = check_ssh_key(&client, &configs).await;
             let _ = key_ready_tx.send(matches!(state, tui::app::SshKeyState::Ready));
@@ -402,11 +365,11 @@ async fn browse_with_inner(opts: BrowseOpts) -> Result<()> {
         },
     );
     spinner.finish_and_clear();
-    let (_, tree) = match loaded {
-        Ok(pair) => pair,
+    let tree = match loaded {
+        Ok(tree) => tree,
         Err(e) => {
             // The early pipeline may already have created an agent; exiting on
-            // the tree/flag error without saying so would orphan a billing VM
+            // the tree error without saying so would orphan a billing VM
             // with no user-visible record.
             if let Some(inflight) = inflight
                 && let Some(note) = inflight

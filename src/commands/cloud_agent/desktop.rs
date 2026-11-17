@@ -195,15 +195,6 @@ pub async fn command(args: Args) -> Result<()> {
         .any(|app| app.is_opencode())
         .then(opencode::generate_password);
 
-    // Same preflight as a launch, and for the same reason: without the flag the
-    // create at the end of provisioning is refused, after a credential has
-    // already been spent on it.
-    {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        super::access::ensure_enabled(&client, &configs).await?;
-    }
-
     // Provision once per app, on one agent. The first pass resolves (or creates)
     // it; later passes are pinned to that id, so `--claude --codex` seeds two
     // credentials on one machine rather than spending two VMs.

@@ -7,6 +7,7 @@ use clap::Parser;
 use is_terminal::IsTerminal;
 
 use crate::client::{GQLClient, post_graphql};
+use crate::commands::output::machine::{Created, Domain, Idle, Kind, disconnected, render_created};
 use crate::commands::ssh::{
     DurableResume, PortForward, ensure_ssh_key, run_native_ssh, run_native_ssh_forward, tel,
 };
@@ -16,7 +17,7 @@ use crate::controllers::project::get_project;
 use crate::controllers::sandbox_exec::{self, ExecOutcome};
 use crate::controllers::variables::Variable;
 use crate::gql::{mutations, queries};
-use crate::util::progress::{create_shimmer_spinner, fail_spinner};
+use crate::util::progress::{create_shimmer_spinner, create_spinner, fail_spinner};
 use crate::util::prompt::{
     prompt_confirm_with_default_with_cancel, prompt_options, prompt_options_skippable,
 };
@@ -32,8 +33,7 @@ use crate::util::shell::shell_join;
   railway sandbox destroy                # delete the active sandbox
 
 Commands use the active sandbox unless you specify an ID.
-Use railway sandbox <command> --help for options and examples.
-Requires Sandboxes access."#)]
+Use railway sandbox <command> --help for options and examples."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
@@ -135,6 +135,11 @@ struct CreateArgs {
         requires = "private_network"
     )]
     domains: Vec<PublicDomainSpec>,
+
+    /// Return as soon as the sandbox is requested, without waiting for it to
+    /// start running
+    #[clap(long)]
+    no_wait: bool,
 
     /// Output the created sandbox as JSON
     #[clap(long)]
@@ -341,6 +346,11 @@ struct ForkArgs {
     )]
     domains: Vec<PublicDomainSpec>,
 
+    /// Return as soon as the sandbox is requested, without waiting for it to
+    /// start running
+    #[clap(long)]
+    no_wait: bool,
+
     /// Output the created sandbox as JSON
     #[clap(long)]
     json: bool,
@@ -474,13 +484,6 @@ impl DestroyArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    use colored::Colorize;
-    eprintln!(
-        "{}",
-        "Warning: Railway sandboxes are experimental and APIs may change or break during testing."
-            .yellow()
-    );
-
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let project = args.project;
@@ -925,15 +928,159 @@ fn public_domains_input(
 
 /// How `create_and_store` reports the new sandbox.
 pub(crate) enum CreateReport {
-    /// The full `sandbox create` block: id, status, region, connect hints.
+    /// The shared create block (see `output::machine`).
     Full,
     Json,
 }
 
+/// How long `create` waits for a sandbox to reach RUNNING. The SDK's
+/// readiness timeout (railway-ts-sdk `READINESS_TIMEOUT_MS`, 5 minutes).
+const READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// First gap between readiness polls, doubled up to [`POLL_MAX`]. A sandbox
+/// usually runs within seconds, so the early polls are what the user waits on.
+const POLL_INITIAL: Duration = Duration::from_millis(500);
+const POLL_MAX: Duration = Duration::from_secs(2);
+
+/// What a sandbox status means for a create that is waiting on it.
+#[derive(Debug, PartialEq, Eq)]
+enum Readiness {
+    Running,
+    Waiting,
+    /// It will never run; the message says why.
+    Failed(&'static str),
+}
+
+/// `status` as the API spells it. A status this CLI doesn't know keeps the
+/// wait going; the timeout bounds it.
+fn readiness(status: &str) -> Readiness {
+    match status {
+        "RUNNING" => Readiness::Running,
+        "FAILED" => Readiness::Failed("failed to start"),
+        "DESTROYING" | "DESTROYED" => Readiness::Failed("was destroyed while starting"),
+        _ => Readiness::Waiting,
+    }
+}
+
+/// The API's spelling of a generated status enum ("RUNNING").
+fn status_text<T: serde::Serialize>(status: &T) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// Poll the sandbox until it runs, fails, or [`READY_TIMEOUT`] passes.
+async fn wait_until_running(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<queries::sandbox::SandboxSandbox> {
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    let mut delay = POLL_INITIAL;
+    loop {
+        let sandbox = post_graphql::<queries::Sandbox, _>(
+            client,
+            backboard,
+            queries::sandbox::Variables {
+                environment_id: environment_id.to_owned(),
+                id: id.to_owned(),
+            },
+        )
+        .await?
+        .sandbox
+        .ok_or_else(|| anyhow!("Sandbox {id} disappeared while starting."))?;
+        let status = status_text(&sandbox.status);
+        match readiness(&status) {
+            Readiness::Running => return Ok(sandbox),
+            Readiness::Failed(what) => bail!("Sandbox {id} {what}."),
+            Readiness::Waiting => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Sandbox {id} did not reach running within {} minutes (last status: {}). Check it with `railway sandbox list`.",
+                READY_TIMEOUT.as_secs() / 60,
+                status.to_lowercase()
+            );
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(POLL_MAX);
+    }
+}
+
+/// The fields the create block shows, read from either the create response or
+/// a later poll (same selection, different generated types).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxView {
+    id: String,
+    status: String,
+    region: String,
+    idle_timeout_minutes: Option<i64>,
+    #[serde(default)]
+    domains: Vec<SandboxDomainView>,
+}
+
+#[derive(serde::Deserialize)]
+struct SandboxDomainView {
+    domain: String,
+    port: i64,
+}
+
+impl SandboxView {
+    fn of<T: serde::Serialize>(sandbox: &T) -> Result<Self> {
+        Ok(serde_json::from_value(serde_json::to_value(sandbox)?)?)
+    }
+
+    fn report(self, verb: &'static str, requested_domains: usize) -> Created {
+        Created {
+            kind: Kind::Sandbox,
+            verb,
+            // Sandboxes have no name, so the ID is the label.
+            label: self.id,
+            status: self.status,
+            region: Some(self.region),
+            idle: Idle::sandbox(self.idle_timeout_minutes),
+            domains_publishing: self.domains.len() < requested_domains,
+            domains: self
+                .domains
+                .into_iter()
+                .map(|d| Domain {
+                    domain: d.domain,
+                    port: d.port,
+                })
+                .collect(),
+            connect: "railway sandbox ssh".into(),
+            hint: None,
+        }
+    }
+}
+
+/// `railway sandbox create --json`: the sandbox as the API returned it, plus
+/// `name` and `projectId` so it has the same keys as `railway ca create
+/// --json`. Sandboxes have no name, so `name` is null.
+fn sandbox_json<T: serde::Serialize>(sandbox: &T, project_id: &str) -> Result<String> {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Json<'a, T> {
+        #[serde(flatten)]
+        sandbox: &'a T,
+        name: Option<&'a str>,
+        project_id: &'a str,
+    }
+    Ok(serde_json::to_string_pretty(&Json {
+        sandbox,
+        name: None,
+        project_id,
+    })?)
+}
+
 /// Run `sandboxCreate` with the given input, persist the result as the active
 /// sandbox (create and fork both retarget `ssh`/`exec` at the new sandbox),
-/// and print create-style output. Returns the new sandbox's id (`pub(crate)`
-/// so `railway code` can reuse the create flow).
+/// wait for it to run unless `wait` is false, and print create-style output.
+/// Returns the new sandbox's id (`pub(crate)` so `railway code` can reuse the
+/// create flow).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_and_store(
     configs: &mut Configs,
     client: &reqwest::Client,
@@ -942,6 +1089,7 @@ pub(crate) async fn create_and_store(
     input: mutations::sandbox_create::SandboxCreateInput,
     report: CreateReport,
     forked: bool,
+    wait: bool,
 ) -> Result<String> {
     let (doing, did, failed) = if forked {
         ("Forking sandbox", "Forked", "Failed to fork sandbox")
@@ -950,52 +1098,69 @@ pub(crate) async fn create_and_store(
     };
 
     let requested_domains = input.public_domains.as_ref().map_or(0, Vec::len);
-    let mut spinner = create_shimmer_spinner(doing);
+    let json = matches!(report, CreateReport::Json);
+    let mut spinner = (!json).then(|| create_shimmer_spinner(doing));
+    let backboard = configs.get_backboard();
     let sandbox = match post_graphql::<mutations::SandboxCreate, _>(
         client,
-        configs.get_backboard(),
+        &backboard,
         mutations::sandbox_create::Variables { input },
     )
     .await
     {
         Ok(res) => res.sandbox_create,
         Err(e) => {
-            fail_spinner(&mut spinner, failed.to_string());
+            if let Some(spinner) = spinner.as_mut() {
+                fail_spinner(spinner, failed.to_string());
+            }
             return Err(e.into());
         }
     };
-    spinner.finish_and_clear();
 
+    // Remembered before waiting: a sandbox that times out still exists, and
+    // the active pointer is how the next command finds it.
     configs.upsert_sandbox(
         StoredSandbox {
             id: sandbox.id.clone(),
-            environment_id,
-            project_id: Some(project_id),
+            environment_id: environment_id.clone(),
+            project_id: Some(project_id.clone()),
             created_at: Some(sandbox.created_at.to_rfc3339()),
         },
         true,
     );
     configs.write()?;
 
+    let running = if wait && readiness(&status_text(&sandbox.status)) != Readiness::Running {
+        match wait_until_running(client, &backboard, &environment_id, &sandbox.id).await {
+            Ok(running) => Some(running),
+            Err(e) => {
+                if let Some(spinner) = spinner.as_mut() {
+                    fail_spinner(spinner, failed.to_string());
+                }
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
     match report {
-        CreateReport::Json => println!("{}", serde_json::to_string_pretty(&sandbox)?),
+        CreateReport::Json => println!(
+            "{}",
+            match &running {
+                Some(running) => sandbox_json(running, &project_id)?,
+                None => sandbox_json(&sandbox, &project_id)?,
+            }
+        ),
         CreateReport::Full => {
-            println!("✓ {did} sandbox {} (now active)", sandbox.id);
-            println!("  status: {:?}", sandbox.status);
-            println!("  region: {}", sandbox.region);
-            if let Some(idle) = sandbox.idle_timeout_minutes {
-                println!("  idle timeout: {idle}m");
-            }
-            if sandbox.domains.len() < requested_domains {
-                println!("  domains: publishing (run `railway sandbox list` to see the URLs)");
-            }
-            for domain in &sandbox.domains {
-                println!(
-                    "  {}: https://{} -> port {}",
-                    domain.prefix, domain.domain, domain.port
-                );
-            }
-            println!("\nConnect with:\n  railway sandbox ssh");
+            let view = match &running {
+                Some(running) => SandboxView::of(running)?,
+                None => SandboxView::of(&sandbox)?,
+            };
+            print!("{}", render_created(&view.report(did, requested_domains)));
         }
     }
     Ok(sandbox.id)
@@ -1070,6 +1235,7 @@ async fn create(
             CreateReport::Full
         },
         false,
+        !args.no_wait,
     )
     .await
     .map(|_| ())
@@ -1560,6 +1726,7 @@ async fn fork(
             CreateReport::Full
         },
         true,
+        !args.no_wait,
     )
     .await
     .map(|_| ())
@@ -1911,6 +2078,25 @@ async fn ssh(
     configs.set_active_sandbox(&sandbox_id);
     configs.write()?;
 
+    // An interactive session gets the same before and after as `railway ca
+    // ssh`: a short spinner, then a disconnect line that says what happens to
+    // the sandbox now. A one-off command prints nothing of its own. The idle
+    // timeout read is best-effort and only feeds that line.
+    let interactive = args.command.is_empty();
+    let idle_timeout = if interactive {
+        let spinner = create_spinner(format!("Connecting to sandbox {sandbox_id}"));
+        let idle = fetch_sandbox(client, configs, &environment_id, &sandbox_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|sandbox| sandbox.idle_timeout_minutes);
+        spinner.finish_and_clear();
+        idle
+    } else {
+        None
+    };
+    let label = sandbox_id.clone();
+
     // Relay target format (per backboard): sbx:<environmentId>:<sandboxId>.
     // `run_native_ssh` appends the environment's relay host internally.
     let target = format!("sbx:{environment_id}:{sandbox_id}");
@@ -1947,6 +2133,19 @@ async fn ssh(
     let exit_code = tel::track_for("sandbox", "ssh_session", session).await?;
 
     heartbeat.abort();
+
+    if interactive {
+        use colored::Colorize;
+        println!(
+            "\n{}",
+            disconnected(
+                Kind::Sandbox,
+                &label.cyan().to_string(),
+                &label,
+                Idle::sandbox(idle_timeout),
+            )
+        );
+    }
 
     if exit_code != 0 {
         tel::report_failure_for(
@@ -2219,6 +2418,18 @@ async fn fetch_sandbox_status(
     environment_id: &str,
     sandbox_id: &str,
 ) -> Result<Option<queries::sandbox::SandboxStatus>> {
+    Ok(fetch_sandbox(client, configs, environment_id, sandbox_id)
+        .await?
+        .map(|s| s.status))
+}
+
+/// Read one sandbox. `Ok(None)` means the API answered but it is gone.
+async fn fetch_sandbox(
+    client: &reqwest::Client,
+    configs: &Configs,
+    environment_id: &str,
+    sandbox_id: &str,
+) -> Result<Option<queries::sandbox::SandboxSandbox>> {
     let res = post_graphql::<queries::Sandbox, _>(
         client,
         configs.get_backboard(),
@@ -2228,7 +2439,7 @@ async fn fetch_sandbox_status(
         },
     )
     .await?;
-    Ok(res.sandbox.map(|s| s.status))
+    Ok(res.sandbox)
 }
 
 pub(crate) fn spawn_heartbeat(
@@ -2661,5 +2872,126 @@ mod tests {
             input.get("REF").map(String::as_str),
             Some("${{shared.char}}")
         );
+    }
+
+    fn sandbox_node(status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "sbx", "status": status, "region": "us-west2", "environmentId": "env",
+            "createdAt": "2026-11-17T00:00:00Z", "idleTimeoutMinutes": 10,
+            "domains": [{"prefix": "web", "port": 3000, "domain": "web-8f2a.up.railway.app"}]
+        })
+    }
+
+    #[test]
+    fn readiness_stops_on_running_and_on_states_that_never_run() {
+        assert_eq!(readiness("RUNNING"), Readiness::Running);
+        assert_eq!(readiness("CREATING"), Readiness::Waiting);
+        assert_eq!(readiness("FUTURE_STATE"), Readiness::Waiting);
+        assert_eq!(readiness("FAILED"), Readiness::Failed("failed to start"));
+        for status in ["DESTROYING", "DESTROYED"] {
+            assert_eq!(
+                readiness(status),
+                Readiness::Failed("was destroyed while starting")
+            );
+        }
+    }
+
+    #[test]
+    fn create_waits_by_default_and_no_wait_parses() {
+        for command in ["create", "fork"] {
+            let waits = |extra: &[&str]| {
+                let mut argv = vec![command];
+                argv.extend_from_slice(extra);
+                match parse_exec(&argv).unwrap().command {
+                    Commands::Create(args) => !args.no_wait,
+                    Commands::Fork(args) => !args.no_wait,
+                    _ => unreachable!(),
+                }
+            };
+            assert!(waits(&[]), "{command}");
+            assert!(!waits(&["--no-wait"]), "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_polls_until_running() {
+        let server = crate::testkit::MockBackboard::spawn();
+        server.stub(
+            "Sandbox",
+            serde_json::json!({"sandbox": sandbox_node("CREATING")}),
+        );
+        server.stub(
+            "Sandbox",
+            serde_json::json!({"sandbox": sandbox_node("RUNNING")}),
+        );
+        let sandbox = wait_until_running(&reqwest::Client::new(), &server.url(), "env", "sbx")
+            .await
+            .unwrap();
+        assert_eq!(status_text(&sandbox.status), "RUNNING");
+        assert_eq!(server.variables_for("Sandbox").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn waiting_reports_a_failed_sandbox() {
+        let server = crate::testkit::MockBackboard::spawn();
+        server.stub(
+            "Sandbox",
+            serde_json::json!({"sandbox": sandbox_node("FAILED")}),
+        );
+        let err = wait_until_running(&reqwest::Client::new(), &server.url(), "env", "sbx")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Sandbox sbx failed to start.");
+
+        let server = crate::testkit::MockBackboard::spawn();
+        server.stub("Sandbox", serde_json::json!({"sandbox": null}));
+        let err = wait_until_running(&reqwest::Client::new(), &server.url(), "env", "sbx")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Sandbox sbx disappeared while starting.");
+    }
+
+    #[test]
+    fn create_json_keeps_the_api_keys_and_adds_name_and_project() {
+        let sandbox: queries::sandbox::SandboxSandbox =
+            serde_json::from_value(sandbox_node("RUNNING")).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&sandbox_json(&sandbox, "project").unwrap()).unwrap();
+        let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        for key in [
+            "id",
+            "name",
+            "status",
+            "region",
+            "projectId",
+            "environmentId",
+            "createdAt",
+            "idleTimeoutMinutes",
+            "domains",
+        ] {
+            assert!(keys.iter().any(|k| k == key), "missing {key}: {keys:?}");
+        }
+        assert_eq!(json["name"], serde_json::Value::Null);
+        assert_eq!(json["projectId"], "project");
+        assert_eq!(json["status"], "RUNNING");
+        assert_eq!(json["domains"][0]["prefix"], "web");
+    }
+
+    #[test]
+    fn create_block_reads_the_api_response() {
+        let sandbox: queries::sandbox::SandboxSandbox =
+            serde_json::from_value(sandbox_node("RUNNING")).unwrap();
+        let report = SandboxView::of(&sandbox).unwrap().report("Created", 2);
+        assert_eq!(report.label, "sbx");
+        assert_eq!(report.status, "RUNNING");
+        assert_eq!(report.idle, Some(Idle::DestroyedAfter(10)));
+        assert_eq!(
+            report.domains,
+            [Domain {
+                domain: "web-8f2a.up.railway.app".into(),
+                port: 3000
+            }]
+        );
+        assert!(report.domains_publishing, "one of two requested came back");
     }
 }
