@@ -1,8 +1,8 @@
 # Cloud-agent command guide
 
 Use `railway ca` to browse and manage VMs, `railway code` to launch a coding
-session, and `railway ca desktop` to configure a desktop app. Cloud Agents access
-is required. Run any command with `--help` for its options.
+session, and `railway ca desktop` to configure a desktop app. Run any command
+with `--help` for its options.
 
 ## Launch and reconnect
 

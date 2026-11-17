@@ -10,7 +10,7 @@ use super::{CliProgress, ConnectInfo, LaunchArgs, Progress, RelayAccess, Session
 use crate::client::GQLClient;
 use crate::commands::cloud_agent::client_sessions::Connection;
 use crate::commands::cloud_agent::{
-    access, codex, desktop,
+    codex, desktop,
     opencode::{self, local},
 };
 use crate::config::Configs;
@@ -225,9 +225,6 @@ pub(super) async fn start(mut args: LaunchArgs, harness: Harness, mode: LaunchMo
         desktop::preflight_codex_desktop()?;
     }
     let json = args.connection_json;
-    let configs = Configs::new()?;
-    let client = GQLClient::new_authorized(&configs)?;
-    access::ensure_enabled(&client, &configs).await?;
     pin_agent(&mut args).await?;
     let directory = args.remote_dir.take().unwrap_or_else(|| "/app".into());
     args.app_mode = true;
@@ -533,7 +530,6 @@ pub(super) async fn connect(
     let json = args.connection_json;
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    access::ensure_enabled(&client, &configs).await?;
     let backboard = configs.get_backboard();
     let scoped = if args.project.is_some() || args.environment.is_some() {
         Some(

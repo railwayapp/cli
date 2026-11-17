@@ -141,7 +141,6 @@ Claude can mint a setup token. Codex saves Desktop setup; OpenCode configures
 detected Desktop installs.
 
 An idle VM sleeps after 5 minutes; railway ca sleep <agent> sleeps it now.
-Requires Cloud Agents access.
 Guide: https://github.com/railwayapp/cli/blob/master/docs/cloud-agents.md"#
 )]
 pub struct Args {
@@ -3054,29 +3053,7 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
     }
 
     let progress = CliProgress::default();
-    // The flag check races prepare instead of preceding it: an un-flagged user
-    // is still stopped the moment the check answers — before any mint or
-    // create completes — while everyone else no longer pays a serialized
-    // round-trip for a question whose answer is almost always yes. If prepare
-    // somehow finishes first, the gate is still enforced before anything runs.
-    let ensure_fut = async {
-        let configs = Configs::new()?;
-        let client = GQLClient::new_authorized(&configs)?;
-        crate::commands::cloud_agent::access::ensure_enabled(&client, &configs).await
-    };
-    let prepare_fut = prepare(&args, &progress, SessionStyle::FullTerminal);
-    tokio::pin!(ensure_fut);
-    tokio::pin!(prepare_fut);
-    let prepared = tokio::select! {
-        enabled = &mut ensure_fut => {
-            enabled?;
-            prepare_fut.await?
-        }
-        prepared = &mut prepare_fut => {
-            ensure_fut.await?;
-            prepared?
-        }
-    };
+    let prepared = prepare(&args, &progress, SessionStyle::FullTerminal).await?;
     progress.finish();
 
     let harness = crate::commands::cloud_agent::harness_label(prepared.harness);

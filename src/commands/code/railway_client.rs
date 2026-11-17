@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use super::{ClientAction, LaunchArgs, Progress, SessionStyle, saved_config::SavedConfig};
 use crate::{
     client::{GQLClient, post_graphql},
-    commands::cloud_agent::access,
     config::Configs,
     controllers::cloud_agent as ca,
     gql::{mutations, queries},
@@ -43,7 +42,6 @@ pub(super) async fn command(mut args: LaunchArgs, action: ClientAction) -> Resul
     validate_args(&args)?;
     let configs = Configs::new()?;
     let gql = GQLClient::new_authorized(&configs)?;
-    access::ensure_enabled(&gql, &configs).await?;
     let progress = ConnectionProgress::new(json);
     let result: Result<_> = async {
         // Check before provisioning, including JSON and reconnect invocations.
