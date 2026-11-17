@@ -49,6 +49,56 @@ def owned_process(state):
     return isinstance(pid, int) and pid > 1 and start is not None and process_start(pid) == start
 
 
+def listener_pid(port):
+    """The PID of the process listening on TCP `port`, read from /proc."""
+    sockets = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            fields = row.split()
+            # local_address is HEXIP:HEXPORT; state 0A is LISTEN.
+            if len(fields) > 9 and fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                sockets.add(f"socket:[{fields[9]}]")
+    if not sockets:
+        return None
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            for descriptor in (process / "fd").iterdir():
+                if os.readlink(descriptor) in sockets:
+                    return int(process.name)
+        except OSError:
+            continue
+    return None
+
+
+def adopt_listener(state, port, authenticated):
+    """Record a server that express-agent restarted after the VM powered off.
+
+    express-agent relaunches recorded listeners on the first boot after a
+    power-off, so the server this script started comes back with a new PID and
+    the saved PID check fails. A listener that accepts the saved token is
+    that server: record its process group leader (what stop signals) and start
+    time in `state`. Returns whether it was adopted.
+    """
+    if restored_state(state) or not authenticated:
+        return False
+    pid = listener_pid(port)
+    try:
+        leader = os.getpgid(pid) if pid else None
+    except OSError:
+        return False
+    start = process_start(leader) if leader and leader > 1 else None
+    if start is None:
+        return False
+    state.update(pid=leader, start=start)
+    return True
+
+
 def probe(port, token=None, websocket=False):
     # Direct loopback probes bypass HTTP_PROXY. Health endpoints are intentionally
     # public; only a WebSocket upgrade tests the server's authentication boundary.
@@ -182,6 +232,10 @@ def setup(request, home):
     if action == "inspect":
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         port = server_port(state)
+        if not owned_process(state) and state.get("token") and not port_available(port):
+            # Read-only: adopt into a copy that is never saved.
+            state = dict(state)
+            adopt_listener(state, port, healthy(port, state["token"]))
         if (owned_process(state) and state.get("token") and state.get("directory")
                 and healthy(port, state["token"])):
             return {"directory": state["directory"], "version": state.get("version")}
@@ -213,6 +267,9 @@ def setup(request, home):
         if not isinstance(token, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{43,}", token):
             raise SetupError("Codex requires a high-entropy URL-safe connection token.")
 
+        if (not owned_process(state) and state.get("token") and not port_available(port)
+                and adopt_listener(state, port, healthy(port, state["token"]))):
+            save(state_path, state)
         reused = owned_process(state)
         if reused:
             if not healthy(port, token):

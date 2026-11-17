@@ -13,8 +13,9 @@ import time
 import unittest
 
 BOOTSTRAP = Path(__file__).resolve().parents[1] / 'src/commands/cloud_agent/opencode.py'
-# Production uses /proc PID start times. macOS CI exercises the same lifecycle
-# using ps, keeping the production bootstrap Linux-specific.
+# Production uses /proc PID start times and socket tables. macOS CI exercises
+# the same lifecycle using ps and lsof, keeping the production bootstrap
+# Linux-specific.
 WRAPPER = '''
 import importlib.util,json,sys,subprocess
 from pathlib import Path
@@ -30,6 +31,10 @@ if sys.platform == 'darwin':
         # Process status changes between probes; only start time identifies it.
         return fields[1] if result.returncode == 0 and len(fields) == 2 and not fields[0].startswith('Z') else None
     m.process_start = process_start
+    def listener_pid(port):
+        pids = subprocess.run(['lsof', '-nP', '-t', f'-iTCP:{port}', '-sTCP:LISTEN'], capture_output=True, text=True).stdout.split()
+        return int(pids[0]) if pids else None
+    m.listener_pid = listener_pid
 try:
     print(json.dumps(m.setup(json.load(sys.stdin), Path(sys.argv[2]))))
 except Exception as error:
@@ -428,10 +433,76 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('not enforcing password', result.stderr)
 
+    def relaunch(self, password=None):
+        """What express-agent does on the first boot after a power-off: the
+        recorded server's command again, in its own session, under a new PID."""
+        state = json.loads(self.state.read_text())
+        os.killpg(state['pid'], signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while not self.port_free():
+            self.assertLess(time.monotonic(), deadline, 'saved server never stopped')
+            time.sleep(0.05)
+        env = dict(self.env, HOME=str(self.home), OPENCODE_SERVER_USERNAME=state['username'],
+                   OPENCODE_SERVER_PASSWORD=password or state['password'])
+        child = subprocess.Popen(
+            [state['binary'], 'serve', '--hostname', '0.0.0.0', '--port', str(state['port'])],
+            cwd=state['directory'], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        self.addCleanup(self.reap, child)
+        while self.port_free():
+            self.assertLess(time.monotonic(), deadline, 'relaunched server never listened')
+            time.sleep(0.05)
+        return child
+
+    def port_free(self):
+        with socket.socket() as sock:
+            return sock.connect_ex(('127.0.0.1', self.port)) != 0
+
+    def reap(self, child):
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGTERM)
+        child.wait(timeout=5)
+
+    def test_server_relaunched_after_power_off_is_adopted(self):
+        first = self.run_bootstrap()
+        relaunched = self.relaunch()
+        before = self.state.read_bytes()
+        self.assertEqual(self.run_bootstrap({'action': 'inspect'}), {'directory': first['directory']})
+        self.assertEqual(self.state.read_bytes(), before)
+        connected = self.run_bootstrap({'action': 'connect'})
+        self.assertTrue(connected['reused'])
+        self.assertEqual(connected['password'], first['password'])
+        self.assertEqual(json.loads(self.state.read_text())['pid'], relaunched.pid)
+        self.assertTrue(self.run_bootstrap()['reused'])
+        self.assertIsNone(relaunched.poll())
+        self.run_bootstrap({'action': 'stop'})
+        relaunched.wait(timeout=5)
+
+    def test_stop_adopts_a_relaunched_server(self):
+        self.run_bootstrap()
+        relaunched = self.relaunch()
+        self.assertEqual(self.run_bootstrap({'action': 'stop'}), {'stopped': True})
+        relaunched.wait(timeout=5)
+
+    def test_listener_that_rejects_the_saved_password_is_not_adopted(self):
+        self.run_bootstrap()
+        relaunched = self.relaunch(password='someone-else')
+        before = self.state.read_bytes()
+        self.assertIsNone(self.run_bootstrap({'action': 'inspect'}))
+        for request in ({'action': 'connect'}, None):
+            result = self.run_bootstrap(request, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('occupied', result.stderr)
+        self.run_bootstrap({'action': 'stop'})
+        self.assertIsNone(relaunched.poll())
+        self.assertEqual(json.loads(self.state.read_text()).get('password'), json.loads(before)['password'])
+
     def test_stop_does_not_signal_reused_pid(self):
         self.run_bootstrap()
         real_state = json.loads(self.state.read_text())
-        altered = dict(real_state, pid=os.getpid(), start='wrong-start-time')
+        # A password the server rejects, so stop has no listener to adopt either.
+        altered = dict(real_state, pid=os.getpid(), start='wrong-start-time', password='not-the-servers')
         self.state.write_text(json.dumps(altered))
         self.run_bootstrap({'action': 'stop'})
         self.state.write_text(json.dumps(real_state))
