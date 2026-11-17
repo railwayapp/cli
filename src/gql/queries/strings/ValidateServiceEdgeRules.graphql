@@ -1,0 +1,7 @@
+query ValidateServiceEdgeRules($input: ValidateServiceEdgeRulesInput!) {
+  validateServiceEdgeRules(input: $input) {
+    code
+    message
+    path
+  }
+}

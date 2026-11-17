@@ -557,7 +557,7 @@ fn run_editor_loop(
         );
     }
 
-    let path = temp_edit_path(service);
+    let path = temp_edit_path("vars", service, "env");
     write_edit_document(&path, before, header_lines)?;
 
     eprintln!(
