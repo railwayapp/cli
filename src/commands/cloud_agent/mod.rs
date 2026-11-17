@@ -278,11 +278,6 @@ async fn browse_into(initial_screen: Option<tui::Screen>) -> Result<()> {
 pub async fn launch_in_pane(args: LaunchArgs) -> Result<()> {
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
-    eprintln!(
-        "{}",
-        "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
-            .yellow()
-    );
 
     // The flag check races target resolution instead of preceding it: an
     // un-flagged user is still stopped the moment the check answers — before

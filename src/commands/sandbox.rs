@@ -474,13 +474,6 @@ impl DestroyArgs {
 }
 
 pub async fn command(args: Args) -> Result<()> {
-    use colored::Colorize;
-    eprintln!(
-        "{}",
-        "Warning: Railway sandboxes are experimental and APIs may change or break during testing."
-            .yellow()
-    );
-
     let mut configs = Configs::new()?;
     let client = GQLClient::new_authorized(&configs)?;
     let project = args.project;

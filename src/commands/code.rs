@@ -3053,12 +3053,6 @@ pub async fn launch(args: LaunchArgs) -> Result<()> {
         return destroy_agent(&mut configs, &client, &environment_id).await;
     }
 
-    eprintln!(
-        "{}",
-        "Warning: Railway cloud agents are experimental and APIs may change or break during testing."
-            .yellow()
-    );
-
     let progress = CliProgress::default();
     // The flag check races prepare instead of preceding it: an un-flagged user
     // is still stopped the moment the check answers — before any mint or
