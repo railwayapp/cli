@@ -187,8 +187,7 @@ pub struct SshArgs {
     #[clap(long, conflicts_with_all = ["session", "command"])]
     resume: bool,
 
-    /// Accepted for compatibility and ignored: disconnecting never sleeps the
-    /// agent, and this does not stop an idle one powering off after 5 minutes
+    /// Accepted for compatibility and ignored; it has no effect on sleep
     #[clap(long, hide = true)]
     keep_awake: bool,
 

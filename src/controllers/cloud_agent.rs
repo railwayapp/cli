@@ -1,11 +1,11 @@
 //! Cloud agent lifecycle, shared by `railway ca` and `railway code`.
 //!
 //! The launcher grew these operations as flags on a command whose job is
-//! something else (`--new` creates, `--rm` destroys, `--keep-awake` declines to
-//! sleep). Pulling them here gives the flat `railway ca` verbs one
-//! implementation to call, and — more importantly — one place where the local
-//! agent pointer is kept honest. A delete that forgets to clear the pointer
-//! leaves `railway code` waking a corpse.
+//! something else (`--new` creates, `--rm` destroys). Pulling them here gives
+//! the flat `railway ca` verbs one implementation to call, and — more
+//! importantly — one place where the local agent pointer is kept honest. A
+//! delete that forgets to clear the pointer leaves `railway code` waking a
+//! corpse.
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};

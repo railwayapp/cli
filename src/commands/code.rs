@@ -290,8 +290,7 @@ pub struct LaunchArgs {
     #[clap(long, conflicts_with_all = ["remote_agent", "rm"], help_heading = "VM creation")]
     no_bootstrap: bool,
 
-    /// Accepted for compatibility and ignored: disconnecting never sleeps the
-    /// agent, and this does not stop an idle one powering off after 5 minutes
+    /// Accepted for compatibility and ignored; it has no effect on sleep
     #[clap(long, hide = true)]
     keep_awake: bool,
 
@@ -546,7 +545,9 @@ impl LaunchArgs {
     }
 
     /// No flags, no arguments — the invocation that means "just open the
-    /// front door" rather than "launch this exact thing".
+    /// front door" rather than "launch this exact thing". `--keep-awake` is
+    /// ignored here as everywhere: a flag that does nothing must not change
+    /// what runs.
     pub fn is_bare(&self) -> bool {
         !self.codex
             && !self.opencode
@@ -557,7 +558,6 @@ impl LaunchArgs {
             && !self.new
             && self.bootstrap.is_none()
             && !self.no_bootstrap
-            && !self.keep_awake
             && !self.rm
             && !self.refresh_auth
             && self.name.is_none()
@@ -5656,6 +5656,15 @@ cat
     #[test]
     fn launch_args_bareness_and_targeting() {
         assert!(LaunchArgs::default().is_bare());
+
+        let keep_awake = LaunchArgs {
+            keep_awake: true,
+            ..Default::default()
+        };
+        assert!(
+            keep_awake.is_bare(),
+            "--keep-awake is ignored, so it must not turn the TUI into a launch"
+        );
 
         let mut flagged = LaunchArgs::default();
         flagged.set_harness("codex");
