@@ -33,8 +33,7 @@ use crate::util::shell::shell_join;
   railway sandbox destroy                # delete the active sandbox
 
 Commands use the active sandbox unless you specify an ID.
-Use railway sandbox <command> --help for options and examples.
-Requires Sandboxes access."#)]
+Use railway sandbox <command> --help for options and examples."#)]
 pub struct Args {
     #[clap(subcommand)]
     command: Commands,
