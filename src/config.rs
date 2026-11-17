@@ -68,6 +68,9 @@ pub struct StoredSandbox {
 /// `sandboxCreate` needs the full recipe — not just the id — so the CLI keeps
 /// the instructions locally to make `railway sandbox create --template <name>`
 /// possible.
+///
+/// Records written before the API dropped `baseImageDigest` may still carry
+/// one; serde ignores it, and the next config write drops it.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde_with::skip_serializing_none]
 #[serde(rename_all = "camelCase")]
@@ -78,7 +81,6 @@ pub struct StoredSandboxTemplate {
     pub name: Option<String>,
     pub environment_id: String,
     pub instructions: Vec<String>,
-    pub base_image_digest: Option<String>,
     pub created_at: Option<String>,
 }
 
@@ -1088,6 +1090,24 @@ mod tests {
         );
 
         assert!(has_credentials);
+    }
+
+    /// The API no longer takes a base image digest, but templates built with
+    /// `--base-image-digest` before it was removed still have one on disk.
+    #[test]
+    fn stored_template_with_legacy_base_image_digest_still_parses() {
+        let template: StoredSandboxTemplate = serde_json::from_value(serde_json::json!({
+            "id": "abc123",
+            "name": "dev",
+            "environmentId": "env-1",
+            "instructions": ["npm i -g pnpm"],
+            "baseImageDigest": "sha256:deadbeef",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(template.instructions, vec!["npm i -g pnpm"]);
+        let json = serde_json::to_value(&template).unwrap();
+        assert!(json.get("baseImageDigest").is_none());
     }
 }
 

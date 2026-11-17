@@ -183,10 +183,6 @@ struct TemplateBuildArgs {
     #[clap(long)]
     name: Option<String>,
 
-    /// Base image digest to build on (defaults to the standard sandbox image)
-    #[clap(long, value_name = "DIGEST")]
-    base_image_digest: Option<String>,
-
     /// Wait for the build to finish (polls until READY or FAILED)
     #[clap(long)]
     wait: bool,
@@ -1018,7 +1014,6 @@ async fn create(
     let template = if let Some(name) = &args.checkpoint {
         Some(mutations::sandbox_create::SandboxTemplateInput {
             instructions: None,
-            base_image_digest: None,
             name: Some(name.clone()),
             variables: None,
         })
@@ -1032,7 +1027,6 @@ async fn create(
             })?;
         Some(mutations::sandbox_create::SandboxTemplateInput {
             instructions: Some(stored.instructions),
-            base_image_digest: stored.base_image_digest,
             name: None,
             variables: None,
         })
@@ -1108,7 +1102,6 @@ async fn template_build(
             environment_id: environment_id.clone(),
             input: mutations::sandbox_template_build::SandboxTemplateInput {
                 instructions: Some(args.commands.clone()),
-                base_image_digest: args.base_image_digest.clone(),
                 name: None,
                 variables: None,
             },
@@ -1124,7 +1117,6 @@ async fn template_build(
         name: args.name.clone(),
         environment_id: environment_id.clone(),
         instructions: args.commands,
-        base_image_digest: args.base_image_digest,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
     });
     configs.write()?;
@@ -1252,7 +1244,6 @@ async fn template_list(
                     "name": t.name,
                     "status": status,
                     "instructions": t.instructions,
-                    "baseImageDigest": t.base_image_digest,
                     "createdAt": t.created_at,
                 })
             })
@@ -2578,7 +2569,6 @@ mod tests {
     fn checkpoint_boot_serializes_name_only() {
         let input = mutations::sandbox_create::SandboxTemplateInput {
             instructions: None,
-            base_image_digest: None,
             name: Some("my-setup".to_string()),
             variables: None,
         };
@@ -2590,7 +2580,6 @@ mod tests {
     fn template_boot_serializes_instructions_only() {
         let input = mutations::sandbox_create::SandboxTemplateInput {
             instructions: Some(vec!["npm i -g pnpm".to_string()]),
-            base_image_digest: None,
             name: None,
             variables: None,
         };
