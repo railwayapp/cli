@@ -233,7 +233,15 @@ impl InstallMethod {
     pub fn package_manager_command(&self) -> Option<(&'static str, Vec<&'static str>)> {
         match self {
             InstallMethod::Homebrew => Some(("brew", vec!["upgrade", "railway"])),
-            InstallMethod::Npm => Some(("npm", vec!["update", "-g", "@railway/cli"])),
+            InstallMethod::Npm => Some((
+                "npm",
+                vec![
+                    "update",
+                    "-g",
+                    "--allow-scripts=@railway/cli",
+                    "@railway/cli",
+                ],
+            )),
             InstallMethod::Bun => Some(("bun", vec!["update", "-g", "@railway/cli"])),
             InstallMethod::Cargo => Some(("cargo", vec!["install", "railwayapp", "--locked"])),
             InstallMethod::Scoop => Some(("scoop", vec!["update", "railway"])),
@@ -248,4 +256,33 @@ impl InstallMethod {
 /// published, so it must not enter the self-update path.
 fn is_self_update_platform() -> bool {
     matches!(std::env::consts::OS, "macos" | "linux" | "windows")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InstallMethod;
+
+    #[test]
+    fn npm_upgrade_allows_railway_postinstall_script() {
+        assert_eq!(
+            InstallMethod::Npm.package_manager_command(),
+            Some((
+                "npm",
+                vec![
+                    "update",
+                    "-g",
+                    "--allow-scripts=@railway/cli",
+                    "@railway/cli"
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn bun_upgrade_command_is_unchanged() {
+        assert_eq!(
+            InstallMethod::Bun.package_manager_command(),
+            Some(("bun", vec!["update", "-g", "@railway/cli"]))
+        );
+    }
 }
