@@ -194,6 +194,7 @@ pub fn print_variable_plan(service: &str, changes: &[VarChange], reveal: bool) {
     }
 }
 
+#[allow(dead_code)]
 pub fn render_variable_plan_plain(service: &str, changes: &[VarChange], reveal: bool) -> String {
     if changes.is_empty() {
         return "No changes.".into();
