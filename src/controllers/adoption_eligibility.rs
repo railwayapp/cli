@@ -170,7 +170,9 @@ pub fn image_is_from_repository(image: Option<&str>, repositories: &[String]) ->
 /// What the service brings to the check.
 pub struct AdoptionTarget<'a> {
     pub image: Option<&'a str>,
-    pub has_start_command: bool,
+    /// The service's custom start command, when one is set (blank counts as
+    /// none).
+    pub start_command: Option<&'a str>,
 }
 
 impl AdoptionRules {
@@ -183,15 +185,20 @@ impl AdoptionRules {
 
         if !self.repositories.is_empty() && !self.image_repository_is_eligible(target.image) {
             blockers.push(format!(
-                "{feature} runs in Railway's own database images, and \"{}\" is not one of them. Supported images: {}.",
+                "{feature} doesn't support \"{}\". Supported images: {}.",
                 target.image.unwrap_or("(no image)"),
                 self.repositories.join(", ")
             ));
         }
 
-        if self.require_image_entrypoint && target.has_start_command {
+        if self.require_image_entrypoint
+            && let Some(command) = target
+                .start_command
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+        {
             blockers.push(format!(
-                "{feature} is switched on by the image's entrypoint, which a custom start command overrides. Clear the service's start command first."
+                "{feature} needs the image's own startup, and this service has a custom start command (`{command}`). Remove it in the service's Settings under Deploy, then retry."
             ));
         }
 
@@ -232,30 +239,37 @@ impl AdoptionRules {
             let digest_pinned = parsed.as_ref().is_some_and(|p| p.digest.is_some());
             if digest_pinned {
                 blockers.push(format!(
-                    "{feature} ships its fixes by republishing the major tag, which a digest pin freezes out. Move \"{image}\" to a floating major tag (e.g. \":16\") first."
+                    "{feature} needs the image on its major tag, so the service keeps getting Railway's fixes. \"{image}\" has a digest pin. Change the tag to the major (for example \":16\"), then retry."
                 ));
             } else if let Some(version) = version
                 && version.minor.is_some()
             {
                 blockers.push(format!(
-                    "{feature} ships its fixes by republishing the major tag, which a minor pin freezes out. Move \"{image}\" to the major tag \":{}\" first.",
+                    "{feature} needs the image on its major tag, so the service keeps getting Railway's fixes. \"{image}\" has a minor pin. Change the tag to \":{}\", then retry.",
                     version.major
                 ));
             }
         }
 
         if self.pin_to_minor_version {
+            let repository = parsed
+                .as_ref()
+                .map(|p| match &p.domain {
+                    Some(domain) => format!("{domain}/{}", p.path),
+                    None => p.path.clone(),
+                })
+                .unwrap_or_else(|| image.to_string());
             match version {
                 // A bare-major source leaves the minor undeterminable, and
                 // pinning the bare major would put every node on a floating
                 // tag -- uniform now, mixed after the next scale-up, which is
                 // the exact break the opt-in exists to prevent.
                 Some(v) if v.minor.is_none() => blockers.push(format!(
-                    "This cluster pins every node to the source image's exact major.minor version, but \"{image}\" declares only a major. Retag it to the minor your database is actually running (e.g. \":{}.2\") first.",
+                    "Every node runs the exact version your database runs, and \"{image}\" names only a major. Change the image tag to the exact version, such as `{repository}:{}.<minor>`. Run `SELECT version()` (or `INFO server`) to see it.",
                     v.major
                 )),
                 None => blockers.push(format!(
-                    "This cluster pins every node to the source image's exact major.minor version, but no version can be read from \"{image}\". Retag it to the minor your database is actually running first."
+                    "Every node runs the exact version your database runs, and no version can be read from \"{image}\". Change the image tag to the exact version, such as `{repository}:<major>.<minor>`. Run `SELECT version()` (or `INFO server`) to see it."
                 )),
                 _ => {}
             }
@@ -271,11 +285,11 @@ impl AdoptionRules {
             match version {
                 Some(v) if self.supported_image_major_versions.contains(&v.major) => {}
                 Some(v) => blockers.push(format!(
-                    "No high-availability image is published for major version {}. Supported majors: {supported}.",
+                    "{feature} doesn't support major version {}. Supported majors: {supported}.",
                     v.major
                 )),
                 None => blockers.push(format!(
-                    "No version can be read from \"{image}\", so the cluster's node images cannot be pinned to it. Retag the service to a versioned tag first. Supported majors: {supported}."
+                    "No version can be read from \"{image}\", so the cluster's nodes can't be pinned to it. Change the image tag to a versioned tag, then retry. Supported majors: {supported}."
                 )),
             }
         }
@@ -292,7 +306,7 @@ mod tests {
     fn target<'a>(image: &'a str, has_start_command: bool) -> AdoptionTarget<'a> {
         AdoptionTarget {
             image: Some(image),
-            has_start_command,
+            start_command: has_start_command.then_some("docker-entrypoint.sh custom"),
         }
     }
 
@@ -422,7 +436,18 @@ mod tests {
             true,
         ));
         assert_eq!(blockers.len(), 1);
-        assert!(blockers[0].contains("start command"));
+        assert!(blockers[0].contains("custom start command"));
+        assert!(blockers[0].contains("`docker-entrypoint.sh custom`"));
+
+        // A blank command is no command at all.
+        assert!(
+            rules
+                .blockers(&AdoptionTarget {
+                    image: Some("ghcr.io/railwayapp-templates/postgres-ssl:16"),
+                    start_command: Some("   "),
+                })
+                .is_empty()
+        );
 
         let mut relaxed = rules.clone();
         relaxed.require_image_entrypoint = false;
@@ -445,14 +470,14 @@ mod tests {
             "ghcr.io/railwayapp-templates/postgres-ha/haproxy:3",
             false,
         ));
-        assert!(blockers.iter().any(|b| b.contains("not one of them")));
+        assert!(blockers.iter().any(|b| b.contains("doesn't support")));
 
         // Nor a lookalike registry serving the same path.
         let blockers = rules.blockers(&target(
             "evil.example.com/railwayapp-templates/postgres-ssl:16",
             false,
         ));
-        assert!(blockers.iter().any(|b| b.contains("not one of them")));
+        assert!(blockers.iter().any(|b| b.contains("doesn't support")));
 
         // An ineligible image reports THAT, and is not also nagged about its
         // tag -- one clear problem beats two, one of which is noise.
@@ -484,7 +509,8 @@ mod tests {
         // floating tag.
         let blockers = rules.blockers(&target("redis:8", false));
         assert_eq!(blockers.len(), 1);
-        assert!(blockers[0].contains("major.minor"));
+        assert!(blockers[0].contains("exact version"));
+        assert!(blockers[0].contains("`redis:8.<minor>`"));
 
         // An unsupported major is refused with the list.
         let blockers = rules.blockers(&target("redis:6.2", false));

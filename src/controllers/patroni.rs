@@ -218,7 +218,7 @@ pub async fn switchover(instance_id: &str, leader: &str, candidate: &str) -> Res
         Ok(Ok(output)) => output,
         Ok(Err(err)) => return map_switchover_exec_error(err),
         Err(_elapsed) => bail!(
-            "Timed out requesting switchover. The failover may still be in progress — check `ha status`."
+            "Timed out requesting the switchover. It may still be in progress. Check with `railway postgres ha status`."
         ),
     };
 
@@ -232,8 +232,8 @@ fn map_switchover_exec_error(err: anyhow::Error) -> Result<String> {
     let detail = format!("{err:#}");
     if detail.contains("exit code 28") || detail.contains("HTTP_STATUS:000") {
         bail!(
-            "Patroni did not answer the switchover in time. \
-             The failover may still be in progress — check `ha status`."
+            "Patroni didn't answer the switchover request in time. \
+             It may still be in progress. Check with `railway postgres ha status`."
         );
     }
     Err(err)
@@ -255,11 +255,11 @@ fn parse_switchover_response(output: &str) -> Result<String> {
         // may already have accepted the handoff by then — the poll just
         // outlived the client — so point the operator at `ha status`.
         Some(0) => bail!(
-            "Patroni did not answer the switchover in time. \
-             The failover may still be in progress — check `ha status`."
+            "Patroni didn't answer the switchover request in time. \
+             It may still be in progress. Check with `railway postgres ha status`."
         ),
-        Some(code) => bail!("Patroni switchover failed ({code}): {response_body}"),
-        None => bail!("Patroni switchover returned an unexpected response: {response_body}"),
+        Some(code) => bail!("Patroni refused the switchover ({code}): {response_body}"),
+        None => bail!("Patroni returned an unexpected response to the switchover: {response_body}"),
     }
 }
 

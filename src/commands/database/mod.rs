@@ -24,7 +24,9 @@ use is_terminal::IsTerminal;
 use serde::Serialize;
 
 use crate::controllers::database_engines::DatabaseEngine;
-use crate::controllers::{config::EnvironmentConfig, database_plugins, project::ServiceContext};
+use crate::controllers::{
+    config::EnvironmentConfig, database_plugins, project::ServiceContext, template_apply,
+};
 use crate::util::prompt::prompt_confirm_with_default;
 
 use super::*;
@@ -287,13 +289,13 @@ pub(crate) fn add_api_mismatch_guidance(err: anyhow::Error) -> anyhow::Error {
         .any(|marker| lower_chain.contains(marker))
     {
         return err.context(
-            "The Railway API requires a newer CLI for this command. Update with `railway upgrade` (or your package manager) and try again.",
+            "The Railway API requires a newer CLI for this command. Update with `railway upgrade` (or your package manager), then retry.",
         );
     }
 
     if is_schema_mismatch_message(&lower_chain) {
         return err.context(
-            "This CLI build no longer matches the Railway API -- an operation this command depends on is missing or has changed. Update with `railway upgrade` and try again; if the latest CLI still fails, the operation may have been removed (check the Railway changelog).",
+            "This CLI build no longer matches the Railway API. An operation this command depends on is missing or has changed. Update with `railway upgrade`, then retry. If the latest CLI still fails, the operation may have been removed (check the Railway changelog).",
         );
     }
 
@@ -310,9 +312,37 @@ pub(crate) fn confirm_or_bail(message: &str, yes: bool) -> Result<bool> {
     if std::io::stdout().is_terminal() {
         prompt_confirm_with_default(message, false)
     } else {
-        bail!(
-            "Cannot prompt for confirmation in non-interactive mode. Use --yes to skip confirmation."
-        );
+        bail!("Can't ask for confirmation without a terminal. Pass --yes to confirm.");
+    }
+}
+
+/// [`confirm_or_bail`] for a command that ends by committing the
+/// environment's staged patch: when the environment already has other staged
+/// changes, the prompt says so (they deploy together with this change). Under
+/// `--yes` the same fact is printed as a warning, since nothing is asked.
+pub(crate) async fn confirm_deploy_or_bail(
+    ctx: &ServiceContext,
+    message: &str,
+    yes: bool,
+) -> Result<bool> {
+    match template_apply::preexisting_staged_changes_note(ctx).await {
+        Some(note) if yes => {
+            eprintln!("Warning: {note}");
+            Ok(true)
+        }
+        Some(note) => confirm_or_bail(&format!("{message} {note} Continue?"), yes),
+        None => confirm_or_bail(message, yes),
+    }
+}
+
+/// The first sentence of a mutation's success line: `deployed == false`
+/// means the change is staged and applies on the next deploy
+/// (`--no-deploy`).
+pub(crate) fn deploy_outcome(deployed: bool, past: &str) -> String {
+    if deployed {
+        format!("{past} and deployed")
+    } else {
+        format!("{past} and staged (applies on the next deploy)")
     }
 }
 
@@ -343,11 +373,11 @@ pub(crate) fn print_field(label: &str, value: &dyn std::fmt::Display) {
     println!("{} {value}", padded.dimmed());
 }
 
-pub(crate) fn status_label(enabled: bool) -> colored::ColoredString {
-    if enabled {
-        "enabled".green().bold()
+pub(crate) fn on_off(on: bool) -> colored::ColoredString {
+    if on {
+        "on".green().bold()
     } else {
-        "disabled".yellow().bold()
+        "off".yellow().bold()
     }
 }
 

@@ -75,7 +75,7 @@ pub(crate) async fn exec_in_container(instance_id: &str, command: &str) -> Resul
         // probe output would turn it into a false reading (an empty Patroni
         // member list reads as "no leader").
         bail!(
-            "the SSH relay did not route to {instance_id}: it answered with its account manifest, which it serves when the target is not an instance this SSH key's account can reach"
+            "Couldn't reach instance {instance_id} over SSH. Make sure your SSH key belongs to an account with access to this project (`railway ssh keys list`)."
         );
     }
     Ok(stdout)
