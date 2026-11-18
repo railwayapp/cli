@@ -1,0 +1,3 @@
+mutation RailwayDomainDnsRecordDelete($input: RailwayDomainDnsRecordDeleteInput!) {
+  railwayDomainDnsRecordDelete(input: $input)
+}
