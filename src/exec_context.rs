@@ -17,6 +17,14 @@ use is_terminal::IsTerminal;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthTransport {
     /// Open a local browser (authorization-code + PKCE).
+    ///
+    /// Retained but no longer constructed: sign-in is standardized on
+    /// `DeviceCode` (see [`ExecutionContext::login_transport`]). The
+    /// browser flow in `commands::login` and its match arms are kept as
+    /// runtime-unreachable code so the policy can be reverted by
+    /// restoring `login_transport`'s body. `allow(dead_code)` covers the
+    /// now-unconstructed variant.
+    #[allow(dead_code)]
     Browser,
     /// Print a verification URL + device code (RFC 8628) for a human to
     /// use on any device.
@@ -91,22 +99,29 @@ impl ExecutionContext {
         self.agent_harness && !self.stdin_tty
     }
 
-    /// Transport for an *explicit* sign-in (`railway login`). The user
-    /// asked to authenticate, so we always attempt it; only the
-    /// transport varies.
-    pub fn login_transport(&self, browserless: bool) -> AuthTransport {
-        if browserless || !self.browser_reachable {
-            AuthTransport::DeviceCode
-        } else {
-            AuthTransport::Browser
-        }
+    /// Transport for a sign-in (`railway login`, or the implicit sign-in
+    /// from an unauthenticated `railway up`). Standardized on the
+    /// device-code flow: the CLI prints a one-click sign-in link (plus a
+    /// short code) that the human completes in a browser on any device.
+    ///
+    /// Every sign-in now uses one transport regardless of environment.
+    /// Auto-opening a local browser was the higher-converting path for
+    /// watched desktop sessions, but a single transport removes the
+    /// branch (no display detection, no flaky `open()` fallback) and
+    /// makes behavior identical across desktop, SSH, CI, and agent
+    /// harnesses. The `browserless` argument is retained for call-site
+    /// compatibility but no longer changes the choice; the browser
+    /// machinery in `commands::login` is kept as runtime-unreachable code
+    /// so this can be reverted by restoring the original body.
+    pub fn login_transport(&self, _browserless: bool) -> AuthTransport {
+        AuthTransport::DeviceCode
     }
 
     /// Decision for *implicit* sign-in triggered as a side effect (an
     /// unauthenticated `railway up`). Fails fast only when there's no
-    /// human to complete a flow; otherwise proceeds with the appropriate
-    /// transport — a browser when one is reachable, or a device code
-    /// (which the human completes on another device) when it isn't.
+    /// human to complete a flow; otherwise proceeds with the standardized
+    /// device-code transport (which the human completes in a browser on
+    /// any device).
     pub fn auto_auth(&self, browserless: bool) -> AutoAuth {
         // Machine contexts have no human in the loop: JSON output is
         // consumed by a tool, and --ci is non-interactive by definition.
@@ -118,12 +133,11 @@ impl ExecutionContext {
         if !self.stdout_tty && !self.agent_implicit_consent() {
             return AutoAuth::FailFast;
         }
-        // A human is present. Pick the transport: a browser if one can
-        // open, otherwise device-code (SSH / no DISPLAY) — the same
-        // fallback `railway login` uses here, so an unauthenticated `up`
-        // can sign the user in and deploy in one shot even on a remote
-        // box. (When there's genuinely no human, we already failed fast
-        // above rather than print a code into the void.)
+        // A human is present. Use the standardized device-code transport
+        // (the same one `railway login` uses), so an unauthenticated `up`
+        // can sign the user in and deploy in one shot in any environment.
+        // (When there's genuinely no human, we already failed fast above
+        // rather than print a code into the void.)
         AutoAuth::Proceed(self.login_transport(browserless))
     }
 }
@@ -152,12 +166,14 @@ mod tests {
         }
     }
 
-    // --- login_transport: explicit `railway login` always attempts ---
+    // --- login_transport: every explicit `railway login` uses device-code ---
 
     #[test]
-    fn login_uses_browser_when_reachable_and_not_browserless() {
+    fn login_uses_device_code_even_when_browser_reachable() {
+        // Standardized policy: a desktop with a reachable browser still
+        // uses device-code, same as every other environment.
         let c = ctx(false, false, true, true, false, true);
-        assert_eq!(c.login_transport(false), AuthTransport::Browser);
+        assert_eq!(c.login_transport(false), AuthTransport::DeviceCode);
     }
 
     #[test]
@@ -168,8 +184,8 @@ mod tests {
 
     #[test]
     fn login_uses_device_code_when_no_browser_reachable() {
-        // SSH / no-DISPLAY / CI env: browser can't open, but the user
-        // explicitly asked to log in, so device-code (not fail-fast).
+        // SSH / no-DISPLAY / CI env: browser can't open, and the
+        // standardized flow is device-code regardless.
         let c = ctx(false, false, true, true, false, false);
         assert_eq!(c.login_transport(false), AuthTransport::DeviceCode);
     }
@@ -181,18 +197,18 @@ mod tests {
         let c = ctx(false, false, true, true, false, true);
         assert_eq!(
             c.auto_auth(false),
-            AutoAuth::Proceed(AuthTransport::Browser)
+            AutoAuth::Proceed(AuthTransport::DeviceCode)
         );
     }
 
     #[test]
     fn auto_auth_proceeds_under_an_agent_harness_with_piped_stdio() {
         // Agent harness with captured stdout/stdin: a human is watching
-        // and can complete the browser sign-in.
+        // and can complete the device-code sign-in.
         let c = ctx(false, false, false, false, true, true);
         assert_eq!(
             c.auto_auth(false),
-            AutoAuth::Proceed(AuthTransport::Browser)
+            AutoAuth::Proceed(AuthTransport::DeviceCode)
         );
     }
 
@@ -256,7 +272,7 @@ mod tests {
         assert!(!c.agent_implicit_consent());
         assert_eq!(
             c.auto_auth(false),
-            AutoAuth::Proceed(AuthTransport::Browser)
+            AutoAuth::Proceed(AuthTransport::DeviceCode)
         );
     }
 }
