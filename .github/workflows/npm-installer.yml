@@ -1,0 +1,26 @@
+name: npm installer
+
+on:
+  pull_request:
+    paths:
+      - "npm-install/**"
+      - "npm-tests/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/npm-installer.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --ignore-scripts --package-lock=false
+      - run: npm run test:installer

@@ -1,10 +1,9 @@
 import { createWriteStream } from "fs";
 import * as fs from "fs/promises";
-import fetch from "node-fetch";
 import path from "path";
 import { pipeline } from "stream/promises";
 import { fileURLToPath } from "url";
-import tar from "tar";
+import * as tar from "tar";
 
 import { CONFIG } from "./config.js";
 
@@ -92,9 +91,12 @@ async function install() {
     const tarFile = path.join(PACKAGE_ROOT, "downloaded.tar.gz");
 
     await fs.mkdir(destDir, { recursive: true });
-    await pipeline(response.body, createWriteStream(tarFile));
-    await tar.x({ file: tarFile, cwd: destDir });
-    await fs.rm(tarFile);
+    try {
+        await pipeline(response.body, createWriteStream(tarFile));
+        await tar.x({ file: tarFile, cwd: destDir });
+    } finally {
+        await fs.rm(tarFile, { force: true });
+    }
 
     // Fail loudly here rather than leaving a package whose `railway` shim exits
     // with a confusing ENOENT on first use.

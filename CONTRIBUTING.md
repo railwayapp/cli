@@ -31,3 +31,9 @@ Then, run the following command to generate the schema:
 ```sh
 graphql-client introspect-schema https://backboard.railway.com/graphql/v2 > src/gql/schema.json
 ```
+
+## npm installer
+
+The npm package requires Node.js 18 or newer for native fetch and tar 7.
+Run `pnpm install --ignore-scripts` and `pnpm test:installer` to test the
+installer against local HTTP fixtures without downloading a release binary.
