@@ -162,8 +162,11 @@ async fn ensure_ssh_key_impl(
     // fires if the key disappeared mid-session.
     if !interactive || !std::io::stdin().is_terminal() || crate::util::prompt::terminal_owned() {
         bail!(
-            "No registered SSH keys found. Register one with:\n  railway ssh keys add\n\n\
-            Or import from GitHub:\n  railway ssh keys github"
+            "{}",
+            no_registered_key_message(
+                !registered_keys.is_empty(),
+                local_keys.first().map(local_key_reference).as_deref()
+            )
         );
     }
 
@@ -213,6 +216,38 @@ async fn ensure_ssh_key_impl(
     println!("SSH key registered successfully!");
 
     Ok(identity_for(key_to_register))
+}
+
+/// What `railway ssh keys add --key` accepts to select `key`: the public key
+/// path for a file-backed key, the fingerprint for an agent-backed one.
+fn local_key_reference(key: &crate::controllers::ssh::keys::LocalSshKey) -> String {
+    match &key.source {
+        SshKeySource::File(path) => path.display().to_string(),
+        SshKeySource::Agent => key.fingerprint.clone(),
+    }
+}
+
+/// The error for a machine with no registered key. When the account already
+/// has keys, "no registered SSH keys found" is false and sends the reader
+/// looking for a missing registration, so say that none of this machine's keys
+/// match and name the one `keys add` would register.
+fn no_registered_key_message(account_has_keys: bool, local_key: Option<&str>) -> String {
+    let add = match local_key {
+        Some(key) if account_has_keys => format!(
+            "railway ssh keys add --key {}",
+            shlex::try_quote(key).unwrap_or_else(|_| key.into())
+        ),
+        _ => "railway ssh keys add".to_string(),
+    };
+    let problem = if account_has_keys {
+        "None of the SSH keys on this machine are registered with Railway."
+    } else {
+        "No registered SSH keys found."
+    };
+    format!(
+        "{problem} Register one with:\n  {add}\n\n\
+        Or import from GitHub:\n  railway ssh keys github"
+    )
 }
 
 /// The path to hand `ssh -i` for a registered local key. File-backed keys point
@@ -796,5 +831,31 @@ mod quote_remote_command_tests {
         let input = args(&["printf", "%s", ""]);
         let quoted = quote_remote_command(&input);
         assert_eq!(remote_shell_split(&quoted), input);
+    }
+}
+
+#[cfg(test)]
+mod no_registered_key_message_tests {
+    use super::*;
+
+    #[test]
+    fn account_without_keys_keeps_the_original_wording() {
+        let message = no_registered_key_message(false, Some("/home/me/.ssh/id_ed25519.pub"));
+        assert!(message.starts_with("No registered SSH keys found."));
+        assert!(message.contains("  railway ssh keys add\n"));
+    }
+
+    #[test]
+    fn account_with_other_keys_says_none_match_this_machine() {
+        let message = no_registered_key_message(true, Some("/home/me/.ssh/id_ed25519.pub"));
+        assert!(message.starts_with("None of the SSH keys on this machine are registered"));
+        assert!(!message.contains("No registered SSH keys found"));
+        assert!(message.contains("railway ssh keys add --key /home/me/.ssh/id_ed25519.pub\n"));
+    }
+
+    #[test]
+    fn key_reference_with_spaces_is_quoted() {
+        let message = no_registered_key_message(true, Some("/home/me/my keys/id.pub"));
+        assert!(message.contains("--key '/home/me/my keys/id.pub'"));
     }
 }
