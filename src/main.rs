@@ -215,25 +215,55 @@ async fn handle_update_task(
 async fn background_stage_update(version: &str) -> Result<()> {
     use util::check_update::UpdateCheck;
 
-    let result = async {
-        if telemetry::is_auto_update_disabled() {
-            return Ok(());
-        }
+    let start = std::time::Instant::now();
+    let stage_outcome: Option<(bool, Option<String>)> = if telemetry::is_auto_update_disabled() {
+        None
+    } else {
+        let outcome = match util::self_update::download_and_stage(version).await {
+            // Staged successfully; cache stays until try_apply_staged() succeeds.
+            Ok(true) => (true, None),
+            // Another stage process holds the lock; this one is a no-op and
+            // the in-flight stage will report its own outcome.
+            Ok(false) => (false, Some("lock_held".to_string())),
+            Err(e) => {
+                UpdateCheck::record_download_failure();
+                // `truncate_message` cuts on a char boundary; a raw byte slice
+                // would panic (and abort) on non-ASCII error text.
+                (false, Some(telemetry::truncate_message(&e.to_string())))
+            }
+        };
+        Some(outcome)
+    };
 
-        match util::self_update::download_and_stage(version).await {
-            Ok(true) => {}  // Staged successfully; cache stays until try_apply_staged() succeeds.
-            Ok(false) => {} // Lock held by another process, will retry
-            Err(_) => UpdateCheck::record_download_failure(),
-        }
-        Ok(())
+    // Fire telemetry from the detached child so we have visibility into
+    // download/stage success rate. The existing `cli_autoupdate_apply`
+    // event covers the *apply* step (TTY-only, fires from the swapped-in
+    // binary on the next invocation); this `cli_autoupdate_stage` event
+    // covers the *download* step which previously had no telemetry. Lock
+    // contention shows up as success=false / error_message="lock_held"
+    // and is a no-op rather than a real failure — distinguishable from
+    // network/checksum errors via the error_message value.
+    if let Some((success, error_message)) = stage_outcome {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        telemetry::send(telemetry::CliTrackEvent {
+            command: "autoupdate_stage".to_string(),
+            sub_command: Some(version.to_string()),
+            duration_ms,
+            success,
+            error_message,
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            is_ci: Configs::env_is_ci(),
+        })
+        .await;
     }
-    .await;
 
     if let Ok(pid_path) = util::self_update::download_update_pid_path() {
         let _ = std::fs::remove_file(pid_path);
     }
 
-    result
+    Ok(())
 }
 
 #[tokio::main]
