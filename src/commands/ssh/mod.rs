@@ -60,6 +60,11 @@ pub struct Args {
     #[clap(short = 'i', long = "identity-file", value_name = "PATH")]
     identity_file: Option<PathBuf>,
 
+    /// Print errors as JSON, with a stable code such as UNAUTHORIZED.
+    /// The remote command's output is not changed
+    #[clap(long)]
+    json: bool,
+
     /// Command to execute instead of starting an interactive shell
     #[clap(trailing_var_arg = true)]
     command: Vec<String>,
@@ -75,6 +80,8 @@ enum Commands {
 }
 
 pub async fn command(args: Args) -> Result<()> {
+    crate::util::reporter::set_mode(args.json);
+
     match args.subcommand {
         Some(Commands::Config(config_args)) => return config::command(config_args).await,
         Some(Commands::Keys(keys_args)) => return keys::command(keys_args).await,
@@ -155,4 +162,23 @@ pub async fn command(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_flag_before_the_command_is_ours() {
+        let args = Args::parse_from(["ssh", "--json", "-s", "postgres", "sh", "-c", "true"]);
+        assert!(args.json);
+        assert_eq!(args.command, ["sh", "-c", "true"]);
+    }
+
+    #[test]
+    fn json_flag_after_the_command_goes_to_the_remote_command() {
+        let args = Args::parse_from(["ssh", "jq", "--json"]);
+        assert!(!args.json);
+        assert_eq!(args.command, ["jq", "--json"]);
+    }
 }
