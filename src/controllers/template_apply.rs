@@ -112,6 +112,7 @@ pub(crate) async fn warn_if_preexisting_staged_changes(ctx: &ServiceContext) {
         ctx.configs.get_backboard(),
         queries::environment_staged_changes::Variables {
             environment_id: ctx.environment_id.clone(),
+            decrypt_variables: None,
         },
     )
     .await;
