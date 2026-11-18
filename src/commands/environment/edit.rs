@@ -69,6 +69,8 @@ pub async fn edit_environment(args: Args) -> Result<()> {
             );
         } else if is_interactive {
             println!("{}", "No changes to apply".yellow());
+        } else {
+            eprintln!("{}", "No changes to apply".yellow());
         }
         return Ok(());
     }
@@ -215,14 +217,15 @@ async fn get_edit_config(
     let all_configs = args.config.get_all_service_configs();
     let has_cli_flags = !all_configs.is_empty();
 
-    // Priority 1: Piped stdin JSON (auto-detected)
-    if !stdin_is_terminal {
-        return read_config_from_stdin(environment_instances);
-    }
-
-    // Priority 2: CLI flags (--service-config, --service-variable)
+    // Priority 1: CLI flags (--service-config, --service-variable)
+    // Explicit flags always take precedence over stdin auto-detection.
     if has_cli_flags {
         return parse_non_interactive_configs(&all_configs, environment_instances);
+    }
+
+    // Priority 2: Piped stdin JSON (auto-detected)
+    if !stdin_is_terminal {
+        return read_config_from_stdin(environment_instances);
     }
 
     // Priority 3: Interactive prompts (terminal only)
