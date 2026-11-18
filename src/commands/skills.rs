@@ -461,6 +461,25 @@ pub async fn command(args: Args) -> Result<()> {
     }
 }
 
+/// A tool's config directory from its override variable, else `home/default`.
+/// An empty value counts as unset, matching how the tools read it.
+fn dir_from_env(home: &Path, var: &str, default: &str) -> PathBuf {
+    match std::env::var_os(var) {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(default),
+    }
+}
+
+/// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub(crate) fn claude_config_dir(home: &Path) -> PathBuf {
+    dir_from_env(home, "CLAUDE_CONFIG_DIR", ".claude")
+}
+
+/// Codex's home directory: `$CODEX_HOME`, else `~/.codex`.
+pub(crate) fn codex_home(home: &Path) -> PathBuf {
+    dir_from_env(home, "CODEX_HOME", ".codex")
+}
+
 pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
     vec![
         CodingTool {
@@ -472,13 +491,13 @@ pub(super) fn coding_tools(home: &Path) -> Vec<CodingTool> {
         CodingTool {
             slug: "claude-code",
             name: "Claude Code",
-            global_parent: home.join(".claude"),
+            global_parent: claude_config_dir(home),
             skills_dir_name: "skills",
         },
         CodingTool {
             slug: "codex",
             name: "OpenAI Codex",
-            global_parent: home.join(".codex"),
+            global_parent: codex_home(home),
             skills_dir_name: "skills",
         },
         CodingTool {
