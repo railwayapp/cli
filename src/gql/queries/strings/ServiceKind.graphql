@@ -1,0 +1,7 @@
+query ServiceKind($id: String!) {
+  service(id: $id) {
+    id
+    name
+    kind
+  }
+}

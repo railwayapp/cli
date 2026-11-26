@@ -109,6 +109,12 @@ pub struct Args {
     #[clap(short, long)]
     /// Message to attach to the deployment
     message: Option<String>,
+
+    #[clap(long)]
+    /// Deploy this directory as a Website: a static site, or a site with a
+    /// server, served from Railway's edge. Creates a Website service unless
+    /// the target service already is one.
+    website: bool,
 }
 
 pub async fn command(args: Args) -> Result<()> {
@@ -202,7 +208,31 @@ pub async fn command(args: Args) -> Result<()> {
         })?;
     let environment_id = get_matched_environment(&project, environment)?.id;
 
-    let service = get_or_prompt_service(linked_project, project, args.service).await?;
+    let service = if args.website {
+        let linked_here = linked_project
+            .as_ref()
+            .filter(|lp| lp.project == project_id);
+        let service_id = website_service(
+            &client,
+            &configs,
+            &project,
+            &environment_id,
+            args.service.clone(),
+            linked_here.and_then(|lp| lp.service.clone()),
+            directory_name(&args)?,
+            args.json,
+        )
+        .await?;
+        // Link the Website service only when this directory is linked to
+        // the same project.
+        if linked_here.is_some() {
+            configs.link_service(service_id.clone())?;
+            configs.write()?;
+        }
+        Some(service_id)
+    } else {
+        get_or_prompt_service(linked_project, project, args.service).await?
+    };
 
     let is_tty = std::io::stdout().is_terminal() && !args.json;
 
@@ -628,6 +658,122 @@ fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<
     }
 }
 
+/// The name of the directory being deployed, used to name a new service.
+fn directory_name(args: &Args) -> Result<Option<String>> {
+    let path = match &args.path {
+        Some(path) => path.clone(),
+        None => std::env::current_dir().context("Failed to get current directory")?,
+    };
+    Ok(path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string()))
+}
+
+/// Which service `railway up --website` deploys to.
+#[derive(Debug, PartialEq)]
+enum WebsiteTarget {
+    /// An existing service, which must be a Website.
+    Existing { id: String },
+    /// A new Website service. Backboard names it when the name is empty.
+    Create { name: Option<String> },
+}
+
+/// Picks the service for `railway up --website`. `--service` names an existing
+/// service, or the new Website to create. Without it, the linked service is
+/// used, and with no linked service a new Website is created.
+fn website_target(
+    services: &[(String, String)],
+    service_arg: Option<String>,
+    linked_service: Option<String>,
+    directory_name: Option<String>,
+) -> WebsiteTarget {
+    match (service_arg, linked_service) {
+        (Some(arg), _) => services
+            .iter()
+            .find(|(id, name)| *id == arg || *name == arg)
+            .map(|(id, _)| WebsiteTarget::Existing { id: id.clone() })
+            .unwrap_or(WebsiteTarget::Create { name: Some(arg) }),
+        (None, Some(linked)) => WebsiteTarget::Existing { id: linked },
+        (None, None) => WebsiteTarget::Create {
+            name: directory_name,
+        },
+    }
+}
+
+/// Resolves or creates the Website service `railway up --website` deploys to,
+/// and returns its ID.
+#[allow(clippy::too_many_arguments)]
+async fn website_service(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project: &queries::project::ProjectProject,
+    environment_id: &str,
+    service_arg: Option<String>,
+    linked_service: Option<String>,
+    directory_name: Option<String>,
+    json: bool,
+) -> Result<String> {
+    let services: Vec<(String, String)> = project
+        .services
+        .edges
+        .iter()
+        .map(|edge| (edge.node.id.clone(), edge.node.name.clone()))
+        .collect();
+
+    match website_target(&services, service_arg, linked_service, directory_name) {
+        WebsiteTarget::Existing { id } => {
+            let service = post_graphql::<queries::ServiceKind, _>(
+                client,
+                configs.get_backboard(),
+                queries::service_kind::Variables { id: id.clone() },
+            )
+            .await?
+            .service;
+            if service.kind != Some(queries::service_kind::ServiceKind::WEBSITE) {
+                bail!(
+                    "Service \"{}\" isn't a Website. A service's kind is set when it's created, so run `railway up --website --service <new name>` to create a Website service.",
+                    service.name
+                );
+            }
+            Ok(id)
+        }
+        WebsiteTarget::Create { name } => {
+            let created =
+                create_website_service(client, configs, &project.id, environment_id, name).await?;
+            if !json {
+                println!(
+                    "  {} Created Website service {}",
+                    "✓".green(),
+                    created.name.bold()
+                );
+            }
+            Ok(created.id)
+        }
+    }
+}
+
+/// Creates a Website service in one environment of a project.
+async fn create_website_service(
+    client: &reqwest::Client,
+    configs: &Configs,
+    project_id: &str,
+    environment_id: &str,
+    name: Option<String>,
+) -> Result<mutations::website_service_create::WebsiteServiceCreateServiceCreate> {
+    let vars = mutations::website_service_create::Variables {
+        name,
+        project_id: project_id.to_owned(),
+        environment_id: Some(environment_id.to_owned()),
+    };
+    Ok(
+        post_graphql::<mutations::WebsiteServiceCreate, _>(client, configs.get_backboard(), vars)
+            .await?
+            .service_create,
+    )
+}
+
 /// Drop into the login flow when the user isn't signed in. Sign-up
 /// and sign-in go through the same OAuth surface, so we don't bother
 /// prompting the user to declare which they're doing — the backend
@@ -878,6 +1024,29 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     )?;
     configs.write()?;
 
+    // A Website needs its service created as one before the upload; an
+    // ordinary service is created by the upload itself.
+    let website_service_id = if args.website {
+        let created = create_website_service(
+            &client,
+            &configs,
+            &project_create.id,
+            &environment.id,
+            Some(project_create.name.clone()),
+        )
+        .await?;
+        if !args.json {
+            println!(
+                "  {} Created Website service {}",
+                "✓".green(),
+                created.name.bold()
+            );
+        }
+        Some(created.id)
+    } else {
+        None
+    };
+
     // Bundle the directory.
     let bundle_spinner = step_spinner(args.json, "Bundling project");
     let DeployTarball {
@@ -903,7 +1072,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
         &hostname,
         &project_create.id,
         &environment.id,
-        None,
+        website_service_id.as_deref(),
         None,
         tarball,
     )
@@ -915,7 +1084,8 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
     // backboard's /up endpoint creates a service implicitly but doesn't
     // return its id, so recover it from the logs_url
     // (.../project/<pid>/service/<sid>?...) to link the service too.
-    let service_id = parse_service_id_from_logs_url(&up_response.logs_url);
+    let service_id =
+        website_service_id.or_else(|| parse_service_id_from_logs_url(&up_response.logs_url));
     match &service_id {
         Some(service_id) => configs.link_service(service_id.clone())?,
         None => crate::util::reporter::warn(
@@ -966,6 +1136,7 @@ async fn deploy_new_project(args: &Args) -> Result<()> {
             "dashboardUrl": dashboard_url,
             "url": deploy_url,
             "detectedServices": detected_services,
+            "website": args.website,
         })
     };
 
@@ -1200,5 +1371,71 @@ fn parse_service_id_from_logs_url(logs_url: &str) -> Option<String> {
         None
     } else {
         Some(service_id)
+    }
+}
+
+#[cfg(test)]
+mod website_target_tests {
+    use super::{WebsiteTarget, website_target};
+
+    fn services() -> Vec<(String, String)> {
+        vec![
+            ("svc-1".to_string(), "blog".to_string()),
+            ("svc-2".to_string(), "api".to_string()),
+        ]
+    }
+
+    #[test]
+    fn service_flag_names_an_existing_service_by_name_or_id() {
+        assert_eq!(
+            website_target(&services(), Some("blog".into()), None, None),
+            WebsiteTarget::Existing { id: "svc-1".into() }
+        );
+        assert_eq!(
+            website_target(
+                &services(),
+                Some("svc-2".into()),
+                Some("svc-1".into()),
+                None
+            ),
+            WebsiteTarget::Existing { id: "svc-2".into() }
+        );
+    }
+
+    #[test]
+    fn unknown_service_flag_creates_a_website_with_that_name() {
+        assert_eq!(
+            website_target(
+                &services(),
+                Some("docs".into()),
+                Some("svc-1".into()),
+                Some("dir".into())
+            ),
+            WebsiteTarget::Create {
+                name: Some("docs".into())
+            }
+        );
+    }
+
+    #[test]
+    fn linked_service_is_used_without_the_service_flag() {
+        assert_eq!(
+            website_target(&services(), None, Some("svc-2".into()), Some("dir".into())),
+            WebsiteTarget::Existing { id: "svc-2".into() }
+        );
+    }
+
+    #[test]
+    fn no_service_creates_a_website_named_after_the_directory() {
+        assert_eq!(
+            website_target(&services(), None, None, Some("my-site".into())),
+            WebsiteTarget::Create {
+                name: Some("my-site".into())
+            }
+        );
+        assert_eq!(
+            website_target(&[], None, None, None),
+            WebsiteTarget::Create { name: None }
+        );
     }
 }
