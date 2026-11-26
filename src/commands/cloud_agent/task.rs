@@ -542,6 +542,9 @@ pub(crate) struct Handle {
     pub task_id: String,
     pub agent_id: String,
     pub session_id: String,
+    /// Set when the API moved a chat prompt to the agent dashboard: the task
+    /// is a new run there, followed at this link.
+    pub dashboard_run_url: Option<String>,
     /// The API's handle as returned, for `--json`.
     raw: Value,
 }
@@ -561,6 +564,7 @@ pub(crate) fn blank_input(
         cloud_agent_id: None,
         context: None,
         conversation_key: None,
+        dashboard_handoff: None,
         external_ref: None,
         idempotency_key: None,
         images: None,
@@ -639,6 +643,7 @@ async fn dispatch_value(client: &reqwest::Client, backboard: &str, input: Value)
     .cloud_agent_task_dispatch;
     Ok(Handle {
         raw: serde_json::to_value(&handle)?,
+        dashboard_run_url: handle.dashboard_run_url,
         task_id: handle.task_id,
         agent_id: handle.cloud_agent_id,
         session_id: handle.session_id,

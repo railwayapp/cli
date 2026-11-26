@@ -39,6 +39,9 @@ const NEW_AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// task back as still waiting.
 const ANSWER_SETTLE_POLLS: usize = 20;
 
+/// The outcome of a prompt the API moved to the agent dashboard.
+const HANDED_OFF: &str = "HANDED_OFF";
+
 /// How many earlier turns a resumed thread shows.
 const RESUME_TURNS: usize = 3;
 
@@ -52,7 +55,11 @@ const RESUME_TURNS: usize = 3;
       railway agent -p \"why is my service crashing?\" --json     # JSON output\n\
       railway agent -p \"summarize today's errors\" --accept      # Skip the cloud agent prompt\n\
       railway agent --list                                      # List existing threads\n\
-      railway agent --thread-id <ID>                            # Continue a thread"
+      railway agent --thread-id <ID>                            # Continue a thread\n\
+      railway agent -p \"add dark mode\" -s web                   # Code: runs on the agent dashboard\n\n\
+    Ask for code to be written (a feature, a fix, a new app) and it runs on the\n\
+    agent dashboard, on the service's repository, instead of here: you get its\n\
+    link, and its questions, approvals and pull request show up there."
 )]
 pub struct Args {
     /// Send a single prompt (omit for interactive mode)
@@ -437,6 +444,9 @@ impl Session<'_> {
             // Only the message that creates the agent names it.
             agent_name: self.agent_id.is_none().then(|| AGENT_NAME.to_string()),
             interactive: Some(self.interactive),
+            // A new thread asking for code goes to the agent dashboard, where
+            // it gets its own agent on the service's repository.
+            dashboard_handoff: self.session_id.is_none().then_some(true),
             context: service_context(self.service.as_ref()),
             ..task::blank_input(
                 self.project_id.clone(),
@@ -455,6 +465,15 @@ impl Session<'_> {
                     task::explain(error, None)
                 }
             })?;
+        // Moved to the dashboard: nothing to wait for here, and the thread
+        // (still unstarted) stays this one.
+        if let Some(url) = &handle.dashboard_run_url {
+            return Ok(json!({
+                "status": HANDED_OFF,
+                "taskId": handle.task_id,
+                "dashboardRunUrl": url,
+            }));
+        }
         self.agent_id = Some(handle.agent_id.clone());
         self.session_id = Some(handle.session_id.clone());
 
@@ -534,6 +553,17 @@ impl Session<'_> {
         };
         match task::outcome(turn) {
             "FAILED" | "CANCELLED" => {}
+            HANDED_OFF => {
+                let url = task::text(turn, "dashboardRunUrl").unwrap_or_default();
+                if to_terminal {
+                    println!(
+                        "{}",
+                        "That's a code change, so it's running on the agent dashboard. Its questions, approvals and pull request show up there:"
+                            .dimmed()
+                    );
+                }
+                println!("{url}");
+            }
             "AWAITING_INPUT" => {
                 header();
                 for request in task::pending(turn) {
@@ -694,11 +724,32 @@ fn json_response(turn: &Value, thread: Option<&str>) -> Value {
     if status == "AWAITING_INPUT" {
         out["questions"] = json!(task::pending(turn));
     }
+    if status == HANDED_OFF {
+        out["dashboardRunUrl"] = json!(task::text(turn, "dashboardRunUrl"));
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn handed_off_json_carries_the_run_link_and_no_thread() {
+        let out = super::json_response(
+            &serde_json::json!({
+                "status": super::HANDED_OFF,
+                "taskId": "task",
+                "dashboardRunUrl": "https://railway.com/project/p/agents/a?chat=s",
+            }),
+            None,
+        );
+        assert_eq!(out["status"], "HANDED_OFF");
+        assert_eq!(
+            out["dashboardRunUrl"],
+            "https://railway.com/project/p/agents/a?chat=s"
+        );
+        assert!(out["threadId"].is_null());
+    }
+
     use super::*;
 
     #[test]

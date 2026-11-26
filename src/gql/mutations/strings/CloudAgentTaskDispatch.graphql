@@ -6,5 +6,6 @@ mutation CloudAgentTaskDispatch($input: CloudAgentTaskDispatchInput!) {
     status
     replayed
     deliveredAsReply
+    dashboardRunUrl
   }
 }
