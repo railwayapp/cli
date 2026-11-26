@@ -512,6 +512,14 @@ pub struct GitHubSshKeys;
 )]
 pub struct ServiceInstance;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/ServiceKind.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq"
+)]
+pub struct ServiceKind;
+
 type SubscriptionDeploymentStatus = super::subscriptions::deployment::DeploymentStatus;
 impl From<environment_instances::DeploymentStatus> for SubscriptionDeploymentStatus {
     fn from(value: environment_instances::DeploymentStatus) -> Self {

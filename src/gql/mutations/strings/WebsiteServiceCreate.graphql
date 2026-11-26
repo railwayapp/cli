@@ -1,0 +1,8 @@
+mutation WebsiteServiceCreate($name: String, $projectId: String!, $environmentId: String) {
+  serviceCreate(
+    input: {name: $name, projectId: $projectId, environmentId: $environmentId, kind: WEBSITE}
+  ) {
+    id
+    name
+  }
+}
