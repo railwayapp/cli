@@ -682,7 +682,8 @@ enum WebsiteTarget {
 
 /// Picks the service for `railway up --website`. `--service` names an existing
 /// service, or the new Website to create. Without it, the linked service is
-/// used, and with no linked service a new Website is created.
+/// used. With no linked service, the service named after the directory is
+/// used, or a new Website with that name is created.
 fn website_target(
     services: &[(String, String)],
     service_arg: Option<String>,
@@ -696,8 +697,15 @@ fn website_target(
             .map(|(id, _)| WebsiteTarget::Existing { id: id.clone() })
             .unwrap_or(WebsiteTarget::Create { name: Some(arg) }),
         (None, Some(linked)) => WebsiteTarget::Existing { id: linked },
-        (None, None) => WebsiteTarget::Create {
-            name: directory_name,
+        // A service named after the directory is the one an earlier run
+        // created, so it is reused rather than created again.
+        (None, None) => match directory_name {
+            Some(name) => services
+                .iter()
+                .find(|(_, service_name)| *service_name == name)
+                .map(|(id, _)| WebsiteTarget::Existing { id: id.clone() })
+                .unwrap_or(WebsiteTarget::Create { name: Some(name) }),
+            None => WebsiteTarget::Create { name: None },
         },
     }
 }
@@ -1436,6 +1444,13 @@ mod website_target_tests {
         assert_eq!(
             website_target(&[], None, None, None),
             WebsiteTarget::Create { name: None }
+        );
+    }
+    #[test]
+    fn a_service_named_after_the_directory_is_reused() {
+        assert_eq!(
+            website_target(&services(), None, None, Some("blog".into())),
+            WebsiteTarget::Existing { id: "svc-1".into() }
         );
     }
 }
