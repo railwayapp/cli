@@ -63,6 +63,7 @@ commands!(
     domain,
     docs,
     down,
+    edge_rules as "edge-rules",
     environment(env),
     flag(flags),
     init,
@@ -593,6 +594,7 @@ mod cli_tests {
                 "--commit and --from-source are mutually exclusive"
             );
             assert_subcommand(&["cdn", "status"], "cdn");
+            assert_subcommand(&["edge-rules", "list"], "edge-rules");
             assert_subcommand(&["waf", "under-attack", "status"], "waf");
             assert_subcommand(&["tcp-proxy", "list"], "tcp-proxy");
         }
@@ -792,6 +794,25 @@ mod cli_tests {
             assert_parses(&["tcp-proxy", "create", "--port", "5432"]);
             assert_parses(&["tcp-proxy", "status", "proxy-id"]);
             assert_parses(&["tcp-proxy", "delete", "proxy-id", "--yes"]);
+        }
+
+        #[test]
+        fn edge_rules_subcommands() {
+            assert!(parse(&["edge-rules"]).is_err());
+            assert_parses(&["edge-rules", "list"]);
+            assert_parses(&["edge-rules", "list", "--service", "api", "--json"]);
+            assert_parses(&["edge-rules", "get", "--environment", "production"]);
+            assert_parses(&["edge-rules", "set", "--file", "rules.json"]);
+            assert_parses(&["edge-rules", "set", "-f", "-", "--json"]);
+            assert_parses(&["edge-rules", "validate", "--file", "rules.json"]);
+            assert_parses(&["edge-rules", "edit"]);
+            assert_parses(&["edge-rules", "edit", "--yes"]);
+            assert_parses(&["edge-rules", "clear", "--yes"]);
+            assert_parses(&["edge-rules", "enable", "2"]);
+            assert_parses(&["edge-rules", "disable", "rul_abc123"]);
+            assert_parses(&["edge-rules", "remove", "rul_abc123", "--yes"]);
+            assert!(parse(&["edge-rules", "enable"]).is_err());
+            assert!(parse(&["edge-rules", "remove"]).is_err());
         }
 
         #[test]

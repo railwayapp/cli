@@ -27,6 +27,7 @@ pub mod dev;
 pub mod docs;
 pub mod domain;
 pub mod down;
+pub mod edge_rules;
 pub mod environment;
 pub mod flag;
 pub mod functions;

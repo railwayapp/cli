@@ -1,0 +1,7 @@
+mutation UpdateServiceEdgeRules($input: UpdateServiceEdgeRulesInput!) {
+  updateServiceEdgeRules(input: $input) {
+    id
+    enabled
+    edgeRules
+  }
+}
