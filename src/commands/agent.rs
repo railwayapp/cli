@@ -25,15 +25,10 @@ use crate::{
 
 use super::*;
 
+mod follow;
+
 /// The cloud agent every `railway agent` thread in an environment runs on.
 const AGENT_NAME: &str = "railway-agent";
-
-/// What the user accepts before the first thread in an environment creates
-/// that agent.
-const NEW_AGENT_NOTICE: &str = "Railway Agent runs on a cloud agent. This will start a cloud agent VM named railway-agent in this environment and use Railway Agent credits. The VM is billed while it is active and sleeps after five minutes idle. Later sessions reuse it.";
-
-/// How long a new agent's notice stays up before the agent is started.
-const NEW_AGENT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How many extra polls to give an approval to register before handing the
 /// task back as still waiting.
@@ -53,7 +48,6 @@ const RESUME_TURNS: usize = 3;
       railway agent                                             # Interactive mode\n\
       railway agent -p \"what's the status of my deployment?\"    # Single prompt\n\
       railway agent -p \"why is my service crashing?\" --json     # JSON output\n\
-      railway agent -p \"summarize today's errors\" --accept      # Skip the cloud agent prompt\n\
       railway agent --list                                      # List existing threads\n\
       railway agent --thread-id <ID>                            # Continue a thread\n\
       railway agent -p \"add dark mode\" -s web                   # Code: runs on the agent dashboard\n\n\
@@ -90,9 +84,9 @@ pub struct Args {
     #[clap(long, conflicts_with_all = ["prompt", "thread_id", "service"])]
     list: bool,
 
-    /// Start the environment's cloud agent VM, which is billed, without the
-    /// notice and five-second wait that come before it is first created
-    #[clap(long, short = 'y', visible_alias = "yes")]
+    /// No longer needed: nothing asks before starting an agent. Kept so
+    /// existing scripts that pass it keep working.
+    #[clap(long, short = 'y', visible_alias = "yes", hide = true)]
     accept: bool,
 }
 
@@ -129,6 +123,13 @@ pub async fn command(args: Args) -> Result<()> {
     // The agent can see the whole environment, so a service only narrows what
     // the conversation is about: use the one named or linked, never ask.
     let project = get_project(&client, &configs, project_id.clone()).await?;
+    let project_name = project.name.clone();
+    let environment_name = project
+        .environments
+        .edges
+        .iter()
+        .find(|edge| edge.node.id == environment_id)
+        .map_or_else(|| environment_id.clone(), |edge| edge.node.name.clone());
     let named = |id: &str| {
         project
             .services
@@ -185,6 +186,8 @@ pub async fn command(args: Args) -> Result<()> {
         backboard,
         project_id,
         environment_id,
+        project_name,
+        environment_name,
         service,
         agent_id,
         session_id,
@@ -195,9 +198,6 @@ pub async fn command(args: Args) -> Result<()> {
 
     match args.prompt {
         Some(message) => {
-            if session.agent_id.is_none() {
-                announce_new_agent(args.accept).await?;
-            }
             let turn = match session.turn(message).await {
                 Ok(turn) => turn,
                 Err(error) if error.is::<Interrupted>() => {
@@ -206,6 +206,23 @@ pub async fn command(args: Args) -> Result<()> {
                 }
                 Err(error) => return Err(error),
             };
+            if task::outcome(&turn) == HANDED_OFF && session.follows() {
+                let run = session.run_of(&turn);
+                return match follow::follow(&run).await? {
+                    follow::Outcome::Done => Ok(()),
+                    follow::Outcome::Detached => {
+                        eprintln!("\n{}", follow::detached_hint(&run).dimmed());
+                        Ok(())
+                    }
+                    follow::Outcome::Failed(error) => {
+                        bail!(
+                            "The run failed: {error}. See it on the dashboard: {}",
+                            run.url
+                        )
+                    }
+                    follow::Outcome::Cancelled => bail!("The run was cancelled."),
+                };
+            }
             session.render(&turn)?;
             let thread = session.session_id.as_deref().unwrap_or_default();
             match task::outcome(&turn) {
@@ -220,84 +237,8 @@ pub async fn command(args: Args) -> Result<()> {
                 _ => Ok(()),
             }
         }
-        None => session.repl(args.accept, &history).await,
+        None => session.repl(&history).await,
     }
-}
-
-/// Say that a billed cloud agent is about to be created, and give a moment
-/// to stop it. `accepted` skips both.
-///
-/// A wait rather than a question, so a script that ran `railway agent -p`
-/// before it started agents keeps working: it sees the notice and carries on.
-/// At a terminal, Enter starts at once and Ctrl-C or Esc backs out.
-async fn announce_new_agent(accepted: bool) -> Result<()> {
-    if accepted {
-        return Ok(());
-    }
-    let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
-    eprintln!("{}", textwrap::fill(NEW_AGENT_NOTICE, width.clamp(40, 100)));
-
-    let seconds = NEW_AGENT_WAIT.as_secs();
-    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
-        eprintln!("Starting in {seconds} seconds. Pass --accept to skip this wait.");
-        tokio::select! {
-            _ = tokio::time::sleep(NEW_AGENT_WAIT) => return Ok(()),
-            _ = tokio::signal::ctrl_c() => bail!("Cancelled. No agent was started."),
-        }
-    }
-
-    // Keys are read raw so Enter and Ctrl-C act the moment they are pressed,
-    // and nothing typed during the wait is left for the prompt that follows.
-    let started = tokio::task::spawn_blocking(move || -> Result<bool> {
-        use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-        use std::io::Write;
-
-        crossterm::terminal::enable_raw_mode()?;
-        let deadline = std::time::Instant::now() + NEW_AGENT_WAIT;
-        let outcome = loop {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                break Ok(true);
-            }
-            eprint!(
-                "\r{}",
-                format!(
-                    "Starting in {}s. Press Enter to start now, Ctrl-C to cancel. ",
-                    left.as_secs() + 1
-                )
-                .dimmed()
-            );
-            let _ = std::io::stderr().flush();
-            match crossterm::event::poll(left.min(std::time::Duration::from_millis(200))) {
-                Ok(false) => continue,
-                Err(error) => break Err(error.into()),
-                Ok(true) => {}
-            }
-            match crossterm::event::read() {
-                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
-                    KeyCode::Enter => break Ok(true),
-                    KeyCode::Esc => break Ok(false),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        break Ok(false);
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(error) => break Err(error.into()),
-            }
-        };
-        let _ = crossterm::terminal::disable_raw_mode();
-        // Clear the countdown line so what follows starts clean.
-        eprint!("\r{}\r", " ".repeat(70));
-        let _ = std::io::stderr().flush();
-        outcome
-    })
-    .await??;
-
-    if !started {
-        bail!("Cancelled. No agent was started.");
-    }
-    Ok(())
 }
 
 /// The environment's shared agent, if it has been created. Two first runs at
@@ -424,6 +365,9 @@ struct Session<'a> {
     backboard: String,
     project_id: String,
     environment_id: String,
+    /// For the header of a run handed to the dashboard.
+    project_name: String,
+    environment_name: String,
     /// The service the conversation is scoped to: its ID and, when known, name.
     service: Option<(String, Option<String>)>,
     /// The shared agent, once it exists. `None` means the next message
@@ -471,6 +415,8 @@ impl Session<'_> {
             return Ok(json!({
                 "status": HANDED_OFF,
                 "taskId": handle.task_id,
+                "cloudAgentId": handle.agent_id,
+                "sessionId": handle.session_id,
                 "dashboardRunUrl": url,
             }));
         }
@@ -535,6 +481,30 @@ impl Session<'_> {
         }
     }
 
+    /// Whether a run handed to the dashboard is followed here: someone is at
+    /// a terminal to watch it and answer its questions.
+    fn follows(&self) -> bool {
+        !self.json
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal()
+    }
+
+    fn run_of(&self, turn: &Value) -> follow::Run<'_> {
+        let field = |name| task::text(turn, name).unwrap_or_default().to_string();
+        follow::Run {
+            client: self.client,
+            backboard: &self.backboard,
+            project: &self.project_name,
+            environment: &self.environment_name,
+            environment_id: &self.environment_id,
+            task_id: field("taskId"),
+            agent_id: field("cloudAgentId"),
+            session_id: field("sessionId"),
+            url: field("dashboardRunUrl"),
+        }
+    }
+
     fn render(&self, turn: &Value) -> Result<()> {
         if self.json {
             println!(
@@ -595,14 +565,11 @@ impl Session<'_> {
         }
     }
 
-    async fn repl(&mut self, accepted: bool, history: &[Value]) -> Result<()> {
+    async fn repl(&mut self, history: &[Value]) -> Result<()> {
         interact_or!(
             "Interactive mode requires a terminal. Use `railway agent -p \"your message\"` for non-interactive use."
         );
 
-        if self.agent_id.is_none() {
-            announce_new_agent(accepted).await?;
-        }
         if let Some(thread) = &self.session_id {
             show_resumed(thread, history);
         }
@@ -634,6 +601,29 @@ impl Session<'_> {
             println!();
             // A failed or abandoned turn ends the turn, not the conversation.
             match self.turn(message).await {
+                Ok(turn) if task::outcome(&turn) == HANDED_OFF && self.follows() => {
+                    let run = self.run_of(&turn);
+                    match follow::follow(&run).await {
+                        Ok(follow::Outcome::Done) => {}
+                        Ok(follow::Outcome::Detached) => {
+                            eprintln!("\n{}", follow::detached_hint(&run).dimmed())
+                        }
+                        Ok(follow::Outcome::Failed(error)) => eprintln!(
+                            "{}: the run failed: {error}. See it on the dashboard: {}",
+                            "Error".red().bold(),
+                            run.url
+                        ),
+                        Ok(follow::Outcome::Cancelled) => {
+                            eprintln!("{}", "The run was cancelled.".yellow())
+                        }
+                        Err(error) => eprintln!("{}: {error:#}", "Error".red().bold()),
+                    }
+                    println!();
+                    println!(
+                        "{}",
+                        "Back in the chat. Your next message starts a new thread.".dimmed()
+                    );
+                }
                 Ok(turn) => {
                     self.render(&turn)?;
                     match task::outcome(&turn) {
