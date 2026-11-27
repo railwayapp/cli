@@ -481,7 +481,7 @@ fn color_status(status: &str) -> colored::ColoredString {
 
 fn held_label(held_seconds: i64, hold_seconds: i64) -> String {
     if hold_seconds <= 0 {
-        return format!("{} held", duration_label(held_seconds));
+        return duration_label(held_seconds);
     }
     format!(
         "{} of {}",
