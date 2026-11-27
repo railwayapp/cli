@@ -1,0 +1,20 @@
+mutation VerifierRunNow($id: String!) {
+  verifierRunNow(id: $id) {
+    id
+    name
+    intent
+    kind
+    status
+    projectId
+    environmentId
+    workloadKind
+    workloadId
+    revisionId
+    clonedFromId
+    holdSeconds
+    heldSeconds
+    deadline
+    createdAt
+    resolvedAt
+  }
+}
