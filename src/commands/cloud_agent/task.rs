@@ -1185,7 +1185,7 @@ fn settled(task: &Value) -> bool {
     }
 }
 
-fn progress_line(task: &Value) -> String {
+pub(crate) fn progress_line(task: &Value) -> String {
     let state = match text(task, "status") {
         Some("PENDING") => "Starting",
         _ => "Working",

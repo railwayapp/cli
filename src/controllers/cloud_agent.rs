@@ -157,6 +157,26 @@ pub async fn get(
     }))
 }
 
+/// The agent machine's live preview domain: what it serves on its HTTP port.
+/// `None` while the machine sleeps or before it serves anything.
+pub async fn preview_domain(
+    client: &reqwest::Client,
+    backboard: &str,
+    environment_id: &str,
+    id: &str,
+) -> Result<Option<String>> {
+    let res = post_graphql::<queries::CloudAgentPreview, _>(
+        client,
+        backboard,
+        queries::cloud_agent_preview::Variables {
+            id: id.to_owned(),
+            environment_id: environment_id.to_owned(),
+        },
+    )
+    .await?;
+    Ok(res.cloud_agent.and_then(|agent| agent.domain))
+}
+
 /// One public domain on an agent's machine.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Domain {
