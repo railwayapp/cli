@@ -823,6 +823,7 @@ fn new_service(name: &str) -> runner::DesiredResource {
         group_id: None,
         tracing: None,
         cdn: None,
+        edge_rules: None,
         kind: None,
     }
 }
@@ -1985,6 +1986,7 @@ healthcheckPath = "/"
             group_id: None,
             tracing: None,
             cdn: None,
+            edge_rules: None,
             kind: None,
         }
     }

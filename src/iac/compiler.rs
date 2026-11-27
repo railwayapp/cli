@@ -45,6 +45,7 @@ pub const IAC_RESOURCE_FIELDS: &[&str] = &[
     "clusterDisplay",
     "tracing",
     "cdn",
+    "edgeRules",
     "engine",
     "image",
     "env",
@@ -666,6 +667,7 @@ fn service_to_environment_config(
         "clusterDisplay",
         "tracing",
         "cdn",
+        "edgeRules",
     ] {
         if let Some(value) = field(service, key) {
             config[key] = value.clone();
@@ -984,6 +986,12 @@ pub fn environment_config_to_graph(
             // edge defaults.
             if let Some(cdn) = service.get("cdn").filter(|c| c.is_object()) {
                 node["cdn"] = cdn.clone();
+            }
+            // Per-environment edge rules. Railway serialises the list in its
+            // canonical form (sorted by priority, defaults left out) and a
+            // service without rules has no list at all.
+            if let Some(rules) = service.get("edgeRules").filter(|r| r.is_array()) {
+                node["edgeRules"] = rules.clone();
             }
             if let Some(group_id) = field_str(service, "groupId") {
                 node["groupId"] = json!(
