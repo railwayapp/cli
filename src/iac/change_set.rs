@@ -197,6 +197,22 @@ pub fn diff_graphs_following(
                 change["details"] = json!(details);
             }
             changes.push(change);
+            // Database creation applies the engine default image before the rest of
+            // the resource. Reassert the authored source in the same change set so
+            // the first deploy uses the pinned image instead of drifting on the next plan.
+            if resource_type(resource) == "database" {
+                if let Some(source) = resource.get("source").filter(|source| !source.is_null()) {
+                    changes.push(update(
+                        &address,
+                        "source",
+                        Value::Null,
+                        source.clone(),
+                        format!("Set {} source during creation", resource_name(resource)),
+                        None,
+                        "safe",
+                    ));
+                }
+            }
             continue;
         }
         let mut previous = previous.unwrap().clone();
@@ -1265,6 +1281,9 @@ fn diff_top_level_field(
 ) {
     let mut before = previous.get(field_name).cloned().unwrap_or(Value::Null);
     let mut after = resource.get(field_name).cloned().unwrap_or(Value::Null);
+    if field_name == "build" {
+        (before, after) = align_build_command(&before, &after);
+    }
     if field_name == "source"
         && resource_type(previous) == "database"
         && is_equivalent_database_source(previous, &after)
@@ -1597,6 +1616,26 @@ fn diff_database_deploy(previous: &Value, resource: &Value, changes: &mut Vec<Va
         Some(details),
         "safe",
     ));
+}
+
+/// `buildCommand: null` or `""` clears. Omitting the key keeps the live command.
+fn align_build_command(before: &Value, after: &Value) -> (Value, Value) {
+    let explicit_clear = after.as_object().is_some_and(|build| {
+        build
+            .get("buildCommand")
+            .is_some_and(|command| command.is_null() || command.as_str() == Some(""))
+    });
+    if explicit_clear {
+        let mut after = after.clone();
+        if let Some(build) = after.as_object_mut() {
+            build.insert("buildCommand".into(), Value::Null);
+        }
+        return (before.clone(), after);
+    }
+    (
+        drop_unauthored_platform_fields(before, after, &["buildCommand"]),
+        after.clone(),
+    )
 }
 
 fn drop_unauthored_platform_fields(
