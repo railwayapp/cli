@@ -272,8 +272,8 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         );
     }
 
-    // Offer the next step. Cutover clears the stored path. The next deploy
-    // behind an explicit human confirmation in a terminal.
+    // Offer the next step. Cutover clears the stored path. It does not
+    // start a deployment; the next deploy stops reading the old file.
     if interactive {
         eprintln!(
             "\n{} switches these services off Config as Code. The next deploy stops reading the old file.",
@@ -664,9 +664,6 @@ fn index_environment_cac(
             .map(str::trim)
             .filter(|path| !path.is_empty());
         let rel = if let Some(config_file) = config_file {
-            if !is_cac_config_file(config_file) {
-                continue;
-            }
             normalize_config_file_path(config_file).with_context(|| {
                 format!("Railway Config File path {config_file} for service {name} escapes the repository")
             })?
