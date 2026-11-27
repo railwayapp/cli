@@ -26,6 +26,8 @@ use super::*;
 #[derive(Parser)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 #[clap(
+    // Hidden until the backend VERIFIERS flag ships.
+    hide = true,
     after_help = "Examples:\n\n  railway verifier list\n  railway verifier list --status active --json\n  railway verifier get <id>\n  railway verifier run <id>\n  railway verifier create checkout-200 --intent \"checkout returns 200\" --kind http --config '{\"path\":\"/checkout\",\"expectStatus\":200}'\n  railway verifier create error-budget --intent \"error logs stay under 5\" --kind log --deployment <id> --config '{\"match\":\"error\",\"max\":5}'\n\nKinds:\n  http    { method?, path?, expectStatus?, bodyContains?, timeoutMs?, private? }\n  script  { source, timeoutMs?, env? }\n  log     { match, matchType?, max?, compareToPrevious?, windowSeconds? }\n\nVM revisions are not supported yet. The API returns at most 200 verifiers, newest first."
 )]
 pub struct Args {
@@ -190,6 +192,10 @@ pub async fn command(args: Args) -> Result<()> {
         json,
     } = args;
 
+    if matches!(command, Commands::Get(_) | Commands::Run(_)) {
+        reject_scope_flags(&project, &environment)?;
+    }
+
     match command {
         Commands::List(list_args) => list_command(project, environment, list_args, json).await,
         Commands::Get(get_args) => get_command(get_args, json).await,
@@ -257,6 +263,16 @@ async fn list_command(
     for verifier in &verifiers {
         print_verifier(verifier, false);
         println!();
+    }
+    Ok(())
+}
+
+// get/run address a verifier by ID, so a project or environment would be ignored.
+fn reject_scope_flags(project: &Option<String>, environment: &Option<String>) -> Result<()> {
+    if project.is_some() || environment.is_some() {
+        bail!(
+            "--project and --environment don't apply to `verifier get` or `verifier run`; the ID already names the verifier"
+        );
     }
     Ok(())
 }
@@ -721,6 +737,13 @@ mod tests {
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn get_and_run_reject_scope_flags() {
+        assert!(reject_scope_flags(&None, &None).is_ok());
+        assert!(reject_scope_flags(&Some("p".into()), &None).is_err());
+        assert!(reject_scope_flags(&None, &Some("e".into())).is_err());
     }
 
     #[test]

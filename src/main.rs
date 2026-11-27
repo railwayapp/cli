@@ -868,6 +868,12 @@ mod cli_tests {
         #[test]
         fn verifier_subcommands() {
             assert!(parse(&["verifier"]).is_err());
+            assert!(
+                build_args()
+                    .find_subcommand("verifier")
+                    .unwrap()
+                    .is_hide_set()
+            );
             assert_subcommand(&["verifier", "list"], "verifier");
             assert_subcommand(&["verifiers", "list"], "verifier");
             assert_parses(&["verifier", "list", "--status", "failed", "--json"]);
