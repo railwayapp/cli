@@ -24,7 +24,7 @@ pub use compiler::{
     CompileOptions, EnvironmentConfigToGraphOptions, environment_config_to_graph,
     graph_to_environment_config, project_definition_to_graph,
 };
-pub use engine::{NativeRun, run as run_native};
+pub use engine::{NativeRun, enforce_project_pin, run as run_native};
 #[allow(dead_code)]
 pub use eval::{EvalContext, EvaluatedFile, evaluate_file, evaluate_file_with_context};
 #[allow(dead_code)]

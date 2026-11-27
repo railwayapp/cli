@@ -418,12 +418,14 @@ fn project_pin_refuses_a_different_linked_project() {
         "resources": [],
     }));
     assert_eq!(graph.project.id.as_deref(), Some(pinned));
-    assert!(unknown_field_diagnostics(&json!({
-        "name": "app",
-        "id": pinned,
-        "resources": [],
-    }))
-    .is_empty());
+    assert!(
+        unknown_field_diagnostics(&json!({
+            "name": "app",
+            "id": pinned,
+            "resources": [],
+        }))
+        .is_empty()
+    );
 }
 
 #[test]
