@@ -429,6 +429,78 @@ fn project_pin_refuses_a_different_linked_project() {
 }
 
 #[test]
+fn limit_display_fields_and_unmentioned_disk_do_not_plan() {
+    let current = graph_from(vec![service(
+        "backend",
+        json!({
+            "deploy": {
+                "limitOverride": {
+                    "containers": {
+                        "cpu": 1,
+                        "cpuDescription": "1 vCPU",
+                        "memoryBytes": 2147483648_i64,
+                        "memoryDescription": "2 GB",
+                        "diskBytes": 100000000000_i64,
+                        "diskDescription": "100 GB"
+                    }
+                }
+            }
+        }),
+    )]);
+    let omitted = graph_from(vec![service(
+        "backend",
+        json!({ "deploy": { "numReplicas": 1 } }),
+    )]);
+    assert!(
+        diff(&current, &omitted)
+            .changes
+            .iter()
+            .all(|change| !change.to_string().contains("limitOverride")),
+        "{:?}",
+        diff(&current, &omitted).changes
+    );
+
+    let partial = graph_from(vec![service(
+        "backend",
+        json!({
+            "deploy": {
+                "limitOverride": {
+                    "containers": { "cpu": 1, "memoryBytes": 2147483648_i64 }
+                }
+            }
+        }),
+    )]);
+    assert!(
+        diff(&current, &partial).changes.is_empty(),
+        "{:?}",
+        diff(&current, &partial).changes
+    );
+
+    let clear_disk = graph_from(vec![service(
+        "backend",
+        json!({
+            "deploy": {
+                "limitOverride": {
+                    "containers": {
+                        "cpu": 1,
+                        "memoryBytes": 2147483648_i64,
+                        "diskBytes": null
+                    }
+                }
+            }
+        }),
+    )]);
+    let change_set = diff(&current, &clear_disk);
+    assert!(
+        change_set.changes.iter().any(|change| {
+            change["after"]["limitOverride"]["containers"]["diskBytes"].is_null()
+        }),
+        "{:?}",
+        change_set.changes
+    );
+}
+
+#[test]
 fn dockerfile_build_defaults_do_not_drift() {
     let current = graph_from(vec![service(
         "backend",

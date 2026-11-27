@@ -1358,6 +1358,7 @@ fn diff_service_deploy(
             &desired_deploy,
         )
     };
+    let (before, after) = align_limit_override(&before, &after);
     let normalized_before = normalize_for_diff("deploy", &before);
     let normalized_after = normalize_for_diff("deploy", &after);
     if stable_stringify(&normalized_before) == stable_stringify(&normalized_after) {
@@ -1636,6 +1637,65 @@ fn align_build_command(before: &Value, after: &Value) -> (Value, Value) {
         drop_unauthored_platform_fields(before, after, &["buildCommand"]),
         after.clone(),
     )
+}
+
+const LIMIT_DISPLAY_FIELDS: &[&str] = &["cpuDescription", "memoryDescription", "diskDescription"];
+
+/// Display strings are derived. A missing container field is not a clear.
+/// `null` still clears that field. Omitting `limitOverride` leaves it alone.
+fn align_limit_override(before: &Value, after: &Value) -> (Value, Value) {
+    let mut before = before.clone();
+    let mut after = after.clone();
+    strip_limit_display(&mut before);
+    strip_limit_display(&mut after);
+    let Some(after_obj) = after.as_object() else {
+        return (before, after);
+    };
+    if !after_obj.contains_key("limitOverride") {
+        if let Some(before_obj) = before.as_object_mut() {
+            before_obj.remove("limitOverride");
+        }
+        return (before, after);
+    }
+    if after_obj.get("limitOverride").is_some_and(Value::is_null) {
+        return (before, after);
+    }
+    let Some(after_containers) = after
+        .get("limitOverride")
+        .and_then(|limit| limit.get("containers"))
+        .and_then(Value::as_object)
+    else {
+        return (before, after);
+    };
+    let Some(before_containers) = before
+        .get_mut("limitOverride")
+        .and_then(|limit| limit.get_mut("containers"))
+        .and_then(Value::as_object_mut)
+    else {
+        return (before, after);
+    };
+    let drop_keys: Vec<String> = before_containers
+        .keys()
+        .filter(|key| !after_containers.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in drop_keys {
+        before_containers.remove(&key);
+    }
+    (before, after)
+}
+
+fn strip_limit_display(deploy: &mut Value) {
+    let Some(containers) = deploy
+        .get_mut("limitOverride")
+        .and_then(|limit| limit.get_mut("containers"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for key in LIMIT_DISPLAY_FIELDS {
+        containers.remove(*key);
+    }
 }
 
 fn drop_unauthored_platform_fields(
