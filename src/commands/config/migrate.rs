@@ -272,11 +272,11 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         );
     }
 
-    // Offer the next step. Cutover redeploys services, so we only reach it
+    // Offer the next step. Cutover clears the stored path. The next deploy
     // behind an explicit human confirmation in a terminal.
     if interactive {
         eprintln!(
-            "\n{} switches these services off Config as Code and redeploys them.",
+            "\n{} switches these services off Config as Code. The next deploy stops reading the old file.",
             "Cutover".bold()
         );
         eprintln!(
@@ -316,7 +316,7 @@ async fn generate(args: MigrateArgs) -> Result<()> {
         "railway config apply".cyan()
     );
     eprintln!(
-        "\n{} Cutover clears each service's Config File path and redeploys it, so\n  run it right before {}. Config as Code keeps working until then.",
+        "\n{} Cutover clears each service's Config File path. It does not start a\n  deployment, so run it right before {}. Config as Code keeps working until then.",
         "Note:".yellow().bold(),
         "railway config plan".cyan()
     );
@@ -1075,7 +1075,7 @@ fn js_string(value: &str) -> String {
 //
 // Generate only writes files. Switching services off Config as Code is a
 // separate, explicit, reversible step: it clears each service's config-file
-// path (which redeploys it) so IaC can manage it, after saving a snapshot of
+// path so IaC can manage it, after saving a snapshot of
 // the previous paths so the switch can be undone.
 
 const SNAPSHOT_FILE: &str = ".cac-migration.json";
@@ -1214,7 +1214,7 @@ async fn fetch_cac_instances(configs: &Configs, environment_id: &str) -> Result<
         .into_iter()
         .filter_map(|edge| {
             let config_file = edge.node.railway_config_file.unwrap_or_default();
-            if config_file.trim().is_empty() || !is_cac_config_file(config_file.trim()) {
+            if config_file.trim().is_empty() {
                 return None;
             }
             Some(CacInstance {
@@ -1313,7 +1313,7 @@ async fn run_cutover(
     }
     eprintln!();
     eprintln!(
-        "{} Each service redeploys as IaC takes over, and environments that\n  inherit {} pick this up too.",
+        "{} This does not start a deployment. The next deploy stops reading the old file.\n  Environments that inherit {} pick up the cleared path too.",
         "!".red().bold(),
         env_label.cyan()
     );
@@ -1432,7 +1432,7 @@ async fn undo(args: &UndoArgs) -> Result<()> {
         );
     }
     eprintln!(
-        "{} Each service redeploys back onto Config as Code.",
+        "{} Paths are restored. This does not start a deployment.",
         "!".yellow().bold()
     );
     eprintln!();
