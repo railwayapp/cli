@@ -1,0 +1,11 @@
+mutation CloudAgentTaskPublish($taskId: String!) {
+  cloudAgentTaskPublish(taskId: $taskId) {
+    status
+    name
+    private
+    repo
+    serviceId
+    serviceName
+    error
+  }
+}

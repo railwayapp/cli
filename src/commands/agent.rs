@@ -1,10 +1,17 @@
 //! `railway agent`: ask the Railway Agent something, from the terminal.
 //!
 //! Each message is a task run on a cloud agent (see `railway ca task`). Every
-//! conversation in an environment shares one agent, named `railway-agent`:
-//! the first conversation creates it, which is billed, so the command says so
-//! and asks first. A thread is one session on that agent, and its session ID
-//! is the thread ID, which stays the same for as long as the thread lives.
+//! conversation in an environment shares one agent, named `railway-agent`,
+//! which the first conversation creates. A thread is one session on that
+//! agent, and its session ID is the thread ID, which stays the same for as
+//! long as the thread lives.
+//!
+//! A new thread asking for code is moved by the API to the agent dashboard,
+//! as a run on its own agent. At a terminal the command follows the run
+//! (`follow`); a script or `--json` waits for it like any turn. Both end on
+//! the agent's answer, the preview, the thread to continue it with and, when
+//! the agent offers to publish a new app, how to (`publish`, also
+//! `--thread-id <thread> --publish`).
 
 use std::collections::HashSet;
 
@@ -26,6 +33,7 @@ use crate::{
 use super::*;
 
 mod follow;
+mod publish;
 
 /// The cloud agent every `railway agent` thread in an environment runs on.
 const AGENT_NAME: &str = "railway-agent";
@@ -50,10 +58,13 @@ const RESUME_TURNS: usize = 3;
       railway agent -p \"why is my service crashing?\" --json     # JSON output\n\
       railway agent --list                                      # List existing threads\n\
       railway agent --thread-id <ID>                            # Continue a thread\n\
-      railway agent -p \"add dark mode\" -s web                   # Code: runs on the agent dashboard\n\n\
+      railway agent -p \"add dark mode\" -s web                   # Code: runs on the agent dashboard\n\
+      railway agent --thread-id <ID> --publish                  # Publish the app a run built\n\n\
     Ask for code to be written (a feature, a fix, a new app) and it runs on the\n\
-    agent dashboard, on the service's repository, instead of here: you get its\n\
-    link, and its questions, approvals and pull request show up there."
+    agent dashboard, on the service's repository. At a terminal the command\n\
+    follows the run; otherwise (a script, --json) it waits for it like any\n\
+    answer. Either way it ends on the agent's answer, the preview, the thread\n\
+    to continue, and, when the agent offers to publish a new app, how to."
 )]
 pub struct Args {
     /// Send a single prompt (omit for interactive mode)
@@ -83,6 +94,11 @@ pub struct Args {
     /// List existing agent threads for the current environment
     #[clap(long, conflicts_with_all = ["prompt", "thread_id", "service"])]
     list: bool,
+
+    /// Publish what the thread's run offered to publish (a new app: a GitHub
+    /// repository and a Railway service from it), and wait until it's created
+    #[clap(long, requires = "thread_id", conflicts_with_all = ["prompt", "list"])]
+    publish: bool,
 
     /// No longer needed: nothing asks before starting an agent. Kept so
     /// existing scripts that pass it keep working.
@@ -184,6 +200,7 @@ pub async fn command(args: Args) -> Result<()> {
     let mut session = Session {
         client: &client,
         backboard,
+        host: configs.get_host(),
         project_id,
         environment_id,
         project_name,
@@ -194,7 +211,23 @@ pub async fn command(args: Args) -> Result<()> {
         json: args.json,
         // Only a person at a terminal can answer the agent mid-task.
         interactive: args.prompt.is_none(),
+        run_url: None,
+        // The commands printed to continue name the same place this one did.
+        place_flags: place_flags(args.project.as_deref(), args.environment.as_deref()),
     };
+
+    if args.publish {
+        // Any of the thread's tasks finds its agent's offer; the newest is
+        // the one its state is read on.
+        let newest = history
+            .last()
+            .and_then(|record| task::text(record, "id"))
+            .map(str::to_string)
+            .context("This thread has no turns to publish from.")?;
+        let target = session.publish_target(&newest)?;
+        publish::publish(&target, session.json).await?;
+        return Ok(());
+    }
 
     match args.prompt {
         Some(message) => {
@@ -223,7 +256,9 @@ pub async fn command(args: Args) -> Result<()> {
                     follow::Outcome::Cancelled => bail!("The run was cancelled."),
                 };
             }
+            let turn = session.with_run_links(turn).await;
             session.render(&turn)?;
+            session.next_steps(&turn);
             let thread = session.session_id.as_deref().unwrap_or_default();
             match task::outcome(&turn) {
                 "FAILED" => bail!(
@@ -363,6 +398,8 @@ fn render_threads(threads: &[Thread], as_json: bool) -> Result<()> {
 struct Session<'a> {
     client: &'a reqwest::Client,
     backboard: String,
+    /// The dashboard's host, for links.
+    host: &'static str,
     project_id: String,
     environment_id: String,
     /// For the header of a run handed to the dashboard.
@@ -377,6 +414,11 @@ struct Session<'a> {
     session_id: Option<String>,
     json: bool,
     interactive: bool,
+    /// The dashboard run this thread was handed to, when it was and isn't
+    /// followed: it is waited on like any turn.
+    run_url: Option<String>,
+    /// `--project` and `--environment` as given, for the commands printed.
+    place_flags: String,
 }
 
 impl Session<'_> {
@@ -409,16 +451,28 @@ impl Session<'_> {
                     task::explain(error, None)
                 }
             })?;
-        // Moved to the dashboard: nothing to wait for here, and the thread
-        // (still unstarted) stays this one.
+        // Moved to the dashboard, as a run on its own agent. At a terminal
+        // it is followed there (see `follow`). Otherwise the run becomes this
+        // thread and is waited on like any turn, so a script or another agent
+        // gets its answer; the link goes to stderr, keeping stdout the answer.
         if let Some(url) = &handle.dashboard_run_url {
-            return Ok(json!({
-                "status": HANDED_OFF,
-                "taskId": handle.task_id,
-                "cloudAgentId": handle.agent_id,
-                "sessionId": handle.session_id,
-                "dashboardRunUrl": url,
-            }));
+            if self.follows() {
+                return Ok(json!({
+                    "status": HANDED_OFF,
+                    "taskId": handle.task_id,
+                    "cloudAgentId": handle.agent_id,
+                    "sessionId": handle.session_id,
+                    "dashboardRunUrl": url,
+                }));
+            }
+            self.run_url = Some(url.clone());
+            if !self.json {
+                eprintln!(
+                    "{}\n{url}",
+                    "A code change, so it runs on the agent dashboard. Waiting for it here; it's also at:"
+                        .dimmed()
+                );
+            }
         }
         self.agent_id = Some(handle.agent_id.clone());
         self.session_id = Some(handle.session_id.clone());
@@ -502,6 +556,103 @@ impl Session<'_> {
             agent_id: field("cloudAgentId"),
             session_id: field("sessionId"),
             url: field("dashboardRunUrl"),
+            host: self.host,
+            project_id: &self.project_id,
+            place_flags: &self.place_flags,
+        }
+    }
+
+    /// The thread's run, to publish what its agent offered.
+    fn publish_target<'s>(&'s self, task_id: &'s str) -> Result<publish::Target<'s>> {
+        let (Some(agent_id), Some(session_id)) =
+            (self.agent_id.as_deref(), self.session_id.as_deref())
+        else {
+            bail!("Nothing to publish: this thread hasn't started.");
+        };
+        Ok(publish::Target {
+            client: self.client,
+            backboard: &self.backboard,
+            host: self.host,
+            project_id: &self.project_id,
+            environment_id: &self.environment_id,
+            agent_id,
+            session_id,
+            task_id,
+            again: format!("{} --publish", self.continue_command()),
+        })
+    }
+
+    /// The command that sends this thread more, as typed.
+    fn continue_command(&self) -> String {
+        format!(
+            "railway agent --thread-id {}{}",
+            self.session_id.as_deref().unwrap_or("<thread>"),
+            self.place_flags
+        )
+    }
+
+    /// A run's turn with where to see it and what it offered to publish: the
+    /// run on the dashboard, the app's preview while the agent's machine
+    /// serves one, and the publish. A turn in chat comes back as it was.
+    async fn with_run_links(&self, mut turn: Value) -> Value {
+        let (Some(agent_id), Some(session_id), Some(task_id)) = (
+            self.agent_id.as_deref(),
+            self.session_id.as_deref(),
+            task::text(&turn, "taskId"),
+        ) else {
+            return turn;
+        };
+        let publish =
+            task::publish_state(self.client, &self.backboard, agent_id, session_id, task_id).await;
+        if self.run_url.is_none() && publish.is_none() {
+            return turn;
+        }
+        turn["dashboardRunUrl"] = json!(self.run_url.clone().unwrap_or_else(|| format!(
+            "https://{}/project/{}/agents/{agent_id}?environmentId={}&chat={session_id}",
+            self.host, self.project_id, self.environment_id
+        )));
+        if let Ok(Some(domain)) =
+            ca::preview_domain(self.client, &self.backboard, &self.environment_id, agent_id).await
+        {
+            turn["previewUrl"] = json!(format!("https://{domain}"));
+        }
+        if let Some(publish) = publish {
+            turn["publish"] = publish;
+        }
+        turn
+    }
+
+    /// After a run's answer: the preview, its publish (how to, or where it
+    /// stands), and how to carry on. Not with `--json`, which carries the
+    /// same as fields, nor for a turn in chat.
+    fn next_steps(&self, turn: &Value) {
+        if self.json || task::text(turn, "dashboardRunUrl").is_none() {
+            return;
+        }
+        let again = format!("{} --publish", self.continue_command());
+        println!();
+        if let Some(preview) = task::text(turn, "previewUrl") {
+            println!("{} {preview}", "Preview:".bold());
+        }
+        let offer = &turn["publish"];
+        match publish::status(offer) {
+            Some("OFFERED") => println!(
+                "{} {}\n  {again}",
+                "Ready to publish.".green().bold(),
+                publish::summary(offer)
+            ),
+            _ => {
+                if let Some(line) = publish::state_line(offer, &again) {
+                    println!("{line}");
+                }
+            }
+        }
+        // In the interactive prompt the next message already continues it.
+        if !self.interactive {
+            println!("{}\n  {}", "Continue:".bold(), self.continue_command());
+        }
+        if let Some(url) = task::text(turn, "dashboardRunUrl") {
+            println!("{} {url}", "Dashboard:".bold().dimmed());
         }
     }
 
@@ -625,7 +776,10 @@ impl Session<'_> {
                     );
                 }
                 Ok(turn) => {
+                    // A resumed run's thread gets its preview and publish too.
+                    let turn = self.with_run_links(turn).await;
                     self.render(&turn)?;
+                    self.next_steps(&turn);
                     match task::outcome(&turn) {
                         "FAILED" => eprintln!(
                             "{}: {}",
@@ -714,10 +868,26 @@ fn json_response(turn: &Value, thread: Option<&str>) -> Value {
     if status == "AWAITING_INPUT" {
         out["questions"] = json!(task::pending(turn));
     }
-    if status == HANDED_OFF {
-        out["dashboardRunUrl"] = json!(task::text(turn, "dashboardRunUrl"));
+    // A run's links and publish, when it is one: see `with_run_links`.
+    for key in ["dashboardRunUrl", "previewUrl", "publish"] {
+        if let Some(value) = turn.get(key).filter(|value| !value.is_null()) {
+            out[key] = value.clone();
+        }
     }
     out
+}
+
+/// `--project` and `--environment` as the caller gave them, to repeat in the
+/// commands printed.
+fn place_flags(project: Option<&str>, environment: Option<&str>) -> String {
+    let mut flags = String::new();
+    if let Some(project) = project {
+        flags.push_str(&format!(" --project {project}"));
+    }
+    if let Some(environment) = environment {
+        flags.push_str(&format!(" -e {environment}"));
+    }
+    flags
 }
 
 #[cfg(test)]
@@ -741,6 +911,42 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_waited_runs_json_carries_its_links_publish_and_thread() {
+        let out = json_response(
+            &json!({
+                "status": "COMPLETED",
+                "taskId": "t1",
+                "text": "Built it.",
+                "dashboardRunUrl": "https://railway.com/project/p/agents/a?chat=s",
+                "previewUrl": "https://app-1.up.railway.app",
+                "publish": { "status": "OFFERED", "name": "water-tracker", "private": true },
+            }),
+            Some("s"),
+        );
+        assert_eq!(out["threadId"], "s");
+        assert_eq!(out["response"], "Built it.");
+        assert_eq!(out["previewUrl"], "https://app-1.up.railway.app");
+        assert_eq!(out["publish"]["status"], "OFFERED");
+        assert_eq!(
+            out["dashboardRunUrl"],
+            "https://railway.com/project/p/agents/a?chat=s"
+        );
+
+        let chat = json_response(&json!({ "status": "COMPLETED", "text": "hi" }), Some("s"));
+        assert!(chat.get("dashboardRunUrl").is_none());
+        assert!(chat.get("publish").is_none());
+    }
+
+    #[test]
+    fn printed_commands_name_the_place_they_were_given() {
+        assert_eq!(place_flags(None, None), "");
+        assert_eq!(
+            place_flags(Some("proj-1"), Some("staging")),
+            " --project proj-1 -e staging"
+        );
+    }
 
     #[test]
     fn json_response_keeps_the_old_keys() {

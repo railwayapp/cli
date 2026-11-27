@@ -25,9 +25,13 @@ use crate::commands::sandbox::resolve_project_and_env;
 use crate::config::Configs;
 use crate::controllers::cloud_agent as ca;
 use crate::gql::mutations::{
-    self, cloud_agent_task_cancel, cloud_agent_task_dispatch, cloud_agent_task_respond,
+    self, cloud_agent_task_cancel, cloud_agent_task_dispatch, cloud_agent_task_publish,
+    cloud_agent_task_respond,
 };
-use crate::gql::queries::{self, cloud_agent_task, cloud_agent_task_models, cloud_agent_tasks};
+use crate::gql::queries::{
+    self, cloud_agent_task, cloud_agent_task_models, cloud_agent_task_publish_state,
+    cloud_agent_tasks,
+};
 use crate::util::progress::create_spinner;
 use crate::util::prompt::prompt_confirm_with_default;
 
@@ -888,6 +892,51 @@ pub(crate) async fn answer(
     .await?
     .cloud_agent_task_respond;
     Ok(serde_json::to_value(result)?)
+}
+
+/// Publish what the task's agent offered to publish (a task's `publish`): the
+/// Publish button in the agent's chat, pressed from here. Returns once the
+/// publish has started; the task's `publish` follows it.
+pub(crate) async fn publish(
+    client: &reqwest::Client,
+    backboard: &str,
+    task_id: &str,
+) -> Result<Value> {
+    let result = post_graphql::<mutations::CloudAgentTaskPublish, _>(
+        client,
+        backboard,
+        cloud_agent_task_publish::Variables {
+            task_id: task_id.to_string(),
+        },
+    )
+    .await?
+    .cloud_agent_task_publish;
+    Ok(serde_json::to_value(result)?)
+}
+
+/// What the task's agent offered to publish and where that stands (a
+/// `TaskPublishView`), or `None` when it offered nothing. An API that can't
+/// say reads as no offer, so nothing is offered that can't be published.
+pub(crate) async fn publish_state(
+    client: &reqwest::Client,
+    backboard: &str,
+    agent_id: &str,
+    session_id: &str,
+    task_id: &str,
+) -> Option<Value> {
+    let task = post_graphql::<queries::CloudAgentTaskPublishState, _>(
+        client,
+        backboard,
+        cloud_agent_task_publish_state::Variables {
+            cloud_agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            task_id: Some(task_id.to_string()),
+        },
+    )
+    .await
+    .ok()?
+    .cloud_agent_task;
+    serde_json::to_value(task.publish?).ok()
 }
 
 async fn cancel(configs: &Configs, client: &reqwest::Client, args: CancelArgs) -> Result<()> {

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use indicatif::ProgressBar;
 
+use super::publish;
 use crate::{
     commands::cloud_agent::task::{self, Answer},
     config::Configs,
@@ -28,6 +29,9 @@ const REPLY_FIELD: &str = "reply";
 pub(super) struct Run<'a> {
     pub client: &'a reqwest::Client,
     pub backboard: &'a str,
+    /// The dashboard's host, for links.
+    pub host: &'a str,
+    pub project_id: &'a str,
     pub project: &'a str,
     pub environment: &'a str,
     pub environment_id: &'a str,
@@ -35,6 +39,32 @@ pub(super) struct Run<'a> {
     pub agent_id: String,
     pub session_id: String,
     pub url: String,
+    /// `--project` and `--environment` as given, for the commands printed.
+    pub place_flags: &'a str,
+}
+
+impl Run<'_> {
+    /// The command that sends the run's thread more, as typed.
+    pub(super) fn continue_command(&self) -> String {
+        format!(
+            "railway agent --thread-id {}{}",
+            self.session_id, self.place_flags
+        )
+    }
+
+    fn publish_target(&self) -> publish::Target<'_> {
+        publish::Target {
+            client: self.client,
+            backboard: self.backboard,
+            host: self.host,
+            project_id: self.project_id,
+            environment_id: self.environment_id,
+            agent_id: &self.agent_id,
+            session_id: &self.session_id,
+            task_id: &self.task_id,
+            again: format!("{} --publish", self.continue_command()),
+        }
+    }
 }
 
 /// How following a run ended.
@@ -264,19 +294,50 @@ async fn finish(run: &Run<'_>, task: &Value, elapsed: Duration) {
     if let Ok(Some(domain)) = preview(run).await {
         println!("  {}https://{domain}", label("Preview"));
     }
-    println!(
-        "  {}Review it, open a pull request or ship it: {}",
-        label("Next"),
-        link(&run.url, "the run on the dashboard ↗")
-    );
+    let target = run.publish_target();
+    // What the agent offered to publish, if it did: a new app goes live from
+    // here, the same as from the run's Publish button.
+    let offer = task::publish_state(
+        run.client,
+        run.backboard,
+        &run.agent_id,
+        &run.session_id,
+        &run.task_id,
+    )
+    .await;
+    match offer.as_ref().map(|offer| (publish::status(offer), offer)) {
+        Some((Some("OFFERED"), offer)) => {
+            println!("  {}{}", label("Publish"), publish::summary(offer));
+            println!();
+            if confirm("Publish it now?").ok().flatten() == Some(true) {
+                println!();
+                if let Err(error) = publish::publish(&target, false).await {
+                    eprintln!("{}: {error:#}", "Error".red().bold());
+                }
+                println!();
+            } else {
+                println!(
+                    "  {}{}",
+                    label(""),
+                    format!("Publish later with {}, or from the run.", target.again).dimmed()
+                );
+            }
+        }
+        Some((_, state)) if publish::state_line(state, &target.again).is_some() => println!(
+            "  {}{}",
+            label("Publish"),
+            publish::state_line(state, &target.again).unwrap_or_default()
+        ),
+        _ => println!(
+            "  {}Review it, open a pull request or ship it: {}",
+            label("Next"),
+            link(&run.url, "the run on the dashboard ↗")
+        ),
+    }
     println!(
         "  {}{}",
-        label(""),
-        format!(
-            "railway agent --thread-id {} -p \"<what next>\" keeps going here",
-            run.session_id
-        )
-        .dimmed()
+        label("Continue"),
+        format!("{} -p \"<what next>\"", run.continue_command()).dimmed()
     );
 }
 

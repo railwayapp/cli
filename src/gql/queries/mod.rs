@@ -647,6 +647,17 @@ pub struct Trace;
 )]
 pub struct CloudAgentTask;
 
+/// What a task's agent offered to publish, and where that publish stands.
+/// Its own query, so an API without it leaves `CloudAgentTask` working.
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentTaskPublishState.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentTaskPublishState;
+
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",

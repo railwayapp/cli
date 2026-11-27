@@ -1,0 +1,13 @@
+query CloudAgentTaskPublishState($cloudAgentId: String!, $sessionId: String!, $taskId: String) {
+  cloudAgentTask(cloudAgentId: $cloudAgentId, sessionId: $sessionId, taskId: $taskId) {
+    publish {
+      status
+      name
+      private
+      repo
+      serviceId
+      serviceName
+      error
+    }
+  }
+}
