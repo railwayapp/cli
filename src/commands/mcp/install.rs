@@ -145,6 +145,7 @@ pub(crate) async fn install_mcp(
         );
     }
 
+    let mut failed = Vec::new();
     for tool in &configurable {
         let path = config_path(tool.slug, &home);
         match install_for(tool.slug, &path, transport) {
@@ -165,8 +166,16 @@ pub(crate) async fn install_mcp(
                     tool.name.bold(),
                     e.to_string().red()
                 );
+                failed.push(tool.name);
             }
         }
+    }
+
+    if !failed.is_empty() {
+        bail!(
+            "Railway MCP server installation failed for {}",
+            failed.join(", ")
+        );
     }
 
     if !quiet {
