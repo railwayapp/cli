@@ -366,6 +366,20 @@ fn null_build_command_clears_and_omission_does_not() {
         assert_eq!(change_set.changes[0]["field"], "build");
         assert!(change_set.changes[0]["after"]["buildCommand"].is_null());
     }
+
+    let cleared = graph_from(vec![service(
+        "backend",
+        json!({ "build": { "builder": "DOCKERFILE" } }),
+    )]);
+    let still_null = graph_from(vec![service(
+        "backend",
+        json!({ "build": { "builder": "DOCKERFILE", "buildCommand": null } }),
+    )]);
+    assert!(
+        diff(&cleared, &still_null).changes.is_empty(),
+        "{:?}",
+        diff(&cleared, &still_null).changes
+    );
 }
 
 #[test]
@@ -378,7 +392,10 @@ fn reasserts_a_custom_database_image_during_creation() {
     let change_set = diff(&current, &graph_from(vec![database]));
     let changes = &change_set.changes;
 
-    assert_eq!(kinds(&change_set), vec!["resource.create", "resource.update"]);
+    assert_eq!(
+        kinds(&change_set),
+        vec!["resource.create", "resource.update"]
+    );
     assert_eq!(changes[1]["address"], "database.Postgres");
     assert_eq!(changes[1]["field"], "source");
     assert_eq!(changes[1]["after"], image(pinned_image));

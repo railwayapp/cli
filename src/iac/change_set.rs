@@ -2252,7 +2252,12 @@ fn normalize_for_diff(field_name: &str, value: &Value) -> Value {
         if copy.get("buildEnvironment") == Some(&json!("V3")) {
             copy.remove("buildEnvironment");
         }
-        if copy.get("buildCommand") == Some(&json!("")) {
+        // Absent, "", and null are the same cleared command. Keeping null
+        // would plan the clear again after it had already landed.
+        if copy
+            .get("buildCommand")
+            .is_some_and(|command| command.is_null() || command.as_str() == Some(""))
+        {
             copy.remove("buildCommand");
         }
         if copy.get("dockerfilePath") == Some(&json!("Dockerfile")) {
