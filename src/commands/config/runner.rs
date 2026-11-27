@@ -606,6 +606,7 @@ async fn invoke_runner(
             .context("Native IaC engine returned a response the CLI could not parse")?;
         return Ok((response, value));
     }
+    crate::iac::enforce_project_pin(args.file.clone(), linked_project, command)?;
     let runner = resolve_runner(args.runner.as_deref(), &cwd_path);
 
     let cwd = cwd_path.to_string_lossy().to_string();

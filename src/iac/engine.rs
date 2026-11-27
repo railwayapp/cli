@@ -203,6 +203,36 @@ fn authoring_language(file: &std::path::Path) -> &'static str {
     }
 }
 
+pub fn enforce_project_pin(
+    file: Option<std::path::PathBuf>,
+    linked_project: &LinkedProject,
+    command: &str,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let file = file
+        .or_else(|| find_authoring_file(&cwd))
+        .context("Could not find .railway/railway.ts, railway.py, or railway.go")?;
+    let ctx = EvalContext::from_linked_project(linked_project, command);
+    let evaluated = evaluate_file_with_context(&file, &ctx)?;
+    if let Some(message) = project_pin_error(
+        evaluated.graph.project.id.as_deref(),
+        &linked_project.project,
+    ) {
+        bail!("{message}");
+    }
+    Ok(())
+}
+
+pub(crate) fn project_pin_error(pinned: Option<&str>, linked: &str) -> Option<String> {
+    let pinned = pinned.map(str::trim).filter(|id| !id.is_empty())?;
+    if pinned == linked {
+        return None;
+    }
+    Some(format!(
+        "This file is pinned to project {pinned}, but this directory is linked to {linked}. project(\"name\") is only a label. Link the pinned project, or remove id from the project definition."
+    ))
+}
+
 pub async fn run(
     args: &NativeRun,
     configs: &Configs,
@@ -219,6 +249,7 @@ pub async fn run(
         .clone()
         .or_else(|| find_authoring_file(&cwd))
         .context("Could not find .railway/railway.ts, railway.py, or railway.go")?;
+    enforce_project_pin(Some(file.clone()), linked_project, command)?;
     let client = GQLClient::new_authorized(configs)?;
     let endpoint = configs.get_backboard();
     let environment_id = linked_project.environment_id()?;

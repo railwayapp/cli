@@ -12,6 +12,7 @@ use super::json::{field, field_str, prune_empty};
 /// Top-level project keys `project_definition_to_graph` reads, plus `variables`.
 pub const IAC_PROJECT_FIELDS: &[&str] = &[
     "name",
+    "id",
     "resources",
     "services",
     "Resources",
@@ -169,6 +170,9 @@ pub fn project_definition_to_graph(definition: &Value) -> RailwayGraph {
             name: field_str(definition, "name")
                 .unwrap_or("imported-project")
                 .to_string(),
+            id: field_str(definition, "id")
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
         },
         variables: variable_policy(definition),
         environments: definition
