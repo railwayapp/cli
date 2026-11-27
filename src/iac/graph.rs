@@ -106,6 +106,10 @@ pub fn format_variable_policy_line(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProjectNode {
     pub name: String,
+    /// Project UUID. When set, plan and apply refuse a directory linked to a different project.
+    /// `name` is only a label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

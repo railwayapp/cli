@@ -203,6 +203,16 @@ fn authoring_language(file: &std::path::Path) -> &'static str {
     }
 }
 
+pub(crate) fn project_pin_error(pinned: Option<&str>, linked: &str) -> Option<String> {
+    let pinned = pinned.map(str::trim).filter(|id| !id.is_empty())?;
+    if pinned == linked {
+        return None;
+    }
+    Some(format!(
+        "This file is pinned to project {pinned}, but this directory is linked to {linked}. project(\"name\") is only a label. Link the pinned project, or remove id from the project definition."
+    ))
+}
+
 pub async fn run(
     args: &NativeRun,
     configs: &Configs,
@@ -228,6 +238,12 @@ pub async fn run(
     let mut ctx = EvalContext::from_linked_project(linked_project, command);
     ctx.pr = current.pr_context();
     let evaluated = evaluate_file_with_context(&file, &ctx)?;
+    if let Some(message) = project_pin_error(
+        evaluated.graph.project.id.as_deref(),
+        &linked_project.project,
+    ) {
+        bail!("{message}");
+    }
     let mut diagnostics: Vec<Value> = evaluated
         .diagnostics
         .iter()

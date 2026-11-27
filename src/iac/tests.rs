@@ -402,6 +402,31 @@ fn reasserts_a_custom_database_image_during_creation() {
 }
 
 #[test]
+fn project_pin_refuses_a_different_linked_project() {
+    let pinned = "11111111-1111-1111-1111-111111111111";
+    let linked = "22222222-2222-2222-2222-222222222222";
+    let message = super::engine::project_pin_error(Some(pinned), linked).unwrap();
+    assert!(message.contains(pinned));
+    assert!(message.contains(linked));
+    assert!(super::engine::project_pin_error(None, linked).is_none());
+    assert!(super::engine::project_pin_error(Some(linked), linked).is_none());
+    assert!(super::engine::project_pin_error(Some("  "), linked).is_none());
+
+    let graph = project_definition_to_graph(&json!({
+        "name": "app",
+        "id": pinned,
+        "resources": [],
+    }));
+    assert_eq!(graph.project.id.as_deref(), Some(pinned));
+    assert!(unknown_field_diagnostics(&json!({
+        "name": "app",
+        "id": pinned,
+        "resources": [],
+    }))
+    .is_empty());
+}
+
+#[test]
 fn dockerfile_build_defaults_do_not_drift() {
     let current = graph_from(vec![service(
         "backend",
