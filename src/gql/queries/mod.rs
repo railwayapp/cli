@@ -383,6 +383,15 @@ pub struct SshPublicKeys;
 )]
 pub struct CloudAgent;
 
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
+    query_path = "src/gql/queries/strings/CloudAgentPreview.graphql",
+    response_derives = "Debug, Serialize, Clone, PartialEq",
+    skip_serializing_none
+)]
+pub struct CloudAgentPreview;
+
 /// Where an agent runs and what it publishes, read once for `railway ca
 /// create`. Separate from `CloudAgent`, which every status poll uses.
 #[derive(GraphQLQuery)]

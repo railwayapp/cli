@@ -1,0 +1,5 @@
+query CloudAgentPreview($id: ID!, $environmentId: ID!) {
+  cloudAgent(id: $id, environmentId: $environmentId) {
+    domain
+  }
+}
