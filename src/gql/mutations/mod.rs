@@ -787,6 +787,15 @@ pub struct CloudAgentTaskRespond;
 #[derive(GraphQLQuery)]
 #[graphql(
     schema_path = "src/gql/schema.json",
+    query_path = "src/gql/mutations/strings/CloudAgentTaskPublish.graphql",
+    response_derives = "Debug, Serialize, Clone",
+    skip_serializing_none
+)]
+pub struct CloudAgentTaskPublish;
+
+#[derive(GraphQLQuery)]
+#[graphql(
+    schema_path = "src/gql/schema.json",
     query_path = "src/gql/mutations/strings/CloudAgentTaskCancel.graphql",
     response_derives = "Debug, Serialize, Clone",
     skip_serializing_none
