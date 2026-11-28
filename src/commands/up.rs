@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
@@ -602,30 +606,63 @@ struct DeployPaths {
 }
 
 fn get_deploy_paths(args: &Args, linked_project_path: Option<String>) -> Result<DeployPaths> {
-    if args.path_as_root {
-        if args.path.is_none() {
-            bail!("--path-as-root requires a path to be specified");
-        }
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    resolve_deploy_paths(
+        args.path.as_deref(),
+        args.path_as_root,
+        linked_project_path.as_deref().map(Path::new),
+        &cwd,
+    )
+}
 
-        let path = args.path.clone().unwrap();
-        Ok(DeployPaths {
-            project_path: path.clone(),
-            archive_prefix_path: path,
-        })
-    } else {
-        let project_dir: PathBuf = match linked_project_path {
-            Some(path) => PathBuf::from(path),
-            None => std::env::current_dir().context("Failed to get current directory")?,
-        };
-        let project_path = match args.path {
-            Some(ref path) => path.clone(),
-            None => project_dir.clone(),
-        };
-        Ok(DeployPaths {
-            project_path,
-            archive_prefix_path: project_dir,
-        })
+fn resolve_deploy_paths(
+    path: Option<&Path>,
+    path_as_root: bool,
+    linked_project_path: Option<&Path>,
+    cwd: &Path,
+) -> Result<DeployPaths> {
+    if path_as_root {
+        let raw_path = path.context("--path-as-root requires a path to be specified")?;
+        let candidate = cwd.join(raw_path);
+        let resolved = candidate
+            .canonicalize()
+            .with_context(|| format!("Failed to resolve deploy path {}", raw_path.display()))?;
+        return Ok(DeployPaths {
+            project_path: resolved.clone(),
+            archive_prefix_path: resolved,
+        });
     }
+
+    let project_dir = linked_project_path.unwrap_or(cwd);
+    let archive_prefix_path = project_dir.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve project directory {}",
+            project_dir.display()
+        )
+    })?;
+
+    let project_path = match path {
+        Some(raw_path) => {
+            let candidate = cwd.join(raw_path);
+            let resolved = candidate
+                .canonicalize()
+                .with_context(|| format!("Failed to resolve deploy path {}", raw_path.display()))?;
+            if !resolved.starts_with(&archive_prefix_path) {
+                bail!(
+                    "Deploy path {} is outside project directory {} (use --path-as-root to deploy it as the archive root)",
+                    raw_path.display(),
+                    archive_prefix_path.display()
+                );
+            }
+            resolved
+        }
+        None => archive_prefix_path.clone(),
+    };
+
+    Ok(DeployPaths {
+        project_path,
+        archive_prefix_path,
+    })
 }
 
 /// Drop into the login flow when the user isn't signed in. Sign-up
@@ -1200,5 +1237,108 @@ fn parse_service_id_from_logs_url(logs_url: &str) -> Option<String> {
         None
     } else {
         Some(service_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    use super::*;
+
+    fn archive_entries(deploy_paths: &DeployPaths) -> Vec<String> {
+        let DeployTarball { bytes, .. } = create_deploy_tarball(
+            &deploy_paths.project_path,
+            &deploy_paths.archive_prefix_path,
+            true,
+            |_, _| {},
+        )
+        .unwrap();
+        let gz = GzDecoder::new(bytes.as_slice());
+        let mut archive = Archive::new(gz);
+        let mut names = Vec::new();
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            names.push(entry.path().unwrap().to_string_lossy().into_owned());
+        }
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn resolves_relative_deploy_path_within_linked_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("api")).unwrap();
+        fs::write(root.join("api").join("server.rs"), "fn main() {}").unwrap();
+
+        let paths =
+            resolve_deploy_paths(Some(Path::new("./api")), false, Some(root), root).unwrap();
+        let entries = archive_entries(&paths);
+
+        assert!(entries.iter().any(|e| e == "api/server.rs"), "{entries:?}");
+    }
+
+    #[test]
+    fn resolves_parent_relative_deploy_path_from_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("api")).unwrap();
+        fs::create_dir_all(root.join("web")).unwrap();
+        fs::write(root.join("api").join("index.ts"), "export {};").unwrap();
+
+        let paths = resolve_deploy_paths(
+            Some(Path::new("../api")),
+            false,
+            Some(root),
+            &root.join("web"),
+        )
+        .unwrap();
+        let entries = archive_entries(&paths);
+
+        assert!(entries.iter().any(|e| e == "api/index.ts"), "{entries:?}");
+    }
+
+    #[test]
+    fn resolves_relative_deploy_path_with_path_as_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("api")).unwrap();
+        fs::write(root.join("api").join("main.rs"), "fn main() {}").unwrap();
+
+        let paths = resolve_deploy_paths(Some(Path::new("./api")), true, Some(root), root).unwrap();
+        let entries = archive_entries(&paths);
+
+        assert!(entries.iter().any(|e| e == "main.rs"), "{entries:?}");
+        assert!(
+            !entries.iter().any(|e| e.starts_with("api/")),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_relative_path_outside_linked_project_without_path_as_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let err = resolve_deploy_paths(
+            Some(Path::new("../outside")),
+            false,
+            Some(&project),
+            &project,
+        )
+        .err()
+        .expect("expected error for path outside linked project");
+
+        assert!(
+            err.to_string().contains("outside project directory"),
+            "unexpected error: {err}"
+        );
     }
 }
